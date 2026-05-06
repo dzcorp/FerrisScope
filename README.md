@@ -7,8 +7,8 @@
 **A Rust-native, open-source desktop IDE for Kubernetes.**
 A lightweight Lens replacement built on Tauri 2 + `kube-rs` + React.
 
-[![CI](https://github.com/yzhelezko/FerrisScope/actions/workflows/ci.yml/badge.svg)](https://github.com/yzhelezko/FerrisScope/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/yzhelezko/FerrisScope?label=release&color=blue)](https://github.com/yzhelezko/FerrisScope/releases)
+[![CI](https://github.com/dzcorp/FerrisScope/actions/workflows/ci.yml/badge.svg)](https://github.com/dzcorp/FerrisScope/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/yzhelezko/FerrisScope?label=release&color=blue)](https://github.com/dzcorp/FerrisScope/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#install)
 [![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org)
@@ -122,7 +122,7 @@ The script picks `.deb`, `.rpm`, or `.AppImage` based on what's available on the
 
 **macOS** (Apple silicon and Intel):
 
-1. Download the `.dmg` for your architecture (`-macos-arm64.dmg` or `-macos-x64.dmg`) from [Releases](https://github.com/yzhelezko/FerrisScope/releases).
+1. Download the `.dmg` for your architecture (`-macos-arm64.dmg` or `-macos-x64.dmg`) from [Releases](https://github.com/dzcorp/FerrisScope/releases).
 2. Open the DMG and drag *FerrisScope.app* into `/Applications`.
 3. **First launch:** right-click (or Control-click) *FerrisScope.app* and choose **Open**. macOS will warn that the developer can't be verified — confirm once and the choice sticks. Builds are currently unsigned and unnotarized; manual approval unblocks Gatekeeper. (Notarization is on the v1.0 roadmap.)
 
@@ -138,7 +138,7 @@ The script picks `.deb`, `.rpm`, or `.AppImage` based on what's available on the
 yay -S ferrisscope-bin     # or: paru -S ferrisscope-bin
 ```
 
-**Windows** (x64): download the `.exe` (NSIS installer) from [Releases](https://github.com/yzhelezko/FerrisScope/releases) and run it. The installer is currently unsigned, so SmartScreen will warn on first run — click **More info → Run anyway**. The in-app updater handles future upgrades.
+**Windows** (x64): download the `.exe` (NSIS installer) from [Releases](https://github.com/dzcorp/FerrisScope/releases) and run it. The installer is currently unsigned, so SmartScreen will warn on first run — click **More info → Run anyway**. The in-app updater handles future upgrades.
 
 ## Quick tour
 

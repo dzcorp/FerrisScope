@@ -1,6 +1,6 @@
 # Linux installer
 
-`install.sh` is a convenience wrapper around the Linux artifacts published on the [GitHub releases page](https://github.com/yzhelezko/FerrisScope/releases). It picks the best format for the host and installs it.
+`install.sh` is a convenience wrapper around the Linux artifacts published on the [GitHub releases page](https://github.com/dzcorp/FerrisScope/releases). It picks the best format for the host and installs it.
 
 ## Install
 

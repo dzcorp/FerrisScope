@@ -76,7 +76,7 @@ impl OpenAICompatibleProvider {
             // them when actually talking to OpenRouter.
             extra_headers.push((
                 "HTTP-Referer",
-                "https://github.com/yzhelezko/FerrisScope".into(),
+                "https://github.com/dzcorp/FerrisScope".into(),
             ));
             extra_headers.push(("X-Title", "FerrisScope".into()));
         }

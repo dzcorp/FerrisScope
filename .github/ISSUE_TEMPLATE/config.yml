@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question or discussion
-    url: https://github.com/yzhelezko/FerrisScope/discussions
+    url: https://github.com/dzcorp/FerrisScope/discussions
     about: For general questions, ideas, or anything that isn't a confirmed bug or a concrete feature request.
   - name: Security report
-    url: https://github.com/yzhelezko/FerrisScope/security/advisories/new
+    url: https://github.com/dzcorp/FerrisScope/security/advisories/new
     about: Please report vulnerabilities privately. See SECURITY.md for the full policy.

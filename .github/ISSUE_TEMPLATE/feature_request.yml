@@ -8,7 +8,7 @@ body:
         Thanks for taking the time to suggest an improvement. Sketching the user-visible behaviour is more valuable than proposing a specific implementation — that way we can discuss the shape together.
 
         Before submitting:
-        - Search [existing issues](https://github.com/yzhelezko/FerrisScope/issues?q=is%3Aissue) for similar requests.
+        - Search [existing issues](https://github.com/dzcorp/FerrisScope/issues?q=is%3Aissue) for similar requests.
         - Check the Roadmap section in [`README.md`](../../README.md) and the Out-of-scope list.
         - For new well-known CRD overrides, the recipe is in [`CLAUDE.md` § Well-known CRD overrides](../../CLAUDE.md#well-known-crd-overrides).
 

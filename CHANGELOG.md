@@ -62,5 +62,5 @@ The initial public release. Highlights of what ships in v1.0:
 - One reflector per `(cluster, kind)`; lazy lifecycle.
 - `crates/core` has no Tauri dependency — engine reusable for a future TUI / CLI.
 
-[Unreleased]: https://github.com/yzhelezko/FerrisScope/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/yzhelezko/FerrisScope/releases/tag/v1.0.0
+[Unreleased]: https://github.com/dzcorp/FerrisScope/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/dzcorp/FerrisScope/releases/tag/v1.0.0

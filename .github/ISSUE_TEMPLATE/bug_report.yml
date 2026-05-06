@@ -8,7 +8,7 @@ body:
         Thanks for taking the time to file a report. Filling in the fields below helps us reproduce the issue quickly.
 
         Before submitting, please:
-        - Search [existing issues](https://github.com/yzhelezko/FerrisScope/issues?q=is%3Aissue) to see if this is already known.
+        - Search [existing issues](https://github.com/dzcorp/FerrisScope/issues?q=is%3Aissue) to see if this is already known.
         - For security-relevant findings, **do not** open a public issue — see [`SECURITY.md`](../../SECURITY.md).
 
   - type: textarea

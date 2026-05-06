@@ -364,13 +364,13 @@ jobs:
           pkgrel=1
           pkgdesc="Rust-native, open-source desktop IDE for Kubernetes"
           arch=('x86_64')
-          url="https://github.com/yzhelezko/FerrisScope"
+          url="https://github.com/dzcorp/FerrisScope"
           license=('Apache-2.0')
           depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3')
           optdepends=('kubectl: required for embedded terminal exec/kubectl tabs')
           provides=('ferrisscope')
           conflicts=('ferrisscope' 'ferrisscope-git')
-          source=("\${pkgname}-\${pkgver}.deb::https://github.com/yzhelezko/FerrisScope/releases/download/v\${pkgver}/${DEB_NAME}")
+          source=("\${pkgname}-\${pkgver}.deb::https://github.com/dzcorp/FerrisScope/releases/download/v\${pkgver}/${DEB_NAME}")
           sha256sums=('${DEB_SHA}')
 
           package() {

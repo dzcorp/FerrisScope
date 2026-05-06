@@ -33,7 +33,7 @@ If you're not sure where a change belongs, open an issue first and we'll point y
 ### Bootstrap
 
 ```bash
-git clone https://github.com/yzhelezko/FerrisScope.git
+git clone https://github.com/dzcorp/FerrisScope.git
 cd FerrisScope
 make install        # one-time: npm install in ui/
 make dev            # vite + tauri dev loop (auto-detects Linux render path)

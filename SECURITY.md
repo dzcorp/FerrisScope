@@ -22,7 +22,7 @@ We accept reports through two channels — pick whichever you're more comfortabl
 
 ### 1. GitHub Security Advisories (preferred)
 
-Open a private advisory at <https://github.com/yzhelezko/FerrisScope/security/advisories/new>. This keeps the entire conversation, fix, and CVE coordination in one place and only the reporter, the maintainers, and (later) any embargoed downstream are involved.
+Open a private advisory at <https://github.com/dzcorp/FerrisScope/security/advisories/new>. This keeps the entire conversation, fix, and CVE coordination in one place and only the reporter, the maintainers, and (later) any embargoed downstream are involved.
 
 ### 2. Email
 
