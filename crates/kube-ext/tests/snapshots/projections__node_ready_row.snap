@@ -1,0 +1,14 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "cpu": "8",
+  "creation_timestamp": "2026-01-10T00:00:00Z",
+  "memory": "32Gi",
+  "name": "worker-1",
+  "phase": "Ready",
+  "roles": "worker",
+  "taints": 1,
+  "version": "v1.31.4"
+}

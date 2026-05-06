@@ -1,0 +1,264 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+@import "tailwindcss";
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Default: chrome (rails, rows, headers, chips, buttons, labels) is not
+   text-selectable — we're an app UI, not a document. Selection is opted
+   back in below for inputs, copyable values, and content surfaces (logs,
+   terminals, code editors). */
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+input,
+textarea,
+[contenteditable="true"],
+[contenteditable=""],
+.fs-selectable,
+.fs-selectable *,
+.fs-copyable,
+.monaco-editor,
+.monaco-editor *,
+.xterm,
+.xterm * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+@keyframes fs-pulse-dot-kf {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.55;
+  }
+}
+
+.fs-pulse-dot {
+  animation: fs-pulse-dot-kf 1.4s ease-in-out infinite;
+  transform-origin: center;
+}
+
+/* P3: animations are short and only on user action (R-14). */
+@keyframes fs-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes fs-slide-from-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes fs-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Drop the spinner rotation; the label still says "Loading…". */
+  [style*="fs-spin"] {
+    animation: none !important;
+  }
+}
+@keyframes fs-bulk-rise {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 12px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+/* Modal — slides down from the top edge of the viewport. Centered horizontally
+   so the X-axis transform is just translateX(-50%); only Y animates. */
+@keyframes fs-modal-drop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -16px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+/* Toast — slides in horizontally inside the header strip, between the
+   search button and the icon row. Short, quiet motion (R-14). */
+@keyframes fs-toast-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+/* Click-to-copy acknowledgement — a brief background pulse on the field that
+   was copied. Quiet by design (R-14) so it doesn't distract operators
+   inspecting many fields in sequence. */
+@keyframes fs-copy-flash-kf {
+  0% {
+    background-color: var(--fs-flash, rgba(45, 212, 191, 0.32));
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.fs-copy-flash {
+  animation: fs-copy-flash-kf 480ms ease-out;
+}
+/* Streaming-cursor blink for the AI chat in-flight assistant message. */
+@keyframes fs-blink {
+  to {
+    visibility: hidden;
+  }
+}
+.fs-copyable {
+  cursor: copy;
+  border-radius: 3px;
+  transition: background-color 120ms ease;
+}
+.fs-copyable:hover {
+  background-color: var(--fs-copy-hover, rgba(127, 127, 127, 0.08));
+}
+/* Collapsed tool-result strip in the AI chat. Hover background lives in CSS
+   (instead of inline JS `onMouseEnter` style mutation + a `transition`)
+   because the prior approach repainted every strip the cursor crossed during
+   a scroll — a few stacked tool messages were enough to make scrolling jank.
+   The hover colour comes from `--fs-tool-hover` set per theme on the button;
+   when the strip is expanded (`data-open="true"`) hover stays neutral. */
+.fs-tool-strip {
+  background: transparent;
+}
+.fs-tool-strip:hover {
+  background: var(--fs-tool-hover, rgba(127, 127, 127, 0.08));
+}
+.fs-tool-strip[data-open="true"],
+.fs-tool-strip[data-open="true"]:hover {
+  background: var(--fs-tool-open-bg, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .fs-pulse-dot {
+    animation: none;
+  }
+  .fs-copy-flash {
+    animation: none;
+  }
+}
+
+/* Global thin overlay scrollbars — replaces the OS chrome everywhere so
+   scroll gutters don't fight the dense layout. Firefox / spec via
+   scrollbar-* properties; WebKit / WebKitGTK via ::-webkit-scrollbar.
+   Translucent gray works on both light and dark themes. Grows on hover
+   of the scrollable container so the thumb is easier to grab. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(127, 127, 127, 0.22) transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(127, 127, 127, 0.28);
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background-clip: content-box;
+  transition: background 120ms ease;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+*:hover::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+*:hover::-webkit-scrollbar-thumb {
+  background: rgba(127, 127, 127, 0.45);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(127, 127, 127, 0.65);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+/* xterm and Monaco render their own scrollbar widgets; let theirs win and
+   hide the native one we'd otherwise stack on top. Same for the search
+   palette / virtualized lists where a doubled track is jarring. */
+.xterm,
+.xterm *,
+.xterm-viewport,
+.monaco-editor,
+.monaco-editor *,
+.monaco-scrollable-element,
+.monaco-scrollable-element * {
+  scrollbar-width: none;
+}
+.xterm::-webkit-scrollbar,
+.xterm *::-webkit-scrollbar,
+.xterm-viewport::-webkit-scrollbar,
+.monaco-editor::-webkit-scrollbar,
+.monaco-editor *::-webkit-scrollbar,
+.monaco-scrollable-element::-webkit-scrollbar,
+.monaco-scrollable-element *::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* Left rail: hide chrome until hover so the icon column stays clean. */
+.fs-rail-scroll {
+  scrollbar-width: none;
+  scrollbar-color: transparent transparent;
+}
+.fs-rail-scroll::-webkit-scrollbar {
+  width: 0;
+  background: transparent;
+}
+.fs-rail-scroll:hover {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(127, 127, 127, 0.18) transparent;
+}
+.fs-rail-scroll:hover::-webkit-scrollbar {
+  width: 6px;
+}
+.fs-rail-scroll:hover::-webkit-scrollbar-thumb {
+  background: rgba(127, 127, 127, 0.18);
+}
+.fs-rail-scroll:hover::-webkit-scrollbar-thumb:hover {
+  background: rgba(127, 127, 127, 0.32);
+}

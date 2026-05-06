@@ -1,0 +1,22 @@
+{
+  "apiVersion": "v1",
+  "kind": "Node",
+  "metadata": {
+    "name": "worker-2",
+    "uid": "node-2-uid",
+    "creationTimestamp": "2026-01-10T00:00:00Z",
+    "labels": {
+      "node-role.kubernetes.io/worker": ""
+    }
+  },
+  "spec": {
+    "unschedulable": true
+  },
+  "status": {
+    "capacity": { "cpu": "4", "memory": "16Gi" },
+    "nodeInfo": { "kubeletVersion": "v1.30.5", "architecture": "amd64", "bootID": "b", "containerRuntimeVersion": "containerd://1.7", "kernelVersion": "6.6", "kubeProxyVersion": "v1.30.5", "machineID": "m", "operatingSystem": "linux", "osImage": "Ubuntu", "systemUUID": "u" },
+    "conditions": [
+      { "type": "Ready", "status": "True", "reason": "KubeletReady", "message": "ok", "lastHeartbeatTime": "2026-04-15T10:00:00Z", "lastTransitionTime": "2026-01-10T00:00:01Z" }
+    ]
+  }
+}

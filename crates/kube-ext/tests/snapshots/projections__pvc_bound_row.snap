@@ -1,0 +1,14 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "access_modes": "RWO",
+  "capacity": "10Gi",
+  "creation_timestamp": "2026-02-01T08:00:00Z",
+  "name": "data-postgres-0",
+  "namespace": "default",
+  "phase": "Bound",
+  "storage_class": "standard",
+  "volume": "pvc-abc-123"
+}

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="256" height="256">
+  <!-- FerrisScope app icon. Mark = Kubernetes helm-wheel (7-spoke
+       heptagonal frame, the K8s motif) with a focused scope reticle
+       at the centre. Designed to read at 16x16.
+
+       All geometry is centred on (256, 256) with explicit vertex
+       coordinates — no compounded scale/translate that would shift the
+       optical centre off the canvas centre. -->
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1A2A3F"/>
+      <stop offset="1" stop-color="#0B1422"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F8B25C"/>
+      <stop offset="1" stop-color="#D9521B"/>
+    </linearGradient>
+    <radialGradient id="dot" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#F8B25C"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background: rounded squircle. -->
+  <rect x="32" y="32" width="256" height="256" rx="112" ry="112" fill="url(#bg)"/>
+  <ellipse cx="256" cy="120" rx="180" ry="40" fill="#FFFFFF" opacity="0.05"/>
+
+  <!-- Outer heptagon: regular 7-gon, R=200 from (256,256), top vertex up.
+       Vertices at θ_k = -90° + k*(360/7), computed once. -->
+  <polygon
+    fill="url(#ring)"
+    points="256,56 412.37,131.30 450.99,300.50 342.78,436.19 169.22,436.19 61.01,300.50 99.63,131.30"/>
+
+  <!-- Inner heptagon (same orientation, R=132) painted in bg colour to
+       leave a thick ring. Same centre, no extra transform. -->
+  <polygon
+    fill="#0E1A2C"
+    points="256,124 359.20,173.70 384.69,285.37 313.27,374.93 198.73,374.93 127.31,285.37 152.80,173.70"/>
+
+  <!-- 7 short tab-spokes around the rim (between inner & outer heptagons).
+       Rotated around the centre — `rotate(a)` with no centre argument
+       defaults to (0,0), so we translate to (256,256) first. -->
+  <g fill="url(#ring)" transform="translate(256 256)">
+    <rect x="-10" y="-176" width="256" height="256" rx="4"/>
+    <rect x="-10" y="-176" width="256" height="256" rx="4" transform="rotate(51.4286)"/>
+    <rect x="-10" y="-176" width="256" height="256" rx="4" transform="rotate(102.857)"/>
+    <rect x="-10" y="-176" width="256" height="256" rx="4" transform="rotate(154.286)"/>
+    <rect x="-10" y="-176" width="256" height="256" rx="4" transform="rotate(205.714)"/>
+    <rect x="-10" y="-176" width="256" height="256" rx="4" transform="rotate(257.143)"/>
+    <rect x="-10" y="-176" width="256" height="256" rx="4" transform="rotate(308.571)"/>
+  </g>
+
+  <!-- Scope reticle in the centre. -->
+  <g fill="none" stroke="#F8FAFC" stroke-width="256" stroke-linecap="round">
+    <circle cx="256" cy="256" r="64" opacity="0.9"/>
+    <line x1="256" y1="174" x2="256" y2="206"/>
+    <line x1="256" y1="306" x2="256" y2="338"/>
+    <line x1="174" y1="256" x2="206" y2="256"/>
+    <line x1="306" y1="256" x2="338" y2="256"/>
+  </g>
+
+  <!-- Bright focal dot. -->
+  <circle cx="256" cy="256" r="18" fill="url(#dot)"/>
+</svg>

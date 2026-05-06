@@ -1,0 +1,49 @@
+[package]
+name = "ferrisscope-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cluster engine, watchers, and event bus. No Tauri dependency."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enables integration tests under `tests/` that talk to a real kind cluster.
+integration = []
+
+[dev-dependencies]
+ferrisscope-test-support.workspace = true
+tokio-test.workspace = true
+tempfile.workspace = true
+pretty_assertions.workspace = true
+serde_yaml.workspace = true
+
+[dependencies]
+tokio.workspace = true
+futures.workspace = true
+kube.workspace = true
+k8s-openapi.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+directories.workspace = true
+notify-debouncer-mini.workspace = true
+uuid.workspace = true
+russh.workspace = true
+russh-keys.workspace = true
+keyring.workspace = true
+hex.workspace = true
+sha2.workspace = true
+base64.workspace = true
+async-trait.workspace = true
+rusqlite.workspace = true

@@ -1,0 +1,40 @@
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "Ingress",
+  "metadata": {
+    "name": "web",
+    "namespace": "default",
+    "uid": "ing-uid",
+    "creationTimestamp": "2026-04-01T09:00:00Z",
+    "annotations": {
+      "nginx.ingress.kubernetes.io/rewrite-target": "/"
+    }
+  },
+  "spec": {
+    "ingressClassName": "nginx",
+    "tls": [
+      { "hosts": ["www.example.com"], "secretName": "web-tls" }
+    ],
+    "rules": [
+      {
+        "host": "www.example.com",
+        "http": {
+          "paths": [
+            {
+              "path": "/api",
+              "pathType": "Prefix",
+              "backend": { "service": { "name": "api", "port": { "number": 80 } } }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "status": {
+    "loadBalancer": {
+      "ingress": [
+        { "ip": "203.0.113.50", "hostname": "lb.example.com" }
+      ]
+    }
+  }
+}

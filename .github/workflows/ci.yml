@@ -1,0 +1,218 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+  RUST_TOOLCHAIN: "1.94"
+
+jobs:
+  lint-rust:
+    name: Lint (Rust)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          prefix-key: v2-lint-rust${{ env.RUST_TOOLCHAIN }}
+          # Only refresh the cache from main pushes — PR runs read but
+          # don't write, so a flaky PR can't poison the shared cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            pkg-config \
+            build-essential
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test-rust:
+    name: Test (Rust)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-24.04
+          - name: macOS arm64
+            os: macos-15
+          - name: Windows x64
+            os: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          prefix-key: v2-test-rust${{ env.RUST_TOOLCHAIN }}-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            pkg-config \
+            build-essential
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  frontend:
+    name: Frontend (typecheck + build + tests)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Vitest (unit tests)
+        run: npm run test
+
+      - name: Vite build
+        run: npm run build
+
+  test-integration:
+    # Layer 2 — kind-cluster integration tests. Boots two clusters at
+    # different K8s versions, applies fixtures, and runs every test in
+    # the kube-ext crate gated by the `integration` feature. Linux only —
+    # the kind/Docker stack doesn't run on macOS / Windows runners.
+    #
+    # Scoped to `-p ferrisscope-kube-ext` instead of `--workspace` because
+    # the integration tests live in that crate and we want to skip the
+    # Tauri/WebKitGTK compile (saves ~3 minutes per run + the apt-get for
+    # WebKit deps that integration tests don't actually need).
+    #
+    # Triggered on PRs *and* main pushes; cache writes only on main so a
+    # flaky PR can't poison the shared cache (same pattern as lint-rust).
+    name: Integration (kind clusters)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          prefix-key: v2-integration-rust${{ env.RUST_TOOLCHAIN }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install kind
+        run: |
+          curl -fsSL -o /tmp/kind \
+            https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v5
+        with:
+          version: v1.31.4
+
+      - name: Install helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.16.4
+
+      - name: Run integration tests
+        # --test-threads=1 because the harness shares two named clusters
+        # across tests within a binary; parallel `kubectl apply` traffic
+        # is fine, but parallel namespace creation/teardown trips on
+        # itself in resource-constrained CI runners. We're already
+        # parallelising at the cluster level (cluster A vs B).
+        run: |
+          cargo test -p ferrisscope-kube-ext --features integration -- --test-threads=1 --nocapture
+        env:
+          # Surface tracing-subscriber output so a failure has context.
+          RUST_LOG: ferrisscope_kube_ext=debug,ferrisscope_test_support=debug,info
+          # Speed up reruns of this job on the same runner — the kind
+          # harness already supports this env.
+          FERRISSCOPE_KEEP_CLUSTERS: ""
+
+      - name: Capture cluster diagnostics on failure
+        if: failure()
+        run: |
+          for c in ferrisscope-it-a ferrisscope-it-b; do
+            echo "=== $c ==="
+            kubectl --context kind-$c get nodes -o wide || true
+            kubectl --context kind-$c get pods -A -o wide || true
+            kubectl --context kind-$c describe nodes || true
+          done

@@ -1,0 +1,29 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "container_states": [
+    {
+      "image": "ghcr.io/example/missing:nope",
+      "kind": "main",
+      "name": "main",
+      "ready": false,
+      "reason": "ImagePullBackOff",
+      "restart_count": 0,
+      "state": "ImagePullBackOff"
+    }
+  ],
+  "containers": [
+    "main"
+  ],
+  "cpu": null,
+  "creation_timestamp": "2026-04-15T10:00:00Z",
+  "mem": null,
+  "name": "broken-77abc",
+  "namespace": "kube-system",
+  "node": null,
+  "phase": "Pending",
+  "ready": "0/1",
+  "restarts": 0
+}

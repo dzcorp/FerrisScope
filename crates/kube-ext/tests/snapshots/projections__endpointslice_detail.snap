@@ -1,0 +1,71 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "address_type": "IPv4",
+  "endpoints": [
+    {
+      "addresses": [
+        "10.244.1.10"
+      ],
+      "conditions": {
+        "ready": true,
+        "serving": true,
+        "terminating": false
+      },
+      "hostname": null,
+      "node_name": "node-1",
+      "target_ref": {
+        "kind": "Pod",
+        "name": "web-7d9f8",
+        "namespace": "default",
+        "uid": null
+      },
+      "zone": "eu-west-1a"
+    },
+    {
+      "addresses": [
+        "10.244.1.11"
+      ],
+      "conditions": {
+        "ready": false,
+        "serving": true,
+        "terminating": true
+      },
+      "hostname": null,
+      "node_name": "node-2",
+      "target_ref": {
+        "kind": "Pod",
+        "name": "web-old",
+        "namespace": "default",
+        "uid": null
+      },
+      "zone": null
+    }
+  ],
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-04-01T09:00:00Z",
+    "generation": null,
+    "labels": [
+      [
+        "kubernetes.io/service-name",
+        "web"
+      ]
+    ],
+    "name": "web-abc",
+    "namespace": "default",
+    "uid": "eps-uid"
+  },
+  "ports": [
+    {
+      "app_protocol": null,
+      "name": "http",
+      "port": 8080,
+      "protocol": "TCP"
+    }
+  ],
+  "service_name": "web"
+}

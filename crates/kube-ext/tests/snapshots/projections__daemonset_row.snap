@@ -1,0 +1,14 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "available": 3,
+  "creation_timestamp": "2026-01-10T00:00:00Z",
+  "current": 3,
+  "desired": 3,
+  "name": "node-exporter",
+  "namespace": "monitoring",
+  "ready": 3,
+  "up_to_date": 3
+}

@@ -1,0 +1,73 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "hostnames": [
+    "web.example.com",
+    "*.web.example.com"
+  ],
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-04-01T09:00:00Z",
+    "generation": null,
+    "labels": [],
+    "name": "web",
+    "namespace": "default",
+    "uid": "hr-uid"
+  },
+  "parent_refs": [
+    {
+      "group": "gateway.networking.k8s.io",
+      "kind": "Gateway",
+      "name": "public",
+      "namespace": "envoy-gateway-system",
+      "port": null,
+      "section_name": null
+    }
+  ],
+  "parent_status": [
+    {
+      "conditions": [
+        {
+          "lastTransitionTime": "2026-04-01T09:00:30Z",
+          "message": "ok",
+          "observedGeneration": 1,
+          "reason": "Accepted",
+          "status": "True",
+          "type": "Accepted"
+        },
+        {
+          "lastTransitionTime": "2026-04-01T09:00:30Z",
+          "message": "ok",
+          "observedGeneration": 1,
+          "reason": "ResolvedRefs",
+          "status": "True",
+          "type": "ResolvedRefs"
+        }
+      ],
+      "controller": "gateway.envoyproxy.io/gatewayclass-controller",
+      "parent": {
+        "group": "gateway.networking.k8s.io",
+        "kind": "Gateway",
+        "name": "public",
+        "namespace": "envoy-gateway-system"
+      }
+    }
+  ],
+  "rules": [
+    {
+      "backends": [
+        {
+          "name": "web",
+          "namespace": "default",
+          "port": 80,
+          "weight": 1
+        }
+      ],
+      "filters": 0,
+      "matches": 1
+    }
+  ]
+}

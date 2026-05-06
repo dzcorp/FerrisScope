@@ -1,0 +1,30 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "DaemonSet",
+  "metadata": {
+    "name": "node-exporter",
+    "namespace": "monitoring",
+    "uid": "ds-uid",
+    "creationTimestamp": "2026-01-10T00:00:00Z",
+    "generation": 1
+  },
+  "spec": {
+    "selector": { "matchLabels": { "app": "node-exporter" } },
+    "updateStrategy": { "type": "RollingUpdate", "rollingUpdate": { "maxUnavailable": 1 } },
+    "template": {
+      "metadata": { "labels": { "app": "node-exporter" } },
+      "spec": {
+        "containers": [{ "name": "main", "image": "prom/node-exporter:v1.8.2" }]
+      }
+    }
+  },
+  "status": {
+    "currentNumberScheduled": 3,
+    "desiredNumberScheduled": 3,
+    "numberReady": 3,
+    "numberAvailable": 3,
+    "numberMisscheduled": 0,
+    "updatedNumberScheduled": 3,
+    "observedGeneration": 1
+  }
+}

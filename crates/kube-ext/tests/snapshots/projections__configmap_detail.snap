@@ -1,0 +1,42 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "data": [
+    {
+      "binary": false,
+      "key": "DATABASE_URL",
+      "size": 18,
+      "value": "postgres://example"
+    },
+    {
+      "binary": false,
+      "key": "FEATURE_FLAGS",
+      "size": 10,
+      "value": "alpha,beta"
+    },
+    {
+      "binary": true,
+      "key": "logo.bin",
+      "size": 6,
+      "value": "AAECAwQF"
+    }
+  ],
+  "immutable": false,
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-03-01T12:00:00Z",
+    "generation": null,
+    "labels": [
+      [
+        "app",
+        "web"
+      ]
+    ],
+    "name": "app-config",
+    "namespace": "default",
+    "uid": "cm-uid"
+  }
+}

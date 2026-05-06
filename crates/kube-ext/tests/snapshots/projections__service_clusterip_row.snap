@@ -1,0 +1,13 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "cluster_ip": "10.0.5.20",
+  "creation_timestamp": "2026-04-01T09:00:00Z",
+  "external_ip": "—",
+  "name": "web",
+  "namespace": "default",
+  "ports": "80/TCP,9090/TCP",
+  "type": "ClusterIP"
+}

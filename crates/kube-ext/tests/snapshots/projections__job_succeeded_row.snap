@@ -1,0 +1,11 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "completions": "1/1",
+  "creation_timestamp": "2026-04-15T09:00:00Z",
+  "name": "migrate-1",
+  "namespace": "default",
+  "phase": "Succeeded"
+}

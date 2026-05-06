@@ -1,0 +1,57 @@
+name: Feature request
+description: Suggest a new feature, kind detail panel, well-known CRD override, or agent tool.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest an improvement. Sketching the user-visible behaviour is more valuable than proposing a specific implementation — that way we can discuss the shape together.
+
+        Before submitting:
+        - Search [existing issues](https://github.com/yzhelezko/FerrisScope/issues?q=is%3Aissue) for similar requests.
+        - Check the Roadmap section in [`README.md`](../../README.md) and the Out-of-scope list.
+        - For new well-known CRD overrides, the recipe is in [`CLAUDE.md` § Well-known CRD overrides](../../CLAUDE.md#well-known-crd-overrides).
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of change is this?
+      options:
+        - New Kubernetes kind detail panel
+        - Well-known CRD override (Argo / Flux / Cert-Manager / Istio / Tekton / other)
+        - New agent native tool
+        - New editable surface (Server-Side Apply)
+        - Workspace UX (rail / dock / palette / settings)
+        - Distribution / packaging
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What can't you do today, or what is awkward enough to be worth fixing?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would the user-visible behaviour look like?
+      description: A sketch of the UX is enough. If you have a concrete API or wire shape in mind, include it — but don't feel obliged.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other shapes you thought about, or workarounds you've used so far.
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Mockups, links to upstream docs, references to similar features in other tools.

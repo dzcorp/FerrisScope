@@ -1,0 +1,79 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "collision_count": null,
+  "conditions": [],
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-01-10T00:00:00Z",
+    "generation": 1,
+    "labels": [],
+    "name": "node-exporter",
+    "namespace": "monitoring",
+    "uid": "ds-uid"
+  },
+  "min_ready_seconds": null,
+  "observed_generation": 1,
+  "pod_template": {
+    "annotations_count": 0,
+    "containers": [
+      {
+        "args": null,
+        "command": null,
+        "env": [],
+        "env_from_count": 0,
+        "image": "prom/node-exporter:v1.8.2",
+        "image_pull_policy": null,
+        "kind": "main",
+        "limits": null,
+        "mounts_count": 0,
+        "name": "main",
+        "ports": [],
+        "requests": null
+      }
+    ],
+    "host_ipc": null,
+    "host_network": null,
+    "host_pid": null,
+    "image_pull_secrets": [],
+    "labels": [
+      [
+        "app",
+        "node-exporter"
+      ]
+    ],
+    "node_selector": [],
+    "priority_class": null,
+    "restart_policy": null,
+    "service_account": null,
+    "tolerations_count": 0,
+    "volumes": []
+  },
+  "replicas": {
+    "available": 3,
+    "current_scheduled": 3,
+    "desired_scheduled": 3,
+    "misscheduled": 0,
+    "ready": 3,
+    "unavailable": 0,
+    "up_to_date": 3
+  },
+  "revision_history_limit": null,
+  "selector": {
+    "match_expressions": 0,
+    "match_labels": [
+      [
+        "app",
+        "node-exporter"
+      ]
+    ]
+  },
+  "update_strategy": {
+    "max_surge": null,
+    "max_unavailable": "1",
+    "type": "RollingUpdate"
+  }
+}

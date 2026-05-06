@@ -1,0 +1,40 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "name": "migrate-1",
+    "namespace": "default",
+    "uid": "job-uid",
+    "creationTimestamp": "2026-04-15T09:00:00Z"
+  },
+  "spec": {
+    "completions": 1,
+    "parallelism": 1,
+    "backoffLimit": 6,
+    "selector": { "matchLabels": { "job": "migrate-1" } },
+    "template": {
+      "metadata": { "labels": { "job": "migrate-1" } },
+      "spec": {
+        "restartPolicy": "Never",
+        "containers": [
+          { "name": "main", "image": "migrator:1.2" }
+        ]
+      }
+    }
+  },
+  "status": {
+    "succeeded": 1,
+    "completionTime": "2026-04-15T09:00:30Z",
+    "startTime": "2026-04-15T09:00:00Z",
+    "conditions": [
+      {
+        "type": "Complete",
+        "status": "True",
+        "reason": "JobCompleted",
+        "message": "Job completed successfully",
+        "lastProbeTime": "2026-04-15T09:00:30Z",
+        "lastTransitionTime": "2026-04-15T09:00:30Z"
+      }
+    ]
+  }
+}

@@ -1,0 +1,63 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "active": [],
+  "concurrency_policy": "Forbid",
+  "failed_jobs_history_limit": 1,
+  "job_template": {
+    "active_deadline_seconds": null,
+    "backoff_limit": null,
+    "completions": null,
+    "parallelism": null,
+    "ttl_seconds_after_finished": null
+  },
+  "last_schedule_time": "2026-04-15T02:00:00Z",
+  "last_successful_time": "2026-04-15T02:00:30Z",
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-01-01T00:00:00Z",
+    "generation": null,
+    "labels": [],
+    "name": "nightly-backup",
+    "namespace": "ops",
+    "uid": "cj-uid"
+  },
+  "pod_template": {
+    "annotations_count": 0,
+    "containers": [
+      {
+        "args": null,
+        "command": null,
+        "env": [],
+        "env_from_count": 0,
+        "image": "backup:1.0",
+        "image_pull_policy": null,
+        "kind": "main",
+        "limits": null,
+        "mounts_count": 0,
+        "name": "backup",
+        "ports": [],
+        "requests": null
+      }
+    ],
+    "host_ipc": null,
+    "host_network": null,
+    "host_pid": null,
+    "image_pull_secrets": [],
+    "labels": [],
+    "node_selector": [],
+    "priority_class": null,
+    "restart_policy": "OnFailure",
+    "service_account": null,
+    "tolerations_count": 0,
+    "volumes": []
+  },
+  "schedule": "0 2 * * *",
+  "starting_deadline_seconds": null,
+  "successful_jobs_history_limit": 3,
+  "suspend": false,
+  "time_zone": null
+}

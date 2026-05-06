@@ -1,0 +1,88 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "web-7d9f8",
+    "namespace": "default",
+    "uid": "0a76a4d3-8c2f-4f79-9f9a-8b7c2bf90001",
+    "creationTimestamp": "2026-04-15T10:00:00Z",
+    "labels": {
+      "app": "web",
+      "version": "v2"
+    },
+    "ownerReferences": [
+      {
+        "apiVersion": "apps/v1",
+        "kind": "ReplicaSet",
+        "name": "web-7d9f",
+        "uid": "owner-uid",
+        "controller": true,
+        "blockOwnerDeletion": true
+      }
+    ]
+  },
+  "spec": {
+    "nodeName": "node-1",
+    "containers": [
+      {
+        "name": "web",
+        "image": "ghcr.io/example/web:v2",
+        "ports": [{ "containerPort": 8080, "protocol": "TCP" }]
+      },
+      {
+        "name": "envoy",
+        "image": "envoyproxy/envoy:v1.30",
+        "ports": [{ "containerPort": 9901, "protocol": "TCP" }]
+      }
+    ],
+    "initContainers": [
+      {
+        "name": "wait-for-db",
+        "image": "busybox:1.36"
+      }
+    ]
+  },
+  "status": {
+    "phase": "Running",
+    "containerStatuses": [
+      {
+        "name": "web",
+        "ready": true,
+        "restartCount": 0,
+        "image": "ghcr.io/example/web:v2",
+        "imageID": "docker-pullable://ghcr.io/example/web@sha256:abc",
+        "containerID": "containerd://aaaa",
+        "started": true,
+        "state": { "running": { "startedAt": "2026-04-15T10:00:05Z" } }
+      },
+      {
+        "name": "envoy",
+        "ready": true,
+        "restartCount": 2,
+        "image": "envoyproxy/envoy:v1.30",
+        "imageID": "docker-pullable://envoyproxy/envoy@sha256:def",
+        "containerID": "containerd://bbbb",
+        "started": true,
+        "state": { "running": { "startedAt": "2026-04-15T10:00:08Z" } }
+      }
+    ],
+    "initContainerStatuses": [
+      {
+        "name": "wait-for-db",
+        "ready": true,
+        "restartCount": 0,
+        "image": "busybox:1.36",
+        "imageID": "",
+        "containerID": "containerd://cccc",
+        "state": {
+          "terminated": {
+            "exitCode": 0,
+            "reason": "Completed",
+            "startedAt": "2026-04-15T10:00:00Z",
+            "finishedAt": "2026-04-15T10:00:04Z"
+          }
+        }
+      }
+    ]
+  }
+}

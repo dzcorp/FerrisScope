@@ -1,0 +1,13 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "cluster_ip": "10.0.7.40",
+  "creation_timestamp": "2026-04-01T09:00:00Z",
+  "external_ip": "lb-1.example.com",
+  "name": "ingress-public",
+  "namespace": "ingress-nginx",
+  "ports": "443:31443/TCP",
+  "type": "LoadBalancer"
+}

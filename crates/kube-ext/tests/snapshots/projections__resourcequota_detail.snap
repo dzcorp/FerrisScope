@@ -1,0 +1,40 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "entries": [
+    {
+      "hard": "20",
+      "name": "cpu",
+      "used": "8500m"
+    },
+    {
+      "hard": "40Gi",
+      "name": "memory",
+      "used": "12Gi"
+    },
+    {
+      "hard": "10",
+      "name": "persistentvolumeclaims",
+      "used": "3"
+    },
+    {
+      "hard": "30",
+      "name": "pods",
+      "used": "12"
+    }
+  ],
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-01-01T00:00:00Z",
+    "generation": null,
+    "labels": [],
+    "name": "team-a-quota",
+    "namespace": "team-a",
+    "uid": "rq-uid"
+  },
+  "scope_selector": [],
+  "scopes": []
+}

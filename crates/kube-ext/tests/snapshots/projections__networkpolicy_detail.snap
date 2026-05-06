@@ -1,0 +1,55 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "egress": [],
+  "ingress": [
+    {
+      "peers": [
+        {
+          "ip_block": null,
+          "namespace_selector": null,
+          "pod_selector": {
+            "match_expressions": 0,
+            "match_labels": [
+              [
+                "app",
+                "web"
+              ]
+            ]
+          }
+        }
+      ],
+      "ports": [
+        {
+          "end_port": null,
+          "port": "8080",
+          "protocol": "TCP"
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-03-01T08:00:00Z",
+    "generation": null,
+    "labels": [],
+    "name": "allow-ingress-from-web",
+    "namespace": "default",
+    "uid": "np-uid"
+  },
+  "pod_selector": {
+    "match_expressions": 0,
+    "match_labels": [
+      [
+        "app",
+        "api"
+      ]
+    ]
+  },
+  "policy_types": [
+    "Ingress"
+  ]
+}

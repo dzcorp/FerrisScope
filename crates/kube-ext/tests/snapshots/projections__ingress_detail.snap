@@ -1,0 +1,57 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "default_backend": null,
+  "ingress_class_name": "nginx",
+  "load_balancer_ingress": [
+    {
+      "hostname": "lb.example.com",
+      "ip": "203.0.113.50",
+      "ports": []
+    }
+  ],
+  "meta": {
+    "annotations": [
+      [
+        "nginx.ingress.kubernetes.io/rewrite-target",
+        "/"
+      ]
+    ],
+    "controlled_by": null,
+    "created_at": "2026-04-01T09:00:00Z",
+    "generation": null,
+    "labels": [],
+    "name": "web",
+    "namespace": "default",
+    "uid": "ing-uid"
+  },
+  "rules": [
+    {
+      "host": "www.example.com",
+      "paths": [
+        {
+          "backend": {
+            "resource": null,
+            "service": {
+              "name": "api",
+              "port_name": null,
+              "port_number": 80
+            }
+          },
+          "path": "/api",
+          "path_type": "Prefix"
+        }
+      ]
+    }
+  ],
+  "tls": [
+    {
+      "hosts": [
+        "www.example.com"
+      ],
+      "secret_name": "web-tls"
+    }
+  ]
+}

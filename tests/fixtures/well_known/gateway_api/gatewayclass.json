@@ -1,0 +1,25 @@
+{
+  "apiVersion": "gateway.networking.k8s.io/v1",
+  "kind": "GatewayClass",
+  "metadata": {
+    "name": "envoy-gateway",
+    "uid": "gc-uid",
+    "creationTimestamp": "2026-04-01T08:00:00Z"
+  },
+  "spec": {
+    "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+    "description": "Envoy Gateway"
+  },
+  "status": {
+    "conditions": [
+      {
+        "type": "Accepted",
+        "status": "True",
+        "reason": "Accepted",
+        "message": "GatewayClass is accepted",
+        "lastTransitionTime": "2026-04-01T08:00:01Z",
+        "observedGeneration": 1
+      }
+    ]
+  }
+}

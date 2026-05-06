@@ -1,0 +1,28 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "conditions": [
+    {
+      "last_transition_time": "2026-04-01T08:00:01Z",
+      "message": "GatewayClass is accepted",
+      "reason": "Accepted",
+      "status": "True",
+      "type": "Accepted"
+    }
+  ],
+  "controller": "gateway.envoyproxy.io/gatewayclass-controller",
+  "description": "Envoy Gateway",
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-04-01T08:00:00Z",
+    "generation": null,
+    "labels": [],
+    "name": "envoy-gateway",
+    "namespace": null,
+    "uid": "gc-uid"
+  },
+  "parameters_ref": null
+}

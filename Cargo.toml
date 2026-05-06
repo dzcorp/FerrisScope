@@ -1,0 +1,186 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/kube-ext",
+    "crates/agent",
+    "crates/app",
+    "crates/test-support",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.94"
+license = "Apache-2.0"
+repository = "https://github.com/yzhelezko/FerrisScope"
+
+[workspace.dependencies]
+# Async
+# Audited feature set — `full` pulls in signal handlers, io-uring, parking_lot
+# integration and other things we don't use. The list below covers every
+# `tokio::*` path actually referenced in the workspace (see `grep tokio::`).
+# If you reach for a tokio API that doesn't compile, add the relevant feature
+# here rather than reverting to `full`.
+tokio = { version = "1.52", features = [
+    "rt-multi-thread", # spawn, async runtime (Tauri owns the runtime)
+    "macros",          # select!, pin!, join!, try_join!, #[tokio::test]
+    "sync",            # broadcast, oneshot, Mutex, RwLock
+    "time",            # sleep, timeout, timeout_at
+    "fs",              # tokio::fs::* (read/write/remove_file/create_dir_all)
+    "net",             # TCP for port-forward
+    "io-util",         # AsyncReadExt/AsyncWriteExt, copy_bidirectional
+    "process",         # tokio::process::Command (PTY/helm shell-out)
+] }
+futures = "0.3"
+bytes = "1"
+
+# Kubernetes
+kube = { version = "3.1", features = ["runtime", "client", "ws", "config"] }
+k8s-openapi = { version = "0.27", features = ["latest"] }
+http = "1"
+http-body-util = "0.1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["decompression-gzip", "set-header"] }
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Logs
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utils
+directories = "6"
+notify-debouncer-mini = "0.7"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Search index. `bundled` ships SQLite 3.46 with the binary so we don't depend
+# on a system libsqlite (which on macOS predates FTS5 trigram). FTS5 is on by
+# default in rusqlite's bundled build.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# SSH (remote kubeconfig sources). russh is a pure-Rust async SSH-2 client; we
+# avoid shelling out to /usr/bin/ssh because (a) it isn't on every Linux distro
+# by default, (b) password / passphrase prompts are interactive there, and (c)
+# we want to own connection lifecycle and tunnel teardown rather than parsing
+# OpenSSH stderr. `keyring` stores user-supplied secrets (passwords, key
+# passphrases) in the OS keychain — never on disk in sources.json.
+russh = "0.46"
+russh-keys = "0.46"
+keyring = { version = "3", features = ["apple-native", "linux-native", "windows-native"] }
+hex = "0.4"
+sha2 = "0.10"
+base64 = "0.22"
+
+# HTTP (agent provider clients)
+# `rustls-no-provider` avoids pulling reqwest's bundled aws-lc-rs. kube-rs's
+# transitive hyper-rustls already brings in `ring`, and we install it as the
+# process-wide default in `main.rs`. Having only one provider in the binary
+# also keeps binary size sensible and avoids the aws-lc-rs C/C++ build.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+eventsource-stream = "0.2"
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Internal
+ferrisscope-core = { path = "crates/core" }
+ferrisscope-kube-ext = { path = "crates/kube-ext" }
+ferrisscope-agent = { path = "crates/agent" }
+ferrisscope-test-support = { path = "crates/test-support" }
+
+# Test deps
+tokio-test = "0.4"
+tempfile = "3"
+pretty_assertions = "1"
+insta = { version = "1", features = ["json", "yaml"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Pre-release: silence pedantic categories that are pure stylistic / annotation
+# chores (see CI history). These are not bugs; revisit after v1.0 ships.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+map_unwrap_or = "allow"
+manual_let_else = "allow"
+redundant_closure_for_method_calls = "allow"
+needless_pass_by_value = "allow"
+too_many_lines = "allow"
+too_many_arguments = "allow"
+items_after_statements = "allow"
+struct_excessive_bools = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+similar_names = "allow"
+implicit_hasher = "allow"
+ignored_unit_patterns = "allow"
+unnecessary_wraps = "allow"
+match_wildcard_for_single_variants = "allow"
+match_same_arms = "allow"
+single_match_else = "allow"
+if_not_else = "allow"
+unused_self = "allow"
+return_self_not_must_use = "allow"
+inline_always = "allow"
+mut_mut = "allow"
+ref_option_ref = "allow"
+needless_continue = "allow"
+explicit_iter_loop = "allow"
+explicit_into_iter_loop = "allow"
+filter_map_next = "allow"
+unused_async = "allow"
+no_effect_underscore_binding = "allow"
+ref_as_ptr = "allow"
+ptr_as_ptr = "allow"
+borrow_as_ptr = "allow"
+trivially_copy_pass_by_ref = "allow"
+needless_for_each = "allow"
+default_trait_access = "allow"
+fn_params_excessive_bools = "allow"
+range_plus_one = "allow"
+naive_bytecount = "allow"
+stable_sort_primitive = "allow"
+unicode_not_nfc = "allow"
+non_ascii_literal = "allow"
+elidable_lifetime_names = "allow"
+needless_raw_string_hashes = "allow"
+trivial_regex = "allow"
+verbose_bit_mask = "allow"
+linkedlist = "allow"
+mut_from_ref = "allow"
+match_bool = "allow"
+should_panic_without_expect = "allow"
+unreadable_literal = "allow"
+or_fun_call = "allow"
+useless_let_if_seq = "allow"
+single_match = "allow"
+collapsible_match = "allow"
+collapsible_if = "allow"
+collapsible_else_if = "allow"
+maybe_infinite_iter = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# We never rely on unwinding (no `catch_unwind` recovery boundary, no FFI
+# that requires unwind tables). Aborting on panic drops the unwind machinery
+# from the binary and lets the optimizer skip cleanup landing pads.
+panic = "abort"

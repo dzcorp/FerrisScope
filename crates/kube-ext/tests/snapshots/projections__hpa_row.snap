@@ -1,0 +1,13 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "creation_timestamp": "2026-02-15T00:00:00Z",
+  "current_replicas": 5,
+  "max_replicas": 20,
+  "min_replicas": 2,
+  "name": "web",
+  "namespace": "default",
+  "reference": "Deployment/web"
+}

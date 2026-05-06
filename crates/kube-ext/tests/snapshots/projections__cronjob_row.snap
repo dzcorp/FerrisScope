@@ -1,0 +1,13 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "active": 0,
+  "creation_timestamp": "2026-01-01T00:00:00Z",
+  "last_schedule": "2026-04-15T02:00:00Z",
+  "name": "nightly-backup",
+  "namespace": "ops",
+  "schedule": "0 2 * * *",
+  "suspend": "false"
+}

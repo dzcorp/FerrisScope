@@ -1,0 +1,13 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "addresses": "203.0.113.50",
+  "class": "envoy-gateway",
+  "creation_timestamp": "2026-04-01T08:05:00Z",
+  "listeners": 2,
+  "name": "public",
+  "namespace": "envoy-gateway-system",
+  "programmed": "True"
+}

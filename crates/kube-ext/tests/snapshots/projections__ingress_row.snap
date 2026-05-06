@@ -1,0 +1,12 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "address": "lb.example.com",
+  "class": "nginx",
+  "creation_timestamp": "2026-04-01T09:00:00Z",
+  "hosts": "www.example.com",
+  "name": "web",
+  "namespace": "default"
+}

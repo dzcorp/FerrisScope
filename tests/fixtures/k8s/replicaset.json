@@ -1,0 +1,28 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "ReplicaSet",
+  "metadata": {
+    "name": "web-7d9f",
+    "namespace": "default",
+    "uid": "rs-uid",
+    "creationTimestamp": "2026-02-10T08:30:00Z",
+    "ownerReferences": [
+      { "apiVersion": "apps/v1", "kind": "Deployment", "name": "web", "uid": "dep-uid", "controller": true }
+    ]
+  },
+  "spec": {
+    "replicas": 5,
+    "selector": { "matchLabels": { "app": "web", "pod-template-hash": "7d9f" } },
+    "template": {
+      "metadata": { "labels": { "app": "web", "pod-template-hash": "7d9f" } },
+      "spec": { "containers": [{ "name": "web", "image": "ghcr.io/example/web:v2" }] }
+    }
+  },
+  "status": {
+    "replicas": 5,
+    "readyReplicas": 4,
+    "availableReplicas": 4,
+    "fullyLabeledReplicas": 5,
+    "observedGeneration": 1
+  }
+}

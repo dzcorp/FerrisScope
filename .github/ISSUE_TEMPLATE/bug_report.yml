@@ -1,0 +1,104 @@
+name: Bug report
+description: Report a defect, regression, or unexpected behaviour in FerrisScope.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. Filling in the fields below helps us reproduce the issue quickly.
+
+        Before submitting, please:
+        - Search [existing issues](https://github.com/yzhelezko/FerrisScope/issues?q=is%3Aissue) to see if this is already known.
+        - For security-relevant findings, **do not** open a public issue — see [`SECURITY.md`](../../SECURITY.md).
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing the issue.
+      placeholder: e.g. The detail panel for Pods crashes when openin a pod that has more than 30 containers.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A minimal sequence that triggers the issue. Cluster shape (kind / vanilla / managed), kubeconfig source, and the exact navigation path help a lot.
+      placeholder: |
+        1. Connect to a kind cluster running k8s 1.30.
+        2. Apply the manifest at https://gist.github.com/...
+        3. Open Workloads → Pods.
+        4. Click the row.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include the visible UI behaviour and, if relevant, what you saw in the terminal logs.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: FerrisScope version
+      description: From the title bar / About panel, or `ferrisscope --version`.
+      placeholder: 1.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - AppImage
+        - Linux .deb
+        - Linux .rpm
+        - AUR (ferrisscope-bin)
+        - macOS .dmg
+        - Windows NSIS
+        - Built from source (`make dev` / `make build-release`)
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system + version
+      placeholder: e.g. Fedora 41, macOS 14.5 (arm64), Windows 11 23H2
+    validations:
+      required: true
+
+  - type: input
+    id: kube
+    attributes:
+      label: Kubernetes version + flavour
+      description: kubectl version --short of the cluster you connected to. Distro / managed-service name if relevant.
+      placeholder: e.g. v1.30.4 on EKS, v1.31.0 on kind, v1.29.5 on GKE Autopilot
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output from the FerrisScope console (the terminal that launched it). Set `RUST_LOG=ferrisscope=debug,kube=info` for more detail. Trim to the lines around the issue.
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, screen recordings, related issues, suspected root cause, workarounds you've tried.

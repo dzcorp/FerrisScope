@@ -1,0 +1,36 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "broken-77abc",
+    "namespace": "kube-system",
+    "uid": "broken-uid",
+    "creationTimestamp": "2026-04-15T10:00:00Z"
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "main",
+        "image": "ghcr.io/example/missing:nope"
+      }
+    ]
+  },
+  "status": {
+    "phase": "Pending",
+    "containerStatuses": [
+      {
+        "name": "main",
+        "ready": false,
+        "restartCount": 0,
+        "image": "ghcr.io/example/missing:nope",
+        "imageID": "",
+        "state": {
+          "waiting": {
+            "reason": "ImagePullBackOff",
+            "message": "Back-off pulling image \"ghcr.io/example/missing:nope\""
+          }
+        }
+      }
+    ]
+  }
+}

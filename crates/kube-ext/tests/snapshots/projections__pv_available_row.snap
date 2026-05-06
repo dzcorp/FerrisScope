@@ -1,0 +1,14 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "access_modes": "RWO",
+  "capacity": "100Gi",
+  "claim": "",
+  "creation_timestamp": "2026-01-15T00:00:00Z",
+  "name": "pv-disk-1",
+  "phase": "Available",
+  "reclaim_policy": "Delete",
+  "storage_class": "standard"
+}

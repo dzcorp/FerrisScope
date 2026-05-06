@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Helmsman — Design principles</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --surface: #ffffff;
+    --surface-alt: #f7f8fa;
+    --header-alt: #fafbfc;
+    --border: #e3e6ec;
+    --border-soft: #eef0f4;
+    --text: #11161d;
+    --text-dim: #525a68;
+    --text-muted: #8a93a0;
+    --accent: #0d9488;
+    --accent-soft: #d8f4f0;
+    --accent-hover: #0b827a;
+    --chip: #eef0f4;
+    --hover: rgba(15,20,30,0.035);
+    --good: #10b981;
+    --warn: #f59e0b;
+    --bad:  #f43f5e;
+    --info: #3b82f6;
+    --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Page chrome */
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(255,255,255,0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar-inner {
+    max-width: 980px; margin: 0 auto;
+    padding: 14px 32px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 9px;
+    font-size: 13.5px; font-weight: 600; letter-spacing: -0.1px;
+  }
+  .brand-mark {
+    width: 22px; height: 22px; border-radius: 6px;
+    background: linear-gradient(135deg, var(--accent), #0ea5a0);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .crumb {
+    font-size: 12.5px; color: var(--text-muted); display: flex; align-items: center; gap: 6px;
+  }
+  .crumb svg { opacity: 0.5; }
+  .topbar .meta {
+    margin-left: auto; font-size: 11.5px; color: var(--text-muted);
+    font-family: var(--mono);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .meta .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--good); display: inline-block; margin-right: 6px; vertical-align: middle; }
+
+  /* Layout */
+  .wrap { max-width: 980px; margin: 0 auto; padding: 56px 32px 96px; display: grid; grid-template-columns: 220px 1fr; gap: 56px; }
+  @media (max-width: 880px) { .wrap { grid-template-columns: 1fr; gap: 24px; padding-top: 32px; } .toc { position: static !important; } }
+
+  .toc {
+    position: sticky; top: 88px; align-self: start;
+    font-size: 12.5px;
+  }
+  .toc-label {
+    font-size: 10.5px; color: var(--text-muted); font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.6px;
+    margin-bottom: 10px;
+  }
+  .toc ol { list-style: none; margin: 0; padding: 0; counter-reset: toc; }
+  .toc li { counter-increment: toc; }
+  .toc a {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 5px 8px; border-radius: 5px;
+    color: var(--text-dim); text-decoration: none;
+    border-left: 2px solid transparent;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .toc a::before {
+    content: counter(toc, decimal-leading-zero);
+    font-family: var(--mono); font-size: 10px;
+    color: var(--text-muted); flex-shrink: 0;
+  }
+  .toc a:hover { background: var(--hover); color: var(--text); }
+  .toc a.active { color: var(--accent); border-left-color: var(--accent); background: var(--accent-soft); }
+
+  /* Hero */
+  .hero {
+    margin-bottom: 48px;
+    padding-bottom: 32px; border-bottom: 1px solid var(--border);
+  }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+    color: var(--accent); text-transform: uppercase; letter-spacing: 0.7px;
+    padding: 4px 9px; border-radius: 4px; background: var(--accent-soft);
+    margin-bottom: 18px;
+  }
+  h1 {
+    font-size: 34px; font-weight: 600; letter-spacing: -0.6px;
+    margin: 0 0 14px; line-height: 1.15; text-wrap: pretty;
+  }
+  .lede {
+    font-size: 16px; color: var(--text-dim); max-width: 62ch;
+    margin: 0; text-wrap: pretty;
+  }
+
+  /* Sections */
+  section + section { margin-top: 56px; }
+  h2 {
+    font-size: 11.5px; font-weight: 700; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.7px;
+    margin: 0 0 18px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  h2 .num {
+    font-family: var(--mono); font-size: 10.5px; color: var(--accent);
+    background: var(--accent-soft);
+    padding: 2px 7px; border-radius: 4px; letter-spacing: 0.4px;
+  }
+  h3 {
+    font-size: 19px; font-weight: 600; letter-spacing: -0.2px;
+    margin: 0 0 8px; color: var(--text);
+  }
+  p { margin: 0 0 14px; color: var(--text-dim); max-width: 64ch; }
+  p strong { color: var(--text); font-weight: 600; }
+
+  /* Principle card */
+  .principle {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px 24px;
+    margin-bottom: 14px;
+    display: grid;
+    grid-template-columns: 32px 1fr;
+    gap: 16px;
+    transition: border-color .12s, box-shadow .12s;
+  }
+  .principle:hover { border-color: #d6dae2; box-shadow: 0 1px 3px rgba(15,20,30,0.04); }
+  .principle .badge {
+    width: 32px; height: 32px; border-radius: 6px;
+    background: var(--chip);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    color: var(--text-dim);
+  }
+  .principle h3 { margin-top: 4px; }
+  .principle p:last-child { margin-bottom: 0; }
+  .principle .tagline {
+    font-family: var(--mono); font-size: 11px;
+    color: var(--accent); margin: 2px 0 10px;
+    letter-spacing: 0.1px;
+  }
+
+  /* Do / Don't */
+  .didnt {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+    margin-top: 14px;
+  }
+  @media (max-width: 640px) { .didnt { grid-template-columns: 1fr; } }
+  .didnt .card {
+    border: 1px solid var(--border-soft);
+    border-radius: 7px;
+    padding: 12px 14px;
+    background: var(--surface-alt);
+  }
+  .didnt .card.do    { border-left: 3px solid var(--good); }
+  .didnt .card.dont  { border-left: 3px solid var(--bad); }
+  .didnt .card .lbl {
+    font-family: var(--mono); font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.6px;
+    margin-bottom: 6px;
+  }
+  .didnt .card.do   .lbl { color: var(--good); }
+  .didnt .card.dont .lbl { color: var(--bad); }
+  .didnt .card p { margin: 0; font-size: 13px; color: var(--text); }
+
+  /* Rule list */
+  .rules {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .rule {
+    padding: 14px 20px;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 16px;
+    align-items: start;
+    border-top: 1px solid var(--border-soft);
+  }
+  .rule:first-child { border-top: none; }
+  .rule .id {
+    font-family: var(--mono); font-size: 10.5px; color: var(--text-muted);
+    margin-top: 2px;
+  }
+  .rule .body { color: var(--text); font-size: 13.5px; line-height: 1.55; }
+  .rule .body em { font-style: normal; color: var(--text-dim); }
+  .rule .scope {
+    font-family: var(--mono); font-size: 10px;
+    color: var(--text-muted); padding: 2px 6px;
+    border: 1px solid var(--border-soft); border-radius: 3px;
+    background: var(--surface-alt); white-space: nowrap;
+  }
+
+  /* Anti-pattern */
+  .anti {
+    display: grid; grid-template-columns: 1fr; gap: 10px;
+  }
+  .anti .row {
+    border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px;
+    background: var(--surface);
+    display: grid; grid-template-columns: 22px 1fr; gap: 12px;
+    align-items: start;
+  }
+  .anti .row .x {
+    width: 18px; height: 18px; border-radius: 4px;
+    background: rgba(244,63,94,0.12); color: var(--bad);
+    display: flex; align-items: center; justify-content: center;
+    margin-top: 1px;
+  }
+  .anti h4 { margin: 0 0 4px; font-size: 13.5px; font-weight: 600; }
+  .anti p  { margin: 0; font-size: 12.5px; }
+
+  /* Checklist */
+  .checklist {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    padding: 20px 24px;
+  }
+  .checklist h4 {
+    margin: 0 0 12px;
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .checklist h4:not(:first-child) { margin-top: 22px; }
+  .checklist ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .checklist li {
+    display: grid; grid-template-columns: 18px 1fr; gap: 10px;
+    align-items: start;
+    font-size: 13px; color: var(--text);
+  }
+  .checklist li::before {
+    content: ""; width: 14px; height: 14px; border-radius: 3px;
+    border: 1.5px solid #c8ccd4; background: var(--surface);
+    margin-top: 3px;
+  }
+
+  /* Tokens grid (visual reference) */
+  .tokens {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px;
+    margin: 14px 0 22px;
+  }
+  .swatch {
+    border: 1px solid var(--border);
+    border-radius: 6px; overflow: hidden; background: var(--surface);
+    font-size: 11px;
+  }
+  .swatch .chip { height: 36px; }
+  .swatch .meta { padding: 7px 9px; display: flex; flex-direction: column; gap: 1px; }
+  .swatch .name { font-weight: 600; color: var(--text); }
+  .swatch .val  { color: var(--text-muted); font-family: var(--mono); font-size: 10.5px; }
+
+  .typesample { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 18px 20px; margin-bottom: 14px; }
+  .typesample .label { font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px; }
+  .typesample .demo  { color: var(--text); }
+  .typesample .specs { font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); margin-top: 8px; }
+
+  /* Footer */
+  .foot {
+    margin-top: 80px; padding-top: 24px;
+    border-top: 1px solid var(--border);
+    font-size: 12px; color: var(--text-muted);
+    display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    font-family: var(--mono);
+  }
+
+  code, .kbd {
+    font-family: var(--mono); font-size: 0.92em;
+    background: var(--chip); padding: 1px 6px; border-radius: 3px;
+    color: var(--text);
+  }
+  .kbd {
+    border: 1px solid var(--border-soft);
+    background: var(--surface-alt);
+    color: var(--text-dim);
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="7" cy="7" r="2"/>
+          <path d="M7 1v3 M7 10v3 M1 7h3 M10 7h3 M2.6 2.6l2.1 2.1 M9.3 9.3l2.1 2.1 M2.6 11.4l2.1-2.1 M9.3 4.7l2.1-2.1"/>
+        </svg>
+      </span>
+      Helmsman
+    </div>
+    <span class="crumb">
+      <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 1l4 4-4 4"/></svg>
+      Design
+      <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 1l4 4-4 4"/></svg>
+      Principles
+    </span>
+    <div class="meta">
+      <span><span class="dot"></span>v2.4</span>
+      <span>updated 2026-04</span>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <aside class="toc">
+    <div class="toc-label">Contents</div>
+    <ol>
+      <li><a href="#axioms">Axioms</a></li>
+      <li><a href="#principles">Principles</a></li>
+      <li><a href="#rules">Rules</a></li>
+      <li><a href="#tokens">Tokens</a></li>
+      <li><a href="#anti">Anti-patterns</a></li>
+      <li><a href="#checklist">Feature checklist</a></li>
+    </ol>
+  </aside>
+
+  <main>
+
+    <header class="hero">
+      <span class="eyebrow">
+        <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 5l2 2 4-5"/></svg>
+        Working agreement · v2
+      </span>
+      <h1>Design principles for Helmsman</h1>
+      <p class="lede">
+        Helmsman is a control plane for a system that is already complex,
+        often broken, and never quiet. Our job is to make it feel boring.
+        These are the axioms, principles, and rules we use to keep the surface
+        calm as we add features — and the checklist we run before shipping any one of them.
+      </p>
+    </header>
+
+    <!-- AXIOMS -->
+    <section id="axioms">
+      <h2><span class="num">01</span> Axioms</h2>
+      <p>Three claims about our user that everything else inherits from. If a feature contradicts one of these, the feature is wrong, not the axiom.</p>
+
+      <div class="principle">
+        <span class="badge">A1</span>
+        <div>
+          <h3>The operator is on call</h3>
+          <p>They opened Helmsman because something is wrong, or might be. Latency, ambiguity, and unread modal copy translate directly into incident minutes. Optimise for the 2 a.m. case, not the demo.</p>
+        </div>
+      </div>
+      <div class="principle">
+        <span class="badge">A2</span>
+        <div>
+          <h3>The operator already knows Kubernetes</h3>
+          <p>They speak in <code>kubectl</code>, YAML, and resource kinds. We translate <em>between</em> their mental model and a faster surface — we don't replace it. Never invent terminology that maps to an existing K8s noun.</p>
+        </div>
+      </div>
+      <div class="principle">
+        <span class="badge">A3</span>
+        <div>
+          <h3>One wrong click can cost a weekend</h3>
+          <p>Destructive actions, scope changes, and "apply" are not the same as filtering or selection. They get friction proportional to blast radius, every time, no exceptions for power users.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- PRINCIPLES -->
+    <section id="principles">
+      <h2><span class="num">02</span> Principles</h2>
+      <p>Eight directional rules that resolve disagreements during design. Cite them by number in reviews.</p>
+
+      <div class="principle">
+        <span class="badge">P1</span>
+        <div>
+          <h3>State first, chrome second</h3>
+          <div class="tagline">// the truth of the cluster is the page</div>
+          <p>Headers, rails, and toolbars exist to <em>frame</em> data, not compete with it. When a screen feels busy, take chrome away before you take data away. The pod table is the product.</p>
+          <div class="didnt">
+            <div class="card do"><div class="lbl">Do</div><p>Cluster bar shows live CPU/MEM gauges and namespace context, then gets out of the way.</p></div>
+            <div class="card dont"><div class="lbl">Don't</div><p>Add marketing-style "welcome" panels, tip carousels, or onboarding nudges to the cluster view.</p></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="principle">
+        <span class="badge">P2</span>
+        <div>
+          <h3>One canonical action per moment</h3>
+          <div class="tagline">// the right next click should be obvious</div>
+          <p>Every screen has one primary action; the rest are secondary, ghost, or hidden in <code>⋯</code>. If two buttons compete for attention, one of them is in the wrong screen.</p>
+        </div>
+      </div>
+
+      <div class="principle">
+        <span class="badge">P3</span>
+        <div>
+          <h3>Speed is a design property</h3>
+          <div class="tagline">// the keyboard is the fastest pointing device</div>
+          <p>Every common path has a keyboard route. <span class="kbd">⌘K</span> finds anything; <span class="kbd">⌘`</span> opens a terminal; <span class="kbd">Esc</span> always backs out. Mouse is for discovery; keyboard is for the third visit.</p>
+        </div>
+      </div>
+
+      <div class="principle">
+        <span class="badge">P4</span>
+        <div>
+          <h3>Friction scales with blast radius</h3>
+          <div class="tagline">// dangerous actions look dangerous</div>
+          <p>Read-only is one click. Selection-aware bulk action is two. Destructive (Delete, Drain, Cordon, Apply to prod) is a typed confirmation with the resource name. Make the cost of being wrong visible <em>before</em> the action commits.</p>
+        </div>
+      </div>
+
+      <div class="principle">
+        <span class="badge">P5</span>
+        <div>
+          <h3>Status is structural, not decorative</h3>
+          <div class="tagline">// colour means the same thing everywhere</div>
+          <p>Green = healthy / running. Amber = transient / pending. Red = failing / crashed. Grey = unknown / paused. Accent (teal) is for <em>UI state</em>, never for status. Don't reuse status colours for selection, links, or branding.</p>
+        </div>
+      </div>
+
+      <div class="principle">
+        <span class="badge">P6</span>
+        <div>
+          <h3>Show the cluster you're standing in</h3>
+          <div class="tagline">// context is never implicit</div>
+          <p>Cluster name + namespace scope must be visible on every screen that reads or writes. Terminal prompts, dock chips, and confirmations all repeat it. Operators with three production clusters open trust scaffolding more than they trust themselves.</p>
+        </div>
+      </div>
+
+      <div class="principle">
+        <span class="badge">P7</span>
+        <div>
+          <h3>Density without noise</h3>
+          <div class="tagline">// every glyph has to earn its row</div>
+          <p>We are an information-rich tool. That doesn't license decoration. No emoji, no gradients on data, no rounded badge for every cell. If a number can replace a chart, use the number. If a row can replace a card, use the row.</p>
+        </div>
+      </div>
+
+      <div class="principle">
+        <span class="badge">P8</span>
+        <div>
+          <h3>Persist what the operator built</h3>
+          <div class="tagline">// the workspace remembers</div>
+          <p>Open terminals, draft YAML, namespace filters, sort orders, pinned rail — all survive a refresh, a tab switch, and a cluster change <em>where it makes sense</em>. State the operator constructed is more valuable than state we computed.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- RULES -->
+    <section id="rules">
+      <h2><span class="num">03</span> Concrete rules</h2>
+      <p>The principles above, made enforceable. These are checked in design review.</p>
+
+      <div class="rules">
+        <div class="rule">
+          <span class="id">R-01</span>
+          <div class="body"><strong>Live data refreshes silently.</strong> <em>No spinners on poll, no skeletons on re-fetch. Use a 1-px progress bar in the cluster bar if you must signal activity.</em></div>
+          <span class="scope">tables · charts</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-02</span>
+          <div class="body"><strong>Tables sort, filter, and select with the keyboard.</strong> <em>Up/Down moves the row cursor; Space selects; Enter opens detail; <span class="kbd">/</span> focuses filter; Esc clears in that order.</em></div>
+          <span class="scope">tables</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-03</span>
+          <div class="body"><strong>Bulk actions appear in a docked bar, never as a row of buttons in a header.</strong> <em>The bar slides up only when ≥1 item is selected and disappears on clear.</em></div>
+          <span class="scope">tables</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-04</span>
+          <div class="body"><strong>Destructive verbs are never the default action of a button group.</strong> <em>Delete is always the trailing item in a menu, never the rightmost button. Confirmations require typing the resource name.</em></div>
+          <span class="scope">all</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-05</span>
+          <div class="body"><strong>YAML is the source of truth.</strong> <em>Every form-driven edit must show the underlying YAML diff before Apply. No hidden mutations.</em></div>
+          <span class="scope">forms · apply</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-06</span>
+          <div class="body"><strong>Numbers use tabular figures.</strong> <em><code>font-variant-numeric: tabular-nums</code> on every column that holds counts, percentages, durations, or memory.</em></div>
+          <span class="scope">type</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-07</span>
+          <div class="body"><strong>Identifiers are monospace.</strong> <em>Pod names, image tags, hashes, IPs, namespaces in chips. Sentence text is sans. Don't mix the two in a single token.</em></div>
+          <span class="scope">type</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-08</span>
+          <div class="body"><strong>Hit targets are ≥ 28 px.</strong> <em>Icon-only buttons are 28×28; menu items 32 high; dense table rows 30 minimum. The mouse is precise; the operator is tired.</em></div>
+          <span class="scope">controls</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-09</span>
+          <div class="body"><strong>Modals are the exception.</strong> <em>Prefer a side panel for detail, a dock tab for editing, an inline confirmation for one-off actions. Modals only for namespace pickers, destructive confirmations, and the command palette.</em></div>
+          <span class="scope">layout</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-10</span>
+          <div class="body"><strong>Empty states explain what would fill them.</strong> <em>"No pods in this namespace" plus the kubectl command that would have created some. Never just an icon and "Nothing here yet."</em></div>
+          <span class="scope">empty</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-11</span>
+          <div class="body"><strong>Errors quote the server.</strong> <em>If the API said <code>Error from server (Forbidden)</code>, we render that string verbatim and add our own one-line interpretation underneath. We don't paraphrase k8s into prose.</em></div>
+          <span class="scope">errors</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-12</span>
+          <div class="body"><strong>The accent colour is teal, and only teal.</strong> <em>It marks active tab, focus ring, primary button, and selection. Reserve it. If everything is accented, nothing is.</em></div>
+          <span class="scope">colour</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-13</span>
+          <div class="body"><strong>Esc always backs out one layer.</strong> <em>Order: command palette → settings → namespace modal → detail panel → bulk selection. Never close the whole app.</em></div>
+          <span class="scope">keyboard</span>
+        </div>
+        <div class="rule">
+          <span class="id">R-14</span>
+          <div class="body"><strong>Animations are under 200 ms and only on user action.</strong> <em>Slide-in dock, fade-in modal, drawer expansion. Never animate data; never animate on poll.</em></div>
+          <span class="scope">motion</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- TOKENS -->
+    <section id="tokens">
+      <h2><span class="num">04</span> Visual tokens</h2>
+      <p>The system, named. New components compose these — they don't introduce new ones.</p>
+
+      <h3 style="margin: 18px 0 10px; font-size: 13px; color: var(--text-dim); font-weight: 600;">Status colours</h3>
+      <div class="tokens">
+        <div class="swatch"><div class="chip" style="background:#10b981"></div><div class="meta"><span class="name">Healthy</span><span class="val">#10b981</span></div></div>
+        <div class="swatch"><div class="chip" style="background:#f59e0b"></div><div class="meta"><span class="name">Transient</span><span class="val">#f59e0b</span></div></div>
+        <div class="swatch"><div class="chip" style="background:#f43f5e"></div><div class="meta"><span class="name">Failing</span><span class="val">#f43f5e</span></div></div>
+        <div class="swatch"><div class="chip" style="background:#94a3b8"></div><div class="meta"><span class="name">Unknown</span><span class="val">#94a3b8</span></div></div>
+      </div>
+
+      <h3 style="margin: 18px 0 10px; font-size: 13px; color: var(--text-dim); font-weight: 600;">UI state</h3>
+      <div class="tokens">
+        <div class="swatch"><div class="chip" style="background:#0d9488"></div><div class="meta"><span class="name">Accent</span><span class="val">#0d9488</span></div></div>
+        <div class="swatch"><div class="chip" style="background:#d8f4f0"></div><div class="meta"><span class="name">Accent soft</span><span class="val">#d8f4f0</span></div></div>
+        <div class="swatch"><div class="chip" style="background:#11161d"></div><div class="meta"><span class="name">Text</span><span class="val">#11161d</span></div></div>
+        <div class="swatch"><div class="chip" style="background:#525a68"></div><div class="meta"><span class="name">Text dim</span><span class="val">#525a68</span></div></div>
+        <div class="swatch"><div class="chip" style="background:#8a93a0"></div><div class="meta"><span class="name">Text muted</span><span class="val">#8a93a0</span></div></div>
+        <div class="swatch"><div class="chip" style="background:#e3e6ec"></div><div class="meta"><span class="name">Border</span><span class="val">#e3e6ec</span></div></div>
+      </div>
+
+      <h3 style="margin: 22px 0 10px; font-size: 13px; color: var(--text-dim); font-weight: 600;">Type</h3>
+      <div class="typesample">
+        <div class="label">Headline · 600 / -0.4 / 28px</div>
+        <div class="demo" style="font-size: 28px; font-weight: 600; letter-spacing: -0.4px; line-height: 1.2;">checkout-api-7d4f8b9-xk2lp</div>
+        <div class="specs">Inter · for cluster names, modal titles, hero copy</div>
+      </div>
+      <div class="typesample">
+        <div class="label">Body · 400 / 14px / 1.55</div>
+        <div class="demo" style="font-size: 14px; line-height: 1.55;">Pod is running on node ip-10-2-3-12 in the checkout namespace. Last restart was 4 days ago after an OOMKilled event in the main container.</div>
+        <div class="specs">Inter · for descriptions, log lines, prose</div>
+      </div>
+      <div class="typesample">
+        <div class="label">Mono · 500 / 12px (tabular)</div>
+        <div class="demo" style="font-family: var(--mono); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums;">checkout-api:v2.14.3 &nbsp;·&nbsp; 142m / 384Mi &nbsp;·&nbsp; 1/1 Ready &nbsp;·&nbsp; 4d</div>
+        <div class="specs">JetBrains Mono · for identifiers, numbers, code, terminal</div>
+      </div>
+      <div class="typesample">
+        <div class="label">Eyebrow · 700 / 0.6 letter-spacing / 10.5px / UPPER</div>
+        <div class="demo" style="font-family: var(--mono); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted);">Workloads · Cluster · Configuration</div>
+        <div class="specs">JetBrains Mono · for section labels, table headers</div>
+      </div>
+
+      <h3 style="margin: 22px 0 10px; font-size: 13px; color: var(--text-dim); font-weight: 600;">Spacing &amp; radius</h3>
+      <p style="font-family: var(--mono); font-size: 12px; max-width: none;">
+        Spacing scale: <code>4 · 6 · 8 · 10 · 12 · 14 · 18 · 22 · 32 · 56</code><br>
+        Radius scale: <code>3 · 4 · 5 · 6 · 7 · 8 · 10</code> &nbsp;—&nbsp; smaller for chips/inputs, larger for modals/cards<br>
+        Borders: <code>1px solid var(--border)</code> for hard edges, <code>--border-soft</code> for table dividers
+      </p>
+    </section>
+
+    <!-- ANTI-PATTERNS -->
+    <section id="anti">
+      <h2><span class="num">05</span> Anti-patterns</h2>
+      <p>Things we have specifically decided not to do, with reasons. Every one of these has been pitched and rejected.</p>
+
+      <div class="anti">
+        <div class="row"><span class="x">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>
+        </span><div>
+          <h4>"AI-suggested fix" buttons in error states</h4>
+          <p>The operator is deciding whether to drain a node holding a stateful service. A confident-sounding suggestion from a system that doesn't share their context is worse than nothing. We surface logs, events, and the kubectl command — they decide.</p>
+        </div></div>
+
+        <div class="row"><span class="x">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>
+        </span><div>
+          <h4>Dashboards as the landing page</h4>
+          <p>Generic time-series charts on a homepage train the operator to ignore them. We land on the cluster picker because that is the choice they came to make. Detail charts live inside resource pages, where they're scoped to something specific.</p>
+        </div></div>
+
+        <div class="row"><span class="x">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>
+        </span><div>
+          <h4>Inline drag-and-drop reordering of resources</h4>
+          <p>Order in Kubernetes comes from labels, selectors, and priority classes — not from a UI affordance. Letting someone drag pods around builds a mental model the cluster doesn't honour.</p>
+        </div></div>
+
+        <div class="row"><span class="x">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>
+        </span><div>
+          <h4>Wizards for resource creation</h4>
+          <p>"Step 3 of 7" is the wrong shape for a Deployment. The dock's YAML scratchpad with templates and dry-run is the right shape: full surface, real format, instant feedback. Wizards train people in our model, not Kubernetes'.</p>
+        </div></div>
+
+        <div class="row"><span class="x">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>
+        </span><div>
+          <h4>Toasts that announce success after a write</h4>
+          <p>A toast that says "Pod restarted" is information the table can already show. Update the row, animate the status pill back to green, and trust the operator to read. Toasts are reserved for things that happened <em>off-screen</em>.</p>
+        </div></div>
+
+        <div class="row"><span class="x">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg>
+        </span><div>
+          <h4>"Pro tips" and onboarding tooltips on hover</h4>
+          <p>The operator has done this 400 times. We document keyboard shortcuts in Settings → Shortcuts and let the surface be quiet. First-run guidance is fine; perpetual coach-marks aren't.</p>
+        </div></div>
+      </div>
+    </section>
+
+    <!-- CHECKLIST -->
+    <section id="checklist">
+      <h2><span class="num">06</span> Feature review checklist</h2>
+      <p>Run this list before shipping any new feature. If you skip an item, write down why in the design ticket.</p>
+
+      <div class="checklist">
+        <h4>Scope &amp; framing</h4>
+        <ul>
+          <li>The feature has a one-sentence description in operator vocabulary (no internal codenames, no metaphors).</li>
+          <li>It maps to an existing K8s concept, or it explicitly extends one with a name we will commit to.</li>
+          <li>The "do nothing" option was considered and rejected for a stated reason.</li>
+        </ul>
+
+        <h4>Surface</h4>
+        <ul>
+          <li>It lives in an existing region (rail, header, dock, detail panel) — or a new region was added with sign-off.</li>
+          <li>It introduces ≤ 1 new primary button per screen.</li>
+          <li>Empty, loading, and error states are designed — not just the populated state.</li>
+          <li>Cluster + namespace context is visible from the feature without scrolling.</li>
+        </ul>
+
+        <h4>Interaction</h4>
+        <ul>
+          <li>Every action has a keyboard route (or a stated reason it can't).</li>
+          <li>Esc behaviour is defined and consistent with the existing stack.</li>
+          <li>Selection-aware bulk actions appear in the dock bar, not in the header.</li>
+          <li>Destructive paths require typed confirmation; the resource name appears in the prompt.</li>
+        </ul>
+
+        <h4>Style</h4>
+        <ul>
+          <li>Uses only tokens from §04 — no new colours, no new font sizes, no new radii.</li>
+          <li>Identifiers are monospace; numbers are tabular; status uses the documented colours.</li>
+          <li>No emoji, no gradients on data, no decorative iconography.</li>
+        </ul>
+
+        <h4>Data &amp; honesty</h4>
+        <ul>
+          <li>If the feature writes to the cluster, the YAML diff is visible before Apply.</li>
+          <li>Server errors are quoted verbatim with our interpretation underneath.</li>
+          <li>Live values refresh silently; no spinner on poll.</li>
+          <li>Anything the operator constructs (filters, drafts, terminal sessions) survives a refresh.</li>
+        </ul>
+
+        <h4>Accessibility &amp; performance</h4>
+        <ul>
+          <li>Hit targets ≥ 28 px; focus rings visible on every interactive element.</li>
+          <li>Colour is never the only signal — pairs with shape, label, or position.</li>
+          <li>Tested with the dark theme; tested with system reduced-motion; tested at 1280-wide.</li>
+          <li>Initial render &lt; 100 ms perceived; interaction response &lt; 50 ms.</li>
+        </ul>
+      </div>
+    </section>
+
+    <div class="foot">
+      <span>Helmsman / design / v2.4</span>
+      <span>cite as P{n} or R-{nn} in review</span>
+    </div>
+
+  </main>
+</div>
+
+<script>
+  // TOC active-section highlight
+  const links = document.querySelectorAll('.toc a');
+  const sections = [...links].map(a => document.querySelector(a.getAttribute('href')));
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + e.target.id));
+      }
+    });
+  }, { rootMargin: '-30% 0px -55% 0px' });
+  sections.forEach(s => s && obs.observe(s));
+</script>
+
+</body>
+</html>

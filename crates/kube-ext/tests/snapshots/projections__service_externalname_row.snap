@@ -1,0 +1,13 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "cluster_ip": "",
+  "creation_timestamp": "2026-04-01T09:00:00Z",
+  "external_ip": "db.example.com",
+  "name": "external-db",
+  "namespace": "default",
+  "ports": "",
+  "type": "ExternalName"
+}

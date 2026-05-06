@@ -1,0 +1,22 @@
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "name": "data-postgres-0",
+    "namespace": "default",
+    "uid": "pvc-uid",
+    "creationTimestamp": "2026-02-01T08:00:00Z"
+  },
+  "spec": {
+    "accessModes": ["ReadWriteOnce"],
+    "resources": { "requests": { "storage": "10Gi" } },
+    "storageClassName": "standard",
+    "volumeMode": "Filesystem",
+    "volumeName": "pvc-abc-123"
+  },
+  "status": {
+    "phase": "Bound",
+    "accessModes": ["ReadWriteOnce"],
+    "capacity": { "storage": "10Gi" }
+  }
+}

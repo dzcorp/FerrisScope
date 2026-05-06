@@ -1,0 +1,12 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "creation_timestamp": "2026-02-10T08:30:00Z",
+  "current": 5,
+  "desired": 5,
+  "name": "web-7d9f",
+  "namespace": "default",
+  "ready": 4
+}

@@ -1,0 +1,69 @@
+{
+  "apiVersion": "gateway.networking.k8s.io/v1",
+  "kind": "Gateway",
+  "metadata": {
+    "name": "public",
+    "namespace": "envoy-gateway-system",
+    "uid": "gw-uid",
+    "creationTimestamp": "2026-04-01T08:05:00Z"
+  },
+  "spec": {
+    "gatewayClassName": "envoy-gateway",
+    "listeners": [
+      {
+        "name": "http",
+        "protocol": "HTTP",
+        "port": 80,
+        "allowedRoutes": { "namespaces": { "from": "All" } }
+      },
+      {
+        "name": "https",
+        "protocol": "HTTPS",
+        "port": 443,
+        "tls": { "mode": "Terminate" },
+        "allowedRoutes": { "namespaces": { "from": "Same" } }
+      }
+    ]
+  },
+  "status": {
+    "addresses": [
+      { "type": "IPAddress", "value": "203.0.113.50" }
+    ],
+    "conditions": [
+      {
+        "type": "Accepted",
+        "status": "True",
+        "reason": "Accepted",
+        "message": "Gateway accepted",
+        "lastTransitionTime": "2026-04-01T08:05:30Z",
+        "observedGeneration": 1
+      },
+      {
+        "type": "Programmed",
+        "status": "True",
+        "reason": "Programmed",
+        "message": "ok",
+        "lastTransitionTime": "2026-04-01T08:05:35Z",
+        "observedGeneration": 1
+      }
+    ],
+    "listeners": [
+      {
+        "name": "http",
+        "supportedKinds": [ { "group": "gateway.networking.k8s.io", "kind": "HTTPRoute" } ],
+        "attachedRoutes": 2,
+        "conditions": [
+          { "type": "Accepted", "status": "True", "reason": "Accepted", "message": "ok", "lastTransitionTime": "2026-04-01T08:05:30Z", "observedGeneration": 1 }
+        ]
+      },
+      {
+        "name": "https",
+        "supportedKinds": [ { "group": "gateway.networking.k8s.io", "kind": "HTTPRoute" } ],
+        "attachedRoutes": 1,
+        "conditions": [
+          { "type": "Accepted", "status": "True", "reason": "Accepted", "message": "ok", "lastTransitionTime": "2026-04-01T08:05:30Z", "observedGeneration": 1 }
+        ]
+      }
+    ]
+  }
+}

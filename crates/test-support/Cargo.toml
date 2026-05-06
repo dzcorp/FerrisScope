@@ -1,0 +1,32 @@
+[package]
+name = "ferrisscope-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared test fixtures and kind-cluster harness for ferrisscope integration tests."
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enables the kind-cluster harness (requires Docker + the `kind` binary on
+# PATH at test time). Off by default so plain `cargo test` stays fast and
+# doesn't depend on Docker.
+integration = ["dep:which"]
+
+[dependencies]
+kube.workspace = true
+k8s-openapi.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+which = { version = "8", optional = true }

@@ -1,0 +1,11 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "accepted": "True",
+  "controller": "gateway.envoyproxy.io/gatewayclass-controller",
+  "creation_timestamp": "2026-04-01T08:00:00Z",
+  "name": "envoy-gateway",
+  "namespace": null
+}

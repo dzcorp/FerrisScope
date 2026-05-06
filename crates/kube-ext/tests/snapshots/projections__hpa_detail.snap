@@ -1,0 +1,47 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "conditions": [
+    {
+      "last_transition_time": "2026-02-15T00:00:01Z",
+      "message": "ok",
+      "reason": "ReadyForNewScale",
+      "status": "True",
+      "type": "AbleToScale"
+    }
+  ],
+  "current_replicas": 5,
+  "desired_replicas": 5,
+  "last_scale_time": null,
+  "max_replicas": 20,
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-02-15T00:00:00Z",
+    "generation": null,
+    "labels": [],
+    "name": "web",
+    "namespace": "default",
+    "uid": "hpa-uid"
+  },
+  "metrics": [
+    {
+      "name": "cpu",
+      "target": {
+        "average_utilization": 80,
+        "average_value": null,
+        "type": "Utilization",
+        "value": null
+      },
+      "type": "Resource"
+    }
+  ],
+  "min_replicas": 2,
+  "scale_target_ref": {
+    "api_version": "apps/v1",
+    "kind": "Deployment",
+    "name": "web"
+  }
+}

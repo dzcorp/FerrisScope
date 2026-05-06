@@ -1,0 +1,16 @@
+{
+  "name": "ferrisscope-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "description": "End-to-end tests for FerrisScope. Drives the packaged Tauri binary via tauri-driver + Playwright (WebDriver protocol).",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "PWTEST_HEADED=1 playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.2",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,95 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "addresses": [
+    {
+      "type": "IPAddress",
+      "value": "203.0.113.50"
+    }
+  ],
+  "conditions": [
+    {
+      "last_transition_time": "2026-04-01T08:05:30Z",
+      "message": "Gateway accepted",
+      "reason": "Accepted",
+      "status": "True",
+      "type": "Accepted"
+    },
+    {
+      "last_transition_time": "2026-04-01T08:05:35Z",
+      "message": "ok",
+      "reason": "Programmed",
+      "status": "True",
+      "type": "Programmed"
+    }
+  ],
+  "gateway_class_name": "envoy-gateway",
+  "listener_status": [
+    {
+      "attached_routes": 2,
+      "conditions": [
+        {
+          "lastTransitionTime": "2026-04-01T08:05:30Z",
+          "message": "ok",
+          "observedGeneration": 1,
+          "reason": "Accepted",
+          "status": "True",
+          "type": "Accepted"
+        }
+      ],
+      "name": "http"
+    },
+    {
+      "attached_routes": 1,
+      "conditions": [
+        {
+          "lastTransitionTime": "2026-04-01T08:05:30Z",
+          "message": "ok",
+          "observedGeneration": 1,
+          "reason": "Accepted",
+          "status": "True",
+          "type": "Accepted"
+        }
+      ],
+      "name": "https"
+    }
+  ],
+  "listeners": [
+    {
+      "allowed_routes": {
+        "namespaces": {
+          "from": "All"
+        }
+      },
+      "hostname": null,
+      "name": "http",
+      "port": 80,
+      "protocol": "HTTP",
+      "tls_mode": null
+    },
+    {
+      "allowed_routes": {
+        "namespaces": {
+          "from": "Same"
+        }
+      },
+      "hostname": null,
+      "name": "https",
+      "port": 443,
+      "protocol": "HTTPS",
+      "tls_mode": "Terminate"
+    }
+  ],
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-04-01T08:05:00Z",
+    "generation": null,
+    "labels": [],
+    "name": "public",
+    "namespace": "envoy-gateway-system",
+    "uid": "gw-uid"
+  }
+}

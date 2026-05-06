@@ -1,0 +1,29 @@
+[package]
+name = "ferrisscope-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AI agent engine: provider abstraction, tool registry, session store. Tauri-free."
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio-test.workspace = true
+pretty_assertions.workspace = true
+
+[dependencies]
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+directories.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+eventsource-stream.workspace = true
+async-trait.workspace = true
+chrono.workspace = true

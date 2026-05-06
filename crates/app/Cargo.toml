@@ -1,0 +1,78 @@
+[package]
+name = "ferrisscope-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tauri shell for ferrisscope."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ferrisscope"
+path = "src/main.rs"
+
+[features]
+default = []
+integration = ["ferrisscope-kube-ext/integration"]
+
+[dev-dependencies]
+ferrisscope-test-support.workspace = true
+tokio-test.workspace = true
+pretty_assertions.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+ferrisscope-core.workspace = true
+ferrisscope-kube-ext.workspace = true
+ferrisscope-agent.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+# keyring v4 is a CLI-only release — the library API was extracted to
+# `keyring-core` + per-backend crates. The upstream README explicitly tells v3
+# users not to upgrade. Staying on v3 until we choose to port to keyring-core.
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored", "apple-native", "windows-native"] }
+tauri = { version = "2.11", features = [] }
+tauri-plugin-fs = "2.5"
+tauri-plugin-dialog = "2.4"
+tauri-plugin-opener = "2.5"
+tauri-plugin-window-state = "2.4"
+tauri-plugin-clipboard-manager = "2.3"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde_yaml.workspace = true
+portable-pty = "0.9"
+directories.workspace = true
+base64 = "0.22"
+getrandom = "0.2"
+futures.workspace = true
+kube.workspace = true
+k8s-openapi.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+http.workspace = true
+scraper = { version = "0.26", default-features = false }
+url = "2"
+
+# Updater (Linux AppImage / macOS DMG)
+semver = "1"
+tempfile = "3"
+ureq = { version = "3", default-features = true }
+sha2 = "0.11"
+
+# Replace the system allocator with mimalloc. glibc's allocator (ptmalloc2)
+# tends to hold freed pages in per-thread arenas indefinitely on long-running
+# processes — the kind of behaviour that shows up as "RSS only ever grows"
+# even after the app frees data. mimalloc returns pages to the OS
+# aggressively and has better small-allocation locality. Zero correctness
+# risk; drop-in via #[global_allocator] in main.rs.
+mimalloc = { version = "0.1", default-features = false }

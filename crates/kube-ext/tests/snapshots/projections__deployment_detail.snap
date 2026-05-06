@@ -1,0 +1,99 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "conditions": [
+    {
+      "last_transition_time": "2026-02-10T08:31:00Z",
+      "message": "Deployment has minimum availability.",
+      "reason": "MinimumReplicasAvailable",
+      "status": "True",
+      "type": "Available"
+    },
+    {
+      "last_transition_time": "2026-02-10T08:31:00Z",
+      "message": "ReplicaSet \"web-abc\" has successfully progressed.",
+      "reason": "NewReplicaSetAvailable",
+      "status": "True",
+      "type": "Progressing"
+    }
+  ],
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-02-10T08:30:00Z",
+    "generation": 4,
+    "labels": [
+      [
+        "app",
+        "web"
+      ]
+    ],
+    "name": "web",
+    "namespace": "default",
+    "uid": "dep-uid"
+  },
+  "min_ready_seconds": 10,
+  "observed_generation": 4,
+  "paused": false,
+  "pod_template": {
+    "annotations_count": 0,
+    "containers": [
+      {
+        "args": null,
+        "command": null,
+        "env": [],
+        "env_from_count": 0,
+        "image": "ghcr.io/example/web:v2",
+        "image_pull_policy": null,
+        "kind": "main",
+        "limits": null,
+        "mounts_count": 0,
+        "name": "web",
+        "ports": [],
+        "requests": null
+      }
+    ],
+    "host_ipc": null,
+    "host_network": null,
+    "host_pid": null,
+    "image_pull_secrets": [],
+    "labels": [
+      [
+        "app",
+        "web"
+      ]
+    ],
+    "node_selector": [],
+    "priority_class": null,
+    "restart_policy": null,
+    "service_account": null,
+    "tolerations_count": 0,
+    "volumes": []
+  },
+  "progress_deadline_seconds": 600,
+  "replicas": {
+    "available": 4,
+    "current": 5,
+    "desired": 5,
+    "ready": 4,
+    "unavailable": 1,
+    "updated": 5
+  },
+  "revision_history_limit": 5,
+  "selector": {
+    "match_expressions": 0,
+    "match_labels": [
+      [
+        "app",
+        "web"
+      ]
+    ]
+  },
+  "strategy": {
+    "max_surge": "25%",
+    "max_unavailable": "1",
+    "type": "RollingUpdate"
+  }
+}

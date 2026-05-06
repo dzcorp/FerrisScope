@@ -1,0 +1,20 @@
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": {
+    "name": "allow-ingress-from-web",
+    "namespace": "default",
+    "uid": "np-uid",
+    "creationTimestamp": "2026-03-01T08:00:00Z"
+  },
+  "spec": {
+    "podSelector": { "matchLabels": { "app": "api" } },
+    "policyTypes": ["Ingress"],
+    "ingress": [
+      {
+        "from": [{ "podSelector": { "matchLabels": { "app": "web" } } }],
+        "ports": [{ "protocol": "TCP", "port": 8080 }]
+      }
+    ]
+  }
+}

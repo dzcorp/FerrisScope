@@ -1,0 +1,89 @@
+# Dependabot config — weekly dependency updates across the three ecosystems
+# this repo uses: cargo (Rust workspace), npm (Vite frontend), and the
+# GitHub Actions used by .github/workflows/*. Minor + patch updates are
+# grouped per-ecosystem to keep the PR queue manageable; major bumps stay
+# as separate PRs so they get a real review (often involve API changes).
+#
+# Reference: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+version: 2
+
+updates:
+  # ─── Rust workspace (Cargo.toml at repo root) ─────────────────────────
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: "chore(cargo)"
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    # Tauri / kube-rs majors deserve their own PRs — both have meaningful
+    # behaviour changes worth a focused review.
+    ignore:
+      - dependency-name: tauri
+        update-types: ["version-update:semver-major"]
+      - dependency-name: kube
+        update-types: ["version-update:semver-major"]
+
+  # ─── npm frontend (ui/package.json) ───────────────────────────────────
+  - package-ecosystem: npm
+    directory: "/ui"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - frontend
+    commit-message:
+      prefix: "chore(ui)"
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    # Vite / React / Tailwind majors carry config + behaviour migrations.
+    ignore:
+      - dependency-name: vite
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react-dom
+        update-types: ["version-update:semver-major"]
+      - dependency-name: tailwindcss
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@tauri-apps/cli"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@tauri-apps/api"
+        update-types: ["version-update:semver-major"]
+
+  # ─── GitHub Actions used in workflows ─────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions-all:
+        patterns:
+          - "*"

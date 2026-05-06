@@ -1,0 +1,12 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "creation_timestamp": "2026-04-01T09:00:00Z",
+  "hostnames": "web.example.com,*.web.example.com",
+  "name": "web",
+  "namespace": "default",
+  "parents": "Gateway/envoy-gateway-system/public",
+  "rules": 1
+}

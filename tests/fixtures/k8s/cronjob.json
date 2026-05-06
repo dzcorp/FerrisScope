@@ -1,0 +1,32 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "CronJob",
+  "metadata": {
+    "name": "nightly-backup",
+    "namespace": "ops",
+    "uid": "cj-uid",
+    "creationTimestamp": "2026-01-01T00:00:00Z"
+  },
+  "spec": {
+    "schedule": "0 2 * * *",
+    "concurrencyPolicy": "Forbid",
+    "successfulJobsHistoryLimit": 3,
+    "failedJobsHistoryLimit": 1,
+    "suspend": false,
+    "jobTemplate": {
+      "spec": {
+        "template": {
+          "spec": {
+            "restartPolicy": "OnFailure",
+            "containers": [{ "name": "backup", "image": "backup:1.0" }]
+          }
+        }
+      }
+    }
+  },
+  "status": {
+    "active": [],
+    "lastScheduleTime": "2026-04-15T02:00:00Z",
+    "lastSuccessfulTime": "2026-04-15T02:00:30Z"
+  }
+}

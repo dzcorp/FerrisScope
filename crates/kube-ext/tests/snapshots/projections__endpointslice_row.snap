@@ -1,0 +1,12 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "address_type": "IPv4",
+  "creation_timestamp": "2026-04-01T09:00:00Z",
+  "endpoints": 2,
+  "name": "web-abc",
+  "namespace": "default",
+  "ports": "8080"
+}

@@ -1,0 +1,81 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "conditions": [],
+  "current_revision": null,
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-02-01T08:00:00Z",
+    "generation": 2,
+    "labels": [],
+    "name": "postgres",
+    "namespace": "default",
+    "uid": "ss-uid"
+  },
+  "min_ready_seconds": null,
+  "observed_generation": 2,
+  "pod_management_policy": "OrderedReady",
+  "pod_template": {
+    "annotations_count": 0,
+    "containers": [
+      {
+        "args": null,
+        "command": null,
+        "env": [],
+        "env_from_count": 0,
+        "image": "postgres:17.2",
+        "image_pull_policy": null,
+        "kind": "main",
+        "limits": null,
+        "mounts_count": 0,
+        "name": "main",
+        "ports": [],
+        "requests": null
+      }
+    ],
+    "host_ipc": null,
+    "host_network": null,
+    "host_pid": null,
+    "image_pull_secrets": [],
+    "labels": [
+      [
+        "app",
+        "postgres"
+      ]
+    ],
+    "node_selector": [],
+    "priority_class": null,
+    "restart_policy": null,
+    "service_account": null,
+    "tolerations_count": 0,
+    "volumes": []
+  },
+  "replicas": {
+    "available": 3,
+    "current": 3,
+    "desired": 3,
+    "ready": 3,
+    "updated": 3
+  },
+  "revision_history_limit": null,
+  "selector": {
+    "match_expressions": 0,
+    "match_labels": [
+      [
+        "app",
+        "postgres"
+      ]
+    ]
+  },
+  "service_name": "postgres-headless",
+  "update_revision": null,
+  "update_strategy": {
+    "max_unavailable": null,
+    "partition": 0,
+    "type": "RollingUpdate"
+  },
+  "volume_claim_templates": []
+}

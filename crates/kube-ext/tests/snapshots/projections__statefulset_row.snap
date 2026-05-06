@@ -1,0 +1,11 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "creation_timestamp": "2026-02-01T08:00:00Z",
+  "name": "postgres",
+  "namespace": "default",
+  "ready": "3/3",
+  "service": "postgres-headless"
+}

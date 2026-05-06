@@ -1,0 +1,80 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "limits": [
+    {
+      "default": [
+        [
+          "cpu",
+          "500m"
+        ],
+        [
+          "memory",
+          "512Mi"
+        ]
+      ],
+      "default_request": [
+        [
+          "cpu",
+          "100m"
+        ],
+        [
+          "memory",
+          "128Mi"
+        ]
+      ],
+      "max": [
+        [
+          "cpu",
+          "2"
+        ],
+        [
+          "memory",
+          "2Gi"
+        ]
+      ],
+      "max_limit_request_ratio": [],
+      "min": [
+        [
+          "cpu",
+          "50m"
+        ],
+        [
+          "memory",
+          "64Mi"
+        ]
+      ],
+      "type_": "Container"
+    },
+    {
+      "default": [],
+      "default_request": [],
+      "max": [
+        [
+          "storage",
+          "100Gi"
+        ]
+      ],
+      "max_limit_request_ratio": [],
+      "min": [
+        [
+          "storage",
+          "1Gi"
+        ]
+      ],
+      "type_": "PersistentVolumeClaim"
+    }
+  ],
+  "meta": {
+    "annotations": [],
+    "controlled_by": null,
+    "created_at": "2026-01-01T00:00:00Z",
+    "generation": null,
+    "labels": [],
+    "name": "default-limits",
+    "namespace": "default",
+    "uid": "lr-uid"
+  }
+}

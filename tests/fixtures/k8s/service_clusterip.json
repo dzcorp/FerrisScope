@@ -1,0 +1,22 @@
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "name": "web",
+    "namespace": "default",
+    "uid": "svc-uid",
+    "creationTimestamp": "2026-04-01T09:00:00Z"
+  },
+  "spec": {
+    "type": "ClusterIP",
+    "clusterIP": "10.0.5.20",
+    "clusterIPs": ["10.0.5.20"],
+    "ipFamilies": ["IPv4"],
+    "ipFamilyPolicy": "SingleStack",
+    "selector": { "app": "web" },
+    "ports": [
+      { "name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP" },
+      { "name": "metrics", "port": 9090, "targetPort": "metrics", "protocol": "TCP" }
+    ]
+  }
+}

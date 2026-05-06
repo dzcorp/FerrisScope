@@ -1,0 +1,81 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "conditions": [],
+  "meta": {
+    "annotations": [],
+    "controlled_by": {
+      "kind": "Deployment",
+      "name": "web"
+    },
+    "created_at": "2026-02-10T08:30:00Z",
+    "generation": null,
+    "labels": [],
+    "name": "web-7d9f",
+    "namespace": "default",
+    "uid": "rs-uid"
+  },
+  "min_ready_seconds": null,
+  "observed_generation": 1,
+  "pod_template": {
+    "annotations_count": 0,
+    "containers": [
+      {
+        "args": null,
+        "command": null,
+        "env": [],
+        "env_from_count": 0,
+        "image": "ghcr.io/example/web:v2",
+        "image_pull_policy": null,
+        "kind": "main",
+        "limits": null,
+        "mounts_count": 0,
+        "name": "web",
+        "ports": [],
+        "requests": null
+      }
+    ],
+    "host_ipc": null,
+    "host_network": null,
+    "host_pid": null,
+    "image_pull_secrets": [],
+    "labels": [
+      [
+        "app",
+        "web"
+      ],
+      [
+        "pod-template-hash",
+        "7d9f"
+      ]
+    ],
+    "node_selector": [],
+    "priority_class": null,
+    "restart_policy": null,
+    "service_account": null,
+    "tolerations_count": 0,
+    "volumes": []
+  },
+  "replicas": {
+    "available": 4,
+    "current": 5,
+    "desired": 5,
+    "fully_labeled": 5,
+    "ready": 4
+  },
+  "selector": {
+    "match_expressions": 0,
+    "match_labels": [
+      [
+        "app",
+        "web"
+      ],
+      [
+        "pod-template-hash",
+        "7d9f"
+      ]
+    ]
+  }
+}

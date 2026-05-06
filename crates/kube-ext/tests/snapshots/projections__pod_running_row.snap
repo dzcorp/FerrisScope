@@ -1,0 +1,48 @@
+---
+source: crates/kube-ext/tests/projections.rs
+expression: value
+---
+{
+  "container_states": [
+    {
+      "image": "busybox:1.36",
+      "kind": "init",
+      "name": "wait-for-db",
+      "ready": true,
+      "reason": "Completed",
+      "restart_count": 0,
+      "state": "Completed"
+    },
+    {
+      "image": "ghcr.io/example/web:v2",
+      "kind": "main",
+      "name": "web",
+      "ready": true,
+      "reason": null,
+      "restart_count": 0,
+      "state": "Running"
+    },
+    {
+      "image": "envoyproxy/envoy:v1.30",
+      "kind": "main",
+      "name": "envoy",
+      "ready": true,
+      "reason": null,
+      "restart_count": 2,
+      "state": "Running"
+    }
+  ],
+  "containers": [
+    "web",
+    "envoy"
+  ],
+  "cpu": null,
+  "creation_timestamp": "2026-04-15T10:00:00Z",
+  "mem": null,
+  "name": "web-7d9f8",
+  "namespace": "default",
+  "node": "node-1",
+  "phase": "Running",
+  "ready": "2/2",
+  "restarts": 2
+}

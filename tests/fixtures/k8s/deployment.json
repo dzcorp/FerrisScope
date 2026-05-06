@@ -1,0 +1,58 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "web",
+    "namespace": "default",
+    "uid": "dep-uid",
+    "creationTimestamp": "2026-02-10T08:30:00Z",
+    "generation": 4,
+    "labels": { "app": "web" }
+  },
+  "spec": {
+    "replicas": 5,
+    "selector": { "matchLabels": { "app": "web" } },
+    "minReadySeconds": 10,
+    "progressDeadlineSeconds": 600,
+    "revisionHistoryLimit": 5,
+    "paused": false,
+    "strategy": {
+      "type": "RollingUpdate",
+      "rollingUpdate": { "maxSurge": "25%", "maxUnavailable": 1 }
+    },
+    "template": {
+      "metadata": { "labels": { "app": "web" } },
+      "spec": {
+        "containers": [
+          { "name": "web", "image": "ghcr.io/example/web:v2" }
+        ]
+      }
+    }
+  },
+  "status": {
+    "observedGeneration": 4,
+    "replicas": 5,
+    "readyReplicas": 4,
+    "updatedReplicas": 5,
+    "availableReplicas": 4,
+    "unavailableReplicas": 1,
+    "conditions": [
+      {
+        "type": "Available",
+        "status": "True",
+        "reason": "MinimumReplicasAvailable",
+        "message": "Deployment has minimum availability.",
+        "lastTransitionTime": "2026-02-10T08:31:00Z",
+        "lastUpdateTime": "2026-02-10T08:31:00Z"
+      },
+      {
+        "type": "Progressing",
+        "status": "True",
+        "reason": "NewReplicaSetAvailable",
+        "message": "ReplicaSet \"web-abc\" has successfully progressed.",
+        "lastTransitionTime": "2026-02-10T08:31:00Z",
+        "lastUpdateTime": "2026-02-10T08:31:00Z"
+      }
+    ]
+  }
+}

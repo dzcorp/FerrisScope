@@ -1,0 +1,38 @@
+[package]
+name = "ferrisscope-kube-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Helpers on top of kube-rs: column projections, resource registry."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+integration = ["ferrisscope-test-support/integration"]
+
+[dev-dependencies]
+ferrisscope-test-support.workspace = true
+tokio-test.workspace = true
+pretty_assertions.workspace = true
+insta.workspace = true
+
+[dependencies]
+ferrisscope-core.workspace = true
+kube.workspace = true
+k8s-openapi.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+base64 = "0.22"
+flate2 = "1"
+tempfile = "3"
+which = "8"
+semver = "1"
