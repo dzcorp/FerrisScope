@@ -328,7 +328,7 @@ fn fill_random(buf: &mut [u8]) {
     // `getrandom` reads from the OS entropy source (`getrandom(2)` on
     // Linux, `SecRandomCopyBytes` on macOS, `BCryptGenRandom` on
     // Windows). Cryptographically suitable for PKCE / state.
-    if getrandom::getrandom(buf).is_err() {
+    if getrandom::fill(buf).is_err() {
         // Fallback so PKCE generation never panics. Two UUIDs give 256
         // bits which exceeds OAuth's PKCE requirement; degrades to
         // process-time entropy if the syscall fails (extremely rare,
