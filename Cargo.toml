@@ -64,7 +64,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Search index. `bundled` ships SQLite 3.46 with the binary so we don't depend
 # on a system libsqlite (which on macOS predates FTS5 trigram). FTS5 is on by
 # default in rusqlite's bundled build.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 
 # SSH (remote kubeconfig sources). russh is a pure-Rust async SSH-2 client; we
 # avoid shelling out to /usr/bin/ssh because (a) it isn't on every Linux distro
