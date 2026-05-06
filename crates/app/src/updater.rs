@@ -27,8 +27,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 use tempfile::TempDir;
 
-const GITHUB_RELEASES_API: &str =
-    "https://api.github.com/repos/dzcorp/FerrisScope/releases/latest";
+const GITHUB_RELEASES_API: &str = "https://api.github.com/repos/dzcorp/FerrisScope/releases/latest";
 const GITHUB_RELEASES_PAGE: &str = "https://github.com/dzcorp/FerrisScope/releases";
 const APPLY_UPDATE_FLAG: &str = "--apply-update";
 #[cfg(target_os = "macos")]

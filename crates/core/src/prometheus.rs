@@ -151,14 +151,30 @@ const DISCOVERY_SELECTORS: &[&str] = &[
     "app in (promscale,promscale-connector)",
 ];
 
-/// List Services that look like a Prometheus instance. Two selector queries
-/// (covering the two most common chart conventions), unioned + deduped by
-/// `(namespace, name)`. Empty list = none found, *not* an error — the UI
-/// shows that as "no Prometheus detected, configure manually".
+/// List Services that look like a Prometheus instance. Two-pass:
+///
+/// 1. **Label selectors** (cheap, high-signal). Concurrent cluster-wide
+///    LISTs — one per entry in [`DISCOVERY_SELECTORS`] — unioned + deduped
+///    by `(namespace, name)`. This catches the vast majority of installs
+///    where the chart sets `app.kubernetes.io/name=prometheus` (or
+///    equivalent) on the queryable Service.
+///
+/// 2. **Name fallback** (only paid when pass 1 returned nothing). One
+///    cluster-wide LIST without a label filter, client-side filtered to
+///    Services whose name contains a known backend keyword AND that are
+///    not on the [`NAME_FALLBACK_BLOCKLIST`] AND that expose at least
+///    one Prom-shaped port. Catches charts that set non-canonical label
+///    values (e.g. `app.kubernetes.io/name=kube-prometheus-stack-prometheus`)
+///    or omit the standard label entirely. Capped at
+///    [`NAME_FALLBACK_MAX_CANDIDATES`] to bound worst-case probe budget.
+///
+/// Empty list = none found, *not* an error — the UI shows that as
+/// "no Prometheus detected, configure manually". The validate probe is
+/// always the source of truth; this function just supplies candidates.
 pub async fn discover(client: Client) -> Result<Vec<PromTarget>, PromError> {
     let api: Api<Service> = Api::all(client);
-    // Run both label selectors concurrently — each is an independent
-    // cluster-wide Service LIST and there's no reason to serialize them.
+    // Run all selectors concurrently — each is an independent cluster-wide
+    // Service LIST and there's no reason to serialize them.
     let lists = futures::future::join_all(DISCOVERY_SELECTORS.iter().map(|selector| {
         let api = api.clone();
         async move {
@@ -182,28 +198,41 @@ pub async fn discover(client: Client) -> Result<Vec<PromTarget>, PromError> {
             }
         };
         for svc in list.items {
-            let Some(ns) = svc.metadata.namespace.clone() else {
-                continue;
-            };
-            let Some(name) = svc.metadata.name.clone() else {
-                continue;
-            };
-            let key = (ns.clone(), name.clone());
-            if !seen.insert(key) {
-                continue;
-            }
-            let backend = classify(svc.metadata.labels.as_ref());
-            let (port, scheme) = pick_port(&svc, backend)
-                .unwrap_or_else(|| (default_port(backend), "http".to_owned()));
-            out.push(PromTarget {
-                namespace: ns,
-                service: name,
-                port,
-                scheme,
-                backend,
-            });
+            push_label_candidate(&mut out, &mut seen, svc);
         }
     }
+
+    // Pass 2 — name-based fallback. Only paid when label discovery turned
+    // up nothing, so the happy path stays a single round-trip per
+    // selector and the fallback's broader LIST is amortised against the
+    // case it actually helps.
+    if out.is_empty() {
+        match api.list(&ListParams::default()).await {
+            Ok(list) => {
+                tracing::debug!(
+                    total = list.items.len(),
+                    "prometheus label discovery empty; running name fallback"
+                );
+                let mut added = 0usize;
+                for svc in list.items {
+                    if added >= NAME_FALLBACK_MAX_CANDIDATES {
+                        tracing::debug!(
+                            cap = NAME_FALLBACK_MAX_CANDIDATES,
+                            "prometheus name fallback hit candidate cap; truncating"
+                        );
+                        break;
+                    }
+                    if push_name_fallback_candidate(&mut out, &mut seen, svc) {
+                        added += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "prometheus name fallback list failed");
+            }
+        }
+    }
+
     // Sort for stable UI ordering.
     out.sort_by(|a, b| {
         (a.namespace.as_str(), a.service.as_str()).cmp(&(b.namespace.as_str(), b.service.as_str()))
@@ -211,13 +240,117 @@ pub async fn discover(client: Client) -> Result<Vec<PromTarget>, PromError> {
     Ok(out)
 }
 
+/// Push a Service that came back from a label-selected LIST. The selector
+/// already proved monitoring-adjacent intent, so we accept anything —
+/// classify is allowed to return `Unknown` (still dispatchable via the
+/// proxy + probe path).
+fn push_label_candidate(
+    out: &mut Vec<PromTarget>,
+    seen: &mut std::collections::HashSet<(String, String)>,
+    svc: Service,
+) {
+    let Some(ns) = svc.metadata.namespace.clone() else {
+        return;
+    };
+    let Some(name) = svc.metadata.name.clone() else {
+        return;
+    };
+    if !seen.insert((ns.clone(), name.clone())) {
+        return;
+    }
+    let backend = classify(svc.metadata.labels.as_ref());
+    let (port, scheme) =
+        pick_port(&svc, backend).unwrap_or_else(|| (default_port(backend), "http".to_owned()));
+    out.push(PromTarget {
+        namespace: ns,
+        service: name,
+        port,
+        scheme,
+        backend,
+    });
+}
+
+/// Push a Service from the unfiltered fallback LIST. Returns `true` if a
+/// candidate was actually pushed, so the caller can apply the cap. We
+/// require:
+///
+/// * Service name contains a known backend keyword (`classify_keyword`).
+/// * Service name does not contain anything on [`NAME_FALLBACK_BLOCKLIST`].
+/// * Service exposes at least one Prom-shaped port.
+///
+/// Anything that clears all three is handed to the same `validate()` probe
+/// as label-discovered candidates — false positives die there at most one
+/// 5s timeout each, bounded by [`NAME_FALLBACK_MAX_CANDIDATES`].
+fn push_name_fallback_candidate(
+    out: &mut Vec<PromTarget>,
+    seen: &mut std::collections::HashSet<(String, String)>,
+    svc: Service,
+) -> bool {
+    let Some(ns) = svc.metadata.namespace.clone() else {
+        return false;
+    };
+    let Some(name) = svc.metadata.name.clone() else {
+        return false;
+    };
+    if name_is_blocklisted(&name) {
+        return false;
+    }
+    let Some(backend) = classify_keyword(&name) else {
+        return false;
+    };
+    if !has_prom_shaped_port(&svc) {
+        return false;
+    }
+    if !seen.insert((ns.clone(), name.clone())) {
+        return false;
+    }
+    let (port, scheme) =
+        pick_port(&svc, backend).unwrap_or_else(|| (default_port(backend), "http".to_owned()));
+    out.push(PromTarget {
+        namespace: ns,
+        service: name,
+        port,
+        scheme,
+        backend,
+    });
+    true
+}
+
+/// Map a candidate string (a label value or a Service name) to a likely
+/// backend by substring. `None` = nothing recognised — the caller decides
+/// whether that means "skip" (name-based fallback pass) or "keep as
+/// Unknown" (label-based pass, where the selector already proved
+/// monitoring-adjacent intent).
+fn classify_keyword(s: &str) -> Option<PromBackend> {
+    let n = s.to_ascii_lowercase();
+    // Order: most specific first. `prometheus` is last because compound
+    // names like `victoria-metrics` etc. don't contain it but several
+    // VM/Thanos/Mimir Service names do contain `prom-…` prefixes from
+    // umbrella charts.
+    if n.contains("victoria") || n.contains("vmsingle") || n.contains("vmselect") {
+        Some(PromBackend::VictoriaMetrics)
+    } else if n.contains("thanos") {
+        Some(PromBackend::Thanos)
+    } else if n.contains("mimir") {
+        Some(PromBackend::Mimir)
+    } else if n.contains("cortex") {
+        Some(PromBackend::Cortex)
+    } else if n.contains("m3coordinator") || n.contains("m3query") {
+        Some(PromBackend::M3)
+    } else if n.contains("promscale") {
+        Some(PromBackend::Promscale)
+    } else if n.contains("prometheus") {
+        Some(PromBackend::Prometheus)
+    } else {
+        None
+    }
+}
+
 /// Map Service labels → likely backend. Uses `app.kubernetes.io/name` if
 /// present (modern convention) and falls back to `app` (older charts).
-/// Substring matching keeps us tolerant to chart suffixes
-/// (`vmsingle-server`, `thanos-query-frontend`, ...) without listing every
-/// permutation. `Unknown` covers a Service that matched a selector but
-/// whose name doesn't look like any of the known backends — still
-/// dispatchable through the same probe + query path.
+/// `Unknown` covers a Service that matched a selector but whose label
+/// value doesn't look like any of the known backends — still dispatchable
+/// through the same probe + query path.
 fn classify(labels: Option<&std::collections::BTreeMap<String, String>>) -> PromBackend {
     let n = labels
         .and_then(|m| {
@@ -226,24 +359,88 @@ fn classify(labels: Option<&std::collections::BTreeMap<String, String>>) -> Prom
                 .map(String::as_str)
         })
         .unwrap_or("");
-    let n = n.to_ascii_lowercase();
-    if n.contains("victoria") || n == "vmsingle" || n == "vmselect" {
-        PromBackend::VictoriaMetrics
-    } else if n.contains("thanos") {
-        PromBackend::Thanos
-    } else if n.contains("mimir") {
-        PromBackend::Mimir
-    } else if n.contains("cortex") {
-        PromBackend::Cortex
-    } else if n.starts_with("m3coordinator") || n == "m3query" {
-        PromBackend::M3
-    } else if n.contains("promscale") {
-        PromBackend::Promscale
-    } else if n.contains("prometheus") {
-        PromBackend::Prometheus
-    } else {
-        PromBackend::Unknown
-    }
+    classify_keyword(n).unwrap_or(PromBackend::Unknown)
+}
+
+/// Service-name substrings that are common Prometheus *neighbors* but do
+/// NOT serve `/api/v1/query`. Without this guard, the name-based fallback
+/// pass would candidate every cluster's `prometheus-node-exporter`, the
+/// headless `prometheus-operated`, alertmanager, pushgateway, etc., and
+/// burn 5s on each one in `validate()`. Match is substring on the
+/// lowercased Service name.
+const NAME_FALLBACK_BLOCKLIST: &[&str] = &[
+    "exporter",   // prometheus-node-exporter, blackbox-exporter, ...
+    "kube-state", // kube-state-metrics
+    "operator",   // prometheus-operator (controller, no PromQL)
+    "operated",   // prometheus-operated (headless, used by the operator)
+    "alertmanager",
+    "pushgateway",
+    "adapter", // prometheus-adapter (custom-metrics, different API)
+    "blackbox",
+    "snmp",
+    "config-reloader",
+    "vmagent", // VM write path; no PromQL endpoint
+    "vminsert",
+    "vmstorage",
+    "thanos-receive",
+    "thanos-store",
+    "thanos-compact",
+    "thanos-ruler",
+    "thanos-sidecar", // exposes PromQL only on a different proxy path
+];
+
+/// Per-fallback cap on the number of name-matched candidates we hand to
+/// the validate loop. Defends against pathologically-shaped clusters
+/// (dozens of Helm releases all using "prometheus" in the Service name)
+/// where every probe is a 5s timeout. In normal clusters the real
+/// candidate count after blocklist is 1–3.
+const NAME_FALLBACK_MAX_CANDIDATES: usize = 10;
+
+/// Does the Service expose a port that *could* be a Prom HTTP endpoint?
+/// Used as a second gate in the name-based fallback to avoid probing
+/// random services whose only ports are e.g. gRPC, AMQP, JDBC. The
+/// known-port list intentionally errs on the side of inclusive — the
+/// `validate()` probe is the source of truth, this just trims obvious
+/// non-candidates before we spend round-trip budget.
+fn has_prom_shaped_port(svc: &Service) -> bool {
+    const KNOWN_PORTS: &[i32] = &[
+        9090,  // prometheus
+        9091,  // pushgateway (caught by name blocklist; listed defensively)
+        9095,  // prometheus HTTPS (legacy)
+        8428,  // vmsingle
+        8481,  // vmselect HTTPS
+        10902, // thanos http
+        9201,  // promscale
+        7201,  // m3coordinator
+        8080,  // mimir / cortex (very common; only admitted with name match)
+    ];
+    const KNOWN_NAMES: &[&str] = &[
+        "http",
+        "https",
+        "web",
+        "http-web",
+        "https-web",
+        "api",
+        "http-api",
+        "query",
+        "http-metrics",
+        "vmsingle",
+        "vmselect",
+        "thanos-http",
+        "coordinator-http",
+    ];
+    let Some(ports) = svc.spec.as_ref().and_then(|s| s.ports.as_ref()) else {
+        return false;
+    };
+    ports.iter().any(|p| {
+        KNOWN_PORTS.contains(&p.port)
+            || matches!(p.name.as_deref(), Some(n) if KNOWN_NAMES.contains(&n))
+    })
+}
+
+fn name_is_blocklisted(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    NAME_FALLBACK_BLOCKLIST.iter().any(|kw| n.contains(kw))
 }
 
 /// Per-backend default API port, used only when the Service has no port
@@ -566,6 +763,163 @@ mod tests {
             backend: PromBackend::Prometheus,
         };
         assert_eq!(t.id(), "monitoring/prom:9090");
+    }
+
+    #[test]
+    fn classify_keyword_recognises_compound_helm_names() {
+        // The whole point of the name-based fallback: catch Service names
+        // where the chart prefixed/suffixed the keyword with its release
+        // name. Each of these would slip through the label `in (...)`
+        // selectors if the chart also set a non-canonical label value.
+        let cases: &[(&str, PromBackend)] = &[
+            ("prometheus", PromBackend::Prometheus),
+            ("prometheus-prometheus", PromBackend::Prometheus),
+            ("prometheus-server", PromBackend::Prometheus),
+            ("kube-prometheus-stack-prometheus", PromBackend::Prometheus),
+            ("monitoring-prometheus", PromBackend::Prometheus),
+            ("vmsingle-cluster", PromBackend::VictoriaMetrics),
+            ("victoria-metrics-single", PromBackend::VictoriaMetrics),
+            ("thanos-query-frontend", PromBackend::Thanos),
+            ("mimir-query-frontend", PromBackend::Mimir),
+            ("cortex-query-frontend", PromBackend::Cortex),
+            ("m3coordinator-headless", PromBackend::M3),
+            ("m3query-frontend", PromBackend::M3),
+            ("promscale-connector", PromBackend::Promscale),
+        ];
+        for (name, want) in cases {
+            assert_eq!(
+                classify_keyword(name),
+                Some(*want),
+                "name {name:?} should classify as {want:?}"
+            );
+        }
+        // And a few that shouldn't classify at all — they need the label
+        // pass to bring them in (or stay out).
+        for unrelated in &["nginx", "kafka", "grafana", "redis"] {
+            assert_eq!(
+                classify_keyword(unrelated),
+                None,
+                "{unrelated} unexpected hit"
+            );
+        }
+    }
+
+    #[test]
+    fn name_blocklist_rejects_prometheus_neighbors() {
+        // Catch the canonical false positives that share the
+        // "prometheus-…" naming convention but don't serve PromQL.
+        // Any failure here means the fallback would burn validate-probe
+        // budget on something that's never going to answer.
+        let blocked = &[
+            "prometheus-node-exporter",
+            "node-exporter",
+            "kube-state-metrics",
+            "prometheus-operator",
+            "prometheus-operated",
+            "alertmanager-main",
+            "kube-prometheus-stack-alertmanager",
+            "prometheus-pushgateway",
+            "prometheus-adapter",
+            "blackbox-exporter",
+            "snmp-exporter",
+            "vmagent",
+            "vminsert",
+            "thanos-store",
+            "thanos-receive",
+            "thanos-compact",
+            "thanos-ruler",
+            "thanos-sidecar",
+        ];
+        for name in blocked {
+            assert!(name_is_blocklisted(name), "{name} should be blocklisted");
+        }
+        let allowed = &[
+            "prometheus",
+            "prometheus-prometheus",
+            "kube-prometheus-stack-prometheus",
+            "vmsingle-cluster",
+            "thanos-query",
+            "thanos-query-frontend",
+            "mimir-query-frontend",
+        ];
+        for name in allowed {
+            assert!(
+                !name_is_blocklisted(name),
+                "{name} should NOT be blocklisted"
+            );
+        }
+    }
+
+    #[test]
+    fn has_prom_shaped_port_accepts_known_ports_and_names() {
+        // Numbered ports we recognise.
+        assert!(has_prom_shaped_port(&svc_with_ports(&[("metrics", 9090)])));
+        assert!(has_prom_shaped_port(&svc_with_ports(&[("metrics", 8428)])));
+        assert!(has_prom_shaped_port(&svc_with_ports(&[("metrics", 10902)])));
+        // Named ports we recognise (number unrelated).
+        assert!(has_prom_shaped_port(&svc_with_ports(&[("http", 12345)])));
+        assert!(has_prom_shaped_port(&svc_with_ports(&[("web", 9090)])));
+        assert!(has_prom_shaped_port(&svc_with_ports(&[(
+            "http-metrics",
+            9095
+        )])));
+        // Service whose only port is gRPC / proprietary should be rejected.
+        assert!(!has_prom_shaped_port(&svc_with_ports(&[("grpc", 9092)])));
+        assert!(!has_prom_shaped_port(&svc_with_ports(&[("amqp", 5672)])));
+    }
+
+    #[test]
+    fn fallback_push_accepts_misnamed_helm_release() {
+        // Real-world shape: chart named the queryable Service
+        // `prometheus-prometheus` and forgot the canonical
+        // `app.kubernetes.io/name=prometheus` label, so the label pass
+        // missed it. Fallback should pick it up.
+        let mut svc = svc_with_ports(&[("web", 9090)]);
+        svc.metadata.namespace = Some("monitoring".into());
+        svc.metadata.name = Some("prometheus-prometheus".into());
+
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let pushed = push_name_fallback_candidate(&mut out, &mut seen, svc);
+        assert!(pushed);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].service, "prometheus-prometheus");
+        assert_eq!(out[0].namespace, "monitoring");
+        assert_eq!(out[0].backend, PromBackend::Prometheus);
+        assert_eq!(out[0].port, 9090);
+    }
+
+    #[test]
+    fn fallback_push_rejects_blocklisted_and_non_matching() {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+
+        // Headless prometheus-operated: name matches "prometheus" but
+        // is on the blocklist (it doesn't serve PromQL).
+        let mut svc = svc_with_ports(&[("web", 9090)]);
+        svc.metadata.namespace = Some("monitoring".into());
+        svc.metadata.name = Some("prometheus-operated".into());
+        assert!(!push_name_fallback_candidate(&mut out, &mut seen, svc));
+
+        // Node-exporter: classic false positive.
+        let mut svc = svc_with_ports(&[("metrics", 9100)]);
+        svc.metadata.namespace = Some("monitoring".into());
+        svc.metadata.name = Some("prometheus-node-exporter".into());
+        assert!(!push_name_fallback_candidate(&mut out, &mut seen, svc));
+
+        // Random unrelated service.
+        let mut svc = svc_with_ports(&[("http", 80)]);
+        svc.metadata.namespace = Some("default".into());
+        svc.metadata.name = Some("nginx".into());
+        assert!(!push_name_fallback_candidate(&mut out, &mut seen, svc));
+
+        // Prometheus-named service but without any HTTP-ish port.
+        let mut svc = svc_with_ports(&[("grpc", 9092)]);
+        svc.metadata.namespace = Some("monitoring".into());
+        svc.metadata.name = Some("prometheus-grpc-only".into());
+        assert!(!push_name_fallback_candidate(&mut out, &mut seen, svc));
+
+        assert!(out.is_empty());
     }
 
     #[test]
