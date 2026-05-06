@@ -1558,7 +1558,7 @@ dependencies = [
  "ferrisscope-kube-ext",
  "ferrisscope-test-support",
  "futures",
- "getrandom 0.2.17",
+ "getrandom 0.4.2",
  "http",
  "k8s-openapi",
  "keyring",
