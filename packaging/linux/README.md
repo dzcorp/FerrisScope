@@ -5,7 +5,7 @@
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yzhelezko/FerrisScope/main/packaging/linux/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/dzcorp/FerrisScope/main/packaging/linux/install.sh | bash
 ```
 
 What it does:
@@ -45,7 +45,7 @@ curl -fsSL https://.../install.sh | bash -s -- --rpm
 ## Uninstall
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yzhelezko/FerrisScope/main/packaging/linux/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/dzcorp/FerrisScope/main/packaging/linux/install.sh | bash -s -- --uninstall
 ```
 
 Per-user state is **preserved** so a reinstall keeps your kubeconfig sources, prefs, pinned port-forwards, table views, and fleet cache. To wipe it manually:

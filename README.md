@@ -8,13 +8,13 @@
 A lightweight Lens replacement built on Tauri 2 + `kube-rs` + React.
 
 [![CI](https://github.com/dzcorp/FerrisScope/actions/workflows/ci.yml/badge.svg)](https://github.com/dzcorp/FerrisScope/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/yzhelezko/FerrisScope?label=release&color=blue)](https://github.com/dzcorp/FerrisScope/releases)
+[![Release](https://img.shields.io/github/v/release/dzcorp/FerrisScope?label=release&color=blue)](https://github.com/dzcorp/FerrisScope/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#install)
 [![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org)
 [![AUR](https://img.shields.io/aur/version/ferrisscope-bin?label=AUR)](https://aur.archlinux.org/packages/ferrisscope-bin)
 
-[Install](#install) · [Features](#what-you-get) · [Why](#why-another-kubernetes-ide) · [Develop](#develop) · [Architecture](#architecture) · [Roadmap](#roadmap)
+[Install](#install) · [Features](#what-you-get) · [Why](#why-another-kubernetes-ide) · [Develop](#develop) · [Architecture](#architecture)
 
 </div>
 
@@ -115,7 +115,7 @@ Lens is the de-facto desktop IDE for Kubernetes, but it bundles an entire Chromi
 **Linux** (Debian / Ubuntu / Fedora / RHEL / openSUSE / Arch / NixOS / …):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yzhelezko/FerrisScope/main/packaging/linux/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/dzcorp/FerrisScope/main/packaging/linux/install.sh | bash
 ```
 
 The script picks `.deb`, `.rpm`, or `.AppImage` based on what's available on the host. Pin a version with `FERRISSCOPE_VERSION=v1.0.0 bash`. Uninstall with `... | bash -s -- --uninstall`. See [`packaging/linux/README.md`](./packaging/linux/README.md) for details.

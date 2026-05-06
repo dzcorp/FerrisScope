@@ -9,7 +9,7 @@
 #   * .AppImage as a fallback (or when forced with --appimage)
 #
 # One-liner:
-#   curl -fsSL https://raw.githubusercontent.com/yzhelezko/FerrisScope/main/packaging/linux/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/dzcorp/FerrisScope/main/packaging/linux/install.sh | bash
 #
 # Pin a specific version:
 #   curl -fsSL https://.../install.sh | FERRISSCOPE_VERSION=v0.1.0 bash
@@ -27,7 +27,7 @@
 
 set -euo pipefail
 
-REPO="yzhelezko/FerrisScope"
+REPO="dzcorp/FerrisScope"
 APP_NAME="FerrisScope"
 BIN_NAME="ferrisscope"   # binary name (lowercase) — see CLAUDE.md.
 
