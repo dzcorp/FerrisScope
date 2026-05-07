@@ -72,7 +72,11 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 # we want to own connection lifecycle and tunnel teardown rather than parsing
 # OpenSSH stderr. `keyring` stores user-supplied secrets (passwords, key
 # passphrases) in the OS keychain — never on disk in sources.json.
-russh = "0.60"
+#
+# Default features pull in `aws-lc-rs`, whose `aws-lc-sys` build needs NASM on
+# Windows and breaks CI. We share `ring` with rustls (see reqwest note below),
+# so opt out of defaults and pick `ring` explicitly.
+russh = { version = "0.60", default-features = false, features = ["flate2", "ring", "rsa"] }
 keyring = { version = "3", features = ["apple-native", "linux-native", "windows-native"] }
 hex = "0.4"
 sha2 = "0.11"
