@@ -135,10 +135,15 @@ export function Copyable({
   text,
   children,
   block,
+  label,
 }: {
   text: string;
   children: ReactNode;
   block?: boolean;
+  // Override the default "Click to copy · {text}" tooltip. Pass any
+  // ReactNode (often a multi-line description) and the copy-hint will be
+  // appended on the last line so the gesture stays discoverable.
+  label?: ReactNode;
 }) {
   const [ref, flash] = useCopyFlash();
   const onCopy = (e: React.MouseEvent) => {
@@ -146,8 +151,19 @@ export function Copyable({
     copyToClipboard(text);
     flash();
   };
+  const tooltip: ReactNode =
+    label != null ? (
+      <span style={{ display: "block" }}>
+        {label}
+        <span style={{ display: "block", opacity: 0.7, marginTop: 4 }}>
+          Click to copy · {text}
+        </span>
+      </span>
+    ) : (
+      `Click to copy · ${text}`
+    );
   return (
-    <Tooltip label={`Click to copy · ${text}`}>
+    <Tooltip label={tooltip}>
       <span
         ref={ref}
         className="fs-copyable"

@@ -347,6 +347,10 @@ function RailFooter({
                     letterSpacing: 0.3,
                     textTransform: "uppercase",
                     cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    lineHeight: 1,
                   }}
                 >
                   {m === "auto" ? "Auto" : m === "pinned" ? "Pin" : "Lock"}

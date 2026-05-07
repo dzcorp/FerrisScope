@@ -248,6 +248,119 @@ pub async fn get_secret_detail(
     Ok(secrets::project_detail(&api.get(name).await?))
 }
 
+/// Light projection of every ConfigMap in a namespace — name + key list per
+/// entry. Used by the env-ref picker; we don't ship the values (cheaper, and
+/// the picker doesn't need them). Sorted by name for stable UI.
+pub async fn list_config_maps_in_namespace(
+    client: Client,
+    namespace: &str,
+) -> Result<Value, FetchError> {
+    let api: Api<ConfigMap> = Api::namespaced(client, namespace);
+    let lp = ListParams::default();
+    let list = api.list(&lp).await?;
+    let mut out: Vec<Value> = list
+        .items
+        .into_iter()
+        .map(|cm| {
+            let name = cm.metadata.name.unwrap_or_default();
+            let mut keys: Vec<String> = cm
+                .data
+                .as_ref()
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            if let Some(b) = cm.binary_data.as_ref() {
+                keys.extend(b.keys().cloned());
+            }
+            keys.sort();
+            keys.dedup();
+            json!({ "name": name, "keys": keys })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("name").and_then(Value::as_str).unwrap_or(""))
+    });
+    Ok(Value::Array(out))
+}
+
+/// Light projection of every PersistentVolumeClaim in a namespace, used
+/// by the volume picker. Carries `storage_class` + `requested_storage` so
+/// the operator can disambiguate at a glance — claim names alone aren't
+/// enough on clusters with many similarly-named PVCs.
+pub async fn list_persistent_volume_claims_in_namespace(
+    client: Client,
+    namespace: &str,
+) -> Result<Value, FetchError> {
+    let api: Api<PersistentVolumeClaim> = Api::namespaced(client, namespace);
+    let lp = ListParams::default();
+    let list = api.list(&lp).await?;
+    let mut out: Vec<Value> = list
+        .items
+        .into_iter()
+        .map(|p| {
+            let name = p.metadata.name.unwrap_or_default();
+            let storage_class = p.spec.as_ref().and_then(|s| s.storage_class_name.clone());
+            let requested_storage = p
+                .spec
+                .as_ref()
+                .and_then(|s| s.resources.as_ref())
+                .and_then(|r| r.requests.as_ref())
+                .and_then(|m| m.get("storage"))
+                .map(|q| q.0.clone());
+            json!({
+                "name": name,
+                "storage_class": storage_class,
+                "requested_storage": requested_storage,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("name").and_then(Value::as_str).unwrap_or(""))
+    });
+    Ok(Value::Array(out))
+}
+
+/// Same as `list_config_maps_in_namespace`, against Secrets. Keys come from
+/// `data` (base64) — `string_data` is write-only and never returned by GET.
+pub async fn list_secrets_in_namespace(
+    client: Client,
+    namespace: &str,
+) -> Result<Value, FetchError> {
+    let api: Api<Secret> = Api::namespaced(client, namespace);
+    let lp = ListParams::default();
+    let list = api.list(&lp).await?;
+    let mut out: Vec<Value> = list
+        .items
+        .into_iter()
+        .map(|s| {
+            let name = s.metadata.name.unwrap_or_default();
+            let mut keys: Vec<String> = s
+                .data
+                .as_ref()
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            keys.sort();
+            json!({
+                "name": name,
+                "keys": keys,
+                "type": s.type_.unwrap_or_default(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("name").and_then(Value::as_str).unwrap_or(""))
+    });
+    Ok(Value::Array(out))
+}
+
 /// Helm release detail: list every revision secret for this release in the
 /// namespace, decode each, and return the latest revision's projection
 /// alongside a sorted history. We use the `owner=helm,name=<release>` label

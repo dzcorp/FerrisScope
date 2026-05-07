@@ -37,6 +37,7 @@ export function CommandPalette({ mode, onClose }: Props) {
   const [q, setQ] = useState("");
   const [hi, setHi] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const activeItemRef = useRef<HTMLButtonElement | null>(null);
 
   const contexts = useAppStore((s) => s.contexts);
   const kinds = useAppStore((s) => s.kinds);
@@ -56,6 +57,9 @@ export function CommandPalette({ mode, onClose }: Props) {
   useEffect(() => {
     setHi(0);
   }, [q]);
+  useEffect(() => {
+    activeItemRef.current?.scrollIntoView({ block: "nearest" });
+  }, [hi]);
 
   // Debounced full-text search against the cluster's index. Fires only when
   // a cluster is selected and the trimmed query has at least 2 chars (the
@@ -420,6 +424,7 @@ export function CommandPalette({ mode, onClose }: Props) {
                     <button
                       key={it.id}
                       type="button"
+                      ref={isHi ? activeItemRef : null}
                       onClick={() => {
                         it.action();
                         onClose();

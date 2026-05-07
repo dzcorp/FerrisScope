@@ -50,7 +50,10 @@ export function EditModeChrome({
   saving: boolean;
   onEnter: () => void;
   onCancel: () => void;
-  onSave: () => void;
+  // When omitted, the Save button is hidden — the editor relies on the
+  // panel-wide GlobalSaveBar to commit changes (the new batched flow).
+  // Editors that still use the legacy per-row save pass `onSave`.
+  onSave?: () => void;
   // Optional content rendered before the edit controls (e.g. "5 total").
   rightExtra?: ReactNode;
 }) {
@@ -64,6 +67,20 @@ export function EditModeChrome({
         }}
       >
         {rightExtra}
+        {dirty > 0 && (
+          // The row's not in edit mode but still has uncommitted changes
+          // (e.g. operator collapsed it after typing). The dot tells them
+          // the global save will include this row.
+          <span
+            title={`${dirty} pending change${dirty === 1 ? "" : "s"} on this row`}
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: t.warn,
+            }}
+          />
+        )}
         <button
           type="button"
           onClick={onEnter}
@@ -91,29 +108,31 @@ export function EditModeChrome({
         type="button"
         onClick={onCancel}
         disabled={saving}
-        title="Cancel"
+        title={onSave ? "Cancel" : "Discard changes on this row"}
         style={{
           ...chipBtnStyle(t),
           background: t.chip,
           color: t.textDim,
         }}
       >
-        Cancel
+        {onSave ? "Cancel" : "Revert"}
       </button>
-      <button
-        type="button"
-        onClick={onSave}
-        disabled={saving || dirty === 0}
-        title={dirty === 0 ? "No changes" : `Apply ${dirty} change${dirty === 1 ? "" : "s"}`}
-        style={{
-          ...chipBtnStyle(t),
-          background: dirty === 0 ? t.chip : "rgba(16,185,129,0.16)",
-          color: dirty === 0 ? t.textMuted : t.good,
-          cursor: dirty === 0 ? "not-allowed" : "pointer",
-        }}
-      >
-        {saving ? "Saving…" : `Save${dirty > 0 ? ` (${dirty})` : ""}`}
-      </button>
+      {onSave && (
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving || dirty === 0}
+          title={dirty === 0 ? "No changes" : `Apply ${dirty} change${dirty === 1 ? "" : "s"}`}
+          style={{
+            ...chipBtnStyle(t),
+            background: dirty === 0 ? t.chip : "rgba(16,185,129,0.16)",
+            color: dirty === 0 ? t.textMuted : t.good,
+            cursor: dirty === 0 ? "not-allowed" : "pointer",
+          }}
+        >
+          {saving ? "Saving…" : `Save${dirty > 0 ? ` (${dirty})` : ""}`}
+        </button>
+      )}
     </span>
   );
 }

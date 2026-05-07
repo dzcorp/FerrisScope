@@ -7,8 +7,96 @@
 //! pivots to an actual Pod's detail panel (every workload page lists its
 //! pods, conceptually) or the YAML tab.
 
-use k8s_openapi::api::core::v1::{Container, PodTemplateSpec, Volume};
+use k8s_openapi::api::core::v1::{
+    Container, EnvFromSource, EnvVar, PodTemplateSpec, Volume, VolumeMount,
+};
 use serde_json::{json, Value};
+
+/// Project a single envFrom entry into a tagged-union JSON shape so the
+/// editor can display source details (CM/Secret name, prefix, optional)
+/// and round-trip them faithfully on save.
+pub fn project_env_from(e: &EnvFromSource) -> Value {
+    if let Some(c) = e.config_map_ref.as_ref() {
+        json!({
+            "kind": "configMapRef",
+            "name": c.name.clone(),
+            "optional": c.optional.unwrap_or(false),
+            "prefix": e.prefix.clone(),
+        })
+    } else if let Some(s) = e.secret_ref.as_ref() {
+        json!({
+            "kind": "secretRef",
+            "name": s.name.clone(),
+            "optional": s.optional.unwrap_or(false),
+            "prefix": e.prefix.clone(),
+        })
+    } else {
+        // No source variant — emit a placeholder so the row renders rather
+        // than disappearing. Editor surfaces it as configMapRef with empty
+        // name (operator can fix it).
+        json!({
+            "kind": "configMapRef",
+            "name": "",
+            "optional": false,
+            "prefix": e.prefix.clone(),
+        })
+    }
+}
+
+/// Project a container volumeMount into the same shape Pod uses
+/// (see `kinds/pods.rs::project_detail`'s `mounts` array).
+pub fn project_volume_mount(m: &VolumeMount) -> Value {
+    json!({
+        "name": m.name.clone(),
+        "mount_path": m.mount_path.clone(),
+        "read_only": m.read_only.unwrap_or(false),
+        "sub_path": m.sub_path.clone(),
+    })
+}
+
+/// Project a single container env entry into a frontend-friendly JSON shape.
+/// Literal entries surface as `{ name, value, from: null }`. Ref entries
+/// (`valueFrom`) surface the full ref details under `from` as a tagged union
+/// — the editor needs round-trippable shape, not just a type marker.
+pub fn project_env_var(e: &EnvVar) -> Value {
+    let from = e.value_from.as_ref().and_then(|vf| {
+        if let Some(c) = vf.config_map_key_ref.as_ref() {
+            Some(json!({
+                "kind": "configMapKeyRef",
+                "name": c.name.clone(),
+                "key": c.key.clone(),
+                "optional": c.optional.unwrap_or(false),
+            }))
+        } else if let Some(s) = vf.secret_key_ref.as_ref() {
+            Some(json!({
+                "kind": "secretKeyRef",
+                "name": s.name.clone(),
+                "key": s.key.clone(),
+                "optional": s.optional.unwrap_or(false),
+            }))
+        } else if let Some(f) = vf.field_ref.as_ref() {
+            Some(json!({
+                "kind": "fieldRef",
+                "field_path": f.field_path.clone(),
+                "api_version": f.api_version.clone(),
+            }))
+        } else {
+            vf.resource_field_ref.as_ref().map(|r| {
+                json!({
+                    "kind": "resourceFieldRef",
+                    "container_name": r.container_name.clone(),
+                    "resource": r.resource.clone(),
+                    "divisor": r.divisor.as_ref().map(|q| q.0.clone()),
+                })
+            })
+        }
+    });
+    json!({
+        "name": e.name.clone(),
+        "value": e.value.clone(),
+        "from": from,
+    })
+}
 
 /// Project a single PodTemplateSpec volume into the same shape Pod uses
 /// (`name`, `kind` tag, `source_name` if any, `target_kind`, opaque `raw`
@@ -107,33 +195,18 @@ fn summarise_container(c: &Container, kind: &'static str) -> Value {
     let env: Vec<Value> = c
         .env
         .as_ref()
-        .map(|es| {
-            es.iter()
-                .map(|e| {
-                    let from = e.value_from.as_ref().map(|vf| {
-                        if vf.config_map_key_ref.is_some() {
-                            "configMapKeyRef"
-                        } else if vf.secret_key_ref.is_some() {
-                            "secretKeyRef"
-                        } else if vf.field_ref.is_some() {
-                            "fieldRef"
-                        } else if vf.resource_field_ref.is_some() {
-                            "resourceFieldRef"
-                        } else {
-                            "valueFrom"
-                        }
-                    });
-                    json!({
-                        "name": e.name.clone(),
-                        "value": e.value.clone(),
-                        "from": from,
-                    })
-                })
-                .collect()
-        })
+        .map(|es| es.iter().map(project_env_var).collect())
         .unwrap_or_default();
-    let env_from_count = c.env_from.as_ref().map_or(0, std::vec::Vec::len);
-    let mounts = c.volume_mounts.as_ref().map_or(0, std::vec::Vec::len);
+    let env_from: Vec<Value> = c
+        .env_from
+        .as_ref()
+        .map(|es| es.iter().map(project_env_from).collect())
+        .unwrap_or_default();
+    let mounts: Vec<Value> = c
+        .volume_mounts
+        .as_ref()
+        .map(|ms| ms.iter().map(project_volume_mount).collect())
+        .unwrap_or_default();
     let requests = c
         .resources
         .as_ref()
@@ -160,8 +233,8 @@ fn summarise_container(c: &Container, kind: &'static str) -> Value {
         "image_pull_policy": c.image_pull_policy.clone(),
         "ports": ports,
         "env": env,
-        "env_from_count": env_from_count,
-        "mounts_count": mounts,
+        "env_from": env_from,
+        "mounts": mounts,
         "requests": requests,
         "limits": limits,
         "command": c.command.clone(),
@@ -263,8 +336,8 @@ pub fn project_label_selector(
 }
 
 /// Common metadata projection — name, namespace, uid, created, labels,
-/// annotations (full), controlled_by. Reused so every workload shares the same
-/// detail header shape.
+/// annotations (full), controlled_by, managers. Reused so every workload
+/// shares the same detail header shape.
 pub fn project_meta(meta: &k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta) -> Value {
     let labels: Vec<Value> = meta
         .labels
@@ -291,5 +364,50 @@ pub fn project_meta(meta: &k8s_openapi::apimachinery::pkg::apis::meta::v1::Objec
         "annotations": annotations,
         "controlled_by": controlled_by,
         "generation": meta.generation,
+        "managers": project_managers(meta),
     })
+}
+
+/// Compact projection of `metadata.managedFields` — one entry per unique
+/// manager name, carrying the operation it last performed (Apply | Update)
+/// and the most recent timestamp it touched the resource at. Used by the
+/// detail-panel header to warn the operator when the resource is being
+/// reconciled by something else (Flux, Argo, Helm, …) — those are the
+/// managers that will surface SSA conflicts on edit.
+///
+/// Self (`ferrisscope`) is *included*: the FE filters it out so the chip
+/// only highlights *other* managers.
+pub fn project_managers(
+    meta: &k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta,
+) -> Vec<Value> {
+    let entries = match meta.managed_fields.as_ref() {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    // Aggregate by (manager, operation) — operators care that
+    // "kustomize-controller is doing Apply", not that it touched twice.
+    use std::collections::BTreeMap;
+    let mut acc: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
+    for e in entries {
+        let manager = e.manager.clone().unwrap_or_default();
+        if manager.is_empty() {
+            continue;
+        }
+        let operation = e.operation.clone().unwrap_or_default();
+        let time = e.time.as_ref().map(|t| t.0.to_string());
+        let key = (manager, operation);
+        let cur = acc.entry(key).or_insert(None);
+        if time.is_some() && (cur.is_none() || cur.as_deref() < time.as_deref()) {
+            *cur = time;
+        }
+    }
+    acc.into_iter()
+        .map(|((manager, operation), time)| {
+            json!({
+                "manager": manager,
+                "operation": operation,
+                "time": time,
+            })
+        })
+        .collect()
 }

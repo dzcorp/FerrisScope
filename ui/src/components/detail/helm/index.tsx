@@ -345,7 +345,7 @@ export function HelmReleaseSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading release…" inline />
+        <LoadingLine t={t} label="Loading release…"/>
       </Frame>
     );
   if (state.kind === "error")

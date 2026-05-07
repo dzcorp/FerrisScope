@@ -108,24 +108,35 @@ export function Chip({
   mono,
   tone = "neutral",
   style,
+  title,
 }: {
   t: Tokens;
   children: ReactNode;
   mono?: boolean;
-  tone?: "neutral" | "accent";
+  // `warn` paints with the amber tokens — used for "this is risky" labels
+  // (e.g. a managedFields chip naming a reconciler that will revert your
+  // edits). Mirrors the bucket semantics in theme.ts.
+  tone?: "neutral" | "accent" | "warn";
   style?: CSSProperties;
+  title?: string;
 }) {
-  const accent = tone === "accent";
+  const palette =
+    tone === "accent"
+      ? { bg: t.accentSoft, fg: t.accent }
+      : tone === "warn"
+        ? { bg: "rgba(245,158,11,0.14)", fg: t.warn }
+        : { bg: t.chip, fg: t.textDim };
   return (
     <span
+      title={title}
       style={{
         display: "inline-flex",
         alignItems: "center",
         fontSize: 11,
         padding: "1px 6px",
         borderRadius: 3,
-        background: accent ? t.accentSoft : t.chip,
-        color: accent ? t.accent : t.textDim,
+        background: palette.bg,
+        color: palette.fg,
         fontWeight: 500,
         fontFamily: mono ? FONT_MONO : "inherit",
         ...style,
@@ -500,7 +511,18 @@ export function Select<V extends string | number>({
   const [active, setActive] = useState(() =>
     Math.max(0, options.findIndex((o) => o.value === value)),
   );
-  const [pop, setPop] = useState({ x: 0, y: 0, w: 0, maxH: 240 });
+  // When `flipUp` is true, `y` is the distance from the viewport BOTTOM to
+  // the popover's bottom edge — anchoring the popover to the trigger top so
+  // it stays glued there even when its rendered height is shorter than
+  // `maxH` (e.g. only a few options). When false, `y` is the popover's top
+  // edge in viewport coords (anchored to the trigger bottom).
+  const [pop, setPop] = useState({
+    x: 0,
+    y: 0,
+    w: 0,
+    maxH: 240,
+    flipUp: false,
+  });
   const [query, setQuery] = useState("");
   const typeBuf = useRef("");
   const typeAt = useRef(0);
@@ -530,7 +552,6 @@ export function Select<V extends string | number>({
     const above = r.top - margin;
     const flipUp = below < 200 && above > below;
     const maxH = Math.max(120, Math.min(360, flipUp ? above - gap : below - gap));
-    const y = flipUp ? r.top - gap : r.bottom + gap;
     const desiredW = Math.max(r.width, popoverMinWidth ?? 0);
     const maxW = window.innerWidth - margin * 2;
     const w = Math.min(desiredW, maxW);
@@ -538,7 +559,13 @@ export function Select<V extends string | number>({
     if (x + w > window.innerWidth - margin) {
       x = Math.max(margin, window.innerWidth - margin - w);
     }
-    setPop({ x, y: flipUp ? y - maxH : y, w, maxH });
+    // Up: anchor by viewport-from-bottom so the popover bottom hugs the
+    // trigger top no matter how tall it actually renders. Down: top-anchor
+    // just below the trigger.
+    const y = flipUp
+      ? window.innerHeight - r.top + gap
+      : r.bottom + gap;
+    setPop({ x, y, w, maxH, flipUp });
   }, [popoverMinWidth]);
 
   useLayoutEffect(() => {
@@ -758,7 +785,7 @@ export function Select<V extends string | number>({
             style={{
               position: "fixed",
               left: pop.x,
-              top: pop.y,
+              ...(pop.flipUp ? { bottom: pop.y } : { top: pop.y }),
               width: pop.w,
               maxHeight: pop.maxH,
               display: "flex",

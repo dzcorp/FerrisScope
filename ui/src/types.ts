@@ -373,12 +373,58 @@ export type ContainerPort = {
   protocol: string | null;
 };
 
+// `from` is null for a literal `value` entry, otherwise carries the full
+// ref details so the editor can display and round-trip the source without
+// a second fetch. Wire shape is the tagged-union JSON produced by
+// `crates/kube-ext/src/kinds/pod_template.rs::project_env_var`.
+export type EnvValueFrom =
+  | {
+      kind: "configMapKeyRef";
+      // Per the Kubernetes API, a ConfigMap ref's `name` is required; we
+      // mirror the Rust `Option<String>` defensively.
+      name: string | null;
+      key: string;
+      optional: boolean;
+    }
+  | {
+      kind: "secretKeyRef";
+      name: string | null;
+      key: string;
+      optional: boolean;
+    }
+  | {
+      kind: "fieldRef";
+      // e.g. "metadata.name", "status.podIP", "spec.nodeName".
+      field_path: string;
+      api_version: string | null;
+    }
+  | {
+      kind: "resourceFieldRef";
+      // Optional — defaults to the current container when omitted on apply.
+      container_name: string | null;
+      // e.g. "limits.cpu", "requests.memory", "limits.ephemeral-storage".
+      resource: string;
+      // Quantity string ("1m", "1Mi"). Null = apiserver default ("1").
+      divisor: string | null;
+    };
+
 export type ContainerEnv = {
   name: string;
   value: string | null;
-  // configMapKeyRef / secretKeyRef / fieldRef / resourceFieldRef — null if
-  // the entry is a literal value rather than a reference.
-  from: string | null;
+  from: EnvValueFrom | null;
+};
+
+// envFrom imports an entire ConfigMap or Secret as env. Each key in the
+// source becomes an env var in the container, optionally prefixed.
+export type ContainerEnvFrom = {
+  // configMapRef / secretRef — discriminator for the source variant.
+  kind: "configMapRef" | "secretRef";
+  // Empty when the projected source had no name field — frontend treats
+  // this as a malformed entry to be repaired by the operator.
+  name: string;
+  optional: boolean;
+  // Prefix applied to every imported key. Null when not set.
+  prefix: string | null;
 };
 
 export type ContainerMount = {
@@ -470,6 +516,7 @@ export type ContainerDetail = {
   last_state: ContainerLastState | null;
   ports: ContainerPort[];
   env: ContainerEnv[];
+  env_from: ContainerEnvFrom[];
   mounts: ContainerMount[];
   liveness: ContainerProbe | null;
   readiness: ContainerProbe | null;
@@ -486,6 +533,8 @@ export type PodDetail = {
   labels: [string, string][];
   annotations: [string, string][];
   controlled_by: PodOwnerRef | null;
+  // Same shape as WorkloadMeta.managers — see FieldManagerInfo.
+  managers: FieldManagerInfo[];
   status_phase: string | null;
   status_reason: string | null;
   status_message: string | null;
@@ -612,6 +661,19 @@ export type WorkloadOwnerRef = {
   name: string;
 };
 
+// One row of `metadata.managedFields`, deduped by (manager, operation).
+// Used by the detail-panel header to surface "this resource is reconciled
+// by Flux/Argo/Helm/etc" so the operator isn't surprised by SSA conflicts
+// on edit. `time` is the most-recent touch by that manager (ISO 8601).
+export type FieldManagerInfo = {
+  manager: string;
+  // "Apply" | "Update" | "" — `Apply` typically means an automation tool
+  // using SSA (kustomize-controller, argocd-application-controller, helm,
+  // flux, kapp-controller). `Update` means an old-style PUT/PATCH.
+  operation: string;
+  time: string | null;
+};
+
 export type WorkloadMeta = {
   name: string;
   namespace: string | null;
@@ -621,6 +683,9 @@ export type WorkloadMeta = {
   annotations: [string, string][];
   controlled_by: WorkloadOwnerRef | null;
   generation: number | null;
+  // Aggregated `metadata.managedFields` view. Empty when the apiserver
+  // doesn't return managedFields (older clusters, certain CRDs).
+  managers: FieldManagerInfo[];
 };
 
 export type LabelSelectorSummary = {
@@ -643,8 +708,8 @@ export type WorkloadContainerSummary = {
   image_pull_policy: string | null;
   ports: ContainerPort[];
   env: ContainerEnv[];
-  env_from_count: number;
-  mounts_count: number;
+  env_from: ContainerEnvFrom[];
+  mounts: ContainerMount[];
   requests: Record<string, string> | null;
   limits: Record<string, string> | null;
   command: string[] | null;
@@ -1110,6 +1175,32 @@ export type ConfigMapDetail = {
   meta: WorkloadMeta;
   immutable: boolean;
   data: ConfigMapDataEntry[];
+};
+
+// Light projection used by the env-ref picker. Just names + key lists —
+// values are deliberately not included (cheaper, and the picker only needs
+// to drill from name → key).
+export type ConfigMapKeysSummary = {
+  name: string;
+  keys: string[];
+};
+
+export type SecretKeysSummary = {
+  name: string;
+  keys: string[];
+  // Secret type ("Opaque", "kubernetes.io/dockerconfigjson", …). Surfaced so
+  // the picker can de-prioritise non-Opaque secrets that operators rarely
+  // reference from env.
+  type: string;
+};
+
+// Light projection used by the volume picker for PersistentVolumeClaim refs.
+// `storage_class` and `requested_storage` help disambiguate similarly-named
+// claims at a glance.
+export type PvcSummary = {
+  name: string;
+  storage_class: string | null;
+  requested_storage: string | null;
 };
 
 export type SecretDataEntry = {

@@ -40,11 +40,14 @@ import {
   ConditionChip,
   Copyable,
   DetailRow,
+  EditSessionProvider,
+  GlobalSaveBar,
   KeyValueChips,
   LinkValue,
   Mute,
   SubGrid,
   ageFromIso,
+  formatQuantity,
   type DetailNavigate,
   type SubEntry,
 } from "./detail";
@@ -58,8 +61,12 @@ import {
 } from "./detail/workload";
 import {
   EnvEditor,
+  EnvFromEditor,
+  ImageEditor,
   MetaPairsRow,
+  MountsEditor,
   PortsEditor,
+  ResourcesEditor,
   VolumesEditor,
 } from "./detail/workload/shared";
 import {
@@ -193,6 +200,12 @@ type LoadState =
       // fields (status, managedFields, resourceVersion, …) are removed so
       // the document round-trips through SSA cleanly.
       yaml: string;
+      // The unstripped YAML straight from the apiserver — what the YAML
+      // tab shows when the operator clicks the "HIDDEN" toggle to reveal
+      // managedFields / status / resourceVersion / etc. Read-only; edit
+      // mode always operates on the stripped form so SSA only takes
+      // ownership of fields the operator actually touched.
+      yamlRaw: string;
       // Parsed JSON form of the same stripped doc — kept around so Save
       // can diff against it without re-parsing on every keystroke.
       original: Json;
@@ -554,7 +567,13 @@ export function DetailPanel({
     // the YAML fetch entirely — the YAML tab is hidden for them and the
     // dynamic API would resolve to the wrong resource (a Secret) anyway.
     if (!hasYaml) {
-      setLoad({ kind: "ready", yaml: "", original: null, refreshedAt: Date.now() });
+      setLoad({
+        kind: "ready",
+        yaml: "",
+        yamlRaw: "",
+        original: null,
+        refreshedAt: Date.now(),
+      });
       return;
     }
     setLoad((prev) => (prev.kind === "ready" ? prev : { kind: "loading" }));
@@ -568,6 +587,7 @@ export function DetailPanel({
           setLoad({
             kind: "ready",
             yaml: stripped,
+            yamlRaw: yaml,
             original,
             refreshedAt: Date.now(),
           });
@@ -578,6 +598,7 @@ export function DetailPanel({
           setLoad({
             kind: "ready",
             yaml,
+            yamlRaw: yaml,
             original: null,
             refreshedAt: Date.now(),
           });
@@ -1112,6 +1133,7 @@ export function DetailPanel({
                 mode={mode}
                 t={t}
                 yaml={load.kind === "ready" ? load.yaml : ""}
+                yamlRaw={load.kind === "ready" ? load.yamlRaw : ""}
                 original={load.kind === "ready" ? load.original : null}
                 refreshedAt={load.kind === "ready" ? load.refreshedAt : null}
                 clusterId={clusterId}
@@ -1199,6 +1221,7 @@ function YamlPane({
   mode,
   t,
   yaml,
+  yamlRaw,
   original,
   refreshedAt,
   clusterId,
@@ -1218,6 +1241,10 @@ function YamlPane({
   mode: ThemeMode;
   t: Tokens;
   yaml: string;
+  // Unstripped YAML — surfaced via the "HIDDEN" toggle in read mode so
+  // operators can inspect server-managed fields (managedFields, status,
+  // resourceVersion, …) without leaving the panel.
+  yamlRaw: string;
   original: Json | null;
   refreshedAt: number | null;
   clusterId: string;
@@ -1237,9 +1264,23 @@ function YamlPane({
   onSaved: () => void;
 }) {
   const editing = buffer !== null;
+  // Operator-facing toggle: when true, render the unstripped raw YAML
+  // (managedFields / status / etc visible). Forced false in edit mode so
+  // saves only ever diff against the stripped baseline — otherwise a
+  // toggle mid-edit would silently re-include server fields the apiserver
+  // would reject anyway. Reset to false whenever the document refetches.
+  const [showHidden, setShowHidden] = useState(false);
+  useEffect(() => {
+    if (editing) setShowHidden(false);
+  }, [editing]);
+  useEffect(() => {
+    setShowHidden(false);
+  }, [refreshedAt]);
+
   // The editor's live text. When editing we render the operator's buffer;
-  // otherwise we mirror the freshly-fetched stripped YAML.
-  const value = editing ? buffer! : yaml;
+  // when in show-hidden read mode we render the raw YAML; otherwise the
+  // stripped YAML.
+  const value = editing ? buffer! : showHidden ? yamlRaw : yaml;
 
   // 1s tick so the "fetched X ago" indicator in the toolbar refreshes.
   const [, setNow] = useState(() => Date.now());
@@ -1362,20 +1403,56 @@ function YamlPane({
                 ? "removals only — not applied"
                 : `editing · ${dirtyForChrome} change${dirtyForChrome === 1 ? "" : "s"}`
             : refreshedAt != null
-              ? `read-only · status & managed fields hidden · fetched ${timeAgo(refreshedAt)}`
-              : "read-only · status & managed fields hidden"}
+              ? showHidden
+                ? `read-only · all fields shown · fetched ${timeAgo(refreshedAt)}`
+                : `read-only · status & managed fields hidden · fetched ${timeAgo(refreshedAt)}`
+              : showHidden
+                ? "read-only · all fields shown"
+                : "read-only · status & managed fields hidden"}
         </span>
-        {editable && (
-          <EditModeChrome
-            t={t}
-            editing={editing}
-            dirty={dirtyForChrome}
-            saving={saving}
-            onEnter={enter}
-            onCancel={cancel}
-            onSave={() => apply(false)}
-          />
-        )}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          {!editing && yamlRaw !== yaml && (
+            <button
+              type="button"
+              onClick={() => setShowHidden((v) => !v)}
+              title={
+                showHidden
+                  ? "Hide server-managed fields (managedFields, status, resourceVersion, …)"
+                  : "Show server-managed fields (managedFields, status, resourceVersion, …)"
+              }
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                height: 22,
+                padding: "0 8px",
+                borderRadius: 3,
+                border: "none",
+                background: showHidden ? t.accentSoft : t.chip,
+                color: showHidden ? t.accent : t.textDim,
+                fontFamily: FONT_MONO,
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: 0.4,
+                cursor: "pointer",
+                textTransform: "uppercase",
+              }}
+            >
+              {showHidden ? "Unhide" : "Hidden"}
+            </button>
+          )}
+          {editable && (
+            <EditModeChrome
+              t={t}
+              editing={editing}
+              dirty={dirtyForChrome}
+              saving={saving}
+              onEnter={enter}
+              onCancel={cancel}
+              onSave={() => apply(false)}
+            />
+          )}
+        </span>
       </div>
       {error && (
         <div
@@ -2068,7 +2145,7 @@ function PodSummary({
   const initContainers = d.containers.filter((c) => c.kind === "init");
   const mainContainers = d.containers.filter((c) => c.kind !== "init");
 
-  return (
+  const body = (
     <div
       style={{
         height: "100%",
@@ -2171,7 +2248,6 @@ function PodSummary({
               : undefined
           }
           metadataKey="labels"
-          onSaved={() => setRefetch((r) => r + 1)}
           keyValidate={(k) => /^([a-z0-9.-]+\/)?[A-Za-z0-9._-]+$/.test(k)}
         />
         <MetaPairsRow
@@ -2189,7 +2265,6 @@ function PodSummary({
               : undefined
           }
           metadataKey="annotations"
-          onSaved={() => setRefetch((r) => r + 1)}
           keyValidate={(k) => /^([a-z0-9.-]+\/)?[A-Za-z0-9._-]+$/.test(k)}
           collapsedAsCount
         />
@@ -2339,7 +2414,7 @@ function PodSummary({
                         {
                           label: "Requests",
                           entries: Object.entries(d.totals.requests).map(
-                            ([k, v]) => ({ key: k, value: v }),
+                            ([k, v]) => ({ key: k, value: formatQuantity(k, v) }),
                           ),
                         },
                       ]
@@ -2349,7 +2424,7 @@ function PodSummary({
                         {
                           label: "Limits",
                           entries: Object.entries(d.totals.limits).map(
-                            ([k, v]) => ({ key: k, value: v }),
+                            ([k, v]) => ({ key: k, value: formatQuantity(k, v) }),
                           ),
                         },
                       ]
@@ -2508,10 +2583,11 @@ function PodSummary({
                 t={t}
                 mode={mode}
                 c={c}
-                clusterId={clusterId}
                 namespace={ns}
                 podName={name}
-                onSaved={() => setRefetch((r) => r + 1)}
+                onNavigate={onNavigate}
+                siblingContainerNames={d.containers.map((x) => x.name)}
+                volumeNames={d.volumes.map((v) => v.name)}
               />
             ))}
           </div>
@@ -2542,10 +2618,11 @@ function PodSummary({
                 t={t}
                 mode={mode}
                 c={c}
-                clusterId={clusterId}
                 namespace={ns}
                 podName={name}
-                onSaved={() => setRefetch((r) => r + 1)}
+                onNavigate={onNavigate}
+                siblingContainerNames={d.containers.map((x) => x.name)}
+                volumeNames={d.volumes.map((v) => v.name)}
               />
             ))}
           </div>
@@ -2558,19 +2635,25 @@ function PodSummary({
           volumes={d.volumes}
           podNamespace={d.namespace}
           onNavigate={onNavigate}
-          editTarget={{
-            clusterId,
-            kindId: "pods",
-            namespace: ns,
-            name,
-          }}
           serializeFor={(vols) => ({ spec: { volumes: vols } })}
-          onSaved={() => setRefetch((r) => r + 1)}
         />
       )}
 
+      {ns && <GlobalSaveBar t={t} />}
     </div>
   );
+
+  if (ns) {
+    return (
+      <EditSessionProvider
+        target={{ clusterId, kindId: "pods", namespace: ns, name }}
+        onSaved={() => setRefetch((r) => r + 1)}
+      >
+        {body}
+      </EditSessionProvider>
+    );
+  }
+  return body;
 }
 
 
@@ -2806,18 +2889,20 @@ function ContainerCard({
   t,
   mode,
   c,
-  clusterId,
   namespace,
   podName,
-  onSaved,
+  onNavigate,
+  siblingContainerNames,
+  volumeNames,
 }: {
   t: Tokens;
   mode: ThemeMode;
   c: ContainerDetail;
-  clusterId: string;
   namespace: string | null;
   podName: string;
-  onSaved: () => void;
+  onNavigate?: DetailNavigate;
+  siblingContainerNames?: string[];
+  volumeNames?: string[];
 }) {
   return (
     <div
@@ -2912,20 +2997,59 @@ function ContainerCard({
             <LastStatePill t={t} ls={c.last_state} />
           </DetailRow>
         )}
-        {c.image && (
-          <DetailRow t={t} label="Image">
-            <Copyable text={c.image}>
-              <span
-                style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
-                  wordBreak: "break-all",
-                }}
-              >
-                {c.image}
-              </span>
-            </Copyable>
-          </DetailRow>
+        {namespace ? (
+          <ImageEditor
+            t={t}
+            containerName={c.name}
+            containerKind={c.kind}
+            image={c.image}
+            imagePullPolicy={c.image_pull_policy}
+            serializeFor={(co) =>
+              co.isInit
+                ? {
+                    spec: {
+                      initContainers: [
+                        {
+                          name: co.name,
+                          ...(co.image !== undefined ? { image: co.image } : {}),
+                          ...(co.imagePullPolicy !== undefined
+                            ? { imagePullPolicy: co.imagePullPolicy }
+                            : {}),
+                        },
+                      ],
+                    },
+                  }
+                : {
+                    spec: {
+                      containers: [
+                        {
+                          name: co.name,
+                          ...(co.image !== undefined ? { image: co.image } : {}),
+                          ...(co.imagePullPolicy !== undefined
+                            ? { imagePullPolicy: co.imagePullPolicy }
+                            : {}),
+                        },
+                      ],
+                    },
+                  }
+            }
+          />
+        ) : (
+          c.image && (
+            <DetailRow t={t} label="Image">
+              <Copyable text={c.image}>
+                <span
+                  style={{
+                    fontFamily: FONT_MONO,
+                    fontSize: 11.5,
+                    wordBreak: "break-all",
+                  }}
+                >
+                  {c.image}
+                </span>
+              </Copyable>
+            </DetailRow>
+          )
         )}
         {c.image_id && (
           <DetailRow t={t} label="Image ID">
@@ -2959,7 +3083,7 @@ function ContainerCard({
             </Copyable>
           </DetailRow>
         )}
-        {c.image_pull_policy && (
+        {!namespace && c.image_pull_policy && (
           <DetailRow t={t} label="ImagePullPolicy">
             <span style={{ fontSize: 12 }}>{c.image_pull_policy}</span>
           </DetailRow>
@@ -2969,12 +3093,6 @@ function ContainerCard({
             t={t}
             containerName={c.name}
             ports={c.ports}
-            editTarget={{
-              clusterId,
-              kindId: "pods",
-              namespace,
-              name: podName,
-            }}
             serializeFor={(co) =>
               c.kind === "init" || c.kind === "sidecar"
                 ? {
@@ -2990,7 +3108,6 @@ function ContainerCard({
                     },
                   }
             }
-            onSaved={onSaved}
             forwardTarget={{ kind: "Pod", namespace, name: podName }}
           />
         )}
@@ -2999,12 +3116,6 @@ function ContainerCard({
             t={t}
             containerName={c.name}
             env={c.env}
-            editTarget={{
-              clusterId,
-              kindId: "pods",
-              namespace,
-              name: podName,
-            }}
             serializeFor={(co) =>
               c.kind === "init" || c.kind === "sidecar"
                 ? {
@@ -3016,36 +3127,61 @@ function ContainerCard({
                     spec: { containers: [{ name: co.name, env: co.env }] },
                   }
             }
-            onSaved={onSaved}
+            onNavigate={onNavigate}
+            podNamespace={namespace}
+            siblingContainerNames={siblingContainerNames?.filter(
+              (n) => n !== c.name,
+            )}
           />
         )}
-        {c.mounts.length > 0 && (
-          <DetailRow t={t} label="Mounts">
-            <SubGrid
-              t={t}
-              copyKeyJoin=":"
-              entries={c.mounts.map((m) => ({
-                key: m.mount_path,
-                hint: (
-                  <>
-                    from{" "}
-                    <span style={{ fontFamily: FONT_MONO, color: t.textDim }}>
-                      {m.name}
-                    </span>{" "}
-                    ({m.read_only ? "ro" : "rw"})
-                    {m.sub_path ? (
-                      <>
-                        {" · sub "}
-                        <span style={{ fontFamily: FONT_MONO }}>
-                          {m.sub_path}
-                        </span>
-                      </>
-                    ) : null}
-                  </>
-                ),
-              }))}
-            />
-          </DetailRow>
+        {namespace && (
+          <EnvFromEditor
+            t={t}
+            containerName={c.name}
+            entries={c.env_from}
+            serializeFor={(co) =>
+              c.kind === "init" || c.kind === "sidecar"
+                ? {
+                    spec: {
+                      initContainers: [
+                        { name: co.name, envFrom: co.envFrom },
+                      ],
+                    },
+                  }
+                : {
+                    spec: {
+                      containers: [{ name: co.name, envFrom: co.envFrom }],
+                    },
+                  }
+            }
+            onNavigate={onNavigate}
+            podNamespace={namespace}
+          />
+        )}
+        {namespace && (
+          <MountsEditor
+            t={t}
+            containerName={c.name}
+            mounts={c.mounts}
+            serializeFor={(co) =>
+              c.kind === "init" || c.kind === "sidecar"
+                ? {
+                    spec: {
+                      initContainers: [
+                        { name: co.name, volumeMounts: co.volumeMounts },
+                      ],
+                    },
+                  }
+                : {
+                    spec: {
+                      containers: [
+                        { name: co.name, volumeMounts: co.volumeMounts },
+                      ],
+                    },
+                  }
+            }
+            volumeNames={volumeNames ?? []}
+          />
         )}
         {c.liveness && (
           <DetailRow t={t} label="Liveness">
@@ -3088,7 +3224,33 @@ function ContainerCard({
             </span>
           </DetailRow>
         )}
-        {c.resources &&
+        {namespace ? (
+          <ResourcesEditor
+            t={t}
+            containerName={c.name}
+            containerKind={c.kind}
+            requests={c.resources?.requests ?? null}
+            limits={c.resources?.limits ?? null}
+            serializeFor={(co) =>
+              co.isInit
+                ? {
+                    spec: {
+                      initContainers: [
+                        { name: co.name, resources: co.resources },
+                      ],
+                    },
+                  }
+                : {
+                    spec: {
+                      containers: [
+                        { name: co.name, resources: co.resources },
+                      ],
+                    },
+                  }
+            }
+          />
+        ) : (
+          c.resources &&
           (c.resources.requests || c.resources.limits) && (
             <DetailRow t={t} label="Resources">
               <SubGrid
@@ -3100,7 +3262,7 @@ function ContainerCard({
                         {
                           label: "Requests",
                           entries: Object.entries(c.resources.requests).map(
-                            ([k, v]) => ({ key: k, value: v }),
+                            ([k, v]) => ({ key: k, value: formatQuantity(k, v) }),
                           ),
                         },
                       ]
@@ -3111,7 +3273,7 @@ function ContainerCard({
                         {
                           label: "Limits",
                           entries: Object.entries(c.resources.limits).map(
-                            ([k, v]) => ({ key: k, value: v }),
+                            ([k, v]) => ({ key: k, value: formatQuantity(k, v) }),
                           ),
                         },
                       ]
@@ -3119,7 +3281,8 @@ function ContainerCard({
                 ]}
               />
             </DetailRow>
-          )}
+          )
+        )}
         {c.security && hasContainerSecurity(c.security) && (
           <DetailRow t={t} label="Security">
             <ContainerSecurityRow t={t} s={c.security} />

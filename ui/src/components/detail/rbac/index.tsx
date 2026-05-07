@@ -396,7 +396,7 @@ export function ServiceAccountSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading service account…" inline />
+        <LoadingLine t={t} label="Loading service account…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -552,7 +552,7 @@ export function RoleSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading role…" inline />
+        <LoadingLine t={t} label="Loading role…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -622,7 +622,7 @@ export function ClusterRoleSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading cluster role…" inline />
+        <LoadingLine t={t} label="Loading cluster role…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -735,7 +735,7 @@ export function RoleBindingSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading role binding…" inline />
+        <LoadingLine t={t} label="Loading role binding…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -823,7 +823,7 @@ export function ClusterRoleBindingSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading cluster role binding…" inline />
+        <LoadingLine t={t} label="Loading cluster role binding…"/>
       </Frame>
     );
   if (state.kind === "error")

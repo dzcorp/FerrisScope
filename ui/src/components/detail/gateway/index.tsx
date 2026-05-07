@@ -134,7 +134,7 @@ export function GatewayClassSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading gateway class…" inline />
+        <LoadingLine t={t} label="Loading gateway class…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -217,7 +217,7 @@ export function GatewaySummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading gateway…" inline />
+        <LoadingLine t={t} label="Loading gateway…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -345,7 +345,7 @@ export function RouteSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label={`Loading ${props.label.toLowerCase()}…`} inline />
+        <LoadingLine t={t} label={`Loading ${props.label.toLowerCase()}…`}/>
       </Frame>
     );
   if (state.kind === "error")
@@ -546,7 +546,7 @@ export function ReferenceGrantSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading reference grant…" inline />
+        <LoadingLine t={t} label="Loading reference grant…"/>
       </Frame>
     );
   if (state.kind === "error")

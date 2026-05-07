@@ -277,6 +277,7 @@ pub fn project_detail(pod: &Pod) -> Value {
         "labels": labels,
         "annotations": annotations,
         "controlled_by": controlled_by,
+        "managers": super::pod_template::project_managers(meta),
         "status_phase": status.and_then(|s| s.phase.clone()),
         "status_reason": status.and_then(|s| s.reason.clone()),
         "status_message": status.and_then(|s| s.message.clone()),
@@ -715,34 +716,16 @@ fn container_detail(c: &Container, kind: &str, st: Option<&ContainerStatus>) -> 
         })
         .unwrap_or_default();
 
-    // Plain literal env values only — env_from / value_from references are
-    // surfaced as a marker rather than the resolved value (which we don't have
-    // without an extra round-trip and which may be sensitive).
+    // Round-trippable env shape (literal `value` or full `valueFrom` ref) so
+    // the inline editor can display ref details (ConfigMap / Secret name+key,
+    // fieldRef path, resourceFieldRef container/resource) without a second
+    // round-trip and re-serialize them faithfully on save.
     let env: Vec<Value> = c
         .env
         .as_ref()
         .map(|es| {
             es.iter()
-                .map(|e| {
-                    let from = e.value_from.as_ref().map(|vf| {
-                        if vf.config_map_key_ref.is_some() {
-                            "configMapKeyRef"
-                        } else if vf.secret_key_ref.is_some() {
-                            "secretKeyRef"
-                        } else if vf.field_ref.is_some() {
-                            "fieldRef"
-                        } else if vf.resource_field_ref.is_some() {
-                            "resourceFieldRef"
-                        } else {
-                            "valueFrom"
-                        }
-                    });
-                    json!({
-                        "name": e.name.clone(),
-                        "value": e.value.clone(),
-                        "from": from,
-                    })
-                })
+                .map(super::pod_template::project_env_var)
                 .collect()
         })
         .unwrap_or_default();
@@ -752,14 +735,18 @@ fn container_detail(c: &Container, kind: &str, st: Option<&ContainerStatus>) -> 
         .as_ref()
         .map(|ms| {
             ms.iter()
-                .map(|m| {
-                    json!({
-                        "name": m.name.clone(),
-                        "mount_path": m.mount_path.clone(),
-                        "read_only": m.read_only.unwrap_or(false),
-                        "sub_path": m.sub_path.clone(),
-                    })
-                })
+                .map(super::pod_template::project_volume_mount)
+                .collect()
+        })
+        .unwrap_or_default();
+    // envFrom on Pod is rarely set post-creation but worth surfacing — and
+    // shape parity with WorkloadContainerSummary keeps the FE simple.
+    let env_from: Vec<Value> = c
+        .env_from
+        .as_ref()
+        .map(|es| {
+            es.iter()
+                .map(super::pod_template::project_env_from)
                 .collect()
         })
         .unwrap_or_default();
@@ -797,6 +784,7 @@ fn container_detail(c: &Container, kind: &str, st: Option<&ContainerStatus>) -> 
         "last_state": last_state,
         "ports": ports,
         "env": env,
+        "env_from": env_from,
         "mounts": mounts,
         "liveness": c.liveness_probe.as_ref().map(probe_value),
         "readiness": c.readiness_probe.as_ref().map(probe_value),

@@ -21,6 +21,8 @@ import {
   KeyValueChips,
   Mute,
   ageFromIso,
+  formatQuantity,
+  parseQuantity,
   type DetailNavigate,
 } from "..";
 import type {
@@ -142,7 +144,7 @@ export function ConfigMapSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading configmap…" inline />
+        <LoadingLine t={t} label="Loading configmap…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -690,7 +692,7 @@ export function SecretSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading secret…" inline />
+        <LoadingLine t={t} label="Loading secret…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -1326,7 +1328,7 @@ export function ResourceQuotaSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading resource quota…" inline />
+        <LoadingLine t={t} label="Loading resource quota…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -1477,7 +1479,7 @@ function ResourceQuotaView({
             )
             : d.entries.map((e) => (
                 <DetailRow key={e.name} t={t} label={e.name}>
-                  <QuotaUsageCell t={t} hard={e.hard} used={e.used} />
+                  <QuotaUsageCell t={t} name={e.name} hard={e.hard} used={e.used} />
                 </DetailRow>
               ))}
 
@@ -1735,10 +1737,12 @@ function isValidQuotaResource(s: string): boolean {
 
 function QuotaUsageCell({
   t,
+  name,
   hard,
   used,
 }: {
   t: Tokens;
+  name: string;
   hard: string | null;
   used: string | null;
 }) {
@@ -1772,13 +1776,14 @@ function QuotaUsageCell({
     >
       <Copyable text={`used: ${used ?? "—"} / hard: ${hard ?? "—"}`}>
         <span
+          title={`used ${used ?? "—"} / hard ${hard ?? "—"}`}
           style={{
             fontFamily: FONT_MONO,
             fontSize: 12,
             color: fg,
           }}
         >
-          {used ?? "—"} / {hard ?? "—"}
+          {formatQuantity(name, used)} / {formatQuantity(name, hard)}
         </span>
       </Copyable>
       {ratio != null && (
@@ -1788,56 +1793,6 @@ function QuotaUsageCell({
       )}
     </div>
   );
-}
-
-// Minimal Quantity → number parser. Handles bare numbers + the SI/binary
-// suffixes Kubernetes actually uses (k, M, G, T, Ki, Mi, Gi, Ti, m). Returns
-// null if the input doesn't match — that's a signal to render plain text
-// rather than a coloured ratio.
-function parseQuantity(q: string | null): number | null {
-  if (q == null) return null;
-  const m = /^(-?\d+(?:\.\d+)?)([numkMGTPEi]*)$/.exec(q);
-  if (!m) return null;
-  const num = m[1];
-  if (num == null) return null;
-  const n = parseFloat(num);
-  if (!Number.isFinite(n)) return null;
-  switch (m[2]) {
-    case "":
-      return n;
-    case "m":
-      return n / 1000;
-    case "k":
-      return n * 1e3;
-    case "M":
-      return n * 1e6;
-    case "G":
-      return n * 1e9;
-    case "T":
-      return n * 1e12;
-    case "P":
-      return n * 1e15;
-    case "E":
-      return n * 1e18;
-    case "Ki":
-      return n * 1024;
-    case "Mi":
-      return n * 1024 ** 2;
-    case "Gi":
-      return n * 1024 ** 3;
-    case "Ti":
-      return n * 1024 ** 4;
-    case "Pi":
-      return n * 1024 ** 5;
-    case "Ei":
-      return n * 1024 ** 6;
-    case "n":
-      return n / 1e9;
-    case "u":
-      return n / 1e6;
-    default:
-      return null;
-  }
 }
 
 // ── LimitRange ─────────────────────────────────────────────────────────────
@@ -1862,7 +1817,7 @@ export function LimitRangeSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading limit range…" inline />
+        <LoadingLine t={t} label="Loading limit range…"/>
       </Frame>
     );
   if (state.kind === "error")

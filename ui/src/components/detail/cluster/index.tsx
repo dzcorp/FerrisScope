@@ -11,9 +11,12 @@ import {
   ChipWrap,
   Copyable,
   DetailRow,
+  EditSessionProvider,
+  GlobalSaveBar,
   LinkValue,
   Mute,
   ageFromIso,
+  formatQuantity,
   type DetailNavigate,
 } from "..";
 import type {
@@ -121,7 +124,7 @@ export function NodeSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading node…" inline />
+        <LoadingLine t={t} label="Loading node…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -137,55 +140,63 @@ export function NodeSummary(props: {
   );
 
   return (
-    <Frame t={t}>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 18,
-        }}
-      >
-        <StatusPill status={d.phase} t={t} mode={props.mode} />
-        {d.roles.length > 0 && (
-          <span
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 12,
-              color: t.text,
-            }}
-          >
-            {d.roles.join(", ")}
-          </span>
-        )}
-        {d.node_info?.kubelet_version && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
-            kubelet {d.node_info.kubelet_version}
-          </span>
-        )}
-        {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
-            · {ageFromIso(d.meta.created_at)} old
-          </span>
-        )}
-        {d.unschedulable && (
-          <StatusPill status="Cordoned" t={t} mode={props.mode} dense />
-        )}
-      </div>
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "nodes",
+        namespace: null,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 18,
+          }}
+        >
+          <StatusPill status={d.phase} t={t} mode={props.mode} />
+          {d.roles.length > 0 && (
+            <span
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 12,
+                color: t.text,
+              }}
+            >
+              {d.roles.join(", ")}
+            </span>
+          )}
+          {d.node_info?.kubelet_version && (
+            <span style={{ fontSize: 11.5, color: t.textMuted }}>
+              kubelet {d.node_info.kubelet_version}
+            </span>
+          )}
+          {d.meta.created_at && (
+            <span style={{ fontSize: 11.5, color: t.textMuted }}>
+              · {ageFromIso(d.meta.created_at)} old
+            </span>
+          )}
+          {d.unschedulable && (
+            <StatusPill status="Cordoned" t={t} mode={props.mode} dense />
+          )}
+        </div>
 
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "nodes",
-          namespace: null,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "nodes",
+            namespace: null,
+            name: props.name,
+          }}
+        />
 
       <Section t={t} title="Spec" />
       <div style={{ marginBottom: 22 }}>
@@ -419,7 +430,9 @@ export function NodeSummary(props: {
       {otherConds.length > 0 && (
         <ConditionsSection t={t} conditions={otherConds} />
       )}
-    </Frame>
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -470,28 +483,36 @@ function ResourceMatrix({
   ).sort();
   return (
     <>
-      {keys.map((k) => (
-        <DetailRow key={k} t={t} label={k}>
-          <span
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 12,
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            {capacity[k] ?? "—"}
-          </span>
-          <span
-            style={{
-              fontSize: 11,
-              color: t.textMuted,
-              marginLeft: 8,
-            }}
-          >
-            allocatable {allocatable[k] ?? "—"}
-          </span>
-        </DetailRow>
-      ))}
+      {keys.map((k) => {
+        const cap = capacity[k] ?? null;
+        const alloc = allocatable[k] ?? null;
+        return (
+          <DetailRow key={k} t={t} label={k}>
+            <Copyable text={cap ?? ""}>
+              <span
+                title={cap ?? undefined}
+                style={{
+                  fontFamily: FONT_MONO,
+                  fontSize: 12,
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {formatQuantity(k, cap)}
+              </span>
+            </Copyable>
+            <span
+              title={alloc ?? undefined}
+              style={{
+                fontSize: 11,
+                color: t.textMuted,
+                marginLeft: 8,
+              }}
+            >
+              allocatable {formatQuantity(k, alloc)}
+            </span>
+          </DetailRow>
+        );
+      })}
     </>
   );
 }
@@ -818,7 +839,7 @@ export function NamespaceSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading namespace…" inline />
+        <LoadingLine t={t} label="Loading namespace…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -826,36 +847,44 @@ export function NamespaceSummary(props: {
 
   const d = state.detail;
   return (
-    <Frame t={t}>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 18,
-        }}
-      >
-        <StatusPill status={d.phase} t={t} mode={props.mode} />
-        {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
-            {ageFromIso(d.meta.created_at)} old
-          </span>
-        )}
-      </div>
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "namespaces",
+        namespace: null,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 18,
+          }}
+        >
+          <StatusPill status={d.phase} t={t} mode={props.mode} />
+          {d.meta.created_at && (
+            <span style={{ fontSize: 11.5, color: t.textMuted }}>
+              {ageFromIso(d.meta.created_at)} old
+            </span>
+          )}
+        </div>
 
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "namespaces",
-          namespace: null,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "namespaces",
+            namespace: null,
+            name: props.name,
+          }}
+        />
 
       {d.finalizers.length > 0 && (
         <>
@@ -891,7 +920,9 @@ export function NamespaceSummary(props: {
       )}
 
       <ConditionsSection t={t} conditions={d.conditions} />
-    </Frame>
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -915,7 +946,7 @@ export function EventSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading event…" inline />
+        <LoadingLine t={t} label="Loading event…"/>
       </Frame>
     );
   if (state.kind === "error")

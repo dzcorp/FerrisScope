@@ -70,7 +70,7 @@ export function CustomResourceDefinitionSummary(props: {
   if (state.kind === "loading") {
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading CRD…" inline />
+        <LoadingLine t={t} label="Loading CRD…"/>
       </Frame>
     );
   }

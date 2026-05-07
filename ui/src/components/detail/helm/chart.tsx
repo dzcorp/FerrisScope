@@ -194,7 +194,7 @@ export function HelmChartSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading chart…" inline />
+        <LoadingLine t={t} label="Loading chart…"/>
       </Frame>
     );
   if (state.kind === "error")

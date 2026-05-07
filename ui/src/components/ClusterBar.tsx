@@ -221,7 +221,7 @@ export function ClusterBar({ mode, context, state, style }: Props) {
               border: `1px solid ${t.border}`,
               borderRadius: 8,
               padding: 4,
-              minWidth: 240,
+              minWidth: 280,
               zIndex: 22,
               boxShadow:
                 mode === "dark"
@@ -232,7 +232,7 @@ export function ClusterBar({ mode, context, state, style }: Props) {
             <AddMenuItem
               t={t}
               icon={Icons.shell}
-              title="New terminal"
+              title="Terminal"
               subtitle="Run kubectl in this cluster"
               kbd={`${MOD_KEY} \``}
               onClick={() => {
@@ -251,8 +251,8 @@ export function ClusterBar({ mode, context, state, style }: Props) {
             <AddMenuItem
               t={t}
               icon={Icons.yaml}
-              title="New YAML scratchpad"
-              subtitle="Write or paste a manifest, then apply"
+              title="YAML scratchpad"
+              subtitle="Edit and apply a manifest"
               kbd={`${SHIFT_KEY}${MOD_KEY}Y`}
               onClick={() => addDockTab(makeYamlTab(context.id))}
             />
@@ -260,7 +260,7 @@ export function ClusterBar({ mode, context, state, style }: Props) {
               t={t}
               icon={Icons.chat}
               title="AI chat"
-              subtitle="Cluster-aware assistant — resumes the latest session"
+              subtitle="Talk to the cluster-aware assistant"
               onClick={() => {
                 // Idempotent: if a chat tab is already open for this cluster,
                 // focus it instead of stacking another tab. Operators expect

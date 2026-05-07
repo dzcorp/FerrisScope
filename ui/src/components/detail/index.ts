@@ -24,4 +24,12 @@ export type {
   ChipStripItem,
   ConditionStatus,
 } from "./primitives";
-export { ageFromIso } from "./helpers";
+export { ageFromIso, formatQuantity, parseQuantity } from "./helpers";
+export {
+  EditSessionProvider,
+  mergePatch,
+  useEditField,
+  useEditSession,
+} from "./editSession";
+export type { ConflictInfo } from "./editSession";
+export { GlobalSaveBar } from "./globalSaveBar";

@@ -156,7 +156,7 @@ export function PersistentVolumeClaimSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading persistent volume claim…" inline />
+        <LoadingLine t={t} label="Loading persistent volume claim…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -366,7 +366,7 @@ export function PersistentVolumeSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading persistent volume…" inline />
+        <LoadingLine t={t} label="Loading persistent volume…"/>
       </Frame>
     );
   if (state.kind === "error")
@@ -597,7 +597,7 @@ export function StorageClassSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading storage class…" inline />
+        <LoadingLine t={t} label="Loading storage class…"/>
       </Frame>
     );
   if (state.kind === "error")

@@ -23,6 +23,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, onResourceDelta } from "../api";
 import { useAppStore } from "../store";
+import { formatQuantity } from "./detail";
 import type { ColumnDef, ResourceKind, ResourceRow } from "../types";
 import { tokens, FONT_MONO, type ThemeMode } from "../theme";
 import { LogPanel } from "./LogPanel";
@@ -2023,30 +2024,40 @@ function renderCell(
       );
     }
     default: {
-      const s = String(value);
+      const raw = String(value);
+      // Quantity-shaped columns (Node table's `cpu` / `memory` ship as raw
+      // K8s Quantity strings like "16384000Ki") render in a friendlier
+      // unit. Pod cpu/mem already go through their own renderer above
+      // (live metrics from metrics-server); this branch covers the static
+      // capacity strings from kubelet.
+      const isQty = c.id === "cpu" || c.id === "memory";
+      const display = isQty ? formatQuantity(c.id, raw === "" ? null : raw) : raw;
       // R-07: identifiers (name, namespace, image, IP-ish) get mono — but
       // the operator can override via Settings → Appearance → Mono in tables.
       const mono =
-        monoTables &&
-        (c.id === "name" ||
-          c.id === "namespace" ||
-          c.id === "image" ||
-          c.id === "node" ||
-          c.id === "host" ||
-          c.id === "uid" ||
-          c.id === "ip" ||
-          c.id === "cluster_ip");
+        isQty ||
+        (monoTables &&
+          (c.id === "name" ||
+            c.id === "namespace" ||
+            c.id === "image" ||
+            c.id === "node" ||
+            c.id === "host" ||
+            c.id === "uid" ||
+            c.id === "ip" ||
+            c.id === "cluster_ip"));
       return (
         <span
+          title={isQty && raw !== "" ? raw : undefined}
           style={{
             fontFamily: mono ? FONT_MONO : "inherit",
             fontSize: mono ? 11.5 : 12,
             color: c.id === "namespace" ? t.textDim : t.text,
+            fontVariantNumeric: isQty ? "tabular-nums" : undefined,
             overflow: "hidden",
             textOverflow: "ellipsis",
           }}
         >
-          {s}
+          {display}
         </span>
       );
     }

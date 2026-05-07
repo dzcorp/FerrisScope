@@ -23,6 +23,7 @@ import type {
   ClusterRoleBindingDetail,
   ClusterRoleDetail,
   ConfigMapDetail,
+  ConfigMapKeysSummary,
   ContextInfo,
   CronJobDetail,
   DaemonSetDetail,
@@ -86,7 +87,9 @@ import type {
   HelmInstallResult,
   HelmReleaseDetail,
   HelmUpgradeResult,
+  PvcSummary,
   SecretDetail,
+  SecretKeysSummary,
   ServiceAccountDetail,
   ServiceDetail,
   StatefulSetDetail,
@@ -251,6 +254,27 @@ export const api = {
       clusterId,
       namespace,
       name,
+    }),
+  /// Light "name + keys" projection of every ConfigMap in a namespace.
+  /// Used by the env-ref picker; not cached (refetched per-open).
+  listConfigMapsInNamespace: (clusterId: string, namespace: string) =>
+    invoke<ConfigMapKeysSummary[]>("list_config_maps_in_namespace_cmd", {
+      clusterId,
+      namespace,
+    }),
+  /// Same shape against Secrets — keys come from `data` only (`string_data`
+  /// is write-only and never returned by GET). Values are not included.
+  listSecretsInNamespace: (clusterId: string, namespace: string) =>
+    invoke<SecretKeysSummary[]>("list_secrets_in_namespace_cmd", {
+      clusterId,
+      namespace,
+    }),
+  /// Light projection of every PVC in a namespace. Used by the volume
+  /// picker. Carries storage_class + requested_storage for disambiguation.
+  listPvcsInNamespace: (clusterId: string, namespace: string) =>
+    invoke<PvcSummary[]>("list_persistent_volume_claims_in_namespace_cmd", {
+      clusterId,
+      namespace,
     }),
   getHelmReleaseDetail: (
     clusterId: string,

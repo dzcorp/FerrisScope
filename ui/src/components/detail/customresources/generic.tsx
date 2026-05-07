@@ -12,6 +12,7 @@
 //      becoming nested-borders soup.
 
 import {
+  Fragment,
   createContext,
   useContext,
   useEffect,
@@ -72,6 +73,8 @@ export function CustomResourceSummary(props: {
   const t = tokens(props.mode);
   const [refetch, setRefetch] = useState(0);
   const [state, setState] = useState<LoadState>({ kind: "loading" });
+  const [specFocus, setSpecFocus] = useState<Segment[]>([]);
+  const [statusFocus, setStatusFocus] = useState<Segment[]>([]);
   const reqId = useRef(0);
 
   useEffect(() => {
@@ -102,7 +105,7 @@ export function CustomResourceSummary(props: {
   if (state.kind === "loading") {
     return (
       <Frame t={t}>
-        <LoadingLine t={t} label="Loading…" inline />
+        <LoadingLine t={t} label="Loading…"/>
       </Frame>
     );
   }
@@ -214,6 +217,8 @@ export function CustomResourceSummary(props: {
           title="Spec"
           obj={spec}
           schema={d.schema?.spec ?? null}
+          focusSegs={specFocus}
+          setFocusSegs={setSpecFocus}
         />
       )}
 
@@ -290,6 +295,8 @@ export function CustomResourceSummary(props: {
           title="Status"
           obj={omitKey(status, "conditions")}
           schema={d.schema?.status ?? null}
+          focusSegs={statusFocus}
+          setFocusSegs={setStatusFocus}
         />
       )}
     </Frame>
@@ -316,6 +323,10 @@ type TreeCtxValue = {
   // expanded based on this so empty filter = clean collapse defaults but
   // typed filter = matched paths visible without manual clicks.
   filterActive: boolean;
+  // Drill into a subtree relative to the current focus root. Branches call
+  // this from their `↗` button. Paths are relative to whatever the section
+  // is currently rendering, so this composes correctly with prior focus.
+  focus: (relativePath: string) => void;
 };
 
 const TreeCtx = createContext<TreeCtxValue>({
@@ -323,6 +334,7 @@ const TreeCtx = createContext<TreeCtxValue>({
   collapseSignal: 0,
   match: () => "self",
   filterActive: false,
+  focus: () => {},
 });
 
 function TreeView({
@@ -330,17 +342,48 @@ function TreeView({
   title,
   obj,
   schema,
+  focusSegs,
+  setFocusSegs,
 }: {
   t: Tokens;
   title: string;
   obj: Record<string, unknown>;
   schema: CustomResourceSchemaNode | null;
+  focusSegs: Segment[];
+  setFocusSegs: (next: Segment[]) => void;
 }) {
   const [filter, setFilter] = useState("");
   const [expandSignal, setExpandSignal] = useState(0);
   const [collapseSignal, setCollapseSignal] = useState(0);
 
-  const matchSets = useMemo(() => buildMatchSets(obj, filter), [obj, filter]);
+  // Resolve the focus path against the current obj. If the path no longer
+  // resolves (field was removed by a refetch), trim back to the longest
+  // valid prefix for *this render* — but don't write that back to state.
+  // The watcher produces a new object reference on every event; hard-
+  // resetting state from a render-time guard races with click handlers and
+  // silently swallows drill-in clicks. focusSegs self-corrects on the
+  // user's next interaction.
+  let resolvedSegs = focusSegs;
+  while (
+    resolvedSegs.length > 0 &&
+    descendData(obj, resolvedSegs) === undefined
+  ) {
+    resolvedSegs = resolvedSegs.slice(0, -1);
+  }
+
+  const focusedValue: unknown =
+    resolvedSegs.length === 0 ? obj : descendData(obj, resolvedSegs);
+  const focusedSchema =
+    resolvedSegs.length === 0 ? schema : descendSchema(schema, resolvedSegs);
+
+  // Match-sets cover the entire section (rooted at `obj`) — the focused
+  // card and the "rest of section" rows below it both render with absolute
+  // paths, so a single set keyed by absolute paths serves both.
+  const focusPrefix = pathFromSegments(resolvedSegs);
+  const matchSets = useMemo(
+    () => buildMatchSets(obj, filter),
+    [obj, filter],
+  );
 
   const ctx: TreeCtxValue = {
     expandSignal,
@@ -352,30 +395,274 @@ function TreeView({
       return "miss";
     },
     filterActive: filter.length > 0,
+    focus: (absolutePath) => {
+      // Absolute path: rooted at this section's obj. Replace, don't append —
+      // every callsite passes the full path it knows about, so any append
+      // logic would either double-up the prefix or drop intermediate
+      // segments depending on the view we drilled from.
+      const next = segmentsFromPath(absolutePath);
+      setFocusSegs(next);
+    },
   };
+
+  const crumbLabels = breadcrumbLabels(resolvedSegs, obj);
+  const focused = resolvedSegs.length > 0;
+  const primaryKey = focused ? crumbLabels[resolvedSegs.length - 1] : null;
+
+  const focusPath = focusPrefix;
+  const focusedTopKey =
+    focused && resolvedSegs[0]?.kind === "key" ? resolvedSegs[0].key : null;
+
+  let body: React.ReactNode;
+  if (focusedValue == null) {
+    body = <Mute t={t}>—</Mute>;
+  } else if (Array.isArray(focusedValue)) {
+    const itemSchema = focusedSchema?.items ?? null;
+    body =
+      focusedValue.length === 0 ? (
+        <Mute t={t}>[ ]</Mute>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {focusedValue.map((item, i) => (
+            <ArrayItem
+              key={i}
+              t={t}
+              index={i}
+              item={item}
+              schema={itemSchema}
+              depth={1}
+              path={focusPath ? `${focusPath}[${i}]` : `[${i}]`}
+            />
+          ))}
+        </div>
+      );
+  } else if (typeof focusedValue === "object") {
+    body = (
+      <RootRows
+        t={t}
+        obj={focusedValue as Record<string, unknown>}
+        schema={focusedSchema}
+        pathPrefix={focusPath}
+      />
+    );
+  } else {
+    body = (
+      <Leaf
+        t={t}
+        v={focusedValue}
+        schema={focusedSchema}
+        depth={1}
+        path={focusPath}
+      />
+    );
+  }
+
+  const toolbar = (
+    <SectionToolbar
+      t={t}
+      filter={filter}
+      onFilter={setFilter}
+      onExpandAll={() => setExpandSignal((n) => n + 1)}
+      onCollapseAll={() => setCollapseSignal((n) => n + 1)}
+      matchCount={filter ? matchSets.self.size : null}
+    />
+  );
+
+  // When focused, swap *only* the matching top-level row for a focused card
+  // — every other row stays exactly where it was. The user's scroll position
+  // is preserved; drilling feels like the row "expanding into" a focused
+  // view instead of teleporting to the section header.
+  const sectionRight = focused ? (
+    <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+      <button
+        type="button"
+        onClick={() => setFocusSegs([])}
+        title="Exit focus"
+        aria-label="Exit focus"
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 10,
+          padding: "2px 6px",
+          background: t.surface,
+          color: t.textMuted,
+          border: `1px solid ${t.borderSoft}`,
+          borderRadius: 3,
+          cursor: "pointer",
+          textTransform: "none",
+          letterSpacing: 0,
+        }}
+      >
+        exit ✕
+      </button>
+      {toolbar}
+    </span>
+  ) : (
+    toolbar
+  );
+
+  const trailLabels = focused ? crumbLabels.slice(0, -1) : [];
+  const orderedKs = orderedKeys(obj, schema);
 
   return (
     <>
-      <Section
-        t={t}
-        title={title}
-        right={
-          <SectionToolbar
-            t={t}
-            filter={filter}
-            onFilter={setFilter}
-            onExpandAll={() => setExpandSignal((n) => n + 1)}
-            onCollapseAll={() => setCollapseSignal((n) => n + 1)}
-            matchCount={filter ? matchSets.self.size : null}
-          />
-        }
-      />
-      <div style={{ marginBottom: 22 }}>
-        <TreeCtx.Provider value={ctx}>
-          <RootRows t={t} obj={obj} schema={schema} />
-        </TreeCtx.Provider>
-      </div>
+      <Section t={t} title={title} right={sectionRight} />
+      <TreeCtx.Provider value={ctx}>
+        <div style={{ marginBottom: 22 }}>
+          {orderedKs.map((k) => {
+            const childSchema = schema?.properties?.[k] ?? null;
+
+            if (focused && k === focusedTopKey) {
+              return (
+                <div
+                  key={k}
+                  style={{
+                    margin: "8px 0",
+                    padding: "10px 12px 14px",
+                    background: t.surface,
+                    border: `1px solid ${t.borderSoft}`,
+                    borderRadius: 6,
+                  }}
+                >
+                  {trailLabels.length > 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        flexWrap: "wrap",
+                        gap: 4,
+                        marginBottom: 8,
+                        fontSize: 11,
+                        fontFamily: FONT_MONO,
+                        color: t.textMuted,
+                      }}
+                    >
+                      {trailLabels.map((label, i) => (
+                        <Fragment key={i}>
+                          {i > 0 && (
+                            <span style={{ color: t.textMuted }}>›</span>
+                          )}
+                          <Crumb
+                            t={t}
+                            onClick={() =>
+                              setFocusSegs(resolvedSegs.slice(0, i + 1))
+                            }
+                          >
+                            {label}
+                          </Crumb>
+                        </Fragment>
+                      ))}
+                      <span style={{ color: t.textMuted }}>›</span>
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      marginBottom: 12,
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setFocusSegs(
+                          resolvedSegs.slice(0, resolvedSegs.length - 1),
+                        )
+                      }
+                      title="Back"
+                      aria-label="Back"
+                      style={{
+                        background: t.bg,
+                        border: `1px solid ${t.borderSoft}`,
+                        color: t.textMuted,
+                        padding: "2px 8px",
+                        borderRadius: 3,
+                        cursor: "pointer",
+                        fontSize: 14,
+                        lineHeight: 1,
+                      }}
+                    >
+                      ‹
+                    </button>
+                    <span
+                      style={{
+                        fontSize: 16,
+                        fontWeight: 600,
+                        color: t.text,
+                        wordBreak: "break-word",
+                        minWidth: 0,
+                      }}
+                    >
+                      {primaryKey}
+                    </span>
+                  </div>
+                  {body}
+                </div>
+              );
+            }
+
+            // Normal row: respect the filter when not focused-on-this-key.
+            if (ctx.filterActive && ctx.match(k) === "miss") return null;
+
+            return (
+              <DetailRow
+                t={t}
+                key={k}
+                label={
+                  <LabelWithDoc
+                    label={humanize(k)}
+                    doc={childSchema?.description ?? null}
+                    rawKey={k}
+                    t={t}
+                  />
+                }
+              >
+                <Leaf
+                  t={t}
+                  v={obj[k]}
+                  schema={childSchema}
+                  depth={1}
+                  path={k}
+                />
+              </DetailRow>
+            );
+          })}
+        </div>
+      </TreeCtx.Provider>
     </>
+  );
+}
+
+function Crumb({
+  t,
+  onClick,
+  active,
+  children,
+}: {
+  t: Tokens;
+  onClick: () => void;
+  active?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        background: "none",
+        border: "none",
+        padding: "0 2px",
+        margin: 0,
+        cursor: active ? "default" : "pointer",
+        font: "inherit",
+        color: active ? t.text : t.textDim,
+        textTransform: "inherit",
+        letterSpacing: "inherit",
+        fontWeight: "inherit",
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -467,23 +754,30 @@ function RootRows({
   t,
   obj,
   schema,
+  pathPrefix = "",
 }: {
   t: Tokens;
   obj: Record<string, unknown>;
   schema: CustomResourceSchemaNode | null;
+  pathPrefix?: string;
 }) {
   const ctx = useContext(TreeCtx);
   const keys = orderedKeys(obj, schema);
   if (keys.length === 0) return <Mute t={t}>—</Mute>;
-  // Per-section matcher: paths are just dotted keys, no `spec.` / `status.`
-  // prefix because each TreeView owns its own match-set namespace.
+  // Paths are absolute (rooted at the section's obj, no `spec.` / `status.`
+  // prefix). When a focused view re-enters here on a subtree, pathPrefix is
+  // the segment chain leading to it so child paths stay absolute.
   const shown = ctx.filterActive
-    ? keys.filter((k) => ctx.match(k) !== "miss")
+    ? keys.filter((k) => {
+        const p = pathPrefix ? `${pathPrefix}.${k}` : k;
+        return ctx.match(p) !== "miss";
+      })
     : keys;
   return (
     <>
       {shown.map((k) => {
         const childSchema = schema?.properties?.[k] ?? null;
+        const childPath = pathPrefix ? `${pathPrefix}.${k}` : k;
         return (
           <DetailRow
             t={t}
@@ -492,7 +786,7 @@ function RootRows({
               <LabelWithDoc
                 label={humanize(k)}
                 doc={childSchema?.description ?? null}
-                rawKey={k}
+                rawKey={childPath}
                 t={t}
               />
             }
@@ -502,7 +796,7 @@ function RootRows({
               v={obj[k]}
               schema={childSchema}
               depth={1}
-              path={k}
+              path={childPath}
             />
           </DetailRow>
         );
@@ -703,15 +997,17 @@ function ObjectBranch({
     <SummaryLine
       t={t}
       pill={`${keys.length} field${keys.length === 1 ? "" : "s"}`}
-      tail={preview}
+      tail={open ? null : preview}
     />
   );
+  const onFocus = () => ctx.focus(path);
   if (depth >= TREE_DEPTH_THRESHOLD) {
     return (
       <TreeBranch
         t={t}
         open={open}
         onToggle={() => setOpen(!open)}
+        onFocus={onFocus}
         summary={summary}
         copyText={JSON.stringify(obj)}
       >
@@ -724,6 +1020,7 @@ function ObjectBranch({
       t={t}
       open={open}
       onToggle={() => setOpen(!open)}
+      onFocus={onFocus}
       summary={summary}
       copyText={JSON.stringify(obj)}
     >
@@ -757,13 +1054,13 @@ function ArrayBranch({
       t={t}
       pill={`${arr.length} item${arr.length === 1 ? "" : "s"}`}
       tail={
-        arr.length > 0
-          ? arr
+        open || arr.length === 0
+          ? null
+          : arr
               .slice(0, 3)
               .map((x) => itemTitle(x))
               .filter((s): s is string => !!s)
               .join(", ") || null
-          : null
       }
     />
   );
@@ -789,12 +1086,14 @@ function ArrayBranch({
       ))}
     </div>
   );
+  const onFocus = () => ctx.focus(path);
   if (depth >= TREE_DEPTH_THRESHOLD) {
     return (
       <TreeBranch
         t={t}
         open={open}
         onToggle={() => setOpen(!open)}
+        onFocus={onFocus}
         summary={summary}
         copyText={JSON.stringify(arr)}
       >
@@ -807,6 +1106,7 @@ function ArrayBranch({
       t={t}
       open={open}
       onToggle={() => setOpen(!open)}
+      onFocus={onFocus}
       summary={summary}
       copyText={JSON.stringify(arr)}
     >
@@ -880,12 +1180,14 @@ function ArrayItem({
     </span>
   );
 
+  const onFocus = () => ctx.focus(path);
   if (depth >= TREE_DEPTH_THRESHOLD) {
     return (
       <TreeBranch
         t={t}
         open={open}
         onToggle={() => setOpen(!open)}
+        onFocus={onFocus}
         summary={titleNode}
         copyText={JSON.stringify(obj)}
       >
@@ -912,6 +1214,7 @@ function ArrayItem({
         t={t}
         open={open}
         onToggle={() => setOpen(!open)}
+        onFocus={onFocus}
         copyText={JSON.stringify(obj)}
       >
         {titleNode}
@@ -956,7 +1259,7 @@ function NestedRows({
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(140px, max-content) 1fr",
+        gridTemplateColumns: "fit-content(220px) minmax(0, 1fr)",
         columnGap: 14,
         rowGap: 6,
         width: "100%",
@@ -1014,6 +1317,9 @@ function NestedRow({
           fontFamily: FONT_MONO,
           alignSelf: "start",
           marginTop: 3,
+          minWidth: 0,
+          overflowWrap: "anywhere",
+          lineHeight: 1.35,
         }}
       >
         {label}
@@ -1044,6 +1350,7 @@ function CardBranch({
   t,
   open,
   onToggle,
+  onFocus,
   summary,
   copyText,
   children,
@@ -1051,6 +1358,7 @@ function CardBranch({
   t: Tokens;
   open: boolean;
   onToggle: () => void;
+  onFocus?: () => void;
   summary: React.ReactNode;
   copyText?: string;
   children: React.ReactNode;
@@ -1069,6 +1377,7 @@ function CardBranch({
         t={t}
         open={open}
         onToggle={onToggle}
+        onFocus={onFocus}
         copyText={copyText}
       >
         {summary}
@@ -1082,6 +1391,7 @@ function TreeBranch({
   t,
   open,
   onToggle,
+  onFocus,
   summary,
   copyText,
   children,
@@ -1089,6 +1399,7 @@ function TreeBranch({
   t: Tokens;
   open: boolean;
   onToggle: () => void;
+  onFocus?: () => void;
   summary: React.ReactNode;
   copyText?: string;
   children: React.ReactNode;
@@ -1099,6 +1410,7 @@ function TreeBranch({
         t={t}
         open={open}
         onToggle={onToggle}
+        onFocus={onFocus}
         copyText={copyText}
         compact
       >
@@ -1125,6 +1437,7 @@ function DisclosureHeader({
   t,
   open,
   onToggle,
+  onFocus,
   copyText,
   compact = false,
   children,
@@ -1132,6 +1445,7 @@ function DisclosureHeader({
   t: Tokens;
   open: boolean;
   onToggle: () => void;
+  onFocus?: () => void;
   copyText?: string;
   compact?: boolean;
   children: React.ReactNode;
@@ -1177,10 +1491,18 @@ function DisclosureHeader({
         <Caret open={open} t={t} />
         {children}
       </span>
-      {copyText && (
-        <Copyable text={copyText}>
-          <span
-            onClick={(e) => e.stopPropagation()}
+      <span
+        style={{ display: "inline-flex", gap: 6, alignItems: "center" }}
+      >
+        {onFocus && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onFocus();
+            }}
+            title="Focus on this subtree"
+            aria-label="Focus on this subtree"
             style={{
               fontSize: 10,
               fontFamily: FONT_MONO,
@@ -1188,12 +1510,32 @@ function DisclosureHeader({
               padding: "1px 6px",
               border: `1px solid ${t.borderSoft}`,
               borderRadius: 3,
+              background: t.surface,
+              cursor: "pointer",
+              lineHeight: 1.2,
             }}
           >
-            copy
-          </span>
-        </Copyable>
-      )}
+            ↗
+          </button>
+        )}
+        {copyText && (
+          <Copyable text={copyText}>
+            <span
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                fontSize: 10,
+                fontFamily: FONT_MONO,
+                color: t.textMuted,
+                padding: "1px 6px",
+                border: `1px solid ${t.borderSoft}`,
+                borderRadius: 3,
+              }}
+            >
+              copy
+            </span>
+          </Copyable>
+        )}
+      </span>
     </div>
   );
 }
@@ -1309,8 +1651,9 @@ function useDisclosureState(initialOpen: boolean, ctx: TreeCtxValue) {
 // `[N]` for array indices.
 
 function buildMatchSets(
-  obj: Record<string, unknown>,
+  obj: unknown,
   filter: string,
+  pathPrefix = "",
 ): { self: Set<string>; ancestor: Set<string> } {
   const self = new Set<string>();
   const ancestor = new Set<string>();
@@ -1347,8 +1690,16 @@ function buildMatchSets(
     return hit || descendantHit;
   }
 
-  for (const [k, v] of Object.entries(obj)) {
-    visit(v, k, k);
+  if (Array.isArray(obj)) {
+    obj.forEach((child, i) => {
+      const sub = pathPrefix ? `${pathPrefix}[${i}]` : `[${i}]`;
+      visit(child, sub, null);
+    });
+  } else if (obj && typeof obj === "object") {
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      const sub = pathPrefix ? `${pathPrefix}.${k}` : k;
+      visit(v, sub, k);
+    }
   }
   return { self, ancestor };
 }
@@ -1470,6 +1821,91 @@ function itemTitle(item: unknown): string | null {
 
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+}
+
+// ── Path segments + descent (for drill-in focus) ──────────────────────────
+//
+// A focus path is the same dotted/bracket syntax we already pass through the
+// `path` props (`affinity.podAntiAffinity`, `volumes[0]`,
+// `volumes[0].secret.secretName`). Segments make it composable: append
+// when drilling deeper, slice when popping a breadcrumb.
+
+type Segment =
+  | { kind: "key"; key: string }
+  | { kind: "index"; index: number };
+
+function segmentsFromPath(path: string): Segment[] {
+  if (!path) return [];
+  const out: Segment[] = [];
+  const re = /([A-Za-z0-9_-]+)|\[(\d+)\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(path)) !== null) {
+    if (m[1] !== undefined) out.push({ kind: "key", key: m[1] });
+    else if (m[2] !== undefined)
+      out.push({ kind: "index", index: Number(m[2]) });
+  }
+  return out;
+}
+
+function pathFromSegments(segs: Segment[]): string {
+  let out = "";
+  for (const s of segs) {
+    if (s.kind === "key") out += out === "" ? s.key : `.${s.key}`;
+    else out += `[${s.index}]`;
+  }
+  return out;
+}
+
+function descendData(root: unknown, segs: Segment[]): unknown {
+  let cur: unknown = root;
+  for (const s of segs) {
+    if (cur == null) return undefined;
+    if (s.kind === "key") {
+      if (typeof cur !== "object" || Array.isArray(cur)) return undefined;
+      cur = (cur as Record<string, unknown>)[s.key];
+    } else {
+      if (!Array.isArray(cur)) return undefined;
+      cur = cur[s.index];
+    }
+  }
+  return cur;
+}
+
+function descendSchema(
+  root: CustomResourceSchemaNode | null,
+  segs: Segment[],
+): CustomResourceSchemaNode | null {
+  let cur: CustomResourceSchemaNode | null = root;
+  for (const s of segs) {
+    if (cur == null) return null;
+    if (s.kind === "key") cur = cur.properties?.[s.key] ?? null;
+    else cur = cur.items ?? null;
+  }
+  return cur;
+}
+
+// Resolve breadcrumb labels by walking the original obj alongside `segs`.
+// Object steps humanize the key; array steps prefer `itemTitle` (the item's
+// `name`/`type`/`kind`/`key`/`id`) and fall back to `Item N` (1-indexed).
+// Bracketed `[N]` is correct as a technical label inside the body, but it
+// reads like debug output in a breadcrumb.
+function breadcrumbLabels(segs: Segment[], root: unknown): string[] {
+  const out: string[] = [];
+  let cur: unknown = root;
+  for (const s of segs) {
+    if (s.kind === "key") {
+      out.push(humanize(s.key));
+      cur =
+        cur != null && typeof cur === "object" && !Array.isArray(cur)
+          ? (cur as Record<string, unknown>)[s.key]
+          : undefined;
+    } else {
+      const item = Array.isArray(cur) ? cur[s.index] : undefined;
+      out.push(itemTitle(item) ?? `Item ${s.index + 1}`);
+      cur = item;
+    }
+  }
+  return out;
 }
 
 function readJsonPath(root: unknown, path: string): unknown {

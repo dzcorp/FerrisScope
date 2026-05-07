@@ -34,10 +34,12 @@ use ferrisscope_kube_ext::{
     get_resource_quota_detail, get_resource_yaml, get_role_binding_detail, get_role_detail,
     get_secret_detail, get_service_account_detail, get_service_detail, get_stateful_set_detail,
     get_storage_class_detail, get_validating_webhook_configuration_detail, get_well_known_detail,
-    helm_install_chart, helm_repo_update, helm_uninstall, helm_upgrade, list_pods_on_node, lookup,
-    registry, restart_pod_owner, restart_pods_owners, restart_workload, set_node_cordon,
-    start_forward, ApplyResult, DrainReport, ForwardEntry, ForwardStatus, HelmInstallResult,
-    HelmUpgradeResult, ResourceKind, ResourceKindEntry, RestartPodsReport,
+    helm_install_chart, helm_repo_update, helm_uninstall, helm_upgrade,
+    list_config_maps_in_namespace, list_persistent_volume_claims_in_namespace, list_pods_on_node,
+    list_secrets_in_namespace, lookup, registry, restart_pod_owner, restart_pods_owners,
+    restart_workload, set_node_cordon, start_forward, ApplyResult, DrainReport, ForwardEntry,
+    ForwardStatus, HelmInstallResult, HelmUpgradeResult, ResourceKind, ResourceKindEntry,
+    RestartPodsReport,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -1435,6 +1437,51 @@ pub(crate) async fn get_secret_detail_cmd(
 ) -> Result<Value, String> {
     let entry = state.entry(&cluster_id).await?;
     get_secret_detail(entry.cluster.client(), &namespace, &name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Light "name + keys" projection of every ConfigMap in a namespace, used
+/// by the env-ref picker. Issues one apiserver list per call — no caching;
+/// the picker is opened on demand and wants fresh data each time.
+#[tauri::command]
+pub(crate) async fn list_config_maps_in_namespace_cmd(
+    cluster_id: String,
+    namespace: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let entry = state.entry(&cluster_id).await?;
+    list_config_maps_in_namespace(entry.cluster.client(), &namespace)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Light "name + storage_class + requested_storage" projection of every
+/// PVC in a namespace, used by the volume picker. Same on-demand shape as
+/// the ConfigMap / Secret variants — no caching.
+#[tauri::command]
+pub(crate) async fn list_persistent_volume_claims_in_namespace_cmd(
+    cluster_id: String,
+    namespace: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let entry = state.entry(&cluster_id).await?;
+    list_persistent_volume_claims_in_namespace(entry.cluster.client(), &namespace)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Same shape as `list_config_maps_in_namespace_cmd`, against Secrets. Keys
+/// come from `data` only (`string_data` is write-only and never returned by
+/// GET). Values are not included.
+#[tauri::command]
+pub(crate) async fn list_secrets_in_namespace_cmd(
+    cluster_id: String,
+    namespace: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let entry = state.entry(&cluster_id).await?;
+    list_secrets_in_namespace(entry.cluster.client(), &namespace)
         .await
         .map_err(|e| e.to_string())
 }
