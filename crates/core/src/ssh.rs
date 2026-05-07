@@ -21,14 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use russh::client::{self, Handle};
-use russh::keys::{
-    self,
-    key::{KeyPair, PublicKey},
-};
-// `PublicKeyBase64` is only consumed by the Unix-only ssh-agent path; importing
-// it unconditionally on Windows triggers `unused_imports` under `-D warnings`.
-#[cfg(unix)]
-use russh::keys::PublicKeyBase64;
+use russh::keys::{self, ssh_key, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::ChannelMsg;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -99,7 +92,6 @@ struct HostKeyVerifier {
     captured: Arc<Mutex<Option<String>>>,
 }
 
-#[async_trait::async_trait]
 impl client::Handler for HostKeyVerifier {
     type Error = russh::Error;
 
@@ -107,9 +99,13 @@ impl client::Handler for HostKeyVerifier {
         &mut self,
         server_public_key: &PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        // russh's PublicKey::fingerprint is base64-nopad SHA-256; prefix with
-        // `sha256:` so the persisted form is unambiguous.
-        let offered = format!("sha256:{}", server_public_key.fingerprint());
+        // ssh_key's Fingerprint Display is `SHA256:<base64>`; we persist as
+        // `sha256:<base64>` (lowercase prefix) for backwards compatibility
+        // with values written by previous russh versions.
+        let fp = server_public_key
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string();
+        let offered = format!("sha256:{}", fp.strip_prefix("SHA256:").unwrap_or(&fp));
         *self.captured.lock().await = Some(offered.clone());
 
         if let Some(pinned) = self.pinned.as_deref() {
@@ -464,11 +460,11 @@ async fn authenticate(
         SshAuth::Password => {
             let secret = read_secret(&keyring_account_password(source_id))
                 .ok_or_else(|| Error::Ssh("password not found in keychain".to_owned()))?;
-            let ok = handle
+            let result = handle
                 .authenticate_password(cfg.user.clone(), secret)
                 .await
                 .map_err(|e| Error::Ssh(format!("authenticate_password: {e}")))?;
-            if !ok {
+            if !result.success() {
                 return Err(Error::Ssh("password authentication rejected".to_owned()));
             }
         }
@@ -486,11 +482,12 @@ async fn authenticate(
                 None
             };
             let key = load_secret_key(path, passphrase.as_deref())?;
-            let ok = handle
-                .authenticate_publickey(cfg.user.clone(), Arc::new(key))
+            let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+            let result = handle
+                .authenticate_publickey(cfg.user.clone(), key)
                 .await
                 .map_err(|e| Error::Ssh(format!("authenticate_publickey: {e}")))?;
-            if !ok {
+            if !result.success() {
                 return Err(Error::Ssh("public-key authentication rejected".to_owned()));
             }
         }
@@ -531,15 +528,13 @@ async fn authenticate_default_keys(handle: &mut Handle<HostKeyVerifier>, user: &
             }
         };
         tried_any = true;
-        match handle
-            .authenticate_publickey(user.to_owned(), Arc::new(key))
-            .await
-        {
-            Ok(true) => {
+        let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+        match handle.authenticate_publickey(user.to_owned(), key).await {
+            Ok(r) if r.success() => {
                 tracing::debug!(path = %path.display(), "default-keys: authenticated");
                 return Ok(());
             }
-            Ok(false) => {
+            Ok(_) => {
                 tracing::debug!(path = %path.display(), "default-keys: rejected");
                 continue;
             }
@@ -579,17 +574,19 @@ async fn authenticate_agent(handle: &mut Handle<HostKeyVerifier>, user: &str) ->
         return Err(Error::Ssh("ssh-agent has no identities".to_owned()));
     }
     for id in identities {
-        let id_label = id.public_key_base64();
-        let (a, result) = handle.authenticate_future(user.to_owned(), id, agent).await;
-        agent = a;
+        let pk = id.public_key().into_owned();
+        let id_label = pk.fingerprint(ssh_key::HashAlg::Sha256).to_string();
+        let result = handle
+            .authenticate_publickey_with(user.to_owned(), pk, None, &mut agent)
+            .await;
         match result {
-            Ok(true) => return Ok(()),
-            Ok(false) => {
+            Ok(r) if r.success() => return Ok(()),
+            Ok(_) => {
                 tracing::debug!(key = %id_label, "ssh-agent: identity rejected");
                 continue;
             }
             Err(e) => {
-                tracing::debug!(key = %id_label, error = %e, "ssh-agent: identity errored");
+                tracing::debug!(key = %id_label, error = ?e, "ssh-agent: identity errored");
                 continue;
             }
         }
@@ -608,7 +605,7 @@ async fn authenticate_agent(_handle: &mut Handle<HostKeyVerifier>, _user: &str) 
     ))
 }
 
-fn load_secret_key(path: &Path, passphrase: Option<&str>) -> Result<KeyPair> {
+fn load_secret_key(path: &Path, passphrase: Option<&str>) -> Result<PrivateKey> {
     keys::load_secret_key(path, passphrase)
         .map_err(|e| Error::Ssh(format!("load private key {}: {e}", path.display())))
 }

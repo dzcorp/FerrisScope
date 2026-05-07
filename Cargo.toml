@@ -72,8 +72,7 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 # we want to own connection lifecycle and tunnel teardown rather than parsing
 # OpenSSH stderr. `keyring` stores user-supplied secrets (passwords, key
 # passphrases) in the OS keychain — never on disk in sources.json.
-russh = "0.46"
-russh-keys = "0.46"
+russh = "0.60"
 keyring = { version = "3", features = ["apple-native", "linux-native", "windows-native"] }
 hex = "0.4"
 sha2 = "0.11"
