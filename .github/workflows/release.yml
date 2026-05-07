@@ -215,7 +215,21 @@ jobs:
             echo "doesn't match the lowercase 'ferrisscope' that PKGBUILD expects."
             exit 1
           fi
-          echo "OK: usr/bin/ferrisscope present in $deb"
+          # The .desktop launcher and at least one icon are what give AUR /
+          # apt / rpm users a working start-menu entry. If Tauri's bundler
+          # ever stops emitting them, fail loudly here rather than shipping
+          # a CLI-only package.
+          if ! grep -qE '^(\./)?usr/share/applications/.*\.desktop$' deb-contents.txt; then
+            echo "::error::deb is missing usr/share/applications/*.desktop"
+            echo "Without this, AUR / apt installs have no start-menu entry."
+            exit 1
+          fi
+          if ! grep -qE '^(\./)?usr/share/icons/hicolor/.*/apps/ferrisscope\.png$' deb-contents.txt; then
+            echo "::error::deb is missing usr/share/icons/hicolor/.../apps/ferrisscope.png"
+            echo "Likely cause: tauri.conf.json bundle.icon list is empty or wrong."
+            exit 1
+          fi
+          echo "OK: binary, .desktop launcher, and icon present in $deb"
 
       - name: Stage macOS bundles
         if: runner.os == 'macOS'
