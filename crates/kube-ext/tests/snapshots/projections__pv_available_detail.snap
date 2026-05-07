@@ -1,5 +1,6 @@
 ---
 source: crates/kube-ext/tests/projections.rs
+assertion_line: 39
 expression: value
 ---
 {
@@ -14,6 +15,7 @@ expression: value
     "created_at": "2026-01-15T00:00:00Z",
     "generation": null,
     "labels": [],
+    "managers": [],
     "name": "pv-disk-1",
     "namespace": null,
     "uid": "pv-uid"

@@ -1,5 +1,6 @@
 ---
 source: crates/kube-ext/tests/projections.rs
+assertion_line: 39
 expression: value
 ---
 {
@@ -21,6 +22,7 @@ expression: value
     "created_at": "2026-01-01T00:00:00Z",
     "generation": null,
     "labels": [],
+    "managers": [],
     "name": "nightly-backup",
     "namespace": "ops",
     "uid": "cj-uid"
@@ -32,12 +34,12 @@ expression: value
         "args": null,
         "command": null,
         "env": [],
-        "env_from_count": 0,
+        "env_from": [],
         "image": "backup:1.0",
         "image_pull_policy": null,
         "kind": "main",
         "limits": null,
-        "mounts_count": 0,
+        "mounts": [],
         "name": "backup",
         "ports": [],
         "requests": null

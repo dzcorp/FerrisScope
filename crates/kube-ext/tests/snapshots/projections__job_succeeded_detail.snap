@@ -1,5 +1,6 @@
 ---
 source: crates/kube-ext/tests/projections.rs
+assertion_line: 39
 expression: value
 ---
 {
@@ -24,6 +25,7 @@ expression: value
     "created_at": "2026-04-15T09:00:00Z",
     "generation": null,
     "labels": [],
+    "managers": [],
     "name": "migrate-1",
     "namespace": "default",
     "uid": "job-uid"
@@ -37,12 +39,12 @@ expression: value
         "args": null,
         "command": null,
         "env": [],
-        "env_from_count": 0,
+        "env_from": [],
         "image": "migrator:1.2",
         "image_pull_policy": null,
         "kind": "main",
         "limits": null,
-        "mounts_count": 0,
+        "mounts": [],
         "name": "main",
         "ports": [],
         "requests": null

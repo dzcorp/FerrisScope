@@ -1,5 +1,6 @@
 ---
 source: crates/kube-ext/tests/projections.rs
+assertion_line: 39
 expression: value
 ---
 {
@@ -31,6 +32,7 @@ expression: value
     "created_at": "2026-01-01T00:00:00Z",
     "generation": null,
     "labels": [],
+    "managers": [],
     "name": "team-a-quota",
     "namespace": "team-a",
     "uid": "rq-uid"

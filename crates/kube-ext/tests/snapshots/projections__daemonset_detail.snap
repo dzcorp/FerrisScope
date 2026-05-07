@@ -1,5 +1,6 @@
 ---
 source: crates/kube-ext/tests/projections.rs
+assertion_line: 39
 expression: value
 ---
 {
@@ -11,6 +12,7 @@ expression: value
     "created_at": "2026-01-10T00:00:00Z",
     "generation": 1,
     "labels": [],
+    "managers": [],
     "name": "node-exporter",
     "namespace": "monitoring",
     "uid": "ds-uid"
@@ -24,12 +26,12 @@ expression: value
         "args": null,
         "command": null,
         "env": [],
-        "env_from_count": 0,
+        "env_from": [],
         "image": "prom/node-exporter:v1.8.2",
         "image_pull_policy": null,
         "kind": "main",
         "limits": null,
-        "mounts_count": 0,
+        "mounts": [],
         "name": "main",
         "ports": [],
         "requests": null

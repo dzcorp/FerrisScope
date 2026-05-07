@@ -1,5 +1,6 @@
 ---
 source: crates/kube-ext/tests/projections.rs
+assertion_line: 39
 expression: value
 ---
 {
@@ -13,6 +14,7 @@ expression: value
     "created_at": "2026-02-10T08:30:00Z",
     "generation": null,
     "labels": [],
+    "managers": [],
     "name": "web-7d9f",
     "namespace": "default",
     "uid": "rs-uid"
@@ -26,12 +28,12 @@ expression: value
         "args": null,
         "command": null,
         "env": [],
-        "env_from_count": 0,
+        "env_from": [],
         "image": "ghcr.io/example/web:v2",
         "image_pull_policy": null,
         "kind": "main",
         "limits": null,
-        "mounts_count": 0,
+        "mounts": [],
         "name": "web",
         "ports": [],
         "requests": null

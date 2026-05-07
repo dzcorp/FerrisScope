@@ -1,5 +1,6 @@
 ---
 source: crates/kube-ext/tests/projections.rs
+assertion_line: 39
 expression: value
 ---
 {
@@ -35,6 +36,7 @@ expression: value
         "web"
       ]
     ],
+    "managers": [],
     "name": "app-config",
     "namespace": "default",
     "uid": "cm-uid"

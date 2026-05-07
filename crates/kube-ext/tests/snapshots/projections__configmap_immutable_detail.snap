@@ -1,5 +1,6 @@
 ---
 source: crates/kube-ext/tests/projections.rs
+assertion_line: 39
 expression: value
 ---
 {
@@ -18,6 +19,7 @@ expression: value
     "created_at": "2026-03-01T12:00:00Z",
     "generation": null,
     "labels": [],
+    "managers": [],
     "name": "frozen",
     "namespace": "default",
     "uid": "cm-frozen-uid"

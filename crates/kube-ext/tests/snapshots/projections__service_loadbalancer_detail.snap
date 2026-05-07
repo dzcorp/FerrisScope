@@ -1,5 +1,6 @@
 ---
 source: crates/kube-ext/tests/projections.rs
+assertion_line: 39
 expression: value
 ---
 {
@@ -28,6 +29,7 @@ expression: value
     "created_at": "2026-04-01T09:00:00Z",
     "generation": null,
     "labels": [],
+    "managers": [],
     "name": "ingress-public",
     "namespace": "ingress-nginx",
     "uid": "svc-lb-uid"
