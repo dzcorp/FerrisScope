@@ -3,7 +3,7 @@ import { api } from "../api";
 import { useAppStore } from "../store";
 import type { Category, PrefsRailMode, ResourceKind } from "../types";
 import { tokens, FONT_MONO, type ThemeMode, type Tokens } from "../theme";
-import { Icons, KindIcons, Tooltip, type IconKey } from "./ui";
+import { Icons, Tooltip, resolveKindIcon } from "./ui";
 
 const CATEGORY_ORDER: Category[] = [
   "Workloads",
@@ -15,19 +15,6 @@ const CATEGORY_ORDER: Category[] = [
   "Apps",
   "CustomResources",
 ];
-
-const CATEGORY_ICON: Record<Category, IconKey> = {
-  Workloads: "pod",
-  Cluster: "cluster",
-  Network: "network",
-  Config: "cm",
-  Storage: "storage",
-  Access: "access",
-  Apps: "apps",
-  // No bespoke icon yet — reuse the cluster glyph; the kind icon (the CRD
-  // glyph itself) is what the operator actually clicks on.
-  CustomResources: "cluster",
-};
 
 const W_COLLAPSED = 56;
 const W_OPEN = 220;
@@ -687,7 +674,7 @@ function RailItem({
   onClick: () => void;
 }) {
   const [hover, setHover] = useState(false);
-  const icon = KindIcons[kind.kind] ?? Icons[CATEGORY_ICON[category]];
+  const icon = resolveKindIcon(kind.kind, kind.group, category);
   const btn = (
     <button
       type="button"

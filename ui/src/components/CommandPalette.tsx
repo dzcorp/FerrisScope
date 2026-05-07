@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useAppStore } from "../store";
 import { tokens, FONT_MONO, type ThemeMode } from "../theme";
-import { Icons, KindIcons, Kbd } from "./ui";
+import { Icons, Kbd, resolveKindIcon } from "./ui";
 import { MOD_KEY } from "../lib/keyboard";
 import { api } from "../api";
 import type { SearchHit } from "../types";
@@ -124,7 +124,7 @@ export function CommandPalette({ mode, onClose }: Props) {
                 color: t.textMuted,
               }}
             >
-              {KindIcons[k.kind] ?? Icons.pod}
+              {resolveKindIcon(k.kind, k.group, k.category)}
             </span>
           ),
           label: k.kind,
@@ -256,7 +256,9 @@ export function CommandPalette({ mode, onClose }: Props) {
               color: t.textMuted,
             }}
           >
-            {KindIcons[kindLabel] ?? Icons.pod}
+            {kind
+              ? resolveKindIcon(kind.kind, kind.group, kind.category)
+              : Icons.pod}
           </span>
         ),
         label: h.name,

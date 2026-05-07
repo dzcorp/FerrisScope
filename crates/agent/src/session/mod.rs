@@ -211,6 +211,7 @@ pub(crate) fn apply_compaction(events: Vec<SessionEvent>) -> Vec<SessionEvent> {
             // Marker so other code can recognise checkpoint messages.
             // Provider impls don't read it; the agent loop uses it.
             name: Some("context_checkpoint".to_string()),
+            reasoning_content: None,
         },
         ts,
     });

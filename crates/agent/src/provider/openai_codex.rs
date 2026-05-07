@@ -361,6 +361,9 @@ impl ChatProvider for OpenAICodexProvider {
             finish_reason,
             tool_calls,
             usage,
+            // Codex Responses uses encrypted reasoning items, not the
+            // OpenAI-compat round-trip slot — nothing to echo back.
+            reasoning_content: None,
         })
     }
 }
@@ -378,6 +381,13 @@ impl OpenAICodexProvider {
 }
 
 fn build_request_body(req: &CompletionRequest, instructions: &str, input: &[Value]) -> Value {
+    // Per-model capability gates from models.dev. gpt-5.x codex models
+    // reject `temperature` (Responses returns 400 "Unsupported
+    // parameter") so we drop it when the catalogue says so.
+    let caps =
+        crate::provider::catalogue::capabilities(crate::config::ProviderKind::OpenAI, &req.model);
+    let supports_temperature = caps.as_ref().is_none_or(|c| c.temperature);
+
     let mut body = json!({
         "model": req.model,
         "input": input,
@@ -390,8 +400,10 @@ fn build_request_body(req: &CompletionRequest, instructions: &str, input: &[Valu
     if !instructions.is_empty() {
         body["instructions"] = json!(instructions);
     }
-    if let Some(t) = req.temperature {
-        body["temperature"] = json!(t);
+    if supports_temperature {
+        if let Some(t) = req.temperature {
+            body["temperature"] = json!(t);
+        }
     }
     if let Some(m) = req.max_tokens {
         body["max_output_tokens"] = json!(m);
@@ -413,6 +425,14 @@ fn build_request_body(req: &CompletionRequest, instructions: &str, input: &[Valu
     // "high" }`, `text: { verbosity: "low" }`, `service_tier: "priority"`.
     if let Some(opts) = &req.provider_options {
         merge_top_level(&mut body, opts);
+    }
+    // Capability gate after merge (operator overrides flow through the
+    // same scrub). Strip temperature again in case the operator set it
+    // and the model rejects it — better to silently drop than 400.
+    if !supports_temperature {
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("temperature");
+        }
     }
     body
 }

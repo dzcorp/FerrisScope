@@ -559,6 +559,20 @@ pub async fn query_instant(
 /// Run a `PromQL` range query. `start` / `end` are RFC 3339 or unix seconds;
 /// `step` is a Prometheus duration (e.g. `15s`, `1m`). The frontend supplies
 /// already-formatted strings — we don't second-guess what units it picked.
+///
+/// VictoriaMetrics gets two extra knobs to make it behave like Prom:
+/// - `nocache=1` disables result caching *and* the start/end alignment to
+///   step boundaries that vmselect does for cache-key reasons (issue #171).
+///   Without it, switching presets returns shifted/wider windows than asked.
+/// - `latency_offset=1ms` overrides the default 30s `-search.latencyOffset`
+///   so the rightmost sample is essentially "now" rather than "now − 30s".
+///   We pass `1ms` (not `0s`) because vmselect rejects 0 with HTTP 422 —
+///   the allowed range is `[1ms ... 31536000000000ms]` and 1ms is the
+///   smallest practical "no offset".
+///
+/// Both params are silently ignored by other backends, but we only attach
+/// them to VM to keep the wire shape minimal and to avoid surprising
+/// upstreams that might tighten their query parsing later.
 pub async fn query_range(
     client: Client,
     target: &PromTarget,
@@ -567,13 +581,16 @@ pub async fn query_range(
     end: &str,
     step: &str,
 ) -> Result<Value, PromError> {
-    let qs = format!(
+    let mut qs = format!(
         "query={q}&start={s}&end={e}&step={step}",
         q = urlencode(query),
         s = urlencode(start),
         e = urlencode(end),
         step = urlencode(step),
     );
+    if matches!(target.backend, PromBackend::VictoriaMetrics) {
+        qs.push_str("&nocache=1&latency_offset=1ms");
+    }
     proxy_get(client, target, "/api/v1/query_range", &qs).await
 }
 

@@ -103,6 +103,14 @@ pub struct CompletionFinal {
     pub finish_reason: FinishReason,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
+    /// Concatenated "thinking" text streamed alongside `content` for
+    /// interleaved-thinking models (DeepSeek, Big Pickle, GLM-4.x,
+    /// Kimi K2.5, …). The agent loop persists it on the assistant
+    /// message so the next request can pass it back — DeepSeek's API
+    /// 400s without it. `None` for providers that don't stream
+    /// reasoning at all (Anthropic uses a separate Messages-API
+    /// content block; Codex Responses uses encrypted reasoning items).
+    pub reasoning_content: Option<String>,
 }
 
 /// Sink the provider invokes for each streaming event. Boxed-trait-object

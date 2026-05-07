@@ -30,6 +30,16 @@ pub struct ChatMessage {
     /// historic shape) require this on tool-result messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Reasoning text emitted alongside the assistant's normal `content`
+    /// for "interleaved-thinking" OpenAI-compatible models (DeepSeek
+    /// reasoner, Big Pickle, GLM-4.7, Kimi K2.5, …). Captured from
+    /// streaming deltas and re-sent verbatim on the next request as a
+    /// top-level message field — DeepSeek's API errors with
+    /// "reasoning_content in the thinking mode must be passed back" if
+    /// it isn't. Only ever populated on assistant messages; persisted in
+    /// session JSONLs so reload restores correct round-trip behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

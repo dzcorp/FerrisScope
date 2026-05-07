@@ -67,6 +67,14 @@ type PromState = {
   samples: ChartSample[];
   loading: boolean;
   error: string | null;
+  // The window (in ms) the *frontend* asked for, independent of which
+  // timestamps the backend actually returned. VictoriaMetrics in
+  // particular drops NaN slots and may step-align the response, so the
+  // sample-derived span is narrower than the user's selection. The chart
+  // pins its x-axis to this so the picker label and the visible window
+  // stay in sync.
+  windowStartMs: number;
+  windowEndMs: number;
 };
 
 // Grafana-style range presets. `windowMin` is the lookback window;
@@ -203,6 +211,12 @@ function usePromRange(
   const [samples, setSamples] = useState<ChartSample[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [window, setWindow] = useState<{ startMs: number; endMs: number }>(
+    () => {
+      const endMs = Date.now();
+      return { startMs: endMs - windowMin * 60_000, endMs };
+    },
+  );
 
   useEffect(() => {
     if (!query) {
@@ -217,6 +231,10 @@ function usePromRange(
       setError(null);
       const end = Math.floor(Date.now() / 1000);
       const start = end - windowMin * 60;
+      // Capture the requested window before the await so the chart's
+      // x-axis matches what we asked for, regardless of how the backend
+      // (notably VM) trims/aligns the response.
+      setWindow({ startMs: start * 1000, endMs: end * 1000 });
       try {
         const data = (await api.prometheusQueryRange(
           clusterId,
@@ -254,7 +272,13 @@ function usePromRange(
     };
   }, [clusterId, query, windowMin, stepSec]);
 
-  return { samples, loading, error };
+  return {
+    samples,
+    loading,
+    error,
+    windowStartMs: window.startMs,
+    windowEndMs: window.endMs,
+  };
 }
 
 // One Prom result series tagged with its identifying label value (e.g.
@@ -265,6 +289,8 @@ type PromMultiState = {
   series: { samples: ChartSample[]; label: string }[];
   loading: boolean;
   error: string | null;
+  windowStartMs: number;
+  windowEndMs: number;
 };
 
 // Like `usePromRange` but keeps every result series and labels each by
@@ -282,6 +308,12 @@ function usePromRangeMulti(
   const [series, setSeries] = useState<PromMultiState["series"]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [window, setWindow] = useState<{ startMs: number; endMs: number }>(
+    () => {
+      const endMs = Date.now();
+      return { startMs: endMs - windowMin * 60_000, endMs };
+    },
+  );
 
   useEffect(() => {
     if (!query) {
@@ -296,6 +328,7 @@ function usePromRangeMulti(
       setError(null);
       const end = Math.floor(Date.now() / 1000);
       const start = end - windowMin * 60;
+      setWindow({ startMs: start * 1000, endMs: end * 1000 });
       try {
         const data = (await api.prometheusQueryRange(
           clusterId,
@@ -336,7 +369,13 @@ function usePromRangeMulti(
     };
   }, [clusterId, query, windowMin, stepSec, labelKey]);
 
-  return { series, loading, error };
+  return {
+    series,
+    loading,
+    error,
+    windowStartMs: window.startMs,
+    windowEndMs: window.endMs,
+  };
 }
 
 // Distinct, mode-aware palette for multi-series charts where colour is
@@ -1547,6 +1586,8 @@ function PromChart({
       t={t}
       series={[{ samples: state.samples, stroke, label: "" }]}
       unit={unit}
+      windowStartMs={state.windowStartMs}
+      windowEndMs={state.windowEndMs}
     />
   );
 }
@@ -1595,6 +1636,9 @@ function PromMultiChart({
       </Mute>
     );
   }
+  // All states share the same range/step (they're driven by the same
+  // RangePicker), so any state's window is fine. Pick the first.
+  const first = states[0]?.state;
   return (
     <Chart
       t={t}
@@ -1604,6 +1648,8 @@ function PromMultiChart({
         stroke: s.stroke,
         label: s.label,
       }))}
+      windowStartMs={first?.windowStartMs}
+      windowEndMs={first?.windowEndMs}
     />
   );
 }
@@ -1734,7 +1780,13 @@ function MultiSeriesSection({
           </span>
         </Mute>
       ) : (
-        <Chart t={t} series={chartSeries} unit={unit} />
+        <Chart
+          t={t}
+          series={chartSeries}
+          unit={unit}
+          windowStartMs={state.windowStartMs}
+          windowEndMs={state.windowEndMs}
+        />
       )}
     </>
   );
@@ -1955,11 +2007,19 @@ function Chart({
   series,
   unit,
   height = 130,
+  windowStartMs,
+  windowEndMs,
 }: {
   t: Tokens;
   series: ChartSeries[];
   unit: string;
   height?: number;
+  // Frontend-asked window in ms. Pinning the x-axis here (rather than
+  // letting it auto-fit to sample timestamps) keeps the visible span
+  // matching the picker label even when the backend trims the response —
+  // VM strips NaN slots and may align start/end to step boundaries.
+  windowStartMs?: number;
+  windowEndMs?: number;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(560);
@@ -2014,11 +2074,21 @@ function Chart({
   }
   const valSpan = vMax - vMin;
 
-  const tFirst = ref.samples[0]!.t;
-  const tLast = ref.samples[ref.samples.length - 1]!.t;
+  // Prefer the explicit window when both ends are provided; otherwise fall
+  // back to the sample-derived span (legacy callers, defensive default).
+  const haveWindow =
+    typeof windowStartMs === "number" &&
+    typeof windowEndMs === "number" &&
+    windowEndMs > windowStartMs;
+  const tFirst = haveWindow ? windowStartMs! : ref.samples[0]!.t;
+  const tLast = haveWindow
+    ? windowEndMs!
+    : ref.samples[ref.samples.length - 1]!.t;
   const tSpan = Math.max(1, tLast - tFirst);
 
-  const xOf = (s: ChartSample) =>
+  // `xOf` only needs the timestamp, so accept the narrower shape used by
+  // synthetic window-anchored ticks ({ t } without `v`).
+  const xOf = (s: { t: number }) =>
     PAD_L + ((s.t - tFirst) / tSpan) * innerW;
   const yOf = (s: ChartSample) =>
     PAD_T + ((vMax - s.v) / valSpan) * innerH;
@@ -2033,11 +2103,16 @@ function Chart({
   });
 
   const yTicks = [vMax, (vMax + vMin) / 2, vMin];
-  const xTicks: ChartSample[] = [
-    ref.samples[0]!,
-    ref.samples[Math.floor((ref.samples.length - 1) / 2)]!,
-    ref.samples[ref.samples.length - 1]!,
-  ];
+  // When we have an explicit window, ticks anchor to the window edges
+  // (start / midpoint / now) — that way the labels match the picker even
+  // if VM trimmed the response. Otherwise pin to actual samples (legacy).
+  const xTicks: { t: number }[] = haveWindow
+    ? [{ t: tFirst }, { t: (tFirst + tLast) / 2 }, { t: tLast }]
+    : [
+        ref.samples[0]!,
+        ref.samples[Math.floor((ref.samples.length - 1) / 2)]!,
+        ref.samples[ref.samples.length - 1]!,
+      ];
 
   const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -2046,14 +2121,22 @@ function Chart({
       setHover(null);
       return;
     }
+    // Map mouse x → time on the (possibly window-wider) axis, then snap
+    // to the nearest actual sample by time. With a sample-derived axis
+    // this collapses to the old "round to nearest index" behaviour; with
+    // a window-derived axis it correctly handles sparse VM responses
+    // where samples don't cover the full chart width.
     const ratio = (cx - PAD_L) / innerW;
-    const idx = Math.max(
-      0,
-      Math.min(
-        ref.samples.length - 1,
-        Math.round(ratio * (ref.samples.length - 1)),
-      ),
-    );
+    const targetT = tFirst + ratio * tSpan;
+    let idx = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < ref.samples.length; i++) {
+      const d = Math.abs(ref.samples[i]!.t - targetT);
+      if (d < bestDist) {
+        bestDist = d;
+        idx = i;
+      }
+    }
     setHover({ idx });
   };
 

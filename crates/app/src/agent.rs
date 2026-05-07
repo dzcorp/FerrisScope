@@ -509,11 +509,12 @@ pub(crate) enum ChatEvent {
     /// sending another message.
     Error { message: String },
     /// Auto-generated session title landed. Fired once per chat after the
-    /// first successful turn, when the backend's `maybe_spawn_auto_title`
-    /// background task succeeds. The new title has already been
-    /// journaled via `SessionUpdate { title }` at the time this event is
-    /// emitted — the UI just mirrors it onto its `meta.title` so the
-    /// header chip updates without a session reload.
+    /// dedicated title-gen request (spawned the moment the operator's
+    /// first message lands, in parallel with the assistant turn)
+    /// succeeds. The new title has already been journaled via
+    /// `SessionUpdate { title }` at the time this event is emitted —
+    /// the UI just mirrors it onto its `meta.title` so the header chip
+    /// updates without a session reload.
     TitleUpdated { title: String },
 }
 
@@ -613,12 +614,13 @@ struct ChatRuntime {
     /// is intentionally NOT persisted to JSONL — re-opening a chat resets
     /// the always-allow set so trust doesn't accidentally span sessions.
     approved_always: HashSet<String>,
-    /// `true` once `maybe_spawn_auto_title` has fired for this chat —
-    /// either a title-gen task is in-flight or already completed.
-    /// Prevents double-renaming when subsequent turns would otherwise
-    /// re-trigger the heuristic. Reset on chat re-open (re-opening a
-    /// session that's already been auto-titled won't fire again because
-    /// the persisted `meta.title` will no longer match the placeholder).
+    /// `true` once the auto-title task has been spawned for this chat
+    /// — either it's in-flight or already completed. Claimed under the
+    /// runtime lock in `chat_send_message` so concurrent sends can't
+    /// both fire the task. Reset on chat re-open; re-opening a session
+    /// that already has a custom title won't double-rename because
+    /// `run_auto_title_task` bails on load when the persisted title
+    /// is no longer the default.
     auto_title_done: bool,
 }
 
@@ -1081,6 +1083,18 @@ pub(crate) async fn ai_list_models(
     if public_fallback_active && ferrisscope_agent::provider::catalogue::has_data_for(kind) {
         models.retain(|m| ferrisscope_agent::provider::catalogue::is_known_free(kind, &m.id));
     }
+    // Sort by opencode's priority list so the picker (and any caller
+    // that reads `[0]` as a default) sees the best candidate first —
+    // `big-pickle` on OpenCode Zen free tier, `gpt-5.x` on OpenAI,
+    // `claude-sonnet-4-x` on Anthropic, etc. Stable across runs; the
+    // catalogue cache is populated at startup.
+    {
+        let mut ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+        ferrisscope_agent::provider::catalogue::sort_for_default(&mut ids);
+        let order: std::collections::HashMap<String, usize> =
+            ids.into_iter().enumerate().map(|(i, s)| (s, i)).collect();
+        models.sort_by_key(|m| order.get(&m.id).copied().unwrap_or(usize::MAX));
+    }
     Ok(models)
 }
 
@@ -1091,10 +1105,54 @@ pub(crate) async fn chat_create_session(
     state: State<'_, AgentState>,
 ) -> Result<SessionMeta, String> {
     let store = state.store().await?;
-    let p = load_persisted().await;
-    let model_id = model
+    let mut p = load_persisted().await;
+    // Resolution order:
+    //  1. caller-supplied `model` (used by chat_open's pickModel()
+    //     fast path and the provider-switch flow).
+    //  2. `settings.default_model` from the operator.
+    //  3. First entry of the active provider's catalogue, sorted by
+    //     opencode's priority list — falls through to whatever the
+    //     provider returns when the priority list misses entirely.
+    // Whatever lands in the meta also gets written back to settings as
+    // `default_model` if the operator hadn't picked one yet, so the
+    // Settings → AI panel reflects the same choice instead of
+    // perpetually showing "—" until they manually pick.
+    let mut model_id = model
         .or_else(|| p.settings.default_model.clone())
         .unwrap_or_default();
+    let mut should_persist_default = false;
+    if model_id.is_empty() {
+        let kind = p.settings.active_provider;
+        if let Some(cred) = effective_credential(kind).await {
+            let base_url = p
+                .settings
+                .providers
+                .get(&kind)
+                .and_then(|c| c.base_url.clone());
+            if let Ok(provider_impl) = build_provider(kind, &cred, base_url, None, None) {
+                if let Ok(mut list) = provider_impl.list_models().await {
+                    let public_fallback_active = matches!(cred, Credential::ApiKey { ref key } if Some(key.as_str()) == kind.public_fallback_key());
+                    if public_fallback_active
+                        && ferrisscope_agent::provider::catalogue::has_data_for(kind)
+                    {
+                        list.retain(|m| {
+                            ferrisscope_agent::provider::catalogue::is_known_free(kind, &m.id)
+                        });
+                    }
+                    let mut ids: Vec<String> = list.into_iter().map(|m| m.id).collect();
+                    ferrisscope_agent::provider::catalogue::sort_for_default(&mut ids);
+                    if let Some(first) = ids.into_iter().next() {
+                        model_id = first;
+                        should_persist_default = p.settings.default_model.is_none();
+                    }
+                }
+            }
+        }
+    }
+    if should_persist_default && !model_id.is_empty() {
+        p.settings.default_model = Some(model_id.clone());
+        let _ = save_persisted(&p).await;
+    }
     let now = chrono::Utc::now().timestamp_millis();
     let meta = SessionMeta {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1590,13 +1648,52 @@ pub(crate) async fn chat_send_message(
         tool_calls: vec![],
         tool_call_id: None,
         name: None,
+        reasoning_content: None,
     };
-    let (cluster_id, session_id, queue_only) = {
+    let (cluster_id, session_id, queue_only, title_snapshot) = {
         let mut rt = runtime.lock().await;
         rt.messages.push(user_message.clone());
         let queue_only = rt.cancel.is_some();
-        (rt.cluster_id.clone(), rt.session_id.clone(), queue_only)
+        // Capture a once-per-chat snapshot for auto-titling under the
+        // same lock so concurrent sends can't both fire the task.
+        // The actual provider call runs outside this critical section.
+        // `run_auto_title_task` separately bails if the persisted
+        // title is already custom (manual rename, or a previous
+        // successful auto-title on a now-reopened session).
+        let snap = if rt.auto_title_done {
+            None
+        } else {
+            snapshot_for_title(&rt.messages).map(|s| {
+                rt.auto_title_done = true;
+                (s, rt.model.clone())
+            })
+        };
+        (
+            rt.cluster_id.clone(),
+            rt.session_id.clone(),
+            queue_only,
+            snap,
+        )
     };
+    if let Some((snap, model)) = title_snapshot {
+        let provider_for_title = provider.clone();
+        let store_for_title = store.clone();
+        let runtime_for_title = runtime.clone();
+        let cluster_for_title = cluster_id.clone();
+        let session_for_title = session_id.clone();
+        tauri::async_runtime::spawn(async move {
+            run_auto_title_task(
+                provider_for_title,
+                store_for_title,
+                runtime_for_title,
+                cluster_for_title,
+                session_for_title,
+                snap,
+                model,
+            )
+            .await;
+        });
+    }
     let now = chrono::Utc::now().timestamp_millis();
     let _ = store
         .append(
@@ -2224,6 +2321,7 @@ async fn run_turn_loop(
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            reasoning_content: None,
         });
         full_messages.extend(messages_so_far);
         truncate_transcript(&mut full_messages, TRANSCRIPT_CHAR_BUDGET);
@@ -2258,50 +2356,17 @@ async fn run_turn_loop(
             // a concurrent `chat_send_message` either lands its message
             // before the check (we keep going) or after we clear cancel
             // (it spawns a fresh turn). No third option.
-            let (pending, title_snapshot) = {
+            let pending = {
                 let mut g = runtime.lock().await;
                 g.messages.push(assistant_msg);
-                // Capture a once-per-chat snapshot for auto-titling.
-                // We claim the slot under the same lock that pushed
-                // the assistant message so concurrent turns can't
-                // both fire the task. The actual provider call runs
-                // outside this critical section.
-                let snap = if g.auto_title_done {
-                    None
-                } else {
-                    snapshot_for_title(&g.messages).map(|s| {
-                        g.auto_title_done = true;
-                        (s, g.model.clone())
-                    })
-                };
-                let pending = if has_unanswered_user_message(&g.messages) {
+                if has_unanswered_user_message(&g.messages) {
                     round = 0;
                     true
                 } else {
                     g.cancel = None;
                     false
-                };
-                (pending, snap)
+                }
             };
-            if let Some((snap, model)) = title_snapshot {
-                let provider_for_title = provider.clone();
-                let store_for_title = store.clone();
-                let runtime_for_title = runtime.clone();
-                let cluster_for_title = cluster_id.clone();
-                let session_for_title = session_id.clone();
-                tauri::async_runtime::spawn(async move {
-                    run_auto_title_task(
-                        provider_for_title,
-                        store_for_title,
-                        runtime_for_title,
-                        cluster_for_title,
-                        session_for_title,
-                        snap,
-                        model,
-                    )
-                    .await;
-                });
-            }
             if pending {
                 continue;
             }
@@ -2351,6 +2416,7 @@ async fn run_turn_loop(
                 tool_calls: vec![],
                 tool_call_id: Some(tc.id.clone()),
                 name: Some(tc.name.clone()),
+                reasoning_content: None,
             })
             .collect();
         {
@@ -2492,7 +2558,11 @@ async fn run_provider_round(
 
     let result = provider.stream_completion(req, provider_sink).await;
 
-    let (finish_reason, tool_calls): (FinishReason, Vec<ToolCall>) = match result {
+    let (finish_reason, tool_calls, reasoning_content): (
+        FinishReason,
+        Vec<ToolCall>,
+        Option<String>,
+    ) = match result {
         Ok(final_) => {
             if let Some(usage) = &final_.usage {
                 send(ChatEvent::Usage {
@@ -2530,7 +2600,11 @@ async fn run_provider_round(
                     )
                     .await;
             }
-            (final_.finish_reason, final_.tool_calls)
+            (
+                final_.finish_reason,
+                final_.tool_calls,
+                final_.reasoning_content,
+            )
         }
         Err(ProviderError::Cancelled) => {
             runtime.lock().await.in_flight_message_id = None;
@@ -2562,6 +2636,7 @@ async fn run_provider_round(
         tool_calls: tool_calls.clone(),
         tool_call_id: None,
         name: None,
+        reasoning_content,
     };
     runtime.lock().await.in_flight_message_id = None;
     let now = chrono::Utc::now().timestamp_millis();
@@ -2832,14 +2907,14 @@ const TITLE_SNAPSHOT_CHAR_LIMIT: usize = 600;
 /// to ellipsize aggressively.
 const TITLE_MAX_CHARS: usize = 80;
 
-/// Prompt shape the auto-title task feeds to the provider. Snapshot
-/// captures only the first user → first assistant exchange — that's
-/// usually enough to characterize the chat's topic, and keeps the
+/// Prompt shape the auto-title task feeds to the provider. Captures
+/// only the first user message — title-gen fires the moment that
+/// message lands, before any assistant reply exists. User text alone
+/// is usually enough to characterize a chat's topic, and keeps the
 /// request token budget tiny so it works under the OpenCode Zen free
 /// tier without burning the operator's quota on real providers.
 struct TitleSnapshot {
     user_text: String,
-    assistant_text: String,
 }
 
 fn snapshot_for_title(messages: &[ChatMessage]) -> Option<TitleSnapshot> {
@@ -2848,22 +2923,11 @@ fn snapshot_for_title(messages: &[ChatMessage]) -> Option<TitleSnapshot> {
         .find(|m| matches!(m.role, MessageRole::User))?
         .content
         .clone();
-    // Pick the FIRST assistant message that actually carries text — skip
-    // any tool-call-only turns whose `content` is empty.
-    let assistant = messages
-        .iter()
-        .find(|m| matches!(m.role, MessageRole::Assistant) && !m.content.trim().is_empty())?
-        .content
-        .clone();
     let user_text = clip_for_title(&user);
-    let assistant_text = clip_for_title(&assistant);
-    if user_text.trim().is_empty() || assistant_text.trim().is_empty() {
+    if user_text.trim().is_empty() {
         return None;
     }
-    Some(TitleSnapshot {
-        user_text,
-        assistant_text,
-    })
+    Some(TitleSnapshot { user_text })
 }
 
 fn clip_for_title(s: &str) -> String {
@@ -2956,12 +3020,9 @@ fn build_title_request(snapshot: &TitleSnapshot, model: String) -> CompletionReq
     // stray quotes / trailing punctuation regardless.
     const SYSTEM_PROMPT: &str = "You generate short, descriptive chat titles. \
         Reply with ONLY a 3 to 5 word title that captures the main topic of the \
-        conversation below. No quotes, no surrounding punctuation, no labels — \
-        just the title itself.";
-    let user_content = format!(
-        "Conversation:\n\nUser: {}\n\nAssistant: {}",
-        snapshot.user_text, snapshot.assistant_text,
-    );
+        user's opening message below. No quotes, no surrounding punctuation, \
+        no labels — just the title itself.";
+    let user_content = format!("User message:\n\n{}", snapshot.user_text);
     CompletionRequest {
         model,
         messages: vec![
@@ -2971,6 +3032,7 @@ fn build_title_request(snapshot: &TitleSnapshot, model: String) -> CompletionReq
                 tool_calls: vec![],
                 tool_call_id: None,
                 name: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: MessageRole::User,
@@ -2978,14 +3040,21 @@ fn build_title_request(snapshot: &TitleSnapshot, model: String) -> CompletionReq
                 tool_calls: vec![],
                 tool_call_id: None,
                 name: None,
+                reasoning_content: None,
             },
         ],
         tools: vec![],
-        // Most providers cap titles tightly here. Some reasoning models
-        // ignore temperature; that's fine — the system prompt is rigid
-        // enough that the output stays on-task.
-        temperature: Some(0.4),
-        max_tokens: Some(60),
+        // Minimal request shape so title-gen works across every
+        // provider in the catalogue. Reasoning-class models on
+        // OpenAI's Codex Responses endpoint reject both
+        // `max_output_tokens` (our `max_tokens` translation) and
+        // custom `temperature`; OpenRouter / OpenAI-compat tolerate
+        // either being absent; Anthropic supplies its own default
+        // when `max_tokens` is unset. Output stays short via the
+        // rigid system prompt and is hard-capped by `sanitise_title`,
+        // so dropping these costs nothing.
+        temperature: None,
+        max_tokens: None,
         // Don't inherit the chat's reasoning budgets — title-gen
         // doesn't need extended thinking, and Anthropic in particular
         // adds latency for an enabled `thinking` block.
@@ -3193,6 +3262,7 @@ async fn repair_orphan_tool_calls(
                     tool_calls: vec![],
                     tool_call_id: Some(tc.id.clone()),
                     name: Some(tc.name.clone()),
+                    reasoning_content: None,
                 };
                 g.messages.insert(insert_at, msg.clone());
                 synthetic.push(msg);
@@ -3333,6 +3403,7 @@ async fn run_compaction_internal(
                 tool_calls: vec![],
                 tool_call_id: None,
                 name: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: MessageRole::User,
@@ -3340,6 +3411,7 @@ async fn run_compaction_internal(
                 tool_calls: vec![],
                 tool_call_id: None,
                 name: None,
+                reasoning_content: None,
             },
         ],
         tools: vec![],
@@ -3414,6 +3486,7 @@ async fn run_compaction_internal(
             tool_calls: vec![],
             tool_call_id: None,
             name: Some("context_checkpoint".to_string()),
+            reasoning_content: None,
         });
         g.messages.extend(tail);
         g.last_total_tokens = 0;

@@ -297,6 +297,10 @@ impl ChatProvider for AnthropicProvider {
             finish_reason,
             tool_calls,
             usage,
+            // Anthropic uses Messages-API thinking blocks, not the
+            // OpenAI-compat round-trip slot — no reasoning to echo back
+            // here.
+            reasoning_content: None,
         })
     }
 }

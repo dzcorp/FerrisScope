@@ -21,6 +21,7 @@ export {
   ContainerDots,
 } from "./atoms";
 export type { ContainerLite } from "./atoms";
-export { Icons, KindIcons } from "./icons";
+export { Icons, KindIcons, CrdIcons } from "./icons";
 export type { IconKey } from "./icons";
+export { resolveKindIcon } from "./iconResolve";
 export { BrandMark } from "./BrandMark";

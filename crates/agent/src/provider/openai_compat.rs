@@ -10,12 +10,13 @@ use super::{
     FinishReason, ModelInfo, ProviderError, Usage,
 };
 use crate::config::{Credential, ProviderKind};
+use crate::provider::catalogue;
 use crate::provider::meta::{self, ModelsEndpoint, ProviderMeta};
 use crate::types::{ChatMessage, MessageRole, ToolCall};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 /// Header style for the `Authorization` slot. Anthropic is the only one
@@ -129,19 +130,6 @@ impl OpenAICompatibleProvider {
 
 // ─── OpenAI-compatible request/response shapes (subset we need) ─────────────
 
-#[derive(Debug, Serialize)]
-struct OaMessage<'a> {
-    role: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Value>,
-}
-
 fn role_str(r: MessageRole) -> &'static str {
     match r {
         MessageRole::System => "system",
@@ -151,31 +139,49 @@ fn role_str(r: MessageRole) -> &'static str {
     }
 }
 
-fn message_to_oa(m: &ChatMessage) -> OaMessage<'_> {
-    let tool_calls = if m.tool_calls.is_empty() {
-        None
-    } else {
-        Some(json!(m
-            .tool_calls
-            .iter()
-            .map(|tc| json!({
-                "id": tc.id,
-                "type": "function",
-                "function": { "name": tc.name, "arguments": tc.arguments },
-            }))
-            .collect::<Vec<_>>()))
-    };
-    OaMessage {
-        role: role_str(m.role),
-        content: if m.content.is_empty() {
-            None
-        } else {
-            Some(m.content.as_str())
-        },
-        name: m.name.as_deref(),
-        tool_call_id: m.tool_call_id.as_deref(),
-        tool_calls,
+/// Convert a neutral `ChatMessage` to OpenAI's wire shape. `interleaved`
+/// names the per-model round-trip field (typically "reasoning_content")
+/// from models.dev — when set, every assistant message in the request
+/// body must carry it (empty string when the message has no captured
+/// reasoning) or DeepSeek-family backends 400.
+fn message_to_oa(m: &ChatMessage, interleaved: Option<&str>) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("role".to_string(), Value::String(role_str(m.role).into()));
+    if !m.content.is_empty() {
+        obj.insert("content".to_string(), Value::String(m.content.clone()));
     }
+    if let Some(name) = &m.name {
+        obj.insert("name".to_string(), Value::String(name.clone()));
+    }
+    if let Some(tcid) = &m.tool_call_id {
+        obj.insert("tool_call_id".to_string(), Value::String(tcid.clone()));
+    }
+    if !m.tool_calls.is_empty() {
+        obj.insert(
+            "tool_calls".to_string(),
+            json!(m
+                .tool_calls
+                .iter()
+                .map(|tc| json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": { "name": tc.name, "arguments": tc.arguments },
+                }))
+                .collect::<Vec<_>>()),
+        );
+    }
+    // Round-trip the assistant's reasoning text. Required for DeepSeek
+    // (and any opencode-zen route that proxies to it — `big-pickle` et
+    // al). Always set the field once interleaved is in play, even when
+    // empty: opencode's transform.ts does the same — DeepSeek expects
+    // every assistant message in the history to declare it.
+    if matches!(m.role, MessageRole::Assistant) {
+        if let Some(field) = interleaved {
+            let value = m.reasoning_content.clone().unwrap_or_default();
+            obj.insert(field.to_string(), Value::String(value));
+        }
+    }
+    Value::Object(obj)
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,6 +220,17 @@ struct OaDelta {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<OaToolCallDelta>>,
+    /// DeepSeek / Big Pickle / GLM-4.x stream "thinking" tokens here
+    /// alongside the user-visible `content`. We accumulate it so the
+    /// next request can pass it back as a top-level message field —
+    /// without that, DeepSeek 400s on the next turn.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    /// Other interleaved-thinking vendors stream the same payload under
+    /// `reasoning_details` instead. Captured the same way; round-trip
+    /// uses the field name from models.dev.
+    #[serde(default)]
+    reasoning_details: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,20 +324,35 @@ impl ChatProvider for OpenAICompatibleProvider {
         req: CompletionRequest,
         sink: EventSink,
     ) -> Result<CompletionFinal, ProviderError> {
-        let oa_messages: Vec<_> = req.messages.iter().map(message_to_oa).collect();
+        // Per-model capability gates from models.dev. Drives whether to
+        // emit `temperature` (some Codex-tier models 400 on it), whether
+        // to send tool schemas at all (`tool_call: false` models reject
+        // them), and the round-trip slot for interleaved reasoning.
+        let caps = catalogue::capabilities(self.kind, &req.model);
+        let interleaved = caps.as_ref().and_then(|c| c.interleaved_field.clone());
+        let supports_temperature = caps.as_ref().is_none_or(|c| c.temperature);
+        let supports_tools = caps.as_ref().is_none_or(|c| c.tool_call);
+
+        let oa_messages: Vec<Value> = req
+            .messages
+            .iter()
+            .map(|m| message_to_oa(m, interleaved.as_deref()))
+            .collect();
 
         let mut body = json!({
             "model": req.model,
             "messages": oa_messages,
             "stream": true,
         });
-        if let Some(t) = req.temperature {
-            body["temperature"] = json!(t);
+        if supports_temperature {
+            if let Some(t) = req.temperature {
+                body["temperature"] = json!(t);
+            }
         }
         if let Some(m) = req.max_tokens {
             body["max_tokens"] = json!(m);
         }
-        if !req.tools.is_empty() {
+        if supports_tools && !req.tools.is_empty() {
             body["tools"] = json!(req
                 .tools
                 .iter()
@@ -357,6 +389,22 @@ impl ChatProvider for OpenAICompatibleProvider {
             merge_top_level(&mut body, opts);
         }
 
+        // Capability gating after the merge. If models.dev marks the
+        // model as non-reasoning, scrub `reasoning_effort` / `reasoning`
+        // even when the caller (or operator) supplied them — non-
+        // reasoning OpenAI-compat models reject these fields with 400
+        // (deepseek-chat being the canonical example). Done here rather
+        // than upstream so operator overrides go through the same gate
+        // as our auto-derived defaults.
+        let supports_reasoning = caps.as_ref().is_none_or(|c| c.reasoning);
+        if !supports_reasoning {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("reasoning_effort");
+                obj.remove("reasoning");
+                obj.remove("thinking");
+            }
+        }
+
         let resp = self
             .client
             .post(self.url("/chat/completions"))
@@ -379,6 +427,7 @@ impl ChatProvider for OpenAICompatibleProvider {
         let mut accum: ToolCallAccum = ToolCallAccum::default();
         let mut finish_reason = FinishReason::Stop;
         let mut usage: Option<Usage> = None;
+        let mut reasoning_buf = String::new();
 
         while let Some(ev) = stream.next().await {
             let ev = ev.map_err(|e| ProviderError::Decode(e.to_string()))?;
@@ -398,6 +447,20 @@ impl ChatProvider for OpenAICompatibleProvider {
                 if let Some(text) = choice.delta.content {
                     if !text.is_empty() {
                         sink(CompletionEvent::TokenDelta(text));
+                    }
+                }
+                // Interleaved-thinking deltas. We don't surface them to
+                // the UI as tokens (operators see the model's prose, not
+                // its scratch pad) but we do accumulate so the next
+                // request can echo them back — DeepSeek 400s otherwise.
+                if let Some(text) = choice.delta.reasoning_content {
+                    if !text.is_empty() {
+                        reasoning_buf.push_str(&text);
+                    }
+                }
+                if let Some(text) = choice.delta.reasoning_details {
+                    if !text.is_empty() {
+                        reasoning_buf.push_str(&text);
                     }
                 }
                 if let Some(tcs) = choice.delta.tool_calls {
@@ -426,10 +489,25 @@ impl ChatProvider for OpenAICompatibleProvider {
         }
 
         let tool_calls = accum.finish(&sink);
+        // Only carry reasoning through to the assistant message when the
+        // model actually wants it on the round-trip. For non-interleaved
+        // models we'd just be padding the persisted transcript.
+        let reasoning_content = if interleaved.is_some() {
+            Some(reasoning_buf)
+        } else if reasoning_buf.is_empty() {
+            None
+        } else {
+            // Catalogue hadn't loaded yet but the wire says reasoning is
+            // in play — keep it; round-trip is harmless on backends that
+            // ignore the field, and the lookup will populate on next
+            // request once the catalogue refreshes.
+            Some(reasoning_buf)
+        };
         Ok(CompletionFinal {
             finish_reason,
             tool_calls,
             usage,
+            reasoning_content,
         })
     }
 }
@@ -507,5 +585,64 @@ impl ToolCallAccum {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ChatMessage;
+
+    #[test]
+    fn assistant_message_with_interleaved_field_carries_reasoning_content() {
+        let msg = ChatMessage {
+            role: MessageRole::Assistant,
+            content: "hi".into(),
+            reasoning_content: Some("step 1; step 2".into()),
+            ..Default::default()
+        };
+        let v = message_to_oa(&msg, Some("reasoning_content"));
+        assert_eq!(v["role"], "assistant");
+        assert_eq!(v["content"], "hi");
+        assert_eq!(v["reasoning_content"], "step 1; step 2");
+    }
+
+    #[test]
+    fn assistant_message_with_interleaved_emits_empty_string_when_missing() {
+        // DeepSeek expects every assistant message in the history to
+        // declare the field — even when the message had no reasoning
+        // (e.g. an old transcript persisted before we started capturing).
+        let msg = ChatMessage {
+            role: MessageRole::Assistant,
+            content: "hi".into(),
+            reasoning_content: None,
+            ..Default::default()
+        };
+        let v = message_to_oa(&msg, Some("reasoning_content"));
+        assert_eq!(v["reasoning_content"], "");
+    }
+
+    #[test]
+    fn user_message_never_carries_reasoning_content() {
+        let msg = ChatMessage {
+            role: MessageRole::User,
+            content: "hi".into(),
+            ..Default::default()
+        };
+        let v = message_to_oa(&msg, Some("reasoning_content"));
+        assert!(v.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn no_interleaved_field_omits_reasoning_content() {
+        let msg = ChatMessage {
+            role: MessageRole::Assistant,
+            content: "hi".into(),
+            reasoning_content: Some("noise".into()),
+            ..Default::default()
+        };
+        let v = message_to_oa(&msg, None);
+        assert!(v.get("reasoning_content").is_none());
+        assert!(v.get("reasoning_details").is_none());
     }
 }

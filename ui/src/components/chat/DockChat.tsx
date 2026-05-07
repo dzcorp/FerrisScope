@@ -16,7 +16,7 @@ import { Btn, Icons } from "../ui";
 import { ChatHeader } from "./ChatHeader";
 import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
-import { SessionsPopover } from "./SessionsPopover";
+import { SessionsPopover, type SessionLiveState } from "./SessionsPopover";
 import { ToolsPopover } from "./ToolsPopover";
 import { ModelPickerPopover } from "./ModelPickerPopover";
 import { ProviderPickerPopover } from "./ProviderPickerPopover";
@@ -53,6 +53,25 @@ type Status =
   | { kind: "ready" }
   | { kind: "error"; message: string };
 
+/// Per-session live runtime state. One entry per session opened in this
+/// tab; non-active entries keep streaming in the background, accumulating
+/// view / usage / streaming flags so the operator sees the result when
+/// they switch back. Backend chat is closed only on tab unmount or
+/// explicit session deletion — switching sessions inside the tab is
+/// purely a render-time key change.
+type OpenChat = {
+  chatId: string;
+  meta: SessionMeta;
+  view: ChatViewState;
+  streaming: boolean;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  } | null;
+  compacting: number | null;
+};
+
 // DockChat — top-level chat tab body. Owns the live Channel<ChatEvent>, the
 // current session metadata, and the in-flight streaming state. Composes
 // ChatHeader + MessageList + ChatInput so each is a small atom.
@@ -64,30 +83,35 @@ export function DockChat({ mode, tab, visible }: Props) {
   const contextLabel = tabState.contextLabel ?? clusterId;
 
   const [status, setStatus] = useState<Status>({ kind: "idle" });
-  const [meta, setMeta] = useState<SessionMeta | null>(null);
-  const [view, setView] = useState<ChatViewState>(() =>
-    chatStateFromMessages([]),
-  );
-  const [streaming, setStreaming] = useState(false);
-  const chatIdRef = useRef<string | null>(null);
-  const closeRef = useRef<(() => void) | null>(null);
-  // Backend events fire one-per-token during streaming. Coalesce them
+  // Per-session live state, keyed by sessionId. Background sessions
+  // remain in the map and keep streaming; the active session is just
+  // `openChats[activeSessionId]`. Cleared only on tab unmount or
+  // explicit session deletion.
+  const [openChats, setOpenChats] = useState<Record<string, OpenChat>>({});
+  // Imperative plumbing per session — kept out of state so we don't
+  // re-render the world when we mutate the rAF id or push to the queue.
+  // Backend events fire one-per-token during streaming; we coalesce
   // through requestAnimationFrame so we render at most once per paint
-  // (~60fps) instead of once per token (sometimes 100+/s for fast
-  // models). Without this, parseBlocks runs against the streaming
-  // bubble's growing text on every token = O(n²) cumulative parse
-  // work over a long response.
-  const pendingEventsRef = useRef<ChatEvent[]>([]);
-  const rafRef = useRef<number | null>(null);
+  // (~60fps) instead of once per token. Without this, parseBlocks runs
+  // against the streaming bubble's growing text on every token =
+  // O(n²) cumulative parse work over a long response.
+  const chatChannels = useRef<
+    Map<string, {
+      chatId: string;
+      close: () => void;
+      pendingEvents: ChatEvent[];
+      raf: number | null;
+    }>
+  >(new Map());
+  // Mirror of `openChats` kept as a ref so the unmount cleanup effect
+  // can read the latest map without re-running on every change.
+  const openChatsLatest = useRef<Record<string, OpenChat>>({});
+  useEffect(() => {
+    openChatsLatest.current = openChats;
+  }, [openChats]);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [sessionBusy, setSessionBusy] = useState(false);
-  const [sessionEpoch, setSessionEpoch] = useState(0);
-  const [usage, setUsage] = useState<{
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  } | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [toolsList, setToolsList] = useState<ChatTool[]>([]);
   const [toolsLoading, setToolsLoading] = useState(false);
@@ -102,14 +126,112 @@ export function DockChat({ mode, tab, visible }: Props) {
   // bound provider lives in `meta.provider_kind`. Refreshed whenever the
   // operator picks "Settings" from the popover so labels stay in sync.
   const [aiSettings, setAiSettings] = useState<AiSettingsWire | null>(null);
-  /// `null` outside compaction; set to the in-flight `tokens_before`
-  /// while a compaction call is running. Drives the small "summarising
-  /// older context…" pill in the chat header.
-  const [compacting, setCompacting] = useState<number | null>(null);
 
-  // One-time bring-up: reuse an existing sessionId on the tab state if
-  // present (the operator might re-open after a hide). Otherwise create a
-  // new session bound to this cluster.
+  // Active session derivations. Render reads from these; null when no
+  // session is open yet (initial bring-up, or every session deleted).
+  const activeSessionId = tabState.sessionId ?? null;
+  const active: OpenChat | null = activeSessionId
+    ? openChats[activeSessionId] ?? null
+    : null;
+
+  // Per-session live state for the SessionsPopover dots. Only includes
+  // sessions currently open in this tab — flat sessions (closed,
+  // disk-only) get no dot.
+  const liveStates = useMemo(() => {
+    const m: Record<string, SessionLiveState> = {};
+    for (const [sid, oc] of Object.entries(openChats)) {
+      m[sid] = {
+        streaming: oc.streaming,
+        pendingApprovals: oc.view.pendingApprovals.length,
+      };
+    }
+    return m;
+  }, [openChats]);
+  const meta = active?.meta ?? null;
+  const view = active?.view ?? chatStateFromMessages([]);
+  const streaming = active?.streaming ?? false;
+  const usage = active?.usage ?? null;
+  const compacting = active?.compacting ?? null;
+  const activeChatId = active?.chatId ?? null;
+
+  // Per-session event flusher. Bound to a sessionId so events for
+  // background sessions still drain into their own slot in the map
+  // instead of leaking onto the active session's view. Folds every
+  // queued event into one `setOpenChats` per frame so the transcript
+  // re-renders at most once per paint regardless of token rate.
+  const flushEventsForSession = (sessionId: string) => {
+    const refs = chatChannels.current.get(sessionId);
+    if (!refs) return;
+    refs.raf = null;
+    const queue = refs.pendingEvents;
+    if (queue.length === 0) return;
+    refs.pendingEvents = [];
+    setOpenChats((prev) => {
+      const cur = prev[sessionId];
+      if (!cur) return prev;
+      let nextView = cur.view;
+      let nextStreaming = cur.streaming;
+      let nextUsage = cur.usage;
+      let nextCompacting = cur.compacting;
+      let nextMeta = cur.meta;
+      for (const e of queue) {
+        nextView = applyChatEvent(nextView, e);
+        if (e.type === "assistant_start") nextStreaming = true;
+        else if (e.type === "assistant_end" || e.type === "error") {
+          nextStreaming = false;
+        } else if (e.type === "usage") {
+          nextUsage = {
+            promptTokens: e.prompt_tokens,
+            completionTokens: e.completion_tokens,
+            totalTokens: e.total_tokens,
+          };
+        } else if (e.type === "compaction_started") {
+          nextCompacting = e.tokens_before;
+        } else if (e.type === "compaction_completed") {
+          nextCompacting = null;
+          // Backend zeroes last_total_tokens on compaction; mirror it
+          // on the chip so the running count matches what the index
+          // will report on next reopen.
+          nextUsage = {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+          };
+        } else if (e.type === "title_updated") {
+          nextMeta = { ...nextMeta, title: e.title };
+        }
+      }
+      return {
+        ...prev,
+        [sessionId]: {
+          ...cur,
+          view: nextView,
+          streaming: nextStreaming,
+          usage: nextUsage,
+          compacting: nextCompacting,
+          meta: nextMeta,
+        },
+      };
+    });
+    // Mirror title_updated into the popover's session list so the row
+    // text refreshes even while the operator is on a different session.
+    for (const e of queue) {
+      if (e.type === "title_updated") {
+        const t = e.title;
+        setSessions((prev) =>
+          prev.map((s) => (s.id === sessionId ? { ...s, title: t } : s)),
+        );
+      }
+    }
+  };
+
+  // Bring-up: open whichever session the tab is pointed at, IF it's not
+  // already open. Re-runs when `tabState.sessionId` changes (operator
+  // switches session via the popover). Critically, the cleanup does NOT
+  // close the previous chat — non-active sessions stay alive in
+  // `chatChannels` and keep streaming events into their map slot. The
+  // tab-unmount effect below is the only place that actually tears
+  // chats down.
   useEffect(() => {
     if (!clusterId) {
       setStatus({
@@ -124,8 +246,8 @@ export function DockChat({ mode, tab, visible }: Props) {
       try {
         const settings = await api.aiGetSettings();
         if (!cancelled) setAiSettings(settings);
-        const active = settings.providers[settings.active_provider];
-        if (!active?.configured) {
+        const activeProvider = settings.providers[settings.active_provider];
+        if (!activeProvider?.configured) {
           if (!cancelled) {
             setStatus({
               kind: "needs_settings",
@@ -136,11 +258,11 @@ export function DockChat({ mode, tab, visible }: Props) {
           return;
         }
         let sessionId = tabState.sessionId ?? null;
-        // No persisted session on this tab — open the most recent one for
-        // this cluster instead of immediately minting a fresh chat. The
-        // operator picks "New chat" from the sessions popover when they
-        // actually want a clean slate; auto-creating on every open litters
-        // the disk with empty sessions.
+        // No persisted session on this tab — open the most recent one
+        // for this cluster instead of immediately minting a fresh chat.
+        // The operator picks "New chat" from the sessions popover when
+        // they actually want a clean slate; auto-creating on every
+        // open litters the disk with empty sessions.
         if (!sessionId) {
           try {
             const existing = await api.chatListSessions(clusterId);
@@ -149,40 +271,54 @@ export function DockChat({ mode, tab, visible }: Props) {
                 (a, b) => b.updated_at_unix_ms - a.updated_at_unix_ms,
               )[0]!;
               sessionId = latest.id;
-              patchTabState(tab.id, { sessionId });
+              if (!cancelled) patchTabState(tab.id, { sessionId });
             }
           } catch {
             /* listing failed — fall through to the create path */
           }
         }
-        // Resolve the default model up front — both the load-fallback and
-        // the fresh-create path want it, and the API call may be slow.
+        // Already open in this tab: just signal ready and reuse the
+        // existing entry. No backend chat_open, no view reset — the
+        // operator's previous turn (if any) has been streaming into
+        // the slot the whole time they were on a different session.
+        if (sessionId && chatChannels.current.has(sessionId)) {
+          if (!cancelled) {
+            const existing = openChatsLatest.current[sessionId];
+            if (existing) {
+              patchTabState(tab.id, { chatId: existing.chatId });
+            }
+            setStatus({ kind: "ready" });
+          }
+          return;
+        }
+        // Resolve the default model up front — both the load-fallback
+        // and the fresh-create path want it, and the API call may be slow.
         const pickModel = async (): Promise<string | null> => {
           let model: string | null = settings.default_model;
           if (!model) {
             try {
-              const models = await api.aiListModels();
-              model = models[0]?.id ?? null;
+              const list = await api.aiListModels();
+              model = list[0]?.id ?? null;
             } catch {
-              /* empty list / network — leave null and let backend default */
+              /* empty list / network — leave null, let backend default */
             }
           }
           return model;
         };
         let sessionMeta: SessionMeta;
+        let initialView: ChatViewState;
         if (sessionId) {
-          // Load can fail when the persisted id points at a session that's
-          // been deleted (another tab nuked it, the JSONL was hand-removed,
-          // or the index is stale). Don't surface that as a hard error —
-          // mint a fresh session and carry on so the operator can keep
-          // chatting instead of staring at "session not found".
+          // Load can fail when the persisted id points at a session
+          // that's been deleted (another tab nuked it, the JSONL was
+          // hand-removed, or the index is stale). Don't surface that
+          // as a hard error — mint a fresh session and carry on.
           try {
             const data = await api.chatLoadSession(sessionId);
             sessionMeta = data.meta;
             const msgs = data.events.flatMap((e): AgentChatMessage[] =>
               e.kind === "message" ? [e.message] : [],
             );
-            if (!cancelled) setView(chatStateFromMessages(msgs));
+            initialView = chatStateFromMessages(msgs);
           } catch (err) {
             console.warn("chatLoadSession failed; minting fresh", err);
             sessionMeta = await api.chatCreateSession(
@@ -190,137 +326,104 @@ export function DockChat({ mode, tab, visible }: Props) {
               await pickModel(),
             );
             sessionId = sessionMeta.id;
-            patchTabState(tab.id, { sessionId });
-            if (!cancelled) setView(chatStateFromMessages([]));
+            if (!cancelled) patchTabState(tab.id, { sessionId });
+            initialView = chatStateFromMessages([]);
           }
         } else {
-          // First time on this cluster — mint a session so the chat has
-          // somewhere to write. From here on out we'll resume it on reopen.
-          sessionMeta = await api.chatCreateSession(clusterId, await pickModel());
+          // First time on this cluster — mint a session so the chat
+          // has somewhere to write.
+          sessionMeta = await api.chatCreateSession(
+            clusterId,
+            await pickModel(),
+          );
           sessionId = sessionMeta.id;
-          patchTabState(tab.id, { sessionId });
+          if (!cancelled) patchTabState(tab.id, { sessionId });
+          initialView = chatStateFromMessages([]);
         }
-        const flushEvents = () => {
-          rafRef.current = null;
-          // Effect cleanup races us if the user switched session
-          // while a frame was queued — drop the queue rather than
-          // apply old-session events to new-session state.
-          if (cancelled) {
-            pendingEventsRef.current = [];
-            return;
-          }
-          const queue = pendingEventsRef.current;
-          if (queue.length === 0) return;
-          pendingEventsRef.current = [];
-          // Fold every queued event into the view in a single
-          // setView so React renders the transcript once per frame
-          // regardless of how many tokens arrived.
-          setView((prev) => {
-            let next = prev;
-            for (const e of queue) next = applyChatEvent(next, e);
-            return next;
-          });
-          // Apply per-event side-effect setStates. React batches
-          // these inside the same callback so they cost one render.
-          for (const evt of queue) {
-            if (evt.type === "assistant_start") setStreaming(true);
-            else if (evt.type === "assistant_end" || evt.type === "error") {
-              setStreaming(false);
-            } else if (evt.type === "usage") {
-              setUsage({
-                promptTokens: evt.prompt_tokens,
-                completionTokens: evt.completion_tokens,
-                totalTokens: evt.total_tokens,
-              });
-            } else if (evt.type === "compaction_started") {
-              setCompacting(evt.tokens_before);
-            } else if (evt.type === "compaction_completed") {
-              setCompacting(null);
-              // Backend zeroes last_total_tokens on compaction; mirror
-              // it on the chip so the running count matches what the
-              // index will report on next reopen.
-              setUsage({
-                promptTokens: 0,
-                completionTokens: 0,
-                totalTokens: 0,
-              });
-            } else if (evt.type === "title_updated") {
-              // Auto-titling landed. Mirror the backend's journaled
-              // title onto the in-memory meta so the header updates
-              // without a session reload, and patch the cached
-              // sessions list so the popover row reflects the new
-              // title next time the operator opens it.
-              const nextTitle = evt.title;
-              let sessionId: string | null = null;
-              setMeta((m) => {
-                if (!m) return m;
-                sessionId = m.id;
-                return { ...m, title: nextTitle };
-              });
-              if (sessionId) {
-                setSessions((prev) =>
-                  prev.map((s) =>
-                    s.id === sessionId ? { ...s, title: nextTitle } : s,
-                  ),
-                );
-              }
-            }
-          }
-        };
-        const opened = await api.chatOpen(sessionId, (evt: ChatEvent) => {
-          pendingEventsRef.current.push(evt);
-          if (rafRef.current === null) {
-            rafRef.current = requestAnimationFrame(flushEvents);
-          }
+        const resolvedSessionId = sessionId;
+        // Register the channel slot BEFORE chat_open so events emitted
+        // during/just-after the IPC return have a buffer to land in.
+        // chatId is filled in once chat_open resolves; before that the
+        // close handle is a no-op.
+        chatChannels.current.set(resolvedSessionId, {
+          chatId: "",
+          close: () => {},
+          pendingEvents: [],
+          raf: null,
         });
-        if (cancelled) {
-          opened.close();
-          api.chatClose(opened.chatId).catch(() => {});
-          return;
+        let opened;
+        try {
+          opened = await api.chatOpen(resolvedSessionId, (evt: ChatEvent) => {
+            const refs = chatChannels.current.get(resolvedSessionId);
+            if (!refs) return;
+            refs.pendingEvents.push(evt);
+            if (refs.raf === null) {
+              refs.raf = requestAnimationFrame(() =>
+                flushEventsForSession(resolvedSessionId),
+              );
+            }
+          });
+        } catch (e) {
+          chatChannels.current.delete(resolvedSessionId);
+          throw e;
         }
-        chatIdRef.current = opened.chatId;
-        closeRef.current = opened.close;
-        patchTabState(tab.id, { chatId: opened.chatId });
-        setMeta(sessionMeta);
-        // Seed `view.mcp` from the in-band snapshot so the header chip
-        // turns green immediately. The streamed `mcp_status` events
-        // (initial emit + per-server updates) will continue to land
-        // through the channel and overwrite this with the same / fresher
-        // values — the reducer wholesale-replaces `mcp` from each event,
-        // so duplicates are harmless.
-        setView((prev) => ({
-          ...prev,
+        const entry = chatChannels.current.get(resolvedSessionId);
+        if (entry) {
+          entry.chatId = opened.chatId;
+          entry.close = opened.close;
+        }
+        const seededView: ChatViewState = {
+          ...initialView,
+          // Seed `view.mcp` from the in-band snapshot so the header
+          // chip turns green immediately. Streamed `mcp_status` events
+          // (initial emit + per-server updates) overwrite this with
+          // fresher values — the reducer wholesale-replaces `mcp` from
+          // each event, so duplicates are harmless.
           mcp: {
             nativeToolCount: opened.initialMcp.nativeToolCount,
             servers: opened.initialMcp.servers,
           },
-        }));
+        };
         // Seed the token-usage chip from the persisted meta so the
-        // operator sees the running count immediately on reopen
-        // (instead of waiting for the next round's Usage event). The
+        // operator sees the running count immediately on reopen. The
         // index only carries `total_tokens`; we don't have the
-        // prompt/completion split for prior turns, so show 0 for
-        // those — the running total is what matters for compaction.
-        if (
+        // prompt/completion split for prior turns, so show 0 — the
+        // running total is what matters for compaction.
+        const seededUsage =
           typeof sessionMeta.last_total_tokens === "number" &&
           sessionMeta.last_total_tokens > 0
-        ) {
-          setUsage({
-            promptTokens: 0,
-            completionTokens: 0,
-            totalTokens: sessionMeta.last_total_tokens,
-          });
+            ? {
+                promptTokens: 0,
+                completionTokens: 0,
+                totalTokens: sessionMeta.last_total_tokens,
+              }
+            : null;
+        // Always populate the map, even if `cancelled` (the operator
+        // switched sessions while we were opening this one). Keeping
+        // the just-opened session as a background entry is the whole
+        // point of the multi-session model — they can come back.
+        // Tab unmount is handled by the dedicated cleanup effect,
+        // which walks `chatChannels` directly so this entry can't leak.
+        setOpenChats((prev) => ({
+          ...prev,
+          [resolvedSessionId]: {
+            chatId: opened.chatId,
+            meta: sessionMeta,
+            view: seededView,
+            streaming: false,
+            usage: seededUsage,
+            compacting: null,
+          },
+        }));
+        if (!cancelled) {
+          patchTabState(tab.id, { chatId: opened.chatId });
+          setStatus({ kind: "ready" });
         }
-        setStatus({ kind: "ready" });
-        // Belt-and-braces: re-request the MCP status snapshot after the
-        // JS-side state is fully wired. The backend already emits one
-        // during `chat_open`, but events sent during the same Tauri
-        // invoke can race with the channel handler / RAF flush in some
-        // orderings — leaving `view.mcp` null and the header chip
-        // showing `…` even though the runtime has all the tools (the
-        // popover proves it via the direct `chat_list_tools` query).
-        // This second emit is idempotent (the reducer wholesale-replaces
-        // `view.mcp` from each event) and cheap.
+        // Belt-and-braces: re-request the MCP status snapshot after
+        // the JS-side state is fully wired. The backend already emits
+        // one during `chat_open`, but events sent during the same
+        // Tauri invoke can race with the channel handler / RAF flush;
+        // re-emitting is idempotent and cheap.
         api.chatRefreshStatus(opened.chatId).catch(() => {});
       } catch (e) {
         if (cancelled) return;
@@ -329,26 +432,28 @@ export function DockChat({ mode, tab, visible }: Props) {
     })();
     return () => {
       cancelled = true;
-      // Drop any queued events and cancel the pending frame so the
-      // next session's effect doesn't inherit stale token deltas.
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-      pendingEventsRef.current = [];
-      const close = closeRef.current;
-      const id = chatIdRef.current;
-      if (close) close();
-      if (id) api.chatClose(id).catch(() => {});
-      chatIdRef.current = null;
-      closeRef.current = null;
+      // Deliberately no chat_close here. Switching sessions inside
+      // the tab leaves the previous session running in the background;
+      // tab unmount is the only path that tears chats down.
     };
-    // `sessionEpoch` retriggers the effect when the operator switches to a
-    // different session via the popover. We deliberately read tabState.sessionId
-    // at run-time inside the closure — it's already updated by patchTabState
-    // before the bump.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clusterId, tab.id, sessionEpoch]);
+  }, [clusterId, tab.id, tabState.sessionId]);
+
+  // Tab-unmount cleanup. Walks `chatChannels.current` (mutated
+  // synchronously when a session opens, so it's the source of truth
+  // for "chats this tab has registered") and tears down every entry.
+  // Empty deps so this fires only on real unmount, not on session
+  // switches.
+  useEffect(() => {
+    return () => {
+      for (const [, refs] of chatChannels.current.entries()) {
+        if (refs.raf !== null) cancelAnimationFrame(refs.raf);
+        refs.close();
+        if (refs.chatId) api.chatClose(refs.chatId).catch(() => {});
+      }
+      chatChannels.current.clear();
+    };
+  }, []);
 
   // Self-healing tools-chip: ping the backend to re-emit `mcp_status`
   // whenever this chat tab returns to the foreground (tab switch back,
@@ -363,41 +468,59 @@ export function DockChat({ mode, tab, visible }: Props) {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   useEffect(() => {
     if (!visible || settingsOpen) return;
-    const id = chatIdRef.current;
-    if (!id) return;
-    api.chatRefreshStatus(id).catch(() => {});
-  }, [visible, settingsOpen]);
+    if (!activeChatId) return;
+    api.chatRefreshStatus(activeChatId).catch(() => {});
+  }, [visible, settingsOpen, activeChatId]);
+
+  // The model catalogue cache is bound to a provider, not a session.
+  // Different sessions in the same tab can be on different providers,
+  // so drop the cache whenever the active session changes — the next
+  // ModelPickerPopover open will refetch for whatever provider this
+  // session uses.
+  useEffect(() => {
+    setModels(null);
+  }, [activeSessionId]);
 
   const onSend = async (text: string) => {
-    const id = chatIdRef.current;
-    if (!id) return;
+    if (!activeChatId || !activeSessionId) return;
     if (!text.trim()) return;
-    // Optimistic append so the user's bubble appears immediately, before the
-    // backend's first AssistantStart fires. The backend persists the user
-    // message itself; the optimistic add is purely for perceived latency.
-    setView((prev) => ({
-      ...prev,
-      messages: [
-        ...prev.messages,
-        {
-          id: `local-${Date.now()}`,
-          role: "user",
-          content: text,
-        } satisfies ChatViewMessage,
-      ],
-    }));
+    const sid = activeSessionId;
+    // Optimistic append so the user's bubble appears immediately,
+    // before the backend's first AssistantStart fires. The backend
+    // persists the user message itself; the optimistic add is purely
+    // for perceived latency.
+    setOpenChats((prev) => {
+      const cur = prev[sid];
+      if (!cur) return prev;
+      return {
+        ...prev,
+        [sid]: {
+          ...cur,
+          view: {
+            ...cur.view,
+            messages: [
+              ...cur.view.messages,
+              {
+                id: `local-${Date.now()}`,
+                role: "user",
+                content: text,
+              } satisfies ChatViewMessage,
+            ],
+          },
+        },
+      };
+    });
     try {
-      await api.chatSendMessage(id, text);
+      await api.chatSendMessage(activeChatId, text);
     } catch (e) {
       setStatus({ kind: "error", message: String(e) });
     }
   };
 
   const onCancel = async () => {
-    const id = chatIdRef.current;
-    if (!id) return;
+    if (!activeChatId) return;
     try {
-      await api.chatCancelStreaming(id);
+      await api.chatCancelStreaming(activeChatId);
     } catch {
       /* ignore — best-effort */
     }
@@ -430,12 +553,11 @@ export function DockChat({ mode, tab, visible }: Props) {
     setToolsOpen((open) => {
       const next = !open;
       if (next) {
-        const id = chatIdRef.current;
-        if (!id) return next;
+        if (!activeChatId) return next;
         setToolsLoading(true);
         setToolsError(null);
         api
-          .chatListTools(id)
+          .chatListTools(activeChatId)
           .then((list) => setToolsList(list))
           .catch((err) => setToolsError(String(err)))
           .finally(() => setToolsLoading(false));
@@ -473,8 +595,7 @@ export function DockChat({ mode, tab, visible }: Props) {
   };
 
   const onPickModel = async (modelId: string) => {
-    const id = chatIdRef.current;
-    if (!id) return;
+    if (!activeChatId || !activeSessionId) return;
     if (modelId === meta?.model) {
       setModelPickerOpen(false);
       return;
@@ -482,10 +603,15 @@ export function DockChat({ mode, tab, visible }: Props) {
     // Optimistic header update — the API call is fire-and-forget from
     // the user's perspective. On failure we surface in the error
     // overlay just like other chat-mutating actions.
-    setMeta((m) => (m ? { ...m, model: modelId } : m));
+    const sid = activeSessionId;
+    setOpenChats((prev) => {
+      const cur = prev[sid];
+      if (!cur) return prev;
+      return { ...prev, [sid]: { ...cur, meta: { ...cur.meta, model: modelId } } };
+    });
     setModelPickerOpen(false);
     try {
-      await api.chatSetModel(id, modelId);
+      await api.chatSetModel(activeChatId, modelId);
     } catch (e) {
       setStatus({ kind: "error", message: String(e) });
     }
@@ -552,27 +678,26 @@ export function DockChat({ mode, tab, visible }: Props) {
     }
   };
 
-  // Tear down the current chat and re-run the bring-up effect against the
-  // new sessionId. We can't just call chatClose+chatOpen inline — the
-  // effect's cleanup is what removes the chat from the registry on the
-  // backend. Bumping sessionEpoch retriggers the effect cleanly.
+  // Switch the tab's render to a different session WITHOUT tearing
+  // down the current one. The bring-up effect notices `tabState.sessionId`
+  // changed and either reuses an existing entry in the map (instant)
+  // or runs the open flow for a not-yet-opened session. The previous
+  // session keeps streaming in the background, accumulating events
+  // into its own slot — switch back and the operator sees the result.
   const switchToSession = (sessionId: string) => {
     if (sessionId === tabState.sessionId) {
       setSessionsOpen(false);
       return;
     }
     patchTabState(tab.id, { sessionId, chatId: null });
-    setMeta(null);
-    setView(chatStateFromMessages([]));
-    setStreaming(false);
     setSessionsOpen(false);
-    // Close the model / provider / tools popovers — they were anchored
-    // to the old session and their fetched lists are about to be stale.
+    // Close popovers anchored to the old session — their fetched lists
+    // (models for the prior provider, tools for the prior chat) are
+    // about to be stale.
     setModelPickerOpen(false);
     setProviderPickerOpen(false);
     setToolsOpen(false);
     setModels(null);
-    setSessionEpoch((n) => n + 1);
   };
 
   const onCreateSession = async () => {
@@ -606,14 +731,38 @@ export function DockChat({ mode, tab, visible }: Props) {
       setSessions((prev) =>
         prev.map((s) => (s.id === sessionId ? { ...s, title } : s)),
       );
-      if (sessionId === tabState.sessionId) {
-        setMeta((m) => (m ? { ...m, title } : m));
-      }
+      // Update the live entry's meta if this session is currently open
+      // in the tab — covers both the active session and any background
+      // session the operator might be holding open.
+      setOpenChats((prev) => {
+        const cur = prev[sessionId];
+        if (!cur) return prev;
+        return { ...prev, [sessionId]: { ...cur, meta: { ...cur.meta, title } } };
+      });
     } catch {
       /* surface as error? — for now silent */
     } finally {
       setSessionBusy(false);
     }
+  };
+
+  // Tear down a live chat for one session and drop it from the map.
+  // Called by both single- and bulk-delete paths so the channel and
+  // backend chat get released alongside the JSONL file.
+  const evictOpenChat = (sessionId: string) => {
+    const refs = chatChannels.current.get(sessionId);
+    if (refs) {
+      if (refs.raf !== null) cancelAnimationFrame(refs.raf);
+      refs.close();
+      if (refs.chatId) api.chatClose(refs.chatId).catch(() => {});
+      chatChannels.current.delete(sessionId);
+    }
+    setOpenChats((prev) => {
+      if (!prev[sessionId]) return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
   };
 
   const onDeleteAllSessions = async () => {
@@ -626,6 +775,7 @@ export function DockChat({ mode, tab, visible }: Props) {
       // command.
       for (const s of list) {
         await api.chatDeleteSession(s.id).catch(() => {});
+        evictOpenChat(s.id);
       }
       setSessions([]);
       // Mint a replacement so the chat doesn't dangle pointing at a gone id.
@@ -654,6 +804,7 @@ export function DockChat({ mode, tab, visible }: Props) {
     try {
       await api.chatDeleteSession(sessionId);
       setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      evictOpenChat(sessionId);
       // If we just deleted the active session, mint a fresh one so the chat
       // doesn't dangle pointing at a gone session.
       if (sessionId === tabState.sessionId) {
@@ -716,6 +867,7 @@ export function DockChat({ mode, tab, visible }: Props) {
             mode={mode}
             sessions={sessions}
             currentSessionId={tabState.sessionId ?? null}
+            liveStates={liveStates}
             busy={sessionBusy}
             onPick={switchToSession}
             onCreate={onCreateSession}
@@ -802,7 +954,7 @@ export function DockChat({ mode, tab, visible }: Props) {
             mode={mode}
             state={view}
             streaming={streaming}
-            chatId={chatIdRef.current}
+            chatId={activeChatId}
             compacting={compacting !== null}
           />
         )}
@@ -814,19 +966,36 @@ export function DockChat({ mode, tab, visible }: Props) {
         streaming={streaming}
         approvalMode={meta?.approval_mode ?? "approve_per_write"}
         onApprovalModeChange={(am) => {
-          if (!chatIdRef.current) return;
-          api.chatSetApprovalMode(chatIdRef.current, am).catch(() => {});
-          setMeta((m) => (m ? { ...m, approval_mode: am } : m));
+          if (!activeChatId || !activeSessionId) return;
+          api.chatSetApprovalMode(activeChatId, am).catch(() => {});
+          const sid = activeSessionId;
+          setOpenChats((prev) => {
+            const cur = prev[sid];
+            if (!cur) return prev;
+            return {
+              ...prev,
+              [sid]: { ...cur, meta: { ...cur.meta, approval_mode: am } },
+            };
+          });
         }}
         usage={usage}
         onCompact={
           status.kind === "ready"
             ? () => {
-                if (!chatIdRef.current) return;
-                setCompacting(0);
-                api
-                  .chatCompact(chatIdRef.current)
-                  .catch(() => setCompacting(null));
+                if (!activeChatId || !activeSessionId) return;
+                const sid = activeSessionId;
+                setOpenChats((prev) => {
+                  const cur = prev[sid];
+                  if (!cur) return prev;
+                  return { ...prev, [sid]: { ...cur, compacting: 0 } };
+                });
+                api.chatCompact(activeChatId).catch(() => {
+                  setOpenChats((prev) => {
+                    const cur = prev[sid];
+                    if (!cur) return prev;
+                    return { ...prev, [sid]: { ...cur, compacting: null } };
+                  });
+                });
               }
             : null
         }
