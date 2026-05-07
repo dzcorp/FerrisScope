@@ -496,7 +496,7 @@ export default function App() {
         onPalette={openPalette}
         onToggleTheme={toggleTheme}
         onOpenNotifications={openNotifications}
-        onOpenSettings={openSettings}
+        onOpenSettings={() => openSettings()}
         onOpenForwards={openForwardsPanel}
       />
 

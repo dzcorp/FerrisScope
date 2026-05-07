@@ -49,6 +49,10 @@ pub struct ModelLimits {
 struct Catalogue {
     /// (provider_models_dev_id, model_id) → limits.
     by_id: HashMap<(String, String), ModelLimits>,
+    /// (provider_models_dev_id, model_id) → input-token cost in USD per
+    /// million. Only populated when models.dev exposes a `cost` block;
+    /// callers treat a missing entry as "unknown" rather than free.
+    cost_by_id: HashMap<(String, String), f64>,
     fetched_unix_ms: i64,
 }
 
@@ -70,6 +74,8 @@ struct ProviderEntry {
 struct ModelEntry {
     #[serde(default)]
     limit: Option<ModelLimitJson>,
+    #[serde(default)]
+    cost: Option<ModelCostJson>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +86,12 @@ struct ModelLimitJson {
     input: Option<f64>,
     #[serde(default)]
     output: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelCostJson {
+    #[serde(default)]
+    input: Option<f64>,
 }
 
 /// Public lookup. Returns `None` when the model isn't in the catalogue
@@ -120,6 +132,37 @@ pub fn reserved_tokens(kind: ProviderKind, model_id: &str) -> u32 {
     20_000.min(max_output).max(2048)
 }
 
+/// True iff the catalogue knows this model has zero input-token cost.
+/// Used to filter the OpenCode Zen catalogue when the public-tier key
+/// is in use (mirrors opencode's own `cost.input === 0` filter). When
+/// the catalogue hasn't loaded yet, or the model isn't listed, returns
+/// `false` — caller decides whether to optimistically include unknown
+/// models or drop them.
+pub fn is_known_free(kind: ProviderKind, model_id: &str) -> bool {
+    let Some(mdid) = meta::models_dev_id(kind) else {
+        return false;
+    };
+    let Ok(g) = slot().try_read() else {
+        return false;
+    };
+    g.cost_by_id
+        .get(&(mdid.to_string(), model_id.to_string()))
+        .is_some_and(|c| *c == 0.0)
+}
+
+/// True iff the in-memory catalogue has any entries for `kind`. Lets
+/// callers distinguish "filter said not-free" from "filter has no
+/// data yet" so they can degrade gracefully on first run / offline.
+pub fn has_data_for(kind: ProviderKind) -> bool {
+    let Some(mdid) = meta::models_dev_id(kind) else {
+        return false;
+    };
+    let Ok(g) = slot().try_read() else {
+        return false;
+    };
+    g.by_id.keys().any(|(p, _)| p == mdid)
+}
+
 /// Initialise the in-memory catalogue from on-disk cache. Cheap and
 /// non-blocking — call this at app startup before chats can open.
 pub async fn load_from_disk(cache_root: PathBuf) {
@@ -132,15 +175,20 @@ pub async fn load_from_disk(cache_root: PathBuf) {
         return;
     };
     let mut next = HashMap::new();
+    let mut next_cost = HashMap::new();
     for (provider_id, entry) in resp.0 {
         for (model_id, m) in entry.models {
             if let Some(limits) = parse_limits(m.limit.as_ref()) {
-                next.insert((provider_id.clone(), model_id), limits);
+                next.insert((provider_id.clone(), model_id.clone()), limits);
+            }
+            if let Some(c) = m.cost.as_ref().and_then(|c| c.input) {
+                next_cost.insert((provider_id.clone(), model_id), c.max(0.0));
             }
         }
     }
     let mut g = slot().write().await;
     g.by_id = next;
+    g.cost_by_id = next_cost;
     g.fetched_unix_ms = chrono::Utc::now().timestamp_millis();
     tracing::debug!(count = g.by_id.len(), "models.dev: loaded from disk cache");
 }
@@ -187,16 +235,21 @@ pub async fn refresh(cache_root: PathBuf) {
     };
 
     let mut next = HashMap::new();
+    let mut next_cost = HashMap::new();
     for (provider_id, entry) in parsed.0 {
         for (model_id, m) in entry.models {
             if let Some(limits) = parse_limits(m.limit.as_ref()) {
-                next.insert((provider_id.clone(), model_id), limits);
+                next.insert((provider_id.clone(), model_id.clone()), limits);
+            }
+            if let Some(c) = m.cost.as_ref().and_then(|c| c.input) {
+                next_cost.insert((provider_id.clone(), model_id), c.max(0.0));
             }
         }
     }
     {
         let mut g = slot().write().await;
         g.by_id = next;
+        g.cost_by_id = next_cost;
         g.fetched_unix_ms = chrono::Utc::now().timestamp_millis();
         tracing::info!(count = g.by_id.len(), "models.dev: refreshed");
     }

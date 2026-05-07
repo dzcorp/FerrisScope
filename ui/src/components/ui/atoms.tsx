@@ -901,15 +901,21 @@ export function Field({
   hint,
   children,
   stack = false,
+  anchor,
 }: {
   t: Tokens;
   label: ReactNode;
   hint?: ReactNode;
   children: ReactNode;
   stack?: boolean;
+  /// Optional `data-fs-anchor` value — picked up by the SettingsPanel
+  /// deep-link consumer (`openSettings({ section, anchor })`) so callers
+  /// can scroll the operator straight to a specific control.
+  anchor?: string;
 }) {
   return (
     <div
+      data-fs-anchor={anchor}
       style={{
         display: stack ? "flex" : "grid",
         flexDirection: stack ? "column" : undefined,

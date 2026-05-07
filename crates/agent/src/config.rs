@@ -12,7 +12,15 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
+    /// OpenCode Zen — proxy at <https://opencode.ai/zen/v1> that exposes
+    /// a curated catalogue of coding models behind a single OpenAI-compat
+    /// endpoint. With no operator key the agent falls back to the public
+    /// "free tier" key, which gates the upstream catalogue down to the
+    /// zero-cost models. This is the default so a fresh install can chat
+    /// without configuring anything.
     #[default]
+    #[serde(rename = "opencode_zen")]
+    OpencodeZen,
     OpenRouter,
     Anthropic,
     // Explicit rename — serde's snake_case mangles consecutive capitals
@@ -33,6 +41,7 @@ impl ProviderKind {
     /// The settings UI iterates over this to render its provider list.
     pub fn all() -> &'static [ProviderKind] {
         &[
+            Self::OpencodeZen,
             Self::OpenAI,
             Self::Anthropic,
             Self::OpenRouter,
@@ -44,6 +53,25 @@ impl ProviderKind {
             Self::Together,
             Self::Ollama,
         ]
+    }
+
+    /// True iff this provider supports the public-key "free tier"
+    /// fallback when no operator credential is configured. The agent
+    /// quietly substitutes a literal `public` API key for these so a
+    /// fresh install can chat with the free models on first run.
+    pub fn supports_public_fallback(self) -> bool {
+        matches!(self, Self::OpencodeZen)
+    }
+
+    /// API key value used when [`Self::supports_public_fallback`] kicks
+    /// in. OpenCode Zen accepts the literal string `public` as a marker
+    /// for the unauthenticated free tier — the upstream filters the
+    /// catalogue to zero-cost models for these requests.
+    pub fn public_fallback_key(self) -> Option<&'static str> {
+        match self {
+            Self::OpencodeZen => Some("public"),
+            _ => None,
+        }
     }
 }
 

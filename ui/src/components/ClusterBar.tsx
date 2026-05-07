@@ -154,24 +154,6 @@ export function ClusterBar({ mode, context, state, style }: Props) {
 
       {showGauges && <ClusterGauges mode={mode} clusterId={context.id} />}
 
-      {state.status === "error" && (
-        <Tooltip label={state.message}>
-          <div
-            style={{
-              fontSize: 11,
-              color: t.bad,
-              fontFamily: FONT_MONO,
-              maxWidth: 280,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {state.message}
-          </div>
-        </Tooltip>
-      )}
-
       {/* "+" menu — opens terminal or YAML in dock */}
       <div ref={menuWrapRef} style={{ position: "relative" }}>
         <Tooltip label="New terminal or YAML scratchpad">

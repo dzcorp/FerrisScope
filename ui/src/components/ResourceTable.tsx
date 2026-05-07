@@ -1682,11 +1682,62 @@ function isMonoCell(c: ColumnDef): boolean {
 // kiss the right edge.
 function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
   const CHROME_PAD = 28;
-  const font = isMonoCell(c) ? CELL_FONT_MONO : CELL_FONT_TEXT;
-  // Header text — uppercase letter-spacing 0.5 widens the rendered glyph
-  // run vs. measureText's plain measurement; bump by ~12 % to compensate.
   const headerWidth =
     measureText(String(c.header ?? "").toUpperCase(), HEADER_FONT) * 1.12;
+
+  // Phase column renders StatusPill (when non-ambient) + ContainerDots
+  // (when the row carries `container_states`, i.e. pods). Plain
+  // measureText on the status string under-counts by the pill chrome
+  // and the dots row — the operator sees `CrashLoopBackOff` followed
+  // by 8 container dots overflow a column sized for the bare text.
+  // Mirror the rendering math from `renderCell`'s `phase` branch.
+  if (c.kind === "phase") {
+    // Dense StatusPill chrome: 1px×6px padding + 4px gap + 5px inner
+    // dot ≈ 21px around the text glyphs.
+    const PILL_FONT = `600 10.5px system-ui, -apple-system, Segoe UI, sans-serif`;
+    const PILL_CHROME = 21;
+    const PHASE_WRAP_GAP = 8; // PHASE_WRAP's gap between pill and dots
+    const DOT_SIZE = 7; // size prop on ContainerDots in ResourceTable
+    const DOT_GAP = 3;
+    const SEP_WIDTH = 1 + (DOT_GAP + 1) * 2; // separator + its margins
+
+    let maxRendered = 0;
+    for (const r of sample) {
+      const phase = typeof r[c.id] === "string" ? String(r[c.id]) : "";
+      // Ambient (Running / Terminating) suppresses the pill on pod
+      // rows — see `renderCell`'s `phase` branch.
+      const ambient = phase === "Running" || phase === "Terminating";
+      const states = Array.isArray(r.container_states)
+        ? (r.container_states as Array<Record<string, unknown>>)
+        : [];
+      const isPodRow = states.length > 0;
+      const pillWidth =
+        isPodRow && ambient ? 0 : measureText(phase, PILL_FONT) + PILL_CHROME;
+
+      let dotsWidth = 0;
+      if (isPodRow) {
+        let inits = 0;
+        let mainsAndSidecars = 0;
+        for (const s of states) {
+          if (s.kind === "init") inits++;
+          else mainsAndSidecars++;
+        }
+        const total = inits + mainsAndSidecars;
+        // Main dots are size+2, init/sidecar are size — average to
+        // (size+1) per dot since we don't track which is which here.
+        dotsWidth =
+          total * (DOT_SIZE + 1) + Math.max(0, total - 1) * DOT_GAP;
+        if (inits > 0 && mainsAndSidecars > 0) dotsWidth += SEP_WIDTH;
+      }
+
+      const gap = pillWidth > 0 && dotsWidth > 0 ? PHASE_WRAP_GAP : 0;
+      const rendered = pillWidth + gap + dotsWidth;
+      if (rendered > maxRendered) maxRendered = rendered;
+    }
+    return Math.ceil(Math.max(maxRendered, headerWidth)) + CHROME_PAD;
+  }
+
+  const font = isMonoCell(c) ? CELL_FONT_MONO : CELL_FONT_TEXT;
   let dataWidth = 0;
   for (const r of sample) {
     const v = r[c.id];
@@ -1705,7 +1756,11 @@ function defaultWidth(c: ColumnDef): number {
   if (c.id === "cpu" || c.id === "mem") return 90;
   switch (c.kind) {
     case "phase":
-      return 170;
+      // No-data fallback: room for a "CrashLoopBackOff" pill (~140px
+      // dense) plus a typical handful of container dots without
+      // overflowing. Once rows arrive `naturalContentWidth` takes over
+      // with a per-row exact calculation.
+      return 220;
     case "age":
       return 80;
     case "number":
@@ -1725,7 +1780,11 @@ function minWidth(c: ColumnDef): number {
   if (c.id === "cpu" || c.id === "mem") return 60;
   switch (c.kind) {
     case "phase":
-      return 90;
+      // Pill text alone (e.g. "CrashLoopBackOff") needs ~140px in
+      // dense mode — the previous 90px clipped both the pill and any
+      // container dots beside it. The shrink tier prefers to take
+      // from Name first, so this only kicks in on very narrow viewports.
+      return 140;
     case "age":
       return 50;
     case "number":

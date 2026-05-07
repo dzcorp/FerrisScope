@@ -205,6 +205,21 @@ export type ClusterInfo = {
   node_count: number;
 };
 
+// Per-cluster apiserver heartbeat status. The backend probes `/version`
+// every 5s; after 30s of consecutive failures it flips the cluster to
+// `unavailable` and tears down its watchers + metrics service. Recovery
+// is operator-driven (Reconnect button → `reconnect_cluster` then
+// `connect_context`). There is no intermediate "degraded" state on the
+// wire — the backend keeps it internal until the threshold trips.
+export type ClusterHealthStatus = "healthy" | "unavailable";
+
+export type ClusterHealthEvent = {
+  status: ClusterHealthStatus;
+  // Last error reason when `status === "unavailable"`. Surfaced verbatim
+  // in the banner; not user-friendly text but operator-debuggable.
+  reason: string | null;
+};
+
 export type Category =
   | "Workloads"
   | "Network"
@@ -1843,10 +1858,38 @@ export type ForwardStatusEvent = {
   status: ForwardStatus;
 };
 
+// ── Settings deep-linking ───────────────────────────────────────────────────
+// Tab id + optional anchor inside that tab. Passed through
+// `openSettings(target?)` so callers (chat picker popovers, status overlays)
+// can land the operator directly on a specific control instead of dropping
+// them on the General tab and making them hunt.
+
+export type SettingsSectionId =
+  | "general"
+  | "appearance"
+  | "kubeconfig"
+  | "observability"
+  | "ai"
+  | "tools"
+  | "shortcuts"
+  | "about";
+
+/// Anchor value matched against `data-fs-anchor` attributes on the
+/// rendered section. The settings panel scrolls the matching element
+/// into view (and pulses it briefly) once the target tab mounts. Free-
+/// form string so individual sections can grow their own anchors
+/// without a central registry — the worst case for an unknown anchor
+/// is "we land on the right tab without scrolling further".
+export type SettingsTarget = {
+  section: SettingsSectionId;
+  anchor?: string;
+};
+
 // ── AI agent ────────────────────────────────────────────────────────────────
 // Mirror of `crates/agent` + `crates/app/src/agent.rs` wire types.
 
 export type ProviderKind =
+  | "opencode_zen"
   | "open_router"
   | "anthropic"
   | "openai"
@@ -2063,6 +2106,27 @@ export type McpServerStatusWire = {
   message: string | null;
 };
 
+/// In-band return shape from `chat_open`. Bundles the chat id with the
+/// initial MCP-status snapshot so callers can seed `view.mcp`
+/// synchronously without depending on the streamed `mcp_status` event
+/// landing first (Tauri channel events sent during the same invoke can
+/// arrive after the JS-side state-init effects). Field names are
+/// snake_case to match the Rust serialization.
+export type ChatOpenResult = {
+  chat_id: string;
+  native_tool_count: number;
+  mcp_servers: McpServerStatusWire[];
+};
+
+/// Camel-cased projection of `ChatOpenResult`'s mcp fields, returned by
+/// `api.chatOpen` so the caller doesn't have to remap snake_case
+/// inline. Mirrors the shape of the streamed `mcp_status` event so it
+/// can flow through the same `applyChatEvent` reducer path.
+export type ChatInitialMcp = {
+  nativeToolCount: number;
+  servers: McpServerStatusWire[];
+};
+
 // kubectl install / detection wire shape.
 export type KubectlDetection =
   | { kind: "configured"; path: string; exists: boolean }
@@ -2118,4 +2182,5 @@ export type ChatEvent =
       summary_chars: number;
       summary: string;
     }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "title_updated"; title: string };

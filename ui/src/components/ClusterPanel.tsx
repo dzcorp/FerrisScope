@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { api, onClusterInfoChanged } from "../api";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { api, onClusterHealth, onClusterInfoChanged } from "../api";
 import { useAppStore } from "../store";
 import type { ClusterInfo, ContextInfo } from "../types";
 import { tokens, type ThemeMode } from "../theme";
@@ -47,13 +47,36 @@ export function ClusterPanel({ mode, context }: Props) {
   const selectedKind = useAppStore((s) =>
     s.kinds.find((k) => k.id === s.selectedKindId) ?? null,
   );
+  const applyClusterHealth = useAppStore((s) => s.applyClusterHealth);
+  const clearClusterHealth = useAppStore((s) => s.clearClusterHealth);
+  const healthStatus = useAppStore(
+    (s) => s.clusterHealth[context.id] ?? "healthy",
+  );
+  const healthReason = useAppStore(
+    (s) => s.clusterHealthReason[context.id] ?? null,
+  );
 
   useEffect(() => {
     const id = ++reqId.current;
     const connectId = newConnectId();
     setState({ status: "connecting", startedAt: Date.now(), connectId });
     let unlisten: (() => void) | null = null;
+    let unlistenHealth: (() => void) | null = null;
     let cancelled = false;
+
+    // Subscribe to the per-cluster health probe before firing connect so
+    // we don't miss the unavailable transition if it lands during the
+    // initial connect window. The backend emits exactly one unavailable
+    // event per cluster lifetime; it's the data plane's "this is dead"
+    // signal that the resource table uses to dim its rows + show the
+    // banner.
+    onClusterHealth(context.id, (evt) => {
+      if (cancelled) return;
+      applyClusterHealth(context.id, evt.status, evt.reason);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenHealth = fn;
+    });
 
     // Listen for the deferred cluster.info result before firing the connect
     // call so we don't miss the event if it arrives between connect_context
@@ -93,9 +116,10 @@ export function ClusterPanel({ mode, context }: Props) {
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
+      if (unlistenHealth) unlistenHealth();
       api.cancelConnect(connectId).catch(() => {});
     };
-  }, [context.id, attempt]);
+  }, [context.id, attempt, applyClusterHealth]);
 
   const onCancel = () => {
     if (state.status !== "connecting") return;
@@ -103,8 +127,23 @@ export function ClusterPanel({ mode, context }: Props) {
     setState({ status: "cancelled" });
   };
 
-  const onRetry = () => {
-    setAttempt((n) => n + 1);
+  // Drop the cached backend ClusterEntry, clear the health flag, and
+  // bump `attempt` so the connect effect re-runs from a clean slate.
+  // Used by every `ReconnectBanner` instance (initial connect failed,
+  // operator-cancelled, heartbeat declared unavailable) — bare "bump
+  // attempt" isn't enough because `state.insert_connected` returns
+  // the existing entry if one was lazy-created (App's eager namespaces
+  // subscribe runs before connect_context, and a wedged client built
+  // then would otherwise get reused on every retry).
+  const onReconnect = () => {
+    const id = context.id;
+    api
+      .reconnectCluster(id)
+      .catch(() => {})
+      .finally(() => {
+        clearClusterHealth(id);
+        setAttempt((n) => n + 1);
+      });
   };
 
   return (
@@ -121,40 +160,39 @@ export function ClusterPanel({ mode, context }: Props) {
 
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
         {state.status === "ok" ? (
-          selectedKind ? (
-            <ResourceTable
-              mode={mode}
-              clusterId={context.id}
-              kind={selectedKind}
-            />
-          ) : (
-            <EmptyState
-              t={t}
-              title="Pick a resource kind"
-              hint="Hover the left rail to expand it, then choose a kind."
-            />
-          )
+          <UnavailableOverlay
+            mode={mode}
+            unavailable={healthStatus === "unavailable"}
+            reason={healthReason}
+            onReconnect={onReconnect}
+          >
+            {selectedKind ? (
+              <ResourceTable
+                mode={mode}
+                clusterId={context.id}
+                kind={selectedKind}
+              />
+            ) : (
+              <EmptyState
+                t={t}
+                title="Pick a resource kind"
+                hint="Hover the left rail to expand it, then choose a kind."
+              />
+            )}
+          </UnavailableOverlay>
         ) : state.status === "error" ? (
-          <EmptyState
-            t={t}
+          <ReconnectBanner
+            mode={mode}
             title="Could not connect to this cluster"
-            hint={state.message}
-            action={
-              <Btn t={t} variant="primary" onClick={onRetry}>
-                Retry
-              </Btn>
-            }
+            reason={state.message}
+            onReconnect={onReconnect}
           />
         ) : state.status === "cancelled" ? (
-          <EmptyState
-            t={t}
+          <ReconnectBanner
+            mode={mode}
             title="Connection cancelled"
-            hint="Press Retry to try again."
-            action={
-              <Btn t={t} variant="primary" onClick={onRetry}>
-                Retry
-              </Btn>
-            }
+            reason={null}
+            onReconnect={onReconnect}
           />
         ) : state.status === "connecting" ? (
           <Loading
@@ -211,5 +249,125 @@ function ConnectingLabel({
     <span>
       Connecting to {context.name}… <span style={{ opacity: 0.6 }}>({secs}s)</span>
     </span>
+  );
+}
+
+// Single banner used for every "cluster needs reconnecting" state —
+// initial connect failure, operator-cancelled connect, and the
+// background heartbeat declaring the cluster unavailable. Same shape
+// across all three so the operator sees a consistent affordance
+// regardless of how the cluster got broken.
+function ReconnectBanner({
+  mode,
+  title,
+  reason,
+  onReconnect,
+}: {
+  mode: ThemeMode;
+  title: string;
+  reason: string | null;
+  onReconnect: () => void;
+}) {
+  const t = tokens(mode);
+  return (
+    <div
+      role="alert"
+      style={{
+        flexShrink: 0,
+        background: t.surfaceAlt,
+        borderBottom: `1px solid ${t.warn}`,
+        padding: "10px 14px",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          display: "inline-block",
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: t.warn,
+          flexShrink: 0,
+        }}
+      />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ color: t.text, fontSize: 12.5, fontWeight: 600 }}>
+          {title}
+        </div>
+        {reason && (
+          <div
+            style={{
+              color: t.textMuted,
+              fontSize: 11,
+              marginTop: 2,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={reason}
+          >
+            {reason}
+          </div>
+        )}
+      </div>
+      <Btn t={t} variant="primary" size="sm" onClick={onReconnect}>
+        Reconnect
+      </Btn>
+    </div>
+  );
+}
+
+// Renders the resource table with a `ReconnectBanner` on top when the
+// cluster's heartbeat probe has flipped to unavailable. Last-known rows
+// stay rendered (dimmed) so the operator's in-flight inspection isn't
+// jarringly cleared — but data is stale and any new subscribe call
+// returns an "unavailable" error from the backend until Reconnect lands.
+function UnavailableOverlay({
+  mode,
+  unavailable,
+  reason,
+  onReconnect,
+  children,
+}: {
+  mode: ThemeMode;
+  unavailable: boolean;
+  reason: string | null;
+  onReconnect: () => void;
+  children: ReactNode;
+}) {
+  if (!unavailable) return <>{children}</>;
+  return (
+    <div
+      style={{
+        position: "relative",
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+      }}
+    >
+      <ReconnectBanner
+        mode={mode}
+        title="Cluster unavailable"
+        reason={
+          reason ??
+          "No response from the apiserver for 30s. Watchers and metrics have been torn down."
+        }
+        onReconnect={onReconnect}
+      />
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          opacity: 0.5,
+          pointerEvents: "none",
+        }}
+      >
+        {children}
+      </div>
+    </div>
   );
 }

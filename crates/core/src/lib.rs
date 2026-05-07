@@ -9,6 +9,7 @@
 pub mod cluster;
 pub mod error;
 pub mod fleet;
+pub mod health;
 pub mod kubeconfig;
 pub mod logs;
 pub mod metrics;

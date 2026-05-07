@@ -11,10 +11,13 @@ import type {
   AppInfo,
   ApprovalDecision,
   ApprovalMode,
+  ChatInitialMcp,
+  ChatOpenResult,
   ChatTool,
   KubectlDetection,
   KubectlInstallResult,
   ChatEvent,
+  ClusterHealthEvent,
   ClusterInfo,
   ClusterProbe,
   ClusterRoleBindingDetail,
@@ -131,6 +134,12 @@ export const api = {
   // cluster we're no longer viewing — bypasses the per-watcher linger.
   dropClusterWatchers: (clusterId: string) =>
     invoke<void>("drop_cluster_watchers", { clusterId }),
+  // Drop the wedged ClusterEntry so the next `connect_context` rebuilds
+  // from a fresh kube `Client`. Wired to the unavailable banner's
+  // Reconnect button — the cluster's HTTP/2 pool may have stalled and
+  // reusing it would just keep failing.
+  reconnectCluster: (clusterId: string) =>
+    invoke<void>("reconnect_cluster", { clusterId }),
   // Header-palette full-text search across the cluster's index. Returns up
   // to `limit` hits (FTS5 bm25 ranked) or an empty array if the cluster
   // hasn't been connected yet (or its index failed to open).
@@ -877,18 +886,30 @@ export const api = {
 
   // Streaming events flow over a Tauri Channel<ChatEvent>, same shape as
   // start_log_stream — typed, no string event keys, no fan-out cost.
+  // Returns the initial MCP status snapshot in-band alongside the chat
+  // id so the caller can seed UI state synchronously (avoids a race
+  // where the streamed `mcp_status` event arrives after the JS-side
+  // state-init effects).
   chatOpen: async (
     sessionId: string,
     onEvent: (evt: ChatEvent) => void,
-  ): Promise<{ chatId: string; close: () => void }> => {
+  ): Promise<{
+    chatId: string;
+    initialMcp: ChatInitialMcp;
+    close: () => void;
+  }> => {
     const channel = new Channel<ChatEvent>();
     channel.onmessage = onEvent;
-    const chatId = await invoke<string>("chat_open", {
+    const result = await invoke<ChatOpenResult>("chat_open", {
       sessionId,
       onEvent: channel,
     });
     return {
-      chatId,
+      chatId: result.chat_id,
+      initialMcp: {
+        nativeToolCount: result.native_tool_count,
+        servers: result.mcp_servers,
+      },
       close: () => {
         channel.onmessage = () => {};
       },
@@ -900,7 +921,15 @@ export const api = {
     invoke<void>("chat_cancel_streaming", { chatId }),
   chatSetApprovalMode: (chatId: string, mode: ApprovalMode) =>
     invoke<void>("chat_set_approval_mode", { chatId, mode }),
+  chatSetModel: (chatId: string, model: string) =>
+    invoke<void>("chat_set_model", { chatId, model }),
   chatCompact: (chatId: string) => invoke<void>("chat_compact", { chatId }),
+  // Re-emit the chat's current McpStatus through its event channel.
+  // Frontend pings on tab-becomes-visible / settings-close so the
+  // header tools chip stays in sync with the live runtime even if
+  // some other UI flow reset the in-memory `view.mcp` snapshot.
+  chatRefreshStatus: (chatId: string) =>
+    invoke<void>("chat_refresh_status", { chatId }),
   chatListTools: (chatId: string) =>
     invoke<ChatTool[]>("chat_list_tools", { chatId }),
   chatClose: (chatId: string) => invoke<void>("chat_close", { chatId }),
@@ -958,6 +987,18 @@ export function onMetrics(
 ): Promise<UnlistenFn> {
   const name = `metrics://${sanitizeEventSegment(clusterId)}`;
   return listen<MetricsSnapshot>(name, (e) => handler(e.payload));
+}
+
+// Per-cluster health probe events. Backend emits exactly one
+// `unavailable` event per cluster lifetime (after 30s of failed probes)
+// and then the probe loop exits — `reconnect_cluster` rebuilds the
+// entry and re-spawns a fresh probe via the next `connect_context`.
+export function onClusterHealth(
+  clusterId: string,
+  handler: (evt: ClusterHealthEvent) => void,
+): Promise<UnlistenFn> {
+  const name = `cluster-health://${sanitizeEventSegment(clusterId)}`;
+  return listen<ClusterHealthEvent>(name, (e) => handler(e.payload));
 }
 
 // Background `cluster.info` probe completed for a cluster. `connect_context`

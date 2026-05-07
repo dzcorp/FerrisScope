@@ -20,8 +20,8 @@ pub use mcp::{classify as classify_tool, McpClient, McpError, McpTool, ToolCateg
 pub use native::{NativeRegistry, NativeTool, NativeToolError};
 pub use provider::meta::{AuthMode, ModelsEndpoint, ProviderFlavor, ProviderMeta};
 pub use provider::{
-    ChatProvider, CompletionEvent, CompletionFinal, CompletionRequest, FinishReason, ModelInfo,
-    ProviderError, Usage,
+    ChatProvider, CompletionEvent, CompletionFinal, CompletionRequest, EventSink, FinishReason,
+    ModelInfo, ProviderError, Usage,
 };
 pub use session::{
     SessionData, SessionError, SessionEvent, SessionMeta, SessionStore, SessionUpdate,

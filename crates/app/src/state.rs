@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use ferrisscope_core::{
-    cluster::Cluster, fleet::ClusterProbe, kubeconfig, logs::LogStream, metrics::MetricsService,
-    search::SearchIndex, sources::SourcesFile, watcher::KubeconfigWatcher,
+    cluster::Cluster, fleet::ClusterProbe, health::ClusterHealth, kubeconfig, logs::LogStream,
+    metrics::MetricsService, search::SearchIndex, sources::SourcesFile, watcher::KubeconfigWatcher,
 };
 use ferrisscope_kube_ext::{ForwardHandle, ForwardStatus, ResourceWatcher};
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -30,6 +30,19 @@ pub(crate) struct ClusterEntry {
     /// Refcounted metrics-server poller. Lazy: started on first `subscribe_metrics`,
     /// torn down (Drop aborts the task) on the last unsubscribe.
     pub(crate) metrics: Mutex<MetricsSlot>,
+    /// Per-cluster apiserver heartbeat probe. Spawned eagerly at connect
+    /// time so the operator gets unavailable signal even when no resource
+    /// view has been subscribed yet. The probe broadcasts through
+    /// `ClusterHealth::subscribe`; commands fan it out to a Tauri event
+    /// in `connect_context`.
+    pub(crate) health: Arc<ClusterHealth>,
+    /// Set to `true` the moment the health probe declares the cluster
+    /// `Unavailable` and the watcher/metrics teardown runs. Subsequent
+    /// `subscribe_*` commands check this and short-circuit so the UI's
+    /// re-subscription attempts don't silently re-spawn watchers against
+    /// a dead client. Cleared by dropping the `ClusterEntry` (manual
+    /// reconnect path).
+    pub(crate) unavailable: AtomicBool,
     /// One-shot guard for connect-time probes (cluster.info background
     /// fetch + pod-list bench). The cluster can be cached either by an
     /// explicit `connect_context` call *or* lazily by `state.entry()` if
@@ -39,6 +52,14 @@ pub(crate) struct ClusterEntry {
     /// run exactly once per cluster lifetime regardless of who created
     /// the entry; CAS true on first call wins, everyone else skips.
     connect_probes_done: AtomicBool,
+    /// One-shot guard for the health-forwarder spawn — kept separate
+    /// from `connect_probes_done` because the forwarder needs to be
+    /// wired up even on the lazy-connect path (App's eager namespaces
+    /// subscribe runs before `connect_context`, and without this gate
+    /// the forwarder would never be spawned for clusters first touched
+    /// by `state.entry()` rather than `connect_context`). Same CAS
+    /// pattern: true on first claim, false thereafter.
+    health_wired: AtomicBool,
 }
 
 impl ClusterEntry {
@@ -48,6 +69,17 @@ impl ClusterEntry {
     /// `false` so they can no-op.
     pub(crate) fn claim_connect_probes(&self) -> bool {
         self.connect_probes_done
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Atomically claim the right to spawn the health-event forwarder for
+    /// this cluster. Returns `true` exactly once per `ClusterEntry`
+    /// lifetime; subsequent callers no-op. Separate from
+    /// `claim_connect_probes` because the forwarder needs to fire on
+    /// the lazy-connect path too (App's eager namespaces subscribe).
+    pub(crate) fn claim_health_wiring(&self) -> bool {
+        self.health_wired
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
@@ -180,11 +212,16 @@ impl AppState {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "AppState.entry: connected on demand"
         );
+        let cluster = Arc::new(cluster);
+        let health = ClusterHealth::start(cluster.client());
         let entry = Arc::new(ClusterEntry {
-            cluster: Arc::new(cluster),
+            cluster,
             kinds: Mutex::new(HashMap::new()),
             metrics: Mutex::new(MetricsSlot::default()),
+            health,
+            unavailable: AtomicBool::new(false),
             connect_probes_done: AtomicBool::new(false),
+            health_wired: AtomicBool::new(false),
         });
         map.insert(id.to_owned(), entry.clone());
         Ok(entry)
@@ -212,11 +249,16 @@ impl AppState {
         if let Some(existing) = map.get(&id) {
             return existing.clone();
         }
+        let cluster = Arc::new(cluster);
+        let health = ClusterHealth::start(cluster.client());
         let entry = Arc::new(ClusterEntry {
-            cluster: Arc::new(cluster),
+            cluster,
             kinds: Mutex::new(HashMap::new()),
             metrics: Mutex::new(MetricsSlot::default()),
+            health,
+            unavailable: AtomicBool::new(false),
             connect_probes_done: AtomicBool::new(false),
+            health_wired: AtomicBool::new(false),
         });
         map.insert(id, entry.clone());
         entry

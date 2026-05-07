@@ -3,7 +3,7 @@ import { api, onFleetProbe, onKubeconfigChanged } from "../api";
 import { useAppStore } from "../store";
 import type { ClusterProbe, ContextInfo } from "../types";
 import { tokens, FONT_MONO, type ThemeMode } from "../theme";
-import { Eyebrow, EmptyState, Gauge, Loading, Tooltip } from "./ui";
+import { Btn, Eyebrow, EmptyState, Gauge, Loading, Tooltip } from "./ui";
 import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
 import { confirm, toast } from "../lib/dialog";
 
@@ -151,7 +151,19 @@ export function FleetLanding({ mode, onSelect }: Props) {
       <EmptyState
         t={t}
         title="No contexts available"
-        hint="Add a kubeconfig file or folder in Settings → Kubeconfig, or set up `~/.kube/config`."
+        hint="Add a kubeconfig file or folder, or set up `~/.kube/config`."
+        action={
+          <Btn
+            t={t}
+            variant="primary"
+            size="sm"
+            onClick={() =>
+              useAppStore.getState().openSettings({ section: "kubeconfig" })
+            }
+          >
+            Open Kubeconfig settings
+          </Btn>
+        }
       />
     );
   }

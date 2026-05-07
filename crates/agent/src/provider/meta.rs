@@ -73,6 +73,22 @@ pub enum ProviderFlavor {
     OpenAiResponses,
 }
 
+const META_OPENCODE_ZEN: ProviderMeta = ProviderMeta {
+    id: "opencode_zen",
+    display_name: "OpenCode Zen",
+    // OpenAI-compatible proxy. With the public ("free tier") key only
+    // zero-cost models are listed; with an operator key the full
+    // catalogue is available — see <https://opencode.ai/zen>.
+    default_base_url: "https://opencode.ai/zen/v1",
+    auth_modes: &[AuthMode::ApiKey],
+    models_endpoint: ModelsEndpoint::OpenAiCompatible,
+    flavor: ProviderFlavor::OpenAiCompat,
+    // Catalogue spans 200k (Claude) → 1M (GPT-5.4 Pro). Use the smaller
+    // value as the conservative fallback; per-model overrides land via
+    // the models.dev catalogue.
+    default_context_window: 200_000,
+};
+
 const META_OPENROUTER: ProviderMeta = ProviderMeta {
     id: "openrouter",
     display_name: "OpenRouter",
@@ -197,6 +213,7 @@ const META_OLLAMA: ProviderMeta = ProviderMeta {
 
 pub fn for_kind(kind: ProviderKind) -> &'static ProviderMeta {
     match kind {
+        ProviderKind::OpencodeZen => &META_OPENCODE_ZEN,
         ProviderKind::OpenRouter => &META_OPENROUTER,
         ProviderKind::Anthropic => &META_ANTHROPIC,
         ProviderKind::OpenAI => &META_OPENAI,
@@ -216,6 +233,9 @@ pub fn for_kind(kind: ProviderKind) -> &'static ProviderMeta {
 /// fall back to the per-provider default window).
 pub fn models_dev_id(kind: ProviderKind) -> Option<&'static str> {
     Some(match kind {
+        // models.dev keys the OpenCode Zen catalogue under the bare
+        // `opencode` id (matches opencode's own provider config).
+        ProviderKind::OpencodeZen => "opencode",
         ProviderKind::OpenRouter => "openrouter",
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::OpenAI => "openai",

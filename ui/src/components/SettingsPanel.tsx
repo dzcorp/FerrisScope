@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, onPrometheusChanged } from "../api";
-import type { ReleaseInfo, UpdaterInfo } from "../types";
+import type { ReleaseInfo, SettingsSectionId, UpdaterInfo } from "../types";
 import { useAppStore } from "../store";
 import {
   tokens,
@@ -38,15 +38,18 @@ import { MOD_KEY, SHIFT_KEY, ALT_KEY } from "../lib/keyboard";
 import { AiSection } from "./settings/AiSection";
 import { ToolsSection } from "./settings/ToolsSection";
 
-type SectionId =
-  | "general"
-  | "appearance"
-  | "kubeconfig"
-  | "observability"
-  | "ai"
-  | "tools"
-  | "shortcuts"
-  | "about";
+// Re-export from `types.ts` so the rest of the app uses one canonical
+// `SettingsSectionId` (the store typed `openSettings(target)` against
+// the same alias).
+type SectionId = SettingsSectionId;
+
+/// Tab the panel lands on when the operator opens it without a deep-link
+/// (title-bar Settings icon, ⌘, , command palette). Stays on this tab
+/// across opens — the panel doesn't persist last-active because the
+/// title-bar button has the same affordance regardless of how the
+/// previous open ended, which is what most operators expect from a
+/// global settings entry-point.
+const DEFAULT_SECTION: SectionId = "general";
 
 type Props = {
   mode: ThemeMode;
@@ -54,11 +57,67 @@ type Props = {
 };
 
 // HV2Settings — slide-in side panel with categorized side-tabs. Settings
-// changes are persisted to the store immediately; the footer Save/Cancel mimics
-// HV2 but currently both just close (no draft buffer needed yet).
+// changes are persisted to the store immediately; the panel closes via the
+// title-bar X or Esc.
 export function SettingsPanel({ mode, onClose }: Props) {
   const t = tokens(mode);
-  const [active, setActive] = useState<SectionId>("general");
+  const [active, setActive] = useState<SectionId>(DEFAULT_SECTION);
+  // Pending anchor → applied once the target tab has rendered. Cleared
+  // after one application so re-renders don't re-scroll the operator.
+  const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  // On every open of the panel, consume any deep-link target the caller
+  // pushed through `openSettings({ section, anchor })`. The pointer is
+  // cleared inside the consume call so a follow-up bare `openSettings()`
+  // (e.g. ⌘,) doesn't re-jump to the same anchor.
+  const consumeSettingsTarget = useAppStore((s) => s.consumeSettingsTarget);
+  useEffect(() => {
+    const target = consumeSettingsTarget();
+    if (!target) return;
+    setActive(target.section);
+    setPendingAnchor(target.anchor ?? null);
+    // We deliberately run only once per panel mount — `settingsOpen`
+    // toggling false → true unmounts and remounts this component.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // After the active tab renders, scroll the matching anchor into view
+  // and pulse it. Two-frame delay so the section's own mount effects
+  // (which often kick off `useEffect` data fetches) settle before we
+  // measure layout.
+  useEffect(() => {
+    if (!pendingAnchor) return;
+    const body = bodyRef.current;
+    if (!body) return;
+    let cancelled = false;
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      if (cancelled) return;
+      raf2 = requestAnimationFrame(() => {
+        if (cancelled) return;
+        const el = body.querySelector<HTMLElement>(
+          `[data-fs-anchor="${pendingAnchor}"]`,
+        );
+        if (el) {
+          el.scrollIntoView({ block: "start", behavior: "smooth" });
+          // Visual nudge so the operator notices the landing target
+          // instead of just looking at "yet another row". The CSS
+          // animation is defined in `index.css` (`fs-anchor-pulse`).
+          el.classList.add("fs-anchor-pulse");
+          window.setTimeout(() => {
+            el.classList.remove("fs-anchor-pulse");
+          }, 1200);
+        }
+        setPendingAnchor(null);
+      });
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
+  }, [pendingAnchor, active]);
 
   const sections: { id: SectionId; label: string }[] = [
     { id: "general", label: "General" },
@@ -171,10 +230,17 @@ export function SettingsPanel({ mode, onClose }: Props) {
           </div>
 
           <div
+            ref={bodyRef}
             style={{
               flex: 1,
               overflowY: "auto",
               padding: "22px 28px 28px",
+              // Provide a positioning context so absolutely-positioned
+              // children inside sections don't escape the scroll
+              // container — and so smooth-scrolling lands cleanly when
+              // we use `scrollIntoView`.
+              position: "relative",
+              scrollBehavior: "smooth",
             }}
           >
             {active === "general" && <GeneralSection mode={mode} />}
@@ -186,22 +252,6 @@ export function SettingsPanel({ mode, onClose }: Props) {
             {active === "shortcuts" && <ShortcutsSection mode={mode} />}
             {active === "about" && <AboutSection mode={mode} />}
           </div>
-        </div>
-
-        <div
-          style={{
-            padding: "12px 22px",
-            borderTop: `1px solid ${t.borderSoft}`,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            justifyContent: "flex-end",
-            background: t.surfaceAlt,
-          }}
-        >
-          <Btn t={t} variant="ghost" onClick={onClose}>
-            Done
-          </Btn>
         </div>
       </div>
     </>
@@ -1814,9 +1864,9 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
         }}
       >
         <div style={{ color: t.textMuted }}>License</div>
-        <div>MIT (planned)</div>
+        <div>Apache-2.0</div>
         <div style={{ color: t.textMuted }}>Status</div>
-        <div>M0 — spike</div>
+        <div>beta</div>
         <div style={{ color: t.textMuted }}>Version</div>
         <div style={{ fontFamily: FONT_MONO }}>
           {info?.current_version ?? "…"}

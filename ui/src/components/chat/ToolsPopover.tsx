@@ -50,14 +50,22 @@ export function ToolsPopover({
   // Build the list of sources to render — native always shown, even when
   // every MCP failed, because the chat is genuinely usable on native alone.
   // Order: native first, then MCP servers in operator-config order.
+  //
+  // Native count is derived from `tools` (the direct `chat_list_tools`
+  // catalogue) rather than `mcp.nativeToolCount` so the row stays
+  // accurate even if the streamed `mcp_status` snapshot is missing or
+  // races to "0" — we already have the authoritative tool list right
+  // here. MCP server rows still come from `mcp` because availability /
+  // failure messages only live there.
   const sources = useMemo(() => {
     const rows: SourceRow[] = [];
+    const nativeFromList = tools.filter((t) => t.source === "native").length;
     rows.push({
       kind: "native",
       key: "native",
       name: "Native (in-process)",
       available: true,
-      toolCount: mcp?.nativeToolCount ?? 0,
+      toolCount: mcp?.nativeToolCount ?? nativeFromList,
       message: null,
     });
     for (const s of mcp?.servers ?? []) {
@@ -71,7 +79,7 @@ export function ToolsPopover({
       });
     }
     return rows;
-  }, [mcp]);
+  }, [mcp, tools]);
 
   // Filter + group tools by source name, then sort by category within each
   // source. Tools without a known source bucket end up in "Other" — defensive

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  ClusterHealthStatus,
   ContextInfo,
   ForwardEntry,
   ForwardStatus,
@@ -7,6 +8,7 @@ import type {
   Prefs,
   PrefsRailMode,
   ResourceKind,
+  SettingsTarget,
   TableView,
 } from "./types";
 import { UI_SCALE_DEFAULT, UI_SCALE_STEP, clampUiScale } from "./theme";
@@ -90,6 +92,12 @@ type AppState = {
   paletteOpen: boolean;
   nsModalOpen: boolean;
   settingsOpen: boolean;
+  /// Pending deep-link target for the next time the Settings panel is
+  /// open / re-opened. Consumed by the panel on mount, then cleared via
+  /// `consumeSettingsTarget()` so re-opening the panel without a new
+  /// `openSettings(target)` lands wherever the operator left off. `null`
+  /// = no pending target → panel keeps its persisted active tab.
+  settingsTarget: SettingsTarget | null;
   addMenuOpen: boolean;
 
   dockTabs: DockTab[];
@@ -166,6 +174,17 @@ type AppState = {
   // off this single source.
   metrics: MetricsSnapshot | null;
 
+  // Per-cluster apiserver health. Absent or "healthy" means we have no
+  // negative signal; "unavailable" means the backend's heartbeat probe
+  // saw 30s of failures, tore down watchers + metrics, and is awaiting
+  // a manual reconnect. The unavailable banner reads this; the cluster
+  // bar dims its rows when set. Cleared by `reconnectCluster` (which
+  // also rebuilds the backend entry on the next `connectContext`).
+  clusterHealth: Record<string, ClusterHealthStatus>;
+  // Reason string from the last unavailable event, keyed the same way.
+  // Surfaced verbatim in the banner so the operator can debug.
+  clusterHealthReason: Record<string, string | null>;
+
   // Active port-forwards keyed by id. Initially hydrated by api.pfList() at
   // App boot; mutated on every `portforward://status` event. Detail-panel
   // forward chips read this directly to render their state.
@@ -212,8 +231,12 @@ type AppState = {
   closeFilterEditor: () => void;
   openNsModal: () => void;
   closeNsModal: () => void;
-  openSettings: () => void;
+  openSettings: (target?: SettingsTarget) => void;
   closeSettings: () => void;
+  /// Returns the pending settings target and clears it. SettingsPanel
+  /// calls this on mount + every time `settingsOpen` flips to true so a
+  /// follow-up re-open without a new deep-link doesn't re-scroll.
+  consumeSettingsTarget: () => SettingsTarget | null;
   setAddMenuOpen: (open: boolean) => void;
 
   addDockTab: (tab: DockTab) => void;
@@ -236,6 +259,13 @@ type AppState = {
   clearSelection: () => void;
 
   setMetrics: (snap: MetricsSnapshot | null) => void;
+
+  applyClusterHealth: (
+    clusterId: string,
+    status: ClusterHealthStatus,
+    reason: string | null,
+  ) => void;
+  clearClusterHealth: (clusterId: string) => void;
 
   hydrateForwards: (entries: ForwardEntry[]) => void;
   upsertForward: (entry: ForwardEntry) => void;
@@ -291,6 +321,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   paletteOpen: false,
   nsModalOpen: false,
   settingsOpen: false,
+  settingsTarget: null,
   addMenuOpen: false,
 
   dockTabs: [],
@@ -315,6 +346,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   detailIndex: -1,
 
   metrics: null,
+
+  clusterHealth: {},
+  clusterHealthReason: {},
 
   forwards: {},
   forwardsOpen: false,
@@ -423,8 +457,30 @@ export const useAppStore = create<AppState>((set, get) => ({
   closeFilterEditor: () => set({ filterEditing: false }),
   openNsModal: () => set({ nsModalOpen: true }),
   closeNsModal: () => set({ nsModalOpen: false }),
-  openSettings: () => set({ settingsOpen: true }),
+  openSettings: (target) =>
+    set({
+      settingsOpen: true,
+      // Replace any pending target — last-call-wins semantics. A bare
+      // `openSettings()` clears the pointer so the panel restores its
+      // persisted active tab instead of jumping back to a stale anchor.
+      // Type-guard so a stray non-target value (e.g. a MouseEvent
+      // forwarded by `<IconBtn onClick={openSettings} />`) doesn't
+      // poison `settingsTarget` and leave the panel rendering with
+      // `active = undefined` (i.e. the empty body the operator
+      // reported). We only accept objects with a string `section`.
+      settingsTarget:
+        target &&
+        typeof target === "object" &&
+        typeof (target as SettingsTarget).section === "string"
+          ? target
+          : null,
+    }),
   closeSettings: () => set({ settingsOpen: false }),
+  consumeSettingsTarget: () => {
+    const target = get().settingsTarget;
+    if (target) set({ settingsTarget: null });
+    return target;
+  },
   setAddMenuOpen: (open) => set({ addMenuOpen: open }),
 
   addDockTab: (tab) =>
@@ -506,6 +562,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
 
   setMetrics: (snap) => set({ metrics: snap }),
+
+  applyClusterHealth: (clusterId, status, reason) =>
+    set((s) => ({
+      clusterHealth: { ...s.clusterHealth, [clusterId]: status },
+      clusterHealthReason: { ...s.clusterHealthReason, [clusterId]: reason },
+    })),
+  clearClusterHealth: (clusterId) =>
+    set((s) => {
+      const { [clusterId]: _h, ...rest } = s.clusterHealth;
+      const { [clusterId]: _r, ...restR } = s.clusterHealthReason;
+      return { clusterHealth: rest, clusterHealthReason: restR };
+    }),
 
   hydrateForwards: (entries) =>
     set({

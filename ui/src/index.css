@@ -136,6 +136,25 @@ textarea,
 .fs-copy-flash {
   animation: fs-copy-flash-kf 480ms ease-out;
 }
+/* Settings deep-link landing pulse — applied to the matched
+   `data-fs-anchor` element by SettingsPanel after `scrollIntoView`. A
+   single soft ring fade so the operator's eye lands on the right
+   control without the surface flashing distractingly. */
+@keyframes fs-anchor-pulse-kf {
+  0% {
+    box-shadow: 0 0 0 0 rgba(99, 179, 237, 0);
+  }
+  20% {
+    box-shadow: 0 0 0 4px rgba(99, 179, 237, 0.32);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(99, 179, 237, 0);
+  }
+}
+.fs-anchor-pulse {
+  animation: fs-anchor-pulse-kf 1100ms ease-out;
+  border-radius: 6px;
+}
 /* Streaming-cursor blink for the AI chat in-flight assistant message. */
 @keyframes fs-blink {
   to {

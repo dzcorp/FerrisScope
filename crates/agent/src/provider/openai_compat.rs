@@ -73,12 +73,15 @@ impl OpenAICompatibleProvider {
         if matches!(kind, ProviderKind::OpenRouter) {
             // OpenRouter uses these to attribute usage in the operator's
             // dashboard. Harmless for everyone else but we only send
-            // them when actually talking to OpenRouter.
+            // them when actually talking to OpenRouter. Names must be
+            // lowercase — `HeaderName::from_static` panics on uppercase
+            // bytes; HTTP itself treats header names case-insensitively
+            // so this changes nothing on the wire.
             extra_headers.push((
-                "HTTP-Referer",
+                "http-referer",
                 "https://github.com/dzcorp/FerrisScope".into(),
             ));
-            extra_headers.push(("X-Title", "FerrisScope".into()));
+            extra_headers.push(("x-title", "FerrisScope".into()));
         }
 
         Self {

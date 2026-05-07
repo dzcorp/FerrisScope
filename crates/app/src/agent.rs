@@ -221,6 +221,20 @@ async fn read_credential(kind: ProviderKind) -> Option<Credential> {
         .and_then(|json| serde_json::from_str::<Credential>(json).ok())
 }
 
+/// Effective credential for `kind` — the operator-configured one when
+/// set, otherwise the provider's public-fallback key when it has one
+/// (OpenCode Zen's free tier). This is what every chat / model-listing
+/// path should call: it lets a fresh install hit the free models on
+/// first run without forcing the operator through Settings → AI.
+async fn effective_credential(kind: ProviderKind) -> Option<Credential> {
+    if let Some(c) = read_credential(kind).await {
+        return Some(c);
+    }
+    kind.public_fallback_key().map(|key| Credential::ApiKey {
+        key: key.to_string(),
+    })
+}
+
 async fn write_credential(kind: ProviderKind, cred: &Credential) -> Result<(), String> {
     if agent_keyring::is_available() {
         agent_keyring::set_credential(kind, cred).map_err(|e| e.to_string())?;
@@ -355,6 +369,24 @@ pub(crate) struct McpServerStatusWire {
     pub message: Option<String>,
 }
 
+/// Returned in-band from `chat_open`. Bundles the new chat id with the
+/// initial MCP-status snapshot so the frontend can seed `view.mcp`
+/// synchronously instead of waiting for the streamed `mcp_status`
+/// event — Tauri channel events sent during the same invoke can arrive
+/// after the JS-side state-init effects, which left the header chip
+/// stuck on `Tools · …`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ChatOpenResult {
+    pub chat_id: String,
+    /// Native (in-process) tool count. Stable for the chat's lifetime.
+    pub native_tool_count: u32,
+    /// Per-MCP-server snapshot, in operator-config order. Each entry is
+    /// in the "pending" state initially (`available: false`, no
+    /// `message`); the streaming `mcp_status` event updates them as
+    /// each spawn task completes.
+    pub mcp_servers: Vec<McpServerStatusWire>,
+}
+
 /// Probe-only test request. The frontend supplies a candidate key inline
 /// so the operator can validate before saving. OAuth providers are
 /// validated via the live `ai_oauth_login` flow instead.
@@ -476,6 +508,13 @@ pub(crate) enum ChatEvent {
     /// Streaming error. The chat is left intact; the frontend can retry by
     /// sending another message.
     Error { message: String },
+    /// Auto-generated session title landed. Fired once per chat after the
+    /// first successful turn, when the backend's `maybe_spawn_auto_title`
+    /// background task succeeds. The new title has already been
+    /// journaled via `SessionUpdate { title }` at the time this event is
+    /// emitted — the UI just mirrors it onto its `meta.title` so the
+    /// header chip updates without a session reload.
+    TitleUpdated { title: String },
 }
 
 // ─── Chat registry: live chats keyed by chat_id ─────────────────────────────
@@ -574,6 +613,13 @@ struct ChatRuntime {
     /// is intentionally NOT persisted to JSONL — re-opening a chat resets
     /// the always-allow set so trust doesn't accidentally span sessions.
     approved_always: HashSet<String>,
+    /// `true` once `maybe_spawn_auto_title` has fired for this chat —
+    /// either a title-gen task is in-flight or already completed.
+    /// Prevents double-renaming when subsequent turns would otherwise
+    /// re-trigger the heuristic. Reset on chat re-open (re-opening a
+    /// session that's already been auto-titled won't fire again because
+    /// the persisted `meta.title` will no longer match the placeholder).
+    auto_title_done: bool,
 }
 
 #[derive(Default)]
@@ -615,11 +661,28 @@ pub(crate) async fn ai_get_settings(
             .get(kind)
             .and_then(|c| c.base_url.clone());
         let cred = read_credential(*kind).await;
-        let auth_mode = cred.as_ref().map(Credential::auth_mode_label);
-        let account_label = cred.as_ref().and_then(|c| match c {
-            Credential::OAuth { account_id, .. } => account_id.clone(),
-            _ => None,
-        });
+        // Providers with a public fallback (OpenCode Zen's free tier)
+        // report as configured even without an operator credential —
+        // chat / model-listing paths use `effective_credential` and
+        // the request still succeeds. We surface the distinction
+        // through `account_label = "free tier"` so the UI can show
+        // operators which mode they're in.
+        let public_fallback_active = cred.is_none() && kind.public_fallback_key().is_some();
+        let auth_mode = if public_fallback_active {
+            Some("api_key".to_string())
+        } else {
+            cred.as_ref()
+                .map(Credential::auth_mode_label)
+                .map(str::to_string)
+        };
+        let account_label = if public_fallback_active {
+            Some("free tier".to_string())
+        } else {
+            cred.as_ref().and_then(|c| match c {
+                Credential::OAuth { account_id, .. } => account_id.clone(),
+                _ => None,
+            })
+        };
         providers.insert(
             *kind,
             ProviderStatusWire {
@@ -636,8 +699,8 @@ pub(crate) async fn ai_get_settings(
                         ferrisscope_agent::AuthMode::OAuth => "oauth".to_string(),
                     })
                     .collect(),
-                auth_mode: auth_mode.map(str::to_string),
-                configured: cred.is_some(),
+                auth_mode,
+                configured: cred.is_some() || public_fallback_active,
                 account_label,
             },
         );
@@ -986,16 +1049,39 @@ pub(crate) async fn ai_list_models(
 ) -> Result<Vec<ModelInfo>, String> {
     let p = load_persisted().await;
     let kind = provider.unwrap_or(p.settings.active_provider);
-    let cred = read_credential(kind)
-        .await
+    // Determine whether the public-tier fallback is in effect *before*
+    // we hand the credential to the provider — the upstream catalogue
+    // doesn't gate models by key, so we filter client-side from
+    // models.dev cost data when no operator key is present.
+    let operator_credential = read_credential(kind).await;
+    let public_fallback_active =
+        operator_credential.is_none() && kind.public_fallback_key().is_some();
+    let cred = operator_credential
+        .or_else(|| {
+            kind.public_fallback_key().map(|key| Credential::ApiKey {
+                key: key.to_string(),
+            })
+        })
         .ok_or_else(|| "no credential configured for this provider".to_string())?;
     let base_url = p
         .settings
         .providers
         .get(&kind)
         .and_then(|c| c.base_url.clone());
-    let provider = build_provider(kind, &cred, base_url, None, None)?;
-    provider.list_models().await.map_err(|e| e.to_string())
+    let provider_impl = build_provider(kind, &cred, base_url, None, None)?;
+    let mut models = provider_impl
+        .list_models()
+        .await
+        .map_err(|e| e.to_string())?;
+    // OpenCode Zen on the public tier — drop everything the catalogue
+    // marks as paid. Mirrors opencode's `cost.input === 0` filter.
+    // When the catalogue hasn't loaded yet for this provider we leave
+    // the list alone (better to show all and let the upstream reject
+    // paid-model requests than to show an empty picker on first run).
+    if public_fallback_active && ferrisscope_agent::provider::catalogue::has_data_for(kind) {
+        models.retain(|m| ferrisscope_agent::provider::catalogue::is_known_free(kind, &m.id));
+    }
+    Ok(models)
 }
 
 #[tauri::command]
@@ -1084,7 +1170,7 @@ pub(crate) async fn chat_open(
     app: tauri::AppHandle,
     state: State<'_, AgentState>,
     app_state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<ChatOpenResult, String> {
     let store = state.store().await?;
     let data = store
         .load(&session_id)
@@ -1234,6 +1320,10 @@ pub(crate) async fn chat_open(
         native,
         pending_approvals: HashMap::new(),
         approved_always: HashSet::new(),
+        // Reset every chat-open. The persisted `meta.title` is the
+        // source of truth: if it's still the placeholder when the
+        // first turn finishes, we attempt auto-naming exactly once.
+        auto_title_done: false,
     }));
     state
         .chats
@@ -1279,7 +1369,12 @@ pub(crate) async fn chat_open(
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "chat_open: cannot acquire store for orphan repair");
-                return Ok(chat_id);
+                let initial = initial_status_for_open(&runtime).await;
+                return Ok(ChatOpenResult {
+                    chat_id,
+                    native_tool_count: initial.0,
+                    mcp_servers: initial.1,
+                });
             }
         };
         let cluster_for_heal = data.meta.cluster_id.clone();
@@ -1295,7 +1390,14 @@ pub(crate) async fn chat_open(
 
     // Emit the initial status now so the inspector renders without
     // sitting on "Checking…" — every configured server is in pending
-    // state until its background task lands a result.
+    // state until its background task lands a result. The same
+    // snapshot is also returned in-band by `ChatOpenResult` so the
+    // frontend can seed `view.mcp` synchronously without waiting on
+    // the streamed event (Tauri channel events sent during the same
+    // invoke can arrive AFTER the JS-side state-init effects, leaving
+    // the chip stuck on "Tools · …"). The streamed event is kept for
+    // operators who already have a chat open and re-emit via
+    // `chat_refresh_status`.
     emit_mcp_status(&runtime).await;
 
     if mcp_servers_cfg.is_empty() {
@@ -1365,7 +1467,41 @@ pub(crate) async fn chat_open(
         }
     }
 
-    Ok(chat_id)
+    let initial = initial_status_for_open(&runtime).await;
+    Ok(ChatOpenResult {
+        chat_id,
+        native_tool_count: initial.0,
+        mcp_servers: initial.1,
+    })
+}
+
+/// Snapshot the runtime's tool inventory for `chat_open`'s in-band
+/// return value. Mirrors what `mcp_status_snapshot` builds for the
+/// streaming `McpStatus` event but lifts the values out of the
+/// `ChatEvent` enum so they can be serialised verbatim into
+/// [`ChatOpenResult`].
+async fn initial_status_for_open(
+    runtime: &Arc<Mutex<ChatRuntime>>,
+) -> (u32, Vec<McpServerStatusWire>) {
+    let g = runtime.lock().await;
+    #[allow(clippy::cast_possible_truncation)]
+    let native_tool_count = g.native.tools().len() as u32;
+    let servers = g
+        .mcp_servers
+        .iter()
+        .map(|s| {
+            #[allow(clippy::cast_possible_truncation)]
+            let tool_count = s.tools.len() as u32;
+            McpServerStatusWire {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                available: s.process.is_some(),
+                tool_count,
+                message: s.message.clone(),
+            }
+        })
+        .collect();
+    (native_tool_count, servers)
 }
 
 /// Build a per-server status snapshot from the live runtime. Used for both
@@ -1425,7 +1561,7 @@ pub(crate) async fn chat_send_message(
         Ok(data) => data.meta.provider_kind,
         Err(_) => p.settings.active_provider,
     };
-    let cred = read_credential(kind)
+    let cred = effective_credential(kind)
         .await
         .ok_or_else(|| format!("no credential configured for provider {kind:?}"))?;
     let base_url = p
@@ -1580,6 +1716,70 @@ pub(crate) async fn chat_set_approval_mode(
         .map_err(session_err_to_string)
 }
 
+/// Re-emit the current `McpStatus` for this chat through its event
+/// channel. The chat header's tools chip is driven by mcp_status events
+/// alone; the backend only emits at chat_open time and on MCP-server
+/// spawn results, so any UI flow that resets `view.mcp` (a remount, a
+/// stale-state race) leaves the chip showing "…" or an out-of-date
+/// count. The frontend pings this on tab-becomes-visible / settings
+/// close so the chip is eventually-consistent with the live runtime.
+#[tauri::command]
+pub(crate) async fn chat_refresh_status(
+    chat_id: String,
+    state: State<'_, AgentState>,
+) -> Result<(), String> {
+    let chats = state.chats.lock().await;
+    let Some(rt) = chats.get(&chat_id).cloned() else {
+        return Err(format!("chat not found: {chat_id}"));
+    };
+    drop(chats);
+    emit_mcp_status(&rt).await;
+    Ok(())
+}
+
+/// Switch the model used for this chat's next provider call. The
+/// provider stays the same — model has to come from the session's
+/// bound provider — and history is preserved. Updates the in-memory
+/// runtime and journals a `SessionUpdate { model }` so reload picks
+/// up the new id.
+#[tauri::command]
+pub(crate) async fn chat_set_model(
+    chat_id: String,
+    model: String,
+    state: State<'_, AgentState>,
+) -> Result<(), String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err("model id cannot be empty".to_string());
+    }
+    let chats = state.chats.lock().await;
+    let Some(rt) = chats.get(&chat_id) else {
+        return Err(format!("chat not found: {chat_id}"));
+    };
+    let (cluster_id, session_id) = {
+        let mut g = rt.lock().await;
+        g.model = trimmed.to_string();
+        (g.cluster_id.clone(), g.session_id.clone())
+    };
+    drop(chats);
+    let store = state.store().await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    store
+        .append(
+            &cluster_id,
+            &session_id,
+            SessionEvent::SessionUpdate {
+                update: SessionUpdate {
+                    model: Some(trimmed.to_string()),
+                    ..Default::default()
+                },
+                ts: now,
+            },
+        )
+        .await
+        .map_err(session_err_to_string)
+}
+
 /// Snapshot of the MCP tool catalogue for a live chat. Returned by
 /// `chat_list_tools` so the UI can render an inspector tree without
 /// re-running tools/list (which would block on the MCP child).
@@ -1669,7 +1869,7 @@ pub(crate) async fn chat_compact(
         Ok(d) => d.meta.provider_kind,
         Err(_) => p.settings.active_provider,
     };
-    let cred = read_credential(kind)
+    let cred = effective_credential(kind)
         .await
         .ok_or_else(|| format!("no credential configured for provider {kind:?}"))?;
     let base_url = p
@@ -1903,18 +2103,21 @@ fn resolve_provider_options(
         }
         // DeepSeek r1 / reasoner models accept `reasoning_effort` as a
         // top-level OpenAI-compat extension. Other OpenAI-compat
-        // providers (Groq, Mistral, Together, Z.AI, MiniMax, Ollama)
-        // don't have a public reasoning-control standard; we still
-        // emit `reasoning_effort` because OpenAI-compat servers
+        // providers (Groq, Mistral, Together, Z.AI, MiniMax, Ollama,
+        // OpenCode Zen) don't have a public reasoning-control standard;
+        // we still emit `reasoning_effort` because OpenAI-compat servers
         // typically tolerate unknown fields. Non-reasoning models
-        // ignore it.
+        // ignore it. OpenCode Zen specifically proxies to the underlying
+        // vendor so this passes through to the appropriate native field
+        // for the selected model.
         ProviderKind::Deepseek
         | ProviderKind::Groq
         | ProviderKind::Mistral
         | ProviderKind::Together
         | ProviderKind::Zai
         | ProviderKind::Minimax
-        | ProviderKind::Ollama => {
+        | ProviderKind::Ollama
+        | ProviderKind::OpencodeZen => {
             if let Some(label) = effort_label {
                 out.insert("reasoning_effort".to_string(), serde_json::json!(label));
             }
@@ -2055,17 +2258,50 @@ async fn run_turn_loop(
             // a concurrent `chat_send_message` either lands its message
             // before the check (we keep going) or after we clear cancel
             // (it spawns a fresh turn). No third option.
-            let pending = {
+            let (pending, title_snapshot) = {
                 let mut g = runtime.lock().await;
                 g.messages.push(assistant_msg);
-                if has_unanswered_user_message(&g.messages) {
+                // Capture a once-per-chat snapshot for auto-titling.
+                // We claim the slot under the same lock that pushed
+                // the assistant message so concurrent turns can't
+                // both fire the task. The actual provider call runs
+                // outside this critical section.
+                let snap = if g.auto_title_done {
+                    None
+                } else {
+                    snapshot_for_title(&g.messages).map(|s| {
+                        g.auto_title_done = true;
+                        (s, g.model.clone())
+                    })
+                };
+                let pending = if has_unanswered_user_message(&g.messages) {
                     round = 0;
                     true
                 } else {
                     g.cancel = None;
                     false
-                }
+                };
+                (pending, snap)
             };
+            if let Some((snap, model)) = title_snapshot {
+                let provider_for_title = provider.clone();
+                let store_for_title = store.clone();
+                let runtime_for_title = runtime.clone();
+                let cluster_for_title = cluster_id.clone();
+                let session_for_title = session_id.clone();
+                tauri::async_runtime::spawn(async move {
+                    run_auto_title_task(
+                        provider_for_title,
+                        store_for_title,
+                        runtime_for_title,
+                        cluster_for_title,
+                        session_for_title,
+                        snap,
+                        model,
+                    )
+                    .await;
+                });
+            }
             if pending {
                 continue;
             }
@@ -2568,6 +2804,230 @@ async fn persist_approval(
             },
         )
         .await;
+}
+
+// ─── Auto-title generation ──────────────────────────────────────────────────
+//
+// After the first successful turn (assistant produced a non-tool reply),
+// fire a background provider call that asks the model to summarise the
+// conversation in a 3-5 word title. The result is journaled via
+// `SessionStore::rename` and streamed to the UI as
+// `ChatEvent::TitleUpdated`. Best-effort: any error path leaves the
+// session's "New chat" placeholder intact.
+
+/// Default title every freshly-minted session starts with. Mirrors the
+/// `chat_create_session` constant — declared here too so the auto-title
+/// gate can compare without relying on string literals scattered across
+/// the file.
+const DEFAULT_SESSION_TITLE: &str = "New chat";
+
+/// Maximum characters of each side of the conversation we feed into the
+/// title prompt. Generous enough to capture a question's gist; small
+/// enough to keep the title-gen call cheap on the free-tier models that
+/// most fresh installs land on.
+const TITLE_SNAPSHOT_CHAR_LIMIT: usize = 600;
+
+/// Hard cap on the persisted title's length. Long enough for natural
+/// 3-5 word phrases, short enough that the chat header chip never has
+/// to ellipsize aggressively.
+const TITLE_MAX_CHARS: usize = 80;
+
+/// Prompt shape the auto-title task feeds to the provider. Snapshot
+/// captures only the first user → first assistant exchange — that's
+/// usually enough to characterize the chat's topic, and keeps the
+/// request token budget tiny so it works under the OpenCode Zen free
+/// tier without burning the operator's quota on real providers.
+struct TitleSnapshot {
+    user_text: String,
+    assistant_text: String,
+}
+
+fn snapshot_for_title(messages: &[ChatMessage]) -> Option<TitleSnapshot> {
+    let user = messages
+        .iter()
+        .find(|m| matches!(m.role, MessageRole::User))?
+        .content
+        .clone();
+    // Pick the FIRST assistant message that actually carries text — skip
+    // any tool-call-only turns whose `content` is empty.
+    let assistant = messages
+        .iter()
+        .find(|m| matches!(m.role, MessageRole::Assistant) && !m.content.trim().is_empty())?
+        .content
+        .clone();
+    let user_text = clip_for_title(&user);
+    let assistant_text = clip_for_title(&assistant);
+    if user_text.trim().is_empty() || assistant_text.trim().is_empty() {
+        return None;
+    }
+    Some(TitleSnapshot {
+        user_text,
+        assistant_text,
+    })
+}
+
+fn clip_for_title(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= TITLE_SNAPSHOT_CHAR_LIMIT {
+        return trimmed.to_string();
+    }
+    // Slice on a char boundary, not a byte boundary — multi-byte UTF-8
+    // input (CJK, accents) would panic on a naive `&trimmed[..N]`.
+    let mut out = String::with_capacity(TITLE_SNAPSHOT_CHAR_LIMIT + 1);
+    for ch in trimmed.chars().take(TITLE_SNAPSHOT_CHAR_LIMIT) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+/// Background task: ask the provider for a short title, persist it to
+/// the session journal, and emit a `TitleUpdated` event so the UI's
+/// header chip + sessions popover refresh without a round-trip. Any
+/// failure (provider error, empty / oversized output, journal write
+/// failure) is logged at WARN and silently abandoned — the session
+/// simply keeps the "New chat" placeholder.
+async fn run_auto_title_task(
+    provider: Arc<dyn ChatProvider>,
+    store: SessionStore,
+    runtime: Arc<Mutex<ChatRuntime>>,
+    cluster_id: String,
+    session_id: String,
+    snapshot: TitleSnapshot,
+    model: String,
+) {
+    // Skip if the session already has a non-default title (operator
+    // renamed manually before the model finished). The runtime flag
+    // prevents the task from firing twice for one chat, but it doesn't
+    // see operator-driven renames — the on-disk title does.
+    match store.load(&session_id).await {
+        Ok(data) => {
+            let current = data.meta.title.trim();
+            if !current.eq_ignore_ascii_case(DEFAULT_SESSION_TITLE) && !current.is_empty() {
+                tracing::debug!(
+                    session_id,
+                    %current,
+                    "auto-title: skipping — session already has a custom title",
+                );
+                return;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "auto-title: load session failed");
+            return;
+        }
+    }
+
+    let req = build_title_request(&snapshot, model);
+    let buffer = Arc::new(std::sync::Mutex::new(String::new()));
+    let buf_for_sink = buffer.clone();
+    let sink: ferrisscope_agent::EventSink = Box::new(move |evt| {
+        if let CompletionEvent::TokenDelta(s) = evt {
+            if let Ok(mut buf) = buf_for_sink.lock() {
+                buf.push_str(&s);
+            }
+        }
+    });
+    if let Err(e) = provider.stream_completion(req, sink).await {
+        tracing::warn!(error = %e, session_id, "auto-title: provider call failed");
+        return;
+    }
+    let raw = buffer.lock().map(|g| g.clone()).unwrap_or_default();
+    let Some(title) = sanitise_title(&raw) else {
+        tracing::warn!(session_id, raw = %raw, "auto-title: empty / unusable model output");
+        return;
+    };
+
+    if let Err(e) = store.rename(&session_id, title.clone()).await {
+        tracing::warn!(error = %e, session_id, "auto-title: persist failed");
+        return;
+    }
+    let _ = cluster_id; // kept in scope for future routing — store.rename owns the lookup
+    let g = runtime.lock().await;
+    let _ = g.channel.send(ChatEvent::TitleUpdated {
+        title: title.clone(),
+    });
+    tracing::info!(session_id, %title, "auto-title: applied");
+}
+
+fn build_title_request(snapshot: &TitleSnapshot, model: String) -> CompletionRequest {
+    // Plain string; no markdown / JSON wrapper. Keep it short and let
+    // the model output a bare title — sanitise_title will strip any
+    // stray quotes / trailing punctuation regardless.
+    const SYSTEM_PROMPT: &str = "You generate short, descriptive chat titles. \
+        Reply with ONLY a 3 to 5 word title that captures the main topic of the \
+        conversation below. No quotes, no surrounding punctuation, no labels — \
+        just the title itself.";
+    let user_content = format!(
+        "Conversation:\n\nUser: {}\n\nAssistant: {}",
+        snapshot.user_text, snapshot.assistant_text,
+    );
+    CompletionRequest {
+        model,
+        messages: vec![
+            ChatMessage {
+                role: MessageRole::System,
+                content: SYSTEM_PROMPT.to_string(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: user_content,
+                tool_calls: vec![],
+                tool_call_id: None,
+                name: None,
+            },
+        ],
+        tools: vec![],
+        // Most providers cap titles tightly here. Some reasoning models
+        // ignore temperature; that's fine — the system prompt is rigid
+        // enough that the output stays on-task.
+        temperature: Some(0.4),
+        max_tokens: Some(60),
+        // Don't inherit the chat's reasoning budgets — title-gen
+        // doesn't need extended thinking, and Anthropic in particular
+        // adds latency for an enabled `thinking` block.
+        provider_options: None,
+    }
+}
+
+/// Trim quotes / trailing punctuation, collapse whitespace, cap length.
+/// Returns `None` for empty or all-whitespace input.
+fn sanitise_title(raw: &str) -> Option<String> {
+    let mut s = raw.trim().to_string();
+    // Some models produce reasoning prose before the title. Take the
+    // first non-empty line as the title — chat titles never legitimately
+    // span multiple lines.
+    if let Some(first_line) = s.lines().find(|l| !l.trim().is_empty()) {
+        s = first_line.trim().to_string();
+    }
+    // Strip matching wrapping quotes/backticks the model occasionally
+    // emits despite the system prompt forbidding them.
+    for &(open, close) in &[('"', '"'), ('\'', '\''), ('`', '`'), ('“', '”'), ('‘', '’')] {
+        if s.starts_with(open) && s.ends_with(close) && s.chars().count() >= 2 {
+            s = s
+                .chars()
+                .skip(1)
+                .take(s.chars().count() - 2)
+                .collect::<String>();
+            break;
+        }
+    }
+    // Drop a trailing full stop / colon — natural sentence endings the
+    // model adds despite the prompt; titles read better without them.
+    while matches!(s.chars().last(), Some('.' | ':' | ';' | ',' | '!' | '?')) {
+        s.pop();
+    }
+    let s = s.trim().to_string();
+    if s.is_empty() {
+        return None;
+    }
+    // Cap by characters (not bytes) so multi-byte UTF-8 doesn't slice
+    // mid-codepoint.
+    let trimmed: String = s.chars().take(TITLE_MAX_CHARS).collect();
+    Some(trimmed)
 }
 
 /// Drops oldest tool messages while the transcript exceeds `budget` chars.

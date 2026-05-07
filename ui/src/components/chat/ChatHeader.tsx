@@ -7,11 +7,19 @@ type Props = {
   title: string;
   contextLabel: string;
   modelId: string;
+  /// Display name of the chat's bound provider — drives the provider
+  /// chip and the model chip's tooltip. Empty string while AI settings
+  /// are still loading; the chip degrades to a `…` label.
+  providerLabel: string;
   mcp: McpStatus | null;
   onToggleSessions: () => void;
   sessionsOpen: boolean;
   onToggleTools: () => void;
   toolsOpen: boolean;
+  onToggleModelPicker: () => void;
+  modelPickerOpen: boolean;
+  onToggleProviderPicker: () => void;
+  providerPickerOpen: boolean;
 };
 
 // ChatHeader — strip above the message list. Shows the session title, the
@@ -25,11 +33,16 @@ export function ChatHeader({
   title,
   contextLabel,
   modelId,
+  providerLabel,
   mcp,
   onToggleSessions,
   sessionsOpen,
   onToggleTools,
   toolsOpen,
+  onToggleModelPicker,
+  modelPickerOpen,
+  onToggleProviderPicker,
+  providerPickerOpen,
 }: Props) {
   const t = tokens(mode);
   const total = totalToolCount(mcp ?? undefined);
@@ -117,7 +130,106 @@ export function ChatHeader({
               gap: 8,
             }}
           >
-            <span>{contextLabel} · {modelId || "no model selected"}</span>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+              {contextLabel}
+            </span>
+            <span style={{ color: t.textDim }}>·</span>
+            <button
+              type="button"
+              onClick={onToggleProviderPicker}
+              title={
+                providerLabel
+                  ? `${providerLabel} — click to switch provider (opens a fresh chat)`
+                  : "Switch provider"
+              }
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                color: t.text,
+                background: providerPickerOpen ? t.surface : "transparent",
+                border: `1px solid ${
+                  providerPickerOpen ? t.borderSoft : "transparent"
+                }`,
+                borderRadius: 4,
+                padding: "1px 6px 1px 6px",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                fontSize: "inherit",
+                maxWidth: 200,
+                minWidth: 0,
+              }}
+            >
+              <span
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {providerLabel || "…"}
+              </span>
+              <span
+                style={{
+                  display: "inline-flex",
+                  color: t.textDim,
+                  transform: providerPickerOpen ? "rotate(180deg)" : undefined,
+                  transition: "transform 120ms ease",
+                }}
+                aria-hidden
+              >
+                {Icons.chevD}
+              </span>
+            </button>
+            <span style={{ color: t.textDim }}>·</span>
+            <button
+              type="button"
+              onClick={onToggleModelPicker}
+              title={
+                providerLabel
+                  ? `${providerLabel} · ${modelId || "no model selected"} — click to switch model`
+                  : "Click to switch model"
+              }
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                color: t.text,
+                background: modelPickerOpen ? t.surface : "transparent",
+                border: `1px solid ${
+                  modelPickerOpen ? t.borderSoft : "transparent"
+                }`,
+                borderRadius: 4,
+                padding: "1px 6px 1px 6px",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                fontSize: "inherit",
+                maxWidth: 280,
+                minWidth: 0,
+              }}
+            >
+              <span
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {modelId || "no model selected"}
+              </span>
+              <span
+                style={{
+                  display: "inline-flex",
+                  color: t.textDim,
+                  transform: modelPickerOpen ? "rotate(180deg)" : undefined,
+                  transition: "transform 120ms ease",
+                }}
+                aria-hidden
+              >
+                {Icons.chevD}
+              </span>
+            </button>
+            <span style={{ color: t.textDim }}>·</span>
             <button
               type="button"
               onClick={onToggleTools}

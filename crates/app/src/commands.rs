@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use ferrisscope_core::cluster::{Cluster, ClusterInfo};
 use ferrisscope_core::fleet::{self, ClusterProbe};
+use ferrisscope_core::health::ClusterHealthStatus;
 use ferrisscope_core::kubeconfig::{self, ContextInfo};
 use ferrisscope_core::logs::{LogEvent, LogStream};
 use ferrisscope_core::metrics::{MetricsService, MetricsSnapshot};
@@ -201,14 +202,16 @@ pub(crate) async fn connect_context(
         None
     };
 
-    // Connect path is now *just* the auth handshake — no cluster.info call
-    // gating the response. info() does an apiserver_version round-trip and
-    // a Node LIST, which on slow apiservers cost 1-2 seconds *before* the
-    // user can click Pods. We move it to a background task and emit a
-    // `cluster_info://changed` event when the data is ready; the UI shows
-    // "—" placeholders for server version / node count until the event
-    // arrives. The strategy probe also lives in info() — until it runs the
-    // watcher uses the safe `Paged` default, so this can't stall the watch.
+    // Connect path: auth handshake + a single apiserver_version round trip
+    // as proof of life. We used to skip the apiserver call here (info() ran
+    // in the background) because it cost 1-2s before the user could click
+    // Pods — but on a broken apiserver the watcher's LIST silently retries
+    // forever and the UI hangs on "Loading…", so we'd rather pay the
+    // round-trip up front and fail fast with a clean error than show a
+    // false "connected" state. The version is discarded; the cluster.info
+    // background probe still fills in node count + version on a separate
+    // round-trip after we return (so the cluster bar's placeholders flip
+    // to real values without blocking the operator from clicking a kind).
     let work = async move {
         let started = std::time::Instant::now();
         let cluster = if let Some((source_id, cfg)) = ssh_lookup {
@@ -220,10 +223,39 @@ pub(crate) async fn connect_context(
                 .await
                 .map_err(|e| e.to_string())?
         };
+        let auth_done = started.elapsed();
+        // Inner liveness budget. Smaller than the outer CONNECT_TIMEOUT so
+        // the error message says "apiserver did not respond in 8s" instead
+        // of the ambiguous "timed out after 15s" — operators can tell the
+        // difference between a wedged auth plugin and a wedged apiserver.
+        //
+        // Uses the canonical `liveness_probe` (real LIST namespaces
+        // limit=1) so connect agrees with the background heartbeat and
+        // the fleet card on what "alive" means. /version and /api can
+        // both succeed against a cluster that hangs on real LIST/WATCH
+        // (etcd dead, watch broken, LB in front of dead replicas);
+        // the LIST exercises exactly the path the eager namespaces
+        // watcher is about to fire.
+        const LIVENESS_TIMEOUT: Duration = Duration::from_secs(8);
+        let probe_started = std::time::Instant::now();
+        tokio::time::timeout(
+            LIVENESS_TIMEOUT,
+            ferrisscope_core::health::liveness_probe(&cluster.client()),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "apiserver did not respond within {}s — cluster may be unreachable, etcd is down, or the endpoint is wrong",
+                LIVENESS_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| format!("apiserver liveness probe failed: {e}"))?;
         tracing::info!(
             context = %context_name,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "connect_context: Cluster::connect"
+            auth_ms = auth_done.as_millis() as u64,
+            probe_ms = probe_started.elapsed().as_millis() as u64,
+            total_ms = started.elapsed().as_millis() as u64,
+            "connect_context: Cluster::connect + liveness probe ok"
         );
         Ok::<_, String>(cluster)
     };
@@ -239,12 +271,33 @@ pub(crate) async fn connect_context(
 
     state.connects.lock().await.remove(&connect_id);
 
+    // Mirror the connect outcome onto the fleet card right away so the
+    // landing screen flips green/red without waiting for the next
+    // `refresh_fleet` cycle. Preserves any cached numbers (nodes/pods/
+    // metrics) on failure — operators want to see "last known good"
+    // alongside the red dot, not blank cells. Operator-cancelled
+    // connects don't update the card; they're a UX choice, not a
+    // statement about cluster health.
+    let outcome_for_fleet = match &result {
+        Ok(_) => Some((true, None)),
+        Err(e) if e == "cancelled" => None,
+        Err(e) => Some((false, Some(e.clone()))),
+    };
+    if let Some((healthy, err)) = outcome_for_fleet {
+        record_fleet_health(&app, &state.fleet, &name, healthy, err).await;
+    }
+
     match result {
         Ok(cluster) => {
             // Cache the connected cluster so the next `state.entry(...)` call
             // (e.g. inside `subscribe_resource` when the operator clicks a
             // kind) reuses this client instead of re-running `Cluster::connect`.
             let entry = state.insert_connected(name.clone(), cluster).await;
+            // Health forwarder is wired separately via its own CAS so
+            // it also runs on the lazy-connect path (eager namespaces
+            // subscribe before connect_context). Cheap no-op if already
+            // claimed by an earlier command.
+            wire_cluster_health(&app, &name, entry.clone());
             // Connect-time probes (cluster.info background fetch + bench)
             // run exactly once per cluster. The CAS in `claim_connect_probes`
             // guarantees that even if `connect_context` fires twice (React
@@ -360,6 +413,53 @@ fn spawn_search_bootstrap(
             "search index: bootstrap complete"
         );
     });
+}
+
+/// Spawn the health-event forwarder for `cluster_id` exactly once per
+/// `ClusterEntry` lifetime. Safe to call from every command that
+/// touches `state.entry()` — the CAS in `claim_health_wiring` makes
+/// repeat calls cheap no-ops. Without this on lazy-connect paths
+/// (App's eager namespaces subscribe runs before `connect_context`),
+/// the probe runs but its `Unavailable` event never reaches the UI.
+fn wire_cluster_health(app: &AppHandle, cluster_id: &str, entry: Arc<crate::state::ClusterEntry>) {
+    if entry.claim_health_wiring() {
+        spawn_health_forwarder(app.clone(), cluster_id.to_owned(), entry);
+    }
+}
+
+/// Update the fleet cache entry for `cluster_id` with the latest
+/// connect outcome and emit `fleet://probe` so the landing screen
+/// re-renders the card. Preserves all summary fields on a failed
+/// connect (nodes / pods / metrics from the last successful probe stay
+/// visible alongside the red dot — operators want last-known-good, not
+/// blank cells). On success this only flips the `healthy` flag and
+/// timestamp; the per-context detail probe (`refresh_fleet`) refreshes
+/// the numbers on its own slower cadence.
+async fn record_fleet_health(
+    app: &AppHandle,
+    fleet: &Arc<tokio::sync::Mutex<crate::state::FleetCache>>,
+    cluster_id: &str,
+    healthy: bool,
+    error: Option<String>,
+) {
+    let mut g = fleet.lock().await;
+    let entry = g
+        .map
+        .entry(cluster_id.to_owned())
+        .or_insert_with(|| ClusterProbe {
+            context_name: cluster_id.to_owned(),
+            ..Default::default()
+        });
+    entry.healthy = Some(healthy);
+    entry.last_error = error;
+    entry.fetched_at_unix_ms = fleet::now_ms();
+    let stored = entry.clone();
+    let snapshot = g.map.clone();
+    drop(g);
+    fleet::save_cache(&snapshot).await;
+    if let Err(e) = app.emit("fleet://probe", &stored) {
+        tracing::warn!(error = %e, ?cluster_id, "failed to emit fleet probe");
+    }
 }
 
 fn spawn_cluster_info_probe(
@@ -492,6 +592,21 @@ pub(crate) async fn subscribe_resource(
     let started = std::time::Instant::now();
     let kind = lookup(&kind_id).ok_or_else(|| format!("unknown kind: {kind_id}"))?;
     let entry = state.entry(&cluster_id).await?;
+    // Lazy-connect callers (App's eager namespaces subscribe runs
+    // before connect_context) need the health forwarder wired here so
+    // probe events reach the UI. CAS-guarded — cheap no-op when
+    // connect_context has already wired it.
+    wire_cluster_health(&app, &cluster_id, entry.clone());
+    if entry.unavailable.load(Ordering::SeqCst) {
+        // Cluster has been declared unavailable by the health probe and
+        // its watchers + metrics service have been torn down. Refuse to
+        // re-spawn against the wedged client; the operator must hit
+        // Reconnect (which drops the entry and lets the next
+        // `connect_context` rebuild from a fresh client) first.
+        return Err(format!(
+            "cluster {cluster_id} is unavailable — reconnect first"
+        ));
+    }
     let after_entry = started.elapsed().as_millis() as u64;
     let mut slots = entry.kinds.lock().await;
     let slot = slots.entry(kind_id.clone()).or_insert_with(KindSlot::empty);
@@ -643,6 +758,35 @@ async fn drop_all_kind_watchers(state: &AppState, cluster_id: &str) -> usize {
     dropped
 }
 
+/// Mark the cluster unavailable and tear down its live data plane —
+/// kind watchers (refcount → 0, reflector tasks abort) and metrics
+/// service (Drop aborts the polling task). Keeps the `ClusterEntry` in
+/// the map so the frontend's last-known rows aren't orphaned and
+/// `subscribe_*` calls return a clean "unavailable" error instead of
+/// silently re-spawning watchers against the wedged client. Recovery
+/// is `reconnect_cluster`, which drops the entry and lets the next
+/// `connect_context` rebuild from a fresh client.
+async fn tear_down_unhealthy(state: &AppState, cluster_id: &str) {
+    let Ok(entry) = state.entry(cluster_id).await else {
+        return;
+    };
+    // Set the gate first so any subscribe_* arriving during teardown
+    // bails out early rather than racing the Arc drop.
+    entry.unavailable.store(true, Ordering::SeqCst);
+    let dropped = drop_all_kind_watchers(state, cluster_id).await;
+    let metrics_dropped = {
+        let mut slot = entry.metrics.lock().await;
+        slot.subscribers = 0;
+        slot.service.take().is_some()
+    };
+    tracing::warn!(
+        cluster_id = %cluster_id,
+        watchers_dropped = dropped,
+        metrics_dropped,
+        "tear_down_unhealthy: cluster unavailable, data plane torn down"
+    );
+}
+
 /// Header-palette search across the cluster's index.
 ///
 /// Returns up to `limit` hits sorted by FTS5 bm25 (lower = more
@@ -747,6 +891,28 @@ pub(crate) async fn drop_cluster_watchers(
         removed,
         index_closed,
         "drop_cluster_watchers: cluster left, watchers torn down"
+    );
+    Ok(())
+}
+
+/// Tear down everything for `cluster_id` so the very next `connect_context`
+/// rebuilds from a fresh `Cluster` (and a fresh kube `Client` HTTP/2 pool).
+/// Called from the unavailable-banner Reconnect button: the existing client
+/// may be wedged after the apiserver hiccup, and reusing it would just keep
+/// failing. Search index is preserved (the writer task exits on `Drop`, the
+/// SQLite file stays on disk and is reopened by `connect_context`).
+#[tauri::command]
+pub(crate) async fn reconnect_cluster(
+    cluster_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let dropped = drop_all_kind_watchers(&state, &cluster_id).await;
+    let removed = state.remove_cluster(&cluster_id).await.is_some();
+    tracing::info!(
+        cluster_id = %cluster_id,
+        dropped,
+        removed,
+        "reconnect_cluster: entry dropped, awaiting fresh connect_context"
     );
     Ok(())
 }
@@ -1932,6 +2098,12 @@ pub(crate) async fn subscribe_metrics(
     state: State<'_, AppState>,
 ) -> Result<Option<MetricsSnapshot>, String> {
     let entry = state.entry(&cluster_id).await?;
+    wire_cluster_health(&app, &cluster_id, entry.clone());
+    if entry.unavailable.load(Ordering::SeqCst) {
+        return Err(format!(
+            "cluster {cluster_id} is unavailable — reconnect first"
+        ));
+    }
     let mut slot = entry.metrics.lock().await;
     let svc = if let Some(s) = &slot.service {
         s.clone()
@@ -3043,6 +3215,69 @@ pub(crate) async fn terminal_close(
         }
     }
     Ok(())
+}
+
+/// Bridge the per-cluster `ClusterHealth` broadcast to a Tauri event so
+/// the frontend can flip into an unavailable banner at the same moment
+/// the data plane gets torn down. Spawned once per cluster from the
+/// `claim_connect_probes` block. The probe loop self-terminates after
+/// emitting `Unavailable`, which closes the broadcast and exits this
+/// task — `reconnect_cluster` rebuilds the entry, re-spawning a fresh
+/// forwarder via the next `connect_context`.
+fn spawn_health_forwarder(
+    app: AppHandle,
+    cluster_id: String,
+    entry: Arc<crate::state::ClusterEntry>,
+) {
+    let mut rx = entry.health.subscribe();
+    let event_name = format!("cluster-health://{}", sanitize_event_segment(&cluster_id));
+    let entry_for_replay = entry.clone();
+    tauri::async_runtime::spawn(async move {
+        // Replay the current health snapshot so a forwarder spawned
+        // *after* the probe already declared `Unavailable` (entry was
+        // lazily created via `state.entry()` by some non-`connect_context`
+        // path; the probe ran for 30s+; only now does the operator
+        // click into the cluster and trigger the forwarder spawn) still
+        // gets the UI into the right state. The broadcast channel does
+        // not buffer past events.
+        let snap = entry_for_replay.health.snapshot().await;
+        if matches!(snap.status, ClusterHealthStatus::Unavailable) {
+            tracing::warn!(
+                ?cluster_id,
+                reason = ?snap.reason,
+                "spawn_health_forwarder: cluster already unavailable on subscribe — replaying"
+            );
+            let state = app.state::<AppState>();
+            tear_down_unhealthy(state.inner(), &cluster_id).await;
+            if let Err(e) = app.emit(&event_name, &snap) {
+                tracing::warn!(error = %e, ?cluster_id, "failed to emit cluster health");
+            }
+        }
+        loop {
+            match rx.recv().await {
+                Ok(evt) => {
+                    if matches!(evt.status, ClusterHealthStatus::Unavailable) {
+                        // Tear down BEFORE emitting so that by the time
+                        // the UI handles the event and any in-flight
+                        // subscribe_* lands, the gate is up and the
+                        // command returns the unavailable error
+                        // cleanly instead of starting a watcher that
+                        // would then immediately fail.
+                        let state = app.state::<AppState>();
+                        tear_down_unhealthy(state.inner(), &cluster_id).await;
+                    }
+                    if let Err(e) = app.emit(&event_name, &evt) {
+                        tracing::warn!(error = %e, ?cluster_id, "failed to emit cluster health");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::debug!(?cluster_id, "cluster health forwarder exiting");
+                    return;
+                }
+            }
+        }
+    });
 }
 
 fn spawn_metrics_forwarder(app: AppHandle, cluster_id: String, svc: Arc<MetricsService>) {

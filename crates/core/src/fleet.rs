@@ -147,16 +147,26 @@ async fn probe_inner(
     };
     let client = cluster.client();
 
-    match client.apiserver_version().await {
-        Ok(v) => {
-            probe.server_version = Some(v.git_version);
-            probe.healthy = Some(true);
-        }
-        Err(e) => {
-            probe.healthy = Some(false);
-            probe.last_error = Some(e.to_string());
-            return probe;
-        }
+    // Liveness signal: real LIST namespaces (limit=1). Matches the
+    // in-app health probe + the connect_context liveness check so all
+    // three paths agree on what "alive" means. /version and /api can
+    // both succeed against a wedged apiserver (LB cache, etcd dead,
+    // watch broken) — a real LIST exercises the same code path the
+    // watcher will fire and is the only signal that actually catches
+    // those failure modes.
+    if let Err(e) = crate::health::liveness_probe(&client).await {
+        probe.healthy = Some(false);
+        probe.last_error = Some(e.to_string());
+        return probe;
+    }
+    probe.healthy = Some(true);
+
+    // Server version is a "nice to have" for the card — fetch it on
+    // its own so a `/version`-only failure (rare; usually means the
+    // version endpoint is gated differently) doesn't flip the card to
+    // unhealthy after we already confirmed liveness.
+    if let Ok(v) = client.apiserver_version().await {
+        probe.server_version = Some(v.git_version);
     }
 
     if let Ok(list) = Api::<Node>::all(client.clone())

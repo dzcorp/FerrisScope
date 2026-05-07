@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { api } from "../../api";
 import type {
   AiSettingsWire,
@@ -152,8 +152,11 @@ export function AiSection({ mode }: { mode: ThemeMode }) {
   };
 
   // Render rows in the order Rust's ProviderKind::all() returns. We mirror
-  // that order on the wire so the UI doesn't have to know it.
+  // that order on the wire so the UI doesn't have to know it. OpenCode
+  // Zen leads — it's the default for fresh installs and works without
+  // a key (free tier) so a brand-new user can chat immediately.
   const providerOrder: ProviderKind[] = [
+    "opencode_zen",
     "openai",
     "anthropic",
     "open_router",
@@ -177,25 +180,7 @@ export function AiSection({ mode }: { mode: ThemeMode }) {
         sub="Cluster-aware assistant — configure providers and defaults."
       />
 
-      <Field
-        t={t}
-        label="Active provider"
-        hint="Which provider new chats use by default. The list below configures credentials per provider; switching active provider here doesn't affect already-open chats."
-      >
-        <Select<ProviderKind>
-          t={t}
-          value={settings.active_provider}
-          onChange={(v) => save({ active_provider: v })}
-          options={visibleProviders.map((p) => ({
-            value: p.kind,
-            label: p.configured
-              ? `${p.display_name} · connected`
-              : p.display_name,
-          }))}
-        />
-      </Field>
-
-      <div style={{ marginTop: 12 }}>
+      <div style={{ marginTop: 12 }} data-fs-anchor="providers">
         <div
           style={{
             fontSize: 11,
@@ -227,6 +212,25 @@ export function AiSection({ mode }: { mode: ThemeMode }) {
         </div>
       </div>
 
+      <Field
+        t={t}
+        anchor="active-provider"
+        label="Active provider"
+        hint="Which provider new chats use by default. Switching here doesn't affect already-open chats — they keep the provider they were created with."
+      >
+        <Select<ProviderKind>
+          t={t}
+          value={settings.active_provider}
+          onChange={(v) => save({ active_provider: v })}
+          options={visibleProviders.map((p) => ({
+            value: p.kind,
+            label: p.configured
+              ? `${p.display_name} · connected`
+              : p.display_name,
+          }))}
+        />
+      </Field>
+
       {!settings.keychain_available && (
         <Field
           t={t}
@@ -245,6 +249,7 @@ export function AiSection({ mode }: { mode: ThemeMode }) {
       <Field
         t={t}
         stack
+        anchor="default-model"
         label="Default model"
         hint={
           models.length > 0
@@ -548,6 +553,17 @@ function ProviderRow({
             gap: 8,
           }}
         >
+          {providerBlurb(provider.kind) && (
+            <div
+              style={{
+                fontSize: 11,
+                color: t.textMuted,
+                lineHeight: 1.45,
+              }}
+            >
+              {providerBlurb(provider.kind)}
+            </div>
+          )}
           {supportsOauth && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               <Btn
@@ -724,6 +740,32 @@ function oauthLabel(kind: ProviderKind): string {
   }
 }
 
+// Per-provider descriptive blurb shown above the key field. `null` = no
+// row-level description (most providers — the global hint is enough).
+function providerBlurb(kind: ProviderKind): ReactNode | null {
+  switch (kind) {
+    case "opencode_zen":
+      return (
+        <>
+          OpenCode Zen exposes a curated catalogue of coding models behind a
+          single OpenAI-compatible endpoint. Leave the key blank to use the{" "}
+          <strong>free tier</strong> (zero-cost models only) — or sign up at{" "}
+          <a
+            href="https://opencode.ai/zen"
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: "inherit", textDecoration: "underline" }}
+          >
+            opencode.ai/zen
+          </a>{" "}
+          to unlock the full catalogue.
+        </>
+      );
+    default:
+      return null;
+  }
+}
+
 function keyPlaceholder(kind: ProviderKind): string {
   switch (kind) {
     case "anthropic":
@@ -734,6 +776,8 @@ function keyPlaceholder(kind: ProviderKind): string {
       return "sk-or-v1-…";
     case "groq":
       return "gsk_…";
+    case "opencode_zen":
+      return "(blank = free tier)";
     case "ollama":
       return "(blank for local)";
     default:
@@ -914,6 +958,7 @@ function McpServersField({
     <Field
       t={t}
       stack
+      anchor="mcp-servers"
       label="External MCP servers (optional)"
       hint="Each entry spawns a subprocess per chat and merges its tools with the native catalogue under the same approval gate. Native tools cover the full Kubernetes management surface — leave the list empty unless you want a non-Kubernetes MCP server (filesystem, github, custom). Changes take effect on the next chat open."
     >

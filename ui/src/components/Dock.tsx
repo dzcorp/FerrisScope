@@ -636,7 +636,7 @@ export function Dock({
                   onPatch={(p) => patchState(tab.id, p)}
                 />
               ) : (
-                <DockChat mode={mode} tab={tab} />
+                <DockChat mode={mode} tab={tab} visible={visible} />
               )}
             </div>
           );

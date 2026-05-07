@@ -44,7 +44,8 @@ function backendShortLabel(b: PromBackend): string {
   }
 }
 import { DetailRow, Mute } from "./primitives";
-import { Section } from "../ui";
+import { IconBtn, Icons, Section } from "../ui";
+import { useAppStore } from "../../store";
 
 // Per-pod / per-PVC metrics surface. CPU + memory come exclusively from
 // Prometheus (PromQL range queries) — metrics-server is not used here, by
@@ -1416,6 +1417,7 @@ function RangePicker({
         display: "flex",
         gap: 4,
         flexWrap: "wrap",
+        alignItems: "center",
         marginBottom: 14,
       }}
     >
@@ -1443,7 +1445,42 @@ function RangePicker({
           </button>
         );
       })}
+      {/* Settings shortcut sits inline with the time presets so the
+          operator can swap the Prometheus target / re-detect without
+          leaving the detail view. Pushed to the row's far right via
+          `marginLeft: auto`. */}
+      <ObservabilitySettingsButton t={t} style={{ marginLeft: "auto" }} />
     </div>
+  );
+}
+
+/// Inline icon shortcut to Settings → Observability. Used in two
+/// places in the metrics surface: alongside the time-range presets
+/// (when Prometheus IS detected) and inside the UnavailableBanner
+/// (when it isn't). Both surfaces share this so the affordance reads
+/// the same wherever it appears.
+function ObservabilitySettingsButton({
+  t,
+  style,
+}: {
+  t: Tokens;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <span style={style}>
+      <IconBtn
+        t={t}
+        size="sm"
+        title="Open Observability settings — switch Prometheus target, re-detect, clear"
+        onClick={() =>
+          useAppStore
+            .getState()
+            .openSettings({ section: "observability" })
+        }
+      >
+        {Icons.settings}
+      </IconBtn>
+    </span>
   );
 }
 
@@ -1775,6 +1812,16 @@ function InodeRow({ t, v }: { t: Tokens; v: VolumeMetric }) {
   );
 }
 
+// Volume usage bar. Draws a bordered track so the 0%/100% extents are
+// always visible, quarter-tick gridlines so the eye can estimate
+// position without reading the label, and the colored fill on top.
+//
+// `minWidth: 3px` on the fill keeps a small but visible slice at very
+// low percentages — a 1% volume used to render as a thin near-invisible
+// pixel (operators reported "shows just a line") because the track tint
+// blended into the surrounding panel. The bordered track plus the
+// minimum fill width makes the same 1% read as "tiny but clearly
+// non-empty".
 function Bar({
   t,
   pct,
@@ -1787,25 +1834,54 @@ function Bar({
   compact?: boolean;
 }) {
   const w = Math.max(0, Math.min(1, pct));
+  const hasUsage = w > 0;
   return (
     <div
       style={{
+        position: "relative",
         marginTop: compact ? 0 : 6,
-        height: compact ? 4 : 6,
+        height: compact ? 10 : 12,
         flex: compact ? 1 : undefined,
+        minWidth: compact ? 100 : undefined,
         background: t.surfaceAlt,
-        borderRadius: 2,
+        border: `1px solid ${t.border}`,
+        borderRadius: 3,
         overflow: "hidden",
       }}
     >
-      <div
-        style={{
-          height: "100%",
-          width: `${(w * 100).toFixed(2)}%`,
-          background: tone,
-          transition: "width 200ms linear",
-        }}
-      />
+      {/* Quarter-tick gridlines (25 / 50 / 75 %) painted INTO the track
+          before the fill, so the fill paints over them naturally and
+          the unfilled area keeps the subtle "this is a scale, not a
+          slab" cue at low usage. */}
+      {[0.25, 0.5, 0.75].map((at) => (
+        <span
+          key={at}
+          style={{
+            position: "absolute",
+            left: `${at * 100}%`,
+            top: 0,
+            bottom: 0,
+            width: 1,
+            background: t.border,
+            opacity: 0.55,
+          }}
+        />
+      ))}
+      {hasUsage && (
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            left: 0,
+            width: `${(w * 100).toFixed(2)}%`,
+            minWidth: 3,
+            maxWidth: "100%",
+            background: tone,
+            transition: "width 200ms linear",
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1842,9 +1918,17 @@ function UnavailableBanner({
         fontSize: 12,
         borderRadius: 3,
         marginBottom: 18,
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 10,
       }}
     >
-      {children}
+      <div style={{ flex: 1 }}>{children}</div>
+      {/* Same shortcut as the RangePicker variant — Prometheus is
+          missing here, so the button doubles as the primary CTA: jump
+          to Settings → Observability where the operator can re-detect
+          or pick a target manually. */}
+      <ObservabilitySettingsButton t={t} />
     </div>
   );
 }
