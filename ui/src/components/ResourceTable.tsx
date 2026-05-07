@@ -38,7 +38,7 @@ import {
   Checkbox,
   ContainerDots,
   Icons,
-  Loading,
+  LoadingLine,
   StatusPill,
   EmptyState,
 } from "./ui";
@@ -977,7 +977,7 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
             // First-paint loading. R-01: no spinners on poll — but we are
             // not polling here; we're waiting for the watcher's first
             // snapshot, which is exactly when a quiet indicator helps.
-            <Loading t={t} label={`Loading ${kind.plural}…`} />
+            <LoadingLine t={t} label={`Loading ${kind.plural}…`} />
           ) : filtered.length === 0 && load.kind === "ready" ? (
             // Honest empty: only mention filters if any are actually applied.
             (() => {

@@ -13,7 +13,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, Loading, Section } from "../../ui";
+import { Chip, LoadingLine, Section } from "../../ui";
 import {
   ChipWrap,
   Copyable,
@@ -142,7 +142,7 @@ export function ConfigMapSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading configmap…" inline />
+        <LoadingLine t={t} label="Loading configmap…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -690,7 +690,7 @@ export function SecretSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading secret…" inline />
+        <LoadingLine t={t} label="Loading secret…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -1326,7 +1326,7 @@ export function ResourceQuotaSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading resource quota…" inline />
+        <LoadingLine t={t} label="Loading resource quota…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -1862,7 +1862,7 @@ export function LimitRangeSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading limit range…" inline />
+        <LoadingLine t={t} label="Loading limit range…" inline />
       </Frame>
     );
   if (state.kind === "error")

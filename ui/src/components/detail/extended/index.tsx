@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Loading, Section, StatusPill } from "../../ui";
+import { LoadingLine, Section, StatusPill } from "../../ui";
 import {
   Copyable,
   DetailRow,
@@ -125,7 +125,7 @@ export function HorizontalPodAutoscalerSummary(props: {
     <NamespaceGuard t={t} ns={ns} label="HorizontalPodAutoscaler">
       {state.kind === "loading" ? (
         <Frame t={t}>
-          <Loading t={t} label="Loading hpa…" inline />
+          <LoadingLine t={t} label="Loading hpa…" inline />
         </Frame>
       ) : state.kind === "error" ? (
         <ErrorBlock t={t} message={state.message} />
@@ -281,7 +281,7 @@ export function PodDisruptionBudgetSummary(props: {
     <NamespaceGuard t={t} ns={ns} label="PodDisruptionBudget">
       {state.kind === "loading" ? (
         <Frame t={t}>
-          <Loading t={t} label="Loading pdb…" inline />
+          <LoadingLine t={t} label="Loading pdb…" inline />
         </Frame>
       ) : state.kind === "error" ? (
         <ErrorBlock t={t} message={state.message} />
@@ -385,7 +385,7 @@ export function PriorityClassSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading priority class…" inline />
+        <LoadingLine t={t} label="Loading priority class…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -480,7 +480,7 @@ export function ReplicationControllerSummary(props: {
     <NamespaceGuard t={t} ns={ns} label="ReplicationController">
       {state.kind === "loading" ? (
         <Frame t={t}>
-          <Loading t={t} label="Loading rc…" inline />
+          <LoadingLine t={t} label="Loading rc…" inline />
         </Frame>
       ) : state.kind === "error" ? (
         <ErrorBlock t={t} message={state.message} />
@@ -589,7 +589,7 @@ export function LeaseSummary(props: {
     <NamespaceGuard t={t} ns={ns} label="Lease">
       {state.kind === "loading" ? (
         <Frame t={t}>
-          <Loading t={t} label="Loading lease…" inline />
+          <LoadingLine t={t} label="Loading lease…" inline />
         </Frame>
       ) : state.kind === "error" ? (
         <ErrorBlock t={t} message={state.message} />
@@ -793,7 +793,7 @@ export function MutatingWebhookConfigurationSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading mutating webhook…" inline />
+        <LoadingLine t={t} label="Loading mutating webhook…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -840,7 +840,7 @@ export function ValidatingWebhookConfigurationSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading validating webhook…" inline />
+        <LoadingLine t={t} label="Loading validating webhook…" inline />
       </Frame>
     );
   if (state.kind === "error")

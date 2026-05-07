@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, Loading, Section, StatusPill } from "../../ui";
+import { Chip, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
   Copyable,
@@ -156,7 +156,7 @@ export function PersistentVolumeClaimSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading persistent volume claim…" inline />
+        <LoadingLine t={t} label="Loading persistent volume claim…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -366,7 +366,7 @@ export function PersistentVolumeSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading persistent volume…" inline />
+        <LoadingLine t={t} label="Loading persistent volume…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -597,7 +597,7 @@ export function StorageClassSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading storage class…" inline />
+        <LoadingLine t={t} label="Loading storage class…" inline />
       </Frame>
     );
   if (state.kind === "error")

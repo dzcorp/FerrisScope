@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, onResourceDelta } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, Loading, Section, StatusPill } from "../../ui";
+import { Chip, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
   Copyable,
@@ -121,7 +121,7 @@ export function NodeSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading node…" inline />
+        <LoadingLine t={t} label="Loading node…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -695,7 +695,7 @@ function PodsOnNodeSection(props: {
       />
       <div style={{ marginBottom: 22 }}>
         {state.kind === "loading" && (
-          <Loading t={t} label="Loading pods…" inline />
+          <LoadingLine t={t} label="Loading pods…" inline />
         )}
         {state.kind === "error" && (
           <div
@@ -818,7 +818,7 @@ export function NamespaceSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading namespace…" inline />
+        <LoadingLine t={t} label="Loading namespace…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -915,7 +915,7 @@ export function EventSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading event…" inline />
+        <LoadingLine t={t} label="Loading event…" inline />
       </Frame>
     );
   if (state.kind === "error")

@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, Loading, Section, StatusPill } from "../../ui";
+import { Chip, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipStrip,
   ChipWrap,
@@ -261,7 +261,7 @@ export function ServiceSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading service…" inline />
+        <LoadingLine t={t} label="Loading service…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -791,7 +791,7 @@ export function EndpointsSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading endpoints…" inline />
+        <LoadingLine t={t} label="Loading endpoints…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -1065,7 +1065,7 @@ export function EndpointSliceSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading endpoint slice…" inline />
+        <LoadingLine t={t} label="Loading endpoint slice…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -1326,7 +1326,7 @@ export function IngressSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading ingress…" inline />
+        <LoadingLine t={t} label="Loading ingress…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -1687,7 +1687,7 @@ export function IngressClassSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading ingress class…" inline />
+        <LoadingLine t={t} label="Loading ingress class…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -1844,7 +1844,7 @@ export function NetworkPolicySummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading network policy…" inline />
+        <LoadingLine t={t} label="Loading network policy…" inline />
       </Frame>
     );
   if (state.kind === "error")

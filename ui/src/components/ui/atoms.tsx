@@ -1116,21 +1116,29 @@ export function ContainerDots({
   );
 }
 
-// ── Loading indicator ──────────────────────────────────────────────────────
-// Quiet centred indicator for first-load surfaces (table snapshot, YAML
-// fetch). Per R-01 we never spin during polls; this is only for the bridge
-// between "no data yet" and "first snapshot received".
-export function Loading({
+// ── LoadingLine — indeterminate horizontal progress bar ────────────────────
+// A 30%-wide accent segment ping-pongs across a thin track. Reads as "data
+// is streaming in" — preferred over the spinning circle for tabs that fetch
+// from a reflector or the apiserver. Replaces the old `Loading` spinner in
+// every loading surface across the app.
+//
+// Layouts:
+//   default — centred in the available space; track on top, label below.
+//   inline  — track + label rendered inline-flex; for compact spots like
+//             detail-summary headers where the skeleton fills the rest.
+export function LoadingLine({
   t,
   label,
   inline,
+  width,
   action,
 }: {
   t: Tokens;
-  label: ReactNode;
+  label?: ReactNode;
   inline?: boolean;
+  width?: number;
   // Optional trailing element (e.g. Cancel button on a pending connection).
-  // Stacks under the spinner+label in the centred layout.
+  // Stacks under the bar+label in the centred layout.
   action?: ReactNode;
 }) {
   if (inline) {
@@ -1139,13 +1147,37 @@ export function Loading({
         style={{
           display: "inline-flex",
           alignItems: "center",
-          gap: 8,
+          gap: 10,
           fontSize: 11,
           color: t.textMuted,
           fontFamily: FONT_MONO,
         }}
       >
-        <Spinner color={t.textMuted} />
+        <span
+          style={{
+            width: width ?? 60,
+            height: 2,
+            background: t.borderSoft,
+            position: "relative",
+            overflow: "hidden",
+            borderRadius: 1,
+            display: "inline-block",
+            flexShrink: 0,
+          }}
+        >
+          <span
+            className="fs-line-loader"
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              height: "100%",
+              width: "30%",
+              background: t.accent,
+              borderRadius: 1,
+            }}
+          />
+        </span>
         {label}
       </span>
     );
@@ -1155,55 +1187,50 @@ export function Loading({
       style={{
         height: "100%",
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
+        gap: 12,
         padding: 32,
       }}
     >
       <div
         style={{
-          display: "inline-flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: 14,
+          width: width ?? 220,
+          height: 2,
+          background: t.borderSoft,
+          position: "relative",
+          overflow: "hidden",
+          borderRadius: 1,
         }}
       >
         <div
+          className="fs-line-loader"
           style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 10,
+            position: "absolute",
+            left: 0,
+            top: 0,
+            height: "100%",
+            width: "30%",
+            background: t.accent,
+            borderRadius: 1,
+          }}
+        />
+      </div>
+      {label && (
+        <div
+          style={{
+            fontSize: 12,
             color: t.textDim,
-            fontSize: 12.5,
+            fontFamily: FONT_MONO,
+            letterSpacing: 0.2,
           }}
         >
-          <Spinner color={t.textDim} />
-          <span>{label}</span>
+          {label}
         </div>
-        {action}
-      </div>
+      )}
+      {action}
     </div>
-  );
-}
-
-function Spinner({ color, size = 12 }: { color: string; size?: number }) {
-  return (
-    <span
-      style={{
-        width: size,
-        height: size,
-        display: "inline-block",
-        borderStyle: "solid",
-        borderWidth: 1.5,
-        borderTopColor: color,
-        borderBottomColor: color,
-        borderLeftColor: color,
-        borderRightColor: "transparent",
-        borderRadius: "50%",
-        animation: "fs-spin 0.8s linear infinite",
-        flexShrink: 0,
-      }}
-    />
   );
 }
 

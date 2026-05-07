@@ -22,7 +22,7 @@ import {
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, Loading, Section, StatusPill, Tooltip } from "../../ui";
+import { Chip, LoadingLine, Section, StatusPill, Tooltip } from "../../ui";
 import {
   ChipWrap,
   ConditionChip,
@@ -102,7 +102,7 @@ export function CustomResourceSummary(props: {
   if (state.kind === "loading") {
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading…" inline />
+        <LoadingLine t={t} label="Loading…" inline />
       </Frame>
     );
   }

@@ -27,7 +27,7 @@ import {
   Eyebrow,
   IconBtn,
   Icons,
-  Loading,
+  LoadingLine,
   Section,
   StatusPill,
 } from "./ui";
@@ -749,18 +749,6 @@ export function DetailPanel({
             >
               {target.name}
             </div>
-            {tab === "yaml" && load.kind === "ready" && (
-              <div
-                style={{
-                  marginTop: 6,
-                  fontSize: 10.5,
-                  color: t.textMuted,
-                  fontFamily: FONT_MONO,
-                }}
-              >
-                fetched {timeAgo(load.refreshedAt)}
-              </div>
-            )}
           </div>
           {canBack && (
             <IconBtn
@@ -784,15 +772,17 @@ export function DetailPanel({
           )}
           {isPod && (
             <>
-              <span
-                aria-hidden
-                style={{
-                  width: 1,
-                  height: 22,
-                  background: t.borderSoft,
-                  margin: "0 6px",
-                }}
-              />
+              {(canBack || canForward) && (
+                <span
+                  aria-hidden
+                  style={{
+                    width: 1,
+                    height: 22,
+                    background: t.borderSoft,
+                    margin: "0 6px",
+                  }}
+                />
+              )}
               <IconBtn
                 ref={shellBtnRef}
                 t={t}
@@ -854,15 +844,17 @@ export function DetailPanel({
           )}
           {isNode && (
             <>
-              <span
-                aria-hidden
-                style={{
-                  width: 1,
-                  height: 22,
-                  background: t.borderSoft,
-                  margin: "0 6px",
-                }}
-              />
+              {(canBack || canForward) && (
+                <span
+                  aria-hidden
+                  style={{
+                    width: 1,
+                    height: 22,
+                    background: t.borderSoft,
+                    margin: "0 6px",
+                  }}
+                />
+              )}
               <IconBtn
                 ref={shellBtnRef}
                 t={t}
@@ -927,15 +919,17 @@ export function DetailPanel({
             // the workload set that actually has a `spec.template`; Delete is
             // universal and rides the dynamic API in `runDelete`.
             <>
-              <span
-                aria-hidden
-                style={{
-                  width: 1,
-                  height: 22,
-                  background: t.borderSoft,
-                  margin: "0 6px",
-                }}
-              />
+              {(canBack || canForward) && (
+                <span
+                  aria-hidden
+                  style={{
+                    width: 1,
+                    height: 22,
+                    background: t.borderSoft,
+                    margin: "0 6px",
+                  }}
+                />
+              )}
               {isRestartableWorkload && (
                 <IconBtn
                   ref={restartBtnRef}
@@ -1112,13 +1106,14 @@ export function DetailPanel({
                 {load.message}
               </pre>
             ) : load.kind === "loading" ? (
-              <Loading t={t} label="Fetching YAML…" />
+              <LoadingLine t={t} label="Fetching YAML…" />
             ) : (
               <YamlPane
                 mode={mode}
                 t={t}
                 yaml={load.kind === "ready" ? load.yaml : ""}
                 original={load.kind === "ready" ? load.original : null}
+                refreshedAt={load.kind === "ready" ? load.refreshedAt : null}
                 clusterId={clusterId}
                 kindId={kind.id}
                 namespace={target.namespace}
@@ -1205,6 +1200,7 @@ function YamlPane({
   t,
   yaml,
   original,
+  refreshedAt,
   clusterId,
   kindId,
   namespace,
@@ -1223,6 +1219,7 @@ function YamlPane({
   t: Tokens;
   yaml: string;
   original: Json | null;
+  refreshedAt: number | null;
   clusterId: string;
   kindId: string;
   namespace: string | null;
@@ -1243,6 +1240,14 @@ function YamlPane({
   // The editor's live text. When editing we render the operator's buffer;
   // otherwise we mirror the freshly-fetched stripped YAML.
   const value = editing ? buffer! : yaml;
+
+  // 1s tick so the "fetched X ago" indicator in the toolbar refreshes.
+  const [, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (refreshedAt == null || editing) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [refreshedAt, editing]);
 
   // Diff metrics — only meaningful while editing. `count` drives the Save
   // chip; `onlyDeletions` flips the warning so the operator isn't confused
@@ -1356,7 +1361,9 @@ function YamlPane({
               : diff.onlyDeletions && diff.count === 0
                 ? "removals only — not applied"
                 : `editing · ${dirtyForChrome} change${dirtyForChrome === 1 ? "" : "s"}`
-            : "read-only · status & managed fields hidden"}
+            : refreshedAt != null
+              ? `read-only · status & managed fields hidden · fetched ${timeAgo(refreshedAt)}`
+              : "read-only · status & managed fields hidden"}
         </span>
         {editable && (
           <EditModeChrome
@@ -1474,26 +1481,28 @@ function RelatedPane({
 
   if (state.kind === "loading") {
     return (
-      <div style={{ padding: 18 }}>
-        <Loading t={t} label="Loading related…" inline />
+      <div style={{ height: "100%", background: t.bg }}>
+        <LoadingLine t={t} label="Loading related…" />
       </div>
     );
   }
   if (state.kind === "error") {
     return (
-      <pre
-        style={{
-          padding: 18,
-          fontFamily: FONT_MONO,
-          fontSize: 11.5,
-          color: t.bad,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          margin: 0,
-        }}
-      >
-        {state.message}
-      </pre>
+      <div style={{ height: "100%", background: t.bg }}>
+        <pre
+          style={{
+            padding: 18,
+            fontFamily: FONT_MONO,
+            fontSize: 11.5,
+            color: t.bad,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            margin: 0,
+          }}
+        >
+          {state.message}
+        </pre>
+      </div>
     );
   }
 
@@ -1738,12 +1747,14 @@ function ObjectEvents({
   const t = tokens(mode);
   const [state, setState] = useState<EventState>({ kind: "loading" });
   const rowsRef = useRef<Map<string, ResourceRow>>(new Map());
+  const initialDoneRef = useRef(false);
   const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     rowsRef.current = new Map();
+    initialDoneRef.current = false;
     setState({ kind: "loading" });
 
     (async () => {
@@ -1760,7 +1771,12 @@ function ObjectEvents({
             next.delete(delta.uid);
           }
           rowsRef.current = next;
-          setState({ kind: "ready", rows: Array.from(next.values()) });
+          // Hold the loading state until the initial snapshot has merged —
+          // otherwise an unrelated cluster-wide event delta flips us to
+          // "ready" with an empty map and the spinner never shows.
+          if (initialDoneRef.current) {
+            setState({ kind: "ready", rows: Array.from(next.values()) });
+          }
         });
 
         const result = await api.subscribeResource(clusterId, "events", null);
@@ -1770,6 +1786,7 @@ function ObjectEvents({
           if (row.involved_uid === targetUid) merged.set(row.uid, row);
         }
         rowsRef.current = merged;
+        initialDoneRef.current = true;
         setState({ kind: "ready", rows: Array.from(merged.values()) });
       } catch (e) {
         if (!cancelled) setState({ kind: "error", message: String(e) });
@@ -1795,28 +1812,34 @@ function ObjectEvents({
   }, [state]);
 
   if (state.kind === "loading") {
-    return <Loading t={t} label="Loading events…" />;
+    return (
+      <div style={{ height: "100%", background: t.bg }}>
+        <LoadingLine t={t} label="Loading events…" />
+      </div>
+    );
   }
   if (state.kind === "error") {
     return (
-      <pre
-        style={{
-          padding: 18,
-          fontFamily: FONT_MONO,
-          fontSize: 11.5,
-          color: t.bad,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          margin: 0,
-        }}
-      >
-        {state.message}
-      </pre>
+      <div style={{ height: "100%", background: t.bg }}>
+        <pre
+          style={{
+            padding: 18,
+            fontFamily: FONT_MONO,
+            fontSize: 11.5,
+            color: t.bad,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            margin: 0,
+          }}
+        >
+          {state.message}
+        </pre>
+      </div>
     );
   }
   if (sorted.length === 0) {
     return (
-      <div style={{ padding: 18 }}>
+      <div style={{ padding: 18, height: "100%", background: t.bg }}>
         <Eyebrow t={t}>No events for this object</Eyebrow>
         <div
           style={{
@@ -2013,7 +2036,7 @@ function PodSummary({
       >
         {row ? <SkeletonFromRow t={t} row={row} mode={mode} /> : null}
         <div style={{ marginTop: 16 }}>
-          <Loading t={t} label="Loading pod detail…" inline />
+          <LoadingLine t={t} label="Loading pod detail…" inline />
         </div>
       </div>
     );

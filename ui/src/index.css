@@ -77,17 +77,6 @@ textarea,
     transform: translateX(0);
   }
 }
-@keyframes fs-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  /* Drop the spinner rotation; the label still says "Loading…". */
-  [style*="fs-spin"] {
-    animation: none !important;
-  }
-}
 @keyframes fs-bulk-rise {
   from {
     opacity: 0;
@@ -159,6 +148,25 @@ textarea,
 @keyframes fs-blink {
   to {
     visibility: hidden;
+  }
+}
+/* Indeterminate horizontal "line" loader: a 30%-wide segment ping-pongs
+   across the track. `alternate` flips direction each cycle so the eye reads
+   it as left → right → left, exactly the indeterminate-progress idiom. */
+@keyframes fs-line-loader-kf {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(233%);
+  }
+}
+.fs-line-loader {
+  animation: fs-line-loader-kf 1.2s ease-in-out infinite alternate;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fs-line-loader {
+    animation: none;
   }
 }
 .fs-copyable {

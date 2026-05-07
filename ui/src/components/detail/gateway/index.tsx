@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Loading, Section, StatusPill } from "../../ui";
+import { LoadingLine, Section, StatusPill } from "../../ui";
 import {
   Copyable,
   DetailRow,
@@ -134,7 +134,7 @@ export function GatewayClassSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading gateway class…" inline />
+        <LoadingLine t={t} label="Loading gateway class…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -217,7 +217,7 @@ export function GatewaySummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading gateway…" inline />
+        <LoadingLine t={t} label="Loading gateway…" inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -345,7 +345,7 @@ export function RouteSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label={`Loading ${props.label.toLowerCase()}…`} inline />
+        <LoadingLine t={t} label={`Loading ${props.label.toLowerCase()}…`} inline />
       </Frame>
     );
   if (state.kind === "error")
@@ -546,7 +546,7 @@ export function ReferenceGrantSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading reference grant…" inline />
+        <LoadingLine t={t} label="Loading reference grant…" inline />
       </Frame>
     );
   if (state.kind === "error")

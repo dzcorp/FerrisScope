@@ -3,7 +3,7 @@ import { api, onFleetProbe, onKubeconfigChanged } from "../api";
 import { useAppStore } from "../store";
 import type { ClusterProbe, ContextInfo } from "../types";
 import { tokens, FONT_MONO, type ThemeMode } from "../theme";
-import { Btn, Eyebrow, EmptyState, Gauge, Loading, Tooltip } from "./ui";
+import { Btn, Eyebrow, EmptyState, Gauge, LoadingLine, Tooltip } from "./ui";
 import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
 import { confirm, toast } from "../lib/dialog";
 
@@ -121,7 +121,7 @@ export function FleetLanding({ mode, onSelect }: Props) {
   }, [contexts, refreshSec]);
 
   if (contextsStatus === "loading" || contextsStatus === "idle") {
-    return <Loading t={t} label="Loading kubeconfig…" />;
+    return <LoadingLine t={t} label="Loading kubeconfig…" />;
   }
 
   if (contextsStatus === "error") {

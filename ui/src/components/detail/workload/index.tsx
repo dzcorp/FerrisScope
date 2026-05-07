@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Section, StatusPill, Loading } from "../../ui";
+import { Section, StatusPill, LoadingLine } from "../../ui";
 import {
   Copyable,
   DetailRow,
@@ -157,7 +157,7 @@ export function DeploymentSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading deployment…" inline />
+        <LoadingLine t={t} label="Loading deployment…" inline />
       </Frame>
     );
   if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
@@ -294,7 +294,7 @@ export function ReplicaSetSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading replica set…" inline />
+        <LoadingLine t={t} label="Loading replica set…" inline />
       </Frame>
     );
   if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
@@ -409,7 +409,7 @@ export function StatefulSetSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading stateful set…" inline />
+        <LoadingLine t={t} label="Loading stateful set…" inline />
       </Frame>
     );
   if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
@@ -603,7 +603,7 @@ export function DaemonSetSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading daemon set…" inline />
+        <LoadingLine t={t} label="Loading daemon set…" inline />
       </Frame>
     );
   if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
@@ -734,7 +734,7 @@ export function JobSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading job…" inline />
+        <LoadingLine t={t} label="Loading job…" inline />
       </Frame>
     );
   if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
@@ -891,7 +891,7 @@ export function CronJobSummary(props: {
   if (state.kind === "loading")
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading cron job…" inline />
+        <LoadingLine t={t} label="Loading cron job…" inline />
       </Frame>
     );
   if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;

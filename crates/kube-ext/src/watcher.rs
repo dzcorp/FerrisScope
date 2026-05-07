@@ -104,12 +104,13 @@ impl ResourceWatcher {
         let cache_task = cache.clone();
         let task = tokio::spawn(async move {
             // Per-task timing so the operator can pinpoint where Pods-load
-            // latency lives. Markers logged: task start, first InitApply
-            // (apiserver returned the first object), every Nth InitApply
-            // (page-drain progress), InitDone (initial sync complete), and
-            // subsequent Apply / Delete events at debug level. Read with
-            // `RUST_LOG=ferrisscope=info` (or `=debug` for the fine-grained
-            // per-event lines).
+            // latency lives. INFO markers: task start, first InitApply
+            // (apiserver returned the first object), InitDone (initial
+            // sync complete), stream ended. DEBUG: per-event Apply /
+            // Delete and every-Nth page-drain progress (chatty kinds like
+            // `events` would otherwise flood at INFO). Read with
+            // `RUST_LOG=ferrisscope=info` (or `=debug` for the fine-
+            // grained per-event lines).
             let started = std::time::Instant::now();
             tracing::info!(kind = S::meta().id, ?strategy, "watcher: task starting");
             tokio::pin!(stream);
@@ -152,7 +153,7 @@ impl ResourceWatcher {
                                 "watcher: first apply (apiserver returned first object)"
                             );
                         } else if applied.is_multiple_of(50) {
-                            tracing::info!(
+                            tracing::debug!(
                                 kind = S::meta().id,
                                 elapsed_ms = started.elapsed().as_millis() as u64,
                                 applied,
@@ -293,7 +294,7 @@ impl ResourceWatcher {
                                 "dynamic watcher: first apply"
                             );
                         } else if applied.is_multiple_of(50) {
-                            tracing::info!(
+                            tracing::debug!(
                                 kind = %log_id_task,
                                 elapsed_ms = started.elapsed().as_millis() as u64,
                                 applied,

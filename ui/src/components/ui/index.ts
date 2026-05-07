@@ -12,7 +12,7 @@ export {
   BarGauge,
   Gauge,
   EmptyState,
-  Loading,
+  LoadingLine,
   Toggle,
   TextInput,
   Select,

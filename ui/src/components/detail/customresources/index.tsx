@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, Loading, Section, StatusPill } from "../../ui";
+import { Chip, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
   Copyable,
@@ -70,7 +70,7 @@ export function CustomResourceDefinitionSummary(props: {
   if (state.kind === "loading") {
     return (
       <Frame t={t}>
-        <Loading t={t} label="Loading CRD…" inline />
+        <LoadingLine t={t} label="Loading CRD…" inline />
       </Frame>
     );
   }

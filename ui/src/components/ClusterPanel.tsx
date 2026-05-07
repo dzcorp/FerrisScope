@@ -5,10 +5,9 @@ import type { ClusterInfo, ContextInfo } from "../types";
 import { tokens, type ThemeMode } from "../theme";
 import { ClusterBar } from "./ClusterBar";
 import { ResourceTable } from "./ResourceTable";
-import { Btn, EmptyState, Loading } from "./ui";
+import { Btn, EmptyState, LoadingLine } from "./ui";
 
 type ConnectState =
-  | { status: "idle" }
   | { status: "connecting"; startedAt: number; connectId: string }
   | { status: "ok"; info: ClusterInfo }
   | { status: "cancelled" }
@@ -41,7 +40,15 @@ function newConnectId(): string {
 //     plugin or unreachable apiserver still resolves with an error.
 export function ClusterPanel({ mode, context }: Props) {
   const t = tokens(mode);
-  const [state, setState] = useState<ConnectState>({ status: "idle" });
+  // Initialise straight to "connecting" so the first paint already renders
+  // the Cancel-button-bearing layout. The placeholder connectId is replaced
+  // by the useEffect below within the same commit, so cancelConnect always
+  // sees the real id.
+  const [state, setState] = useState<ConnectState>(() => ({
+    status: "connecting",
+    startedAt: Date.now(),
+    connectId: "",
+  }));
   const [attempt, setAttempt] = useState(0);
   const reqId = useRef(0);
   const selectedKind = useAppStore((s) =>
@@ -194,8 +201,8 @@ export function ClusterPanel({ mode, context }: Props) {
             reason={null}
             onReconnect={onReconnect}
           />
-        ) : state.status === "connecting" ? (
-          <Loading
+        ) : (
+          <LoadingLine
             t={t}
             label={<ConnectingLabel context={context} startedAt={state.startedAt} />}
             action={
@@ -204,20 +211,17 @@ export function ClusterPanel({ mode, context }: Props) {
               </Btn>
             }
           />
-        ) : (
-          <Loading t={t} label={`Connecting to ${context.name}…`} />
         )}
       </div>
     </div>
   );
 }
 
-// ClusterBar's `state` discriminator is { idle | connecting | ok | error };
+// ClusterBar's `state` discriminator is { connecting | ok | error };
 // our extra `cancelled` state doesn't exist there, so present it as an error
 // for the bar's purposes (red dot + message). The retry UI in the panel body
 // is what the user actually interacts with.
 function connectStateForBar(s: ConnectState):
-  | { status: "idle" }
   | { status: "connecting" }
   | { status: "ok"; info: ClusterInfo }
   | { status: "error"; message: string } {
