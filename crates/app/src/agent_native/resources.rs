@@ -27,6 +27,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 const MAX_LIST_ITEMS: u32 = 500;
@@ -91,12 +92,12 @@ struct ApplyArgs {
 
 pub(crate) struct ResourcesList {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl ResourcesList {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -134,7 +135,7 @@ impl NativeTool for ResourcesList {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: GvkArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         let (ar, caps) = resolve_gvk(&client, &a.api_version, &a.kind).await?;
 
         let api: Api<DynamicObject> = match caps.scope {
@@ -171,12 +172,12 @@ impl NativeTool for ResourcesList {
 
 pub(crate) struct ResourcesGet {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl ResourcesGet {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -211,7 +212,7 @@ impl NativeTool for ResourcesGet {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: GetArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         let (ar, caps) = resolve_gvk(&client, &a.api_version, &a.kind).await?;
 
         let api: Api<DynamicObject> = match caps.scope {
@@ -244,12 +245,12 @@ impl NativeTool for ResourcesGet {
 
 pub(crate) struct ResourcesDelete {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl ResourcesDelete {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -285,7 +286,7 @@ impl NativeTool for ResourcesDelete {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: DeleteArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         let (ar, caps) = resolve_gvk(&client, &a.api_version, &a.kind).await?;
 
         let api: Api<DynamicObject> = match caps.scope {
@@ -320,12 +321,12 @@ impl NativeTool for ResourcesDelete {
 
 pub(crate) struct ResourcesScale {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl ResourcesScale {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -369,7 +370,7 @@ impl NativeTool for ResourcesScale {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: ScaleArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         let (ar, caps) = resolve_gvk(&client, &a.api_version, &a.kind).await?;
         if !matches!(caps.scope, discovery::Scope::Namespaced) {
             return Err(NativeToolError::msg(
@@ -450,12 +451,12 @@ fn scale_to_value(a: &ScaleArgs, scale: &Value) -> Value {
 
 pub(crate) struct ResourcesApply {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl ResourcesApply {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -497,7 +498,7 @@ impl NativeTool for ResourcesApply {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: ApplyArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         let results = apply_yaml(client, &a.manifest, a.dry_run, a.force).await;
         Ok(json!({
             "dry_run": a.dry_run,
@@ -509,12 +510,13 @@ impl NativeTool for ResourcesApply {
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-async fn client_for(app: &AppHandle, cluster_id: &str) -> Result<kube::Client, NativeToolError> {
+async fn client_for(
+    app: &AppHandle,
+    cluster: &ChatClusterRef,
+) -> Result<kube::Client, NativeToolError> {
+    let id = cluster.active().await;
     let state = app.state::<AppState>();
-    let entry = state
-        .entry(cluster_id)
-        .await
-        .map_err(NativeToolError::msg)?;
+    let entry = state.entry(&id).await.map_err(NativeToolError::msg)?;
     Ok(entry.cluster.client())
 }
 

@@ -1,10 +1,16 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
 import { Eyebrow } from "../ui";
-import type { ChatViewState, ExecutingToolCall } from "./chatStreaming";
+import {
+  shouldRenderMessage,
+  type ChatViewState,
+  type ExecutingToolCall,
+} from "./chatStreaming";
 import { MessageBubble } from "./MessageBubble";
+import { ToolApprovalBulkBar } from "./ToolApprovalBulkBar";
 import { ToolApprovalCard } from "./ToolApprovalCard";
+import { useStickToBottom } from "./useStickToBottom";
 
 type Props = {
   mode: ThemeMode;
@@ -19,204 +25,209 @@ type Props = {
 // must live inside each row's measured height instead.
 const ROW_GAP = 12;
 
-// MessageList — the scrolling transcript. Auto-scrolls to bottom on new
-// messages while the operator is already at the bottom; respects the scroll
-// position otherwise so they can read backscroll while the model streams.
-//
-// Rows are virtualized via `@tanstack/react-virtual` with `measureElement`
-// because heights vary wildly (single-line user message vs. 800 px assistant
-// block with code/tables). The footer surfaces (executing strip, pending
-// approvals, compacting bubble) stay non-virtualized below the virtual
-// container — small fixed count, easier than folding them into the row array.
+// MessageList — the scrolling transcript. Auto-scroll-to-bottom is owned
+// by `useStickToBottom`, which uses pixel distance for stickiness and a
+// ResizeObserver for content-growth follow. Rows are virtualized via
+// `@tanstack/react-virtual` with `measureElement` because heights vary
+// wildly (single-line user message vs. 800 px assistant block with code/
+// tables). Footer surfaces (executing strip, pending approvals,
+// compacting bubble) sit below the virtual container — small fixed
+// count, easier than folding them into the row array.
 export function MessageList({ mode, state, streaming, chatId, compacting }: Props) {
   const t = tokens(mode);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const stickToBottomRef = useRef(true);
-  const messages = state.messages;
+  const { scrollRef, stuck, snapToBottom } = useStickToBottom();
+  // Filter out messages that MessageBubble would render as null
+  // (settled assistant turns with no text — typically tool-call-only
+  // turns whose tool results render below as their own strips, plus
+  // EmptyTurn retry phantoms). Keeping them in the virtualizer leaves
+  // 12 px paddingBottom-only wrappers stacked between consecutive
+  // tool-result groups, which the operator reads as an unexplained
+  // gap. The filter is the only consumer of the index, so reordering
+  // here doesn't affect anything else (ids stay stable).
+  const messages = useMemo(
+    () => state.messages.filter(shouldRenderMessage),
+    [state.messages],
+  );
 
   const virtualizer = useVirtualizer({
     count: messages.length,
     getScrollElement: () => scrollRef.current,
     // Rough seed; `measureElement` refines per-row from the rendered DOM.
     estimateSize: () => 80,
-    overscan: 8,
+    // Small overscan: the hook's stickiness now reads pixel distance,
+    // not range.endIndex, so we no longer need a wide overscan to keep
+    // sticky stable. Keeps virtualization work cheap during streaming.
+    overscan: 4,
   });
   const virtualItems = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
 
-  // useLayoutEffect runs after DOM mutation but before paint, so any
-  // height changes from this render are visible to the virtualizer when
-  // we ask it to scroll.
-  //
-  // Deps key off the reducer's reference identity: every event that
-  // could change rendered height (token_delta, tool_call_*, tool_result,
-  // approval_request, …) returns a fresh `messages` / `toolBuffers` /
-  // `pendingApprovals` reference, so referential equality is enough —
-  // no need to walk the array building a fingerprint string on every
-  // render.
-  useLayoutEffect(() => {
-    if (!stickToBottomRef.current) return;
-    if (messages.length > 0) {
-      virtualizer.scrollToIndex(messages.length - 1, { align: "end" });
-    }
-    // The footer (executing strip, pending approvals, compacting bubble)
-    // sits below the virtualized region; nudge the scroll element to its
-    // raw `scrollHeight` on the next frame so footer content lands in
-    // view too. Cheap — one rAF, no observers.
-    const raf = requestAnimationFrame(() => {
-      if (!stickToBottomRef.current) return;
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [
-    messages,
-    state.toolBuffers,
-    state.pendingApprovals,
-    state.executing,
-    compacting,
-    virtualizer,
-  ]);
-
-  // Session-load snap. Force sticky on chat switch so the new session
-  // always lands at the bottom regardless of where the previous session
-  // left the ref. `measureElement` corrects positions as bubble heights
-  // settle (markdown highlighter resolving on frames 3-5, etc.) without
-  // the multi-timeout retry the manual scroll path used to need.
+  // Force-snap on chat switch — new session always lands at the bottom
+  // regardless of where the previous session left the scroll position.
+  // The hook's ResizeObserver re-snaps as `measureElement` settles row
+  // heights on subsequent frames (markdown highlighter resolving on
+  // frames 3-5, etc.), so a single explicit snap here is enough — no
+  // multi-timeout retry chain.
   useEffect(() => {
     if (!chatId) return;
-    stickToBottomRef.current = true;
-    if (messages.length > 0) {
-      virtualizer.scrollToIndex(messages.length - 1, { align: "end" });
-    }
-    const raf = requestAnimationFrame(() => {
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
-    return () => cancelAnimationFrame(raf);
-    // Intentionally only re-runs on chat switch — height changes within a
-    // session are handled by the layout effect above.
+    snapToBottom();
+    // Intentionally only re-runs on chat switch — content-growth follow
+    // within a session is owned by the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId]);
 
-  const onScroll = () => {
-    if (messages.length === 0) {
-      stickToBottomRef.current = true;
-      return;
-    }
-    const range = virtualizer.range;
-    if (!range) return;
-    // Sticky while the last message (or the footer beneath it) is in the
-    // visible window. The virtualizer's range tracks which message indexes
-    // are currently rendered, so `endIndex >= count - 1` is a precise
-    // equivalent of the old "scrollHeight - scrollTop - clientHeight < 24"
-    // slop without depending on raw scroll math.
-    stickToBottomRef.current = range.endIndex >= messages.length - 1;
-  };
-
   const lastIndex = messages.length - 1;
+  const showJumpButton = !stuck && messages.length > 0;
 
   return (
-    <div
-      ref={scrollRef}
-      onScroll={onScroll}
-      style={{
-        position: "absolute",
-        inset: 0,
-        overflowY: "auto",
-        padding: "16px 16px 8px",
-        display: "flex",
-        flexDirection: "column",
-        gap: ROW_GAP,
-        // Hint the compositor that scrolling this container is a hot
-        // path. Combined with `contain: content` on each bubble, this
-        // keeps long histories scrolling on the GPU instead of forcing
-        // a full repaint of the dock surface on every scroll tick.
-        willChange: "scroll-position",
-        contain: "content",
-      }}
-    >
-      {messages.length === 0 && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flex: 1,
-            color: t.textMuted,
-            fontSize: 12,
-            textAlign: "center",
-            padding: 24,
-          }}
-        >
-          <div>
-            <Eyebrow t={t}>Cluster-aware AI chat</Eyebrow>
-            <div style={{ marginTop: 6, fontFamily: FONT_MONO }}>
-              Ask anything about this cluster.
+    <>
+      <div
+        ref={scrollRef}
+        style={{
+          position: "absolute",
+          inset: 0,
+          overflowY: "auto",
+          padding: "16px 16px 8px",
+          display: "flex",
+          flexDirection: "column",
+          gap: ROW_GAP,
+          // Hint the compositor that scrolling this container is a hot
+          // path. Combined with `contain: content` on each bubble, this
+          // keeps long histories scrolling on the GPU instead of forcing
+          // a full repaint of the dock surface on every scroll tick.
+          willChange: "scroll-position",
+          contain: "content",
+        }}
+      >
+        {messages.length === 0 && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flex: 1,
+              color: t.textMuted,
+              fontSize: 12,
+              textAlign: "center",
+              padding: 24,
+            }}
+          >
+            <div>
+              <Eyebrow t={t}>Cluster-aware AI chat</Eyebrow>
+              <div style={{ marginTop: 6, fontFamily: FONT_MONO }}>
+                Ask anything about this cluster.
+              </div>
             </div>
           </div>
-        </div>
-      )}
-      {messages.length > 0 && (
-        <div
-          style={{
-            position: "relative",
-            height: totalSize,
-            width: "100%",
-            // Disable the parent's flex sizing for this slot — virtualized
-            // rows are positioned absolutely and `flex-shrink: 1` would
-            // collapse the slot below `totalSize` and clip them.
-            flex: "0 0 auto",
-          }}
-        >
-          {virtualItems.map((vi) => {
-            const m = messages[vi.index];
-            if (!m) return null;
-            // Each row's measured height includes a 12 px gap below it,
-            // so the next row sits exactly `ROW_GAP` below — except the
-            // last row, where the parent's flex `gap` already handles the
-            // spacing to the footer.
-            const isLast = vi.index === lastIndex;
-            return (
-              <div
-                key={m.id}
-                data-index={vi.index}
-                ref={virtualizer.measureElement}
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  transform: `translateY(${vi.start}px)`,
-                  paddingBottom: isLast ? 0 : ROW_GAP,
-                }}
-              >
-                <MessageBubble mode={mode} message={m} />
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {state.executing.length > 0 && (
-        <ExecutingStrip t={t} executing={state.executing} />
-      )}
-      {chatId &&
-        state.pendingApprovals.map((p) => (
-          <ToolApprovalCard
-            key={p.toolCallId}
+        )}
+        {messages.length > 0 && (
+          <div
+            style={{
+              position: "relative",
+              height: totalSize,
+              width: "100%",
+              // Disable the parent's flex sizing for this slot — virtualized
+              // rows are positioned absolutely and `flex-shrink: 1` would
+              // collapse the slot below `totalSize` and clip them.
+              flex: "0 0 auto",
+            }}
+          >
+            {virtualItems.map((vi) => {
+              const m = messages[vi.index];
+              if (!m) return null;
+              // Each row's measured height includes a 12 px gap below it,
+              // so the next row sits exactly `ROW_GAP` below — except the
+              // last row, where the parent's flex `gap` already handles the
+              // spacing to the footer.
+              const isLast = vi.index === lastIndex;
+              return (
+                <div
+                  key={m.id}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    transform: `translateY(${vi.start}px)`,
+                    paddingBottom: isLast ? 0 : ROW_GAP,
+                  }}
+                >
+                  <MessageBubble mode={mode} message={m} />
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {state.executing.length > 0 && (
+          <ExecutingStrip t={t} executing={state.executing} />
+        )}
+        {chatId &&
+          state.pendingApprovals.map((p) => (
+            <ToolApprovalCard
+              key={p.toolCallId}
+              mode={mode}
+              chatId={chatId}
+              approval={p}
+            />
+          ))}
+        {chatId && state.pendingApprovals.length > 1 && (
+          <ToolApprovalBulkBar
             mode={mode}
             chatId={chatId}
-            approval={p}
+            approvals={state.pendingApprovals}
           />
-        ))}
-      {compacting && <CompactingBubble t={t} />}
-      {streaming &&
-        messages.length > 0 &&
-        // No-op visual: the streaming caret lives inside the MessageBubble
-        // for the in-flight assistant. Kept this slot here so future
-        // surfaces (token usage, "thinking…" indicator) have a home.
-        null}
-    </div>
+        )}
+        {compacting && <CompactingBubble t={t} />}
+      </div>
+      {showJumpButton && (
+        <JumpToLatestButton t={t} streaming={streaming} onClick={snapToBottom} />
+      )}
+    </>
+  );
+}
+
+// Floating affordance shown when the operator has scrolled away from
+// the bottom while the transcript keeps growing. Click → snap to the
+// latest message and resume auto-follow. Bottom-centre so it doesn't
+// collide with right-side scrollbars on long transcripts.
+function JumpToLatestButton({
+  t,
+  streaming,
+  onClick,
+}: {
+  t: ReturnType<typeof tokens>;
+  streaming: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        position: "absolute",
+        bottom: 12,
+        left: "50%",
+        transform: "translateX(-50%)",
+        background: t.surface,
+        border: `1px solid ${t.borderSoft}`,
+        borderRadius: 999,
+        padding: "5px 12px",
+        fontFamily: FONT_MONO,
+        fontSize: 11,
+        color: t.text,
+        cursor: "pointer",
+        boxShadow: "0 2px 8px rgba(15,20,30,0.18)",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        zIndex: 2,
+      }}
+    >
+      <span style={{ color: t.accent, fontWeight: 700 }}>↓</span>
+      <span>{streaming ? "follow latest" : "jump to latest"}</span>
+    </button>
   );
 }
 

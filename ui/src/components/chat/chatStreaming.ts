@@ -29,6 +29,19 @@ export type ChatViewMessage = {
   toolLineCount?: number;
 };
 
+// Predicate for "this message will produce visible DOM in MessageBubble".
+// Mirrors the early-return null branches in MessageBubble:
+//  - settled assistant with no text content renders null (whether it has
+//    tool_calls or not) — the matching ToolResultBubble below stands in,
+//    or it's an EmptyTurn retry phantom we don't want to surface.
+// MessageList filters by this before passing to the virtualizer so empty
+// turns don't leave 12 px phantom rows between tool-result strips.
+export function shouldRenderMessage(m: ChatViewMessage): boolean {
+  if (m.role !== "assistant") return true;
+  if (m.streaming) return true;
+  return (m.content ?? "").trim().length > 0;
+}
+
 // Build the strip preview + line count from a tool result body. Only the
 // first line is used for the preview, capped at 120 chars with an ellipsis
 // so the strip stays single-row regardless of payload size.

@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use tokio::io::AsyncReadExt;
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 /// Output cap matches `fs_node_shell_exec` so the agent gets a consistent
@@ -33,10 +34,11 @@ use crate::state::AppState;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Per-call timeout default. Overridable via `timeout_seconds`. Sized to
-/// fit comfortably under the agent loop's 60s ceiling so a tool-level
+/// fit comfortably under the agent loop's 300s ceiling so a tool-level
 /// timeout error has a chance to come back instead of the outer wrapper
-/// firing first.
-const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(45);
+/// firing first. Long-running diagnostics (`kubectl wait`, multi-second
+/// init scripts) commonly land in the 60–180s range.
+const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(240);
 
 #[derive(Debug, Deserialize)]
 struct Args {
@@ -65,12 +67,12 @@ struct ExecResult {
 
 pub(crate) struct PodExec {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl PodExec {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -108,7 +110,7 @@ impl NativeTool for PodExec {
         if a.command.is_empty() {
             return Err(NativeToolError::msg("command must be non-empty argv"));
         }
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         let pods: Api<Pod> = Api::namespaced(client.clone(), &a.namespace);
 
         // Resolve container name explicitly — the apiserver will guess the
@@ -248,10 +250,11 @@ async fn run_exec(
     })
 }
 
-async fn client_for(app: &AppHandle, cluster_id: &str) -> Result<Client, NativeToolError> {
+async fn client_for(app: &AppHandle, cluster: &ChatClusterRef) -> Result<Client, NativeToolError> {
+    let id = cluster.active().await;
     let state = app.state::<AppState>();
     let entry = state
-        .entry(cluster_id)
+        .entry(&id)
         .await
         .map_err(|e| NativeToolError::msg(format!("connect cluster: {e}")))?;
     Ok(entry.cluster.client())

@@ -2,6 +2,7 @@ import { memo, useMemo, useState } from "react";
 import { api } from "../../api";
 import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
 import { Btn } from "../ui";
+import { useCopyFlash } from "../detail/primitives";
 import type { PendingApproval } from "./chatStreaming";
 
 type Props = {
@@ -25,8 +26,20 @@ function ToolApprovalCardInner({ mode, chatId, approval }: Props) {
   const t = tokens(mode);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Pulse the pretty-args block after a successful clipboard write so the
+  // operator sees acknowledgement without a toast. Same pattern as
+  // <Copyable> in detail primitives.
+  const [argsPreRef, flashArgs] = useCopyFlash<HTMLPreElement>();
 
   const pretty = useMemo(() => formatArgs(approval.arguments), [approval.arguments]);
+
+  const copyArgs = () => {
+    if (typeof navigator === "undefined" || !navigator.clipboard) return;
+    navigator.clipboard
+      .writeText(pretty)
+      .then(() => flashArgs())
+      .catch(() => {});
+  };
 
   const decide = async (
     decision: "approved" | "approved_always" | "denied",
@@ -51,6 +64,12 @@ function ToolApprovalCardInner({ mode, chatId, approval }: Props) {
       }}
     >
       <div
+        // `fs-selectable` opts the whole card body — tool name, arguments
+        // JSON, error text — back into text selection (the global
+        // `body { user-select: none }` rule otherwise blocks it). Lets
+        // operators select+copy a path/manifest snippet from the args
+        // before deciding, or grab the tool name into search.
+        className="fs-selectable"
         style={{
           maxWidth: "92%",
           flex: 1,
@@ -78,9 +97,31 @@ function ToolApprovalCardInner({ mode, chatId, approval }: Props) {
           <span style={{ color: t.warn, fontWeight: 600, fontSize: 11 }}>
             ⚠ APPROVAL REQUIRED
           </span>
-          <span style={{ color: t.text, fontSize: 12 }}>{approval.name}</span>
+          <span style={{ color: t.text, fontSize: 12, flex: 1, minWidth: 0 }}>
+            {approval.name}
+          </span>
+          <button
+            type="button"
+            onClick={copyArgs}
+            title="Copy arguments JSON"
+            style={{
+              background: "transparent",
+              border: `1px solid ${t.borderSoft}`,
+              borderRadius: 4,
+              color: t.textDim,
+              fontFamily: FONT_MONO,
+              fontSize: 10,
+              padding: "2px 6px",
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+          >
+            copy
+          </button>
         </div>
         <pre
+          ref={argsPreRef}
+          className="fs-selectable"
           style={{
             margin: 0,
             padding: "6px 8px",

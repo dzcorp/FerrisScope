@@ -1,7 +1,8 @@
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
 import type { ChatViewMessage } from "./chatStreaming";
 import { Markdown } from "./markdown";
+import { safePrefixLength } from "./safePrefix";
 
 type Props = {
   mode: ThemeMode;
@@ -41,6 +42,17 @@ function MessageBubbleInner({ mode, message }: Props) {
   const hasContent = (message.content ?? "").trim().length > 0;
   const hasToolCalls = !!message.toolCalls && message.toolCalls.length > 0;
 
+  // While streaming, render only the safe-prefix slice so partial
+  // markdown constructs (mid-link, mid-code, mid-row…) don't flash as
+  // raw text and then re-render. Once streaming settles we render the
+  // full content unconditionally. The slice is memoized so unrelated
+  // bubble re-renders don't recompute it.
+  const renderText = useMemo(() => {
+    const text = message.content ?? "";
+    if (!message.streaming) return text;
+    return text.slice(0, safePrefixLength(text));
+  }, [message.content, message.streaming]);
+
   // Pure-tool-call assistant message. While streaming we surface a tiny
   // "calling…" strip so the operator sees activity; once streaming settles
   // we suppress it entirely — the matching ToolResultBubble immediately
@@ -50,6 +62,23 @@ function MessageBubbleInner({ mode, message }: Props) {
     if (message.streaming) {
       return <ToolCallStrip t={t} names={message.toolCalls!.map((c) => c.name)} />;
     }
+    return null;
+  }
+
+  // Empty assistant turn (no text, no tool calls) that has settled — the
+  // backend's auto-retry on `EmptyTurn` will spawn a fresh AssistantStart
+  // for the retry, leaving this AssistantStart/AssistantEnd pair as a
+  // phantom in the reducer. Hide it so the operator only sees the real
+  // response (or the explicit "model returned no output" notice once
+  // retries are exhausted, which has content and falls through). While
+  // still streaming we DO render the empty bubble — the blinking caret
+  // shows the model is working.
+  if (
+    message.role === "assistant" &&
+    !hasContent &&
+    !hasToolCalls &&
+    !message.streaming
+  ) {
     return null;
   }
 
@@ -97,7 +126,7 @@ function MessageBubbleInner({ mode, message }: Props) {
         >
           {isUser ? "you" : "assistant"}
         </div>
-        <Markdown text={message.content} t={t} />
+        <Markdown text={renderText} t={t} />
         {message.streaming && (
           <span
             style={{

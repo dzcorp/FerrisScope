@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use ferrisscope_agent::NativeRegistry;
 use tauri::AppHandle;
+use tokio::sync::RwLock;
 
 pub(crate) mod apply;
 pub(crate) mod can_i;
@@ -37,28 +38,90 @@ pub(crate) mod resources;
 pub(crate) mod rollout;
 pub(crate) mod workload;
 
+/// Per-chat cluster context shared across every native tool.
+///
+/// `origin` is the cluster the chat was opened against — stable for the
+/// chat's lifetime; it's what the chat is "bound to" for storage, auto-title,
+/// the MCP child's `KUBECONFIG`, and port-forward ownership filtering.
+///
+/// `active` is what stateless tools target on each call. Defaults to `origin`.
+/// `fs_configuration_use_context` rebinds it for the rest of the chat (or
+/// until rebound again) so the operator can stay parked on cluster A in the UI
+/// while the agent investigates clusters B/C without the operator having to
+/// open a new chat per cluster.
+///
+/// Stateful tools (node-shell at minimum) snapshot the active id at open time
+/// into their session struct so in-flight sessions keep targeting their
+/// origin cluster even after a switch.
+pub(crate) struct ChatClusterCtx {
+    origin: String,
+    /// Session id this ctx belongs to. Carried so
+    /// `fs_configuration_use_context` can persist the switch into the
+    /// session JSONL without an extra plumbing layer.
+    session_id: String,
+    active: RwLock<String>,
+}
+
+impl ChatClusterCtx {
+    /// Build the per-chat context.
+    ///
+    /// `restored_active` is the persisted active-cluster override (from
+    /// `SessionMeta::active_cluster_id`) — when present and resolvable
+    /// against the current sources, the chat re-opens on the agent's
+    /// last target rather than reverting to origin. Pass `None` for new
+    /// chats or when the saved override doesn't resolve any longer.
+    pub(crate) fn new(
+        origin: String,
+        session_id: String,
+        restored_active: Option<String>,
+    ) -> Arc<Self> {
+        let active = restored_active.unwrap_or_else(|| origin.clone());
+        Arc::new(Self {
+            origin,
+            session_id,
+            active: RwLock::new(active),
+        })
+    }
+
+    pub(crate) fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) async fn active(&self) -> String {
+        self.active.read().await.clone()
+    }
+
+    pub(crate) async fn set_active(&self, id: String) {
+        *self.active.write().await = id;
+    }
+}
+
+pub(crate) type ChatClusterRef = Arc<ChatClusterCtx>;
+
 /// Build the per-chat native registry. Tools close over `AppHandle` (cheap
-/// clone, internally ref-counted) and the chat's `cluster_id`; AppState is
+/// clone, internally ref-counted) and a shared `ChatClusterRef`; AppState is
 /// fetched per-call via `app.state::<AppState>()` so we don't need to thread
 /// an `Arc<AppState>` through the system.
-pub(crate) fn build_registry(app: AppHandle, cluster_id: String) -> NativeRegistry {
+pub(crate) fn build_registry(app: AppHandle, cluster: ChatClusterRef) -> NativeRegistry {
     let mut reg = NativeRegistry::new();
 
     // Node shell family — privileged, three-tool session lifecycle.
     let sessions = node_shell::NodeShellSessions::new();
     reg.register(Arc::new(node_shell::NodeShellOpen::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
         sessions.clone(),
     )));
     reg.register(Arc::new(node_shell::NodeShellExec::new(
         app.clone(),
-        cluster_id.clone(),
         sessions.clone(),
     )));
     reg.register(Arc::new(node_shell::NodeShellClose::new(
         app.clone(),
-        cluster_id.clone(),
         sessions,
     )));
 
@@ -68,7 +131,7 @@ pub(crate) fn build_registry(app: AppHandle, cluster_id: String) -> NativeRegist
     let ssh_sessions = node_ssh::NodeSshSessions::new();
     reg.register(Arc::new(node_ssh::NodeSshOpen::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
         ssh_sessions.clone(),
     )));
     reg.register(Arc::new(node_ssh::NodeSshExec::new(ssh_sessions.clone())));
@@ -77,134 +140,120 @@ pub(crate) fn build_registry(app: AppHandle, cluster_id: String) -> NativeRegist
     // Read-only synthesis tools.
     reg.register(Arc::new(workload::WorkloadSummary::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(diagnose::PodDiagnose::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(diagnose::NodeDiagnose::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(metrics::MetricsPod::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(metrics::MetricsNode::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(prom::PrometheusQuery::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
-    reg.register(Arc::new(logs::LogsTail::new(
-        app.clone(),
-        cluster_id.clone(),
-    )));
-    reg.register(Arc::new(helm::HelmList::new(
-        app.clone(),
-        cluster_id.clone(),
-    )));
+    reg.register(Arc::new(logs::LogsTail::new(app.clone(), cluster.clone())));
+    reg.register(Arc::new(helm::HelmList::new(app.clone(), cluster.clone())));
     reg.register(Arc::new(helm::HelmReleaseGet::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(helm::HelmHistory::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(helm::HelmInstall::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(helm::HelmUninstall::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
 
     // Generic K8s primitives — what the external MCP server used to
     // provide. Pods (list/get/delete/run), arbitrary resources by GVK
     // (list/get/delete/scale/apply-from-yaml), namespaces, events,
     // node-side kubelet logs + stats summary, and config introspection.
-    reg.register(Arc::new(pods::PodsList::new(
-        app.clone(),
-        cluster_id.clone(),
-    )));
-    reg.register(Arc::new(pods::PodsGet::new(
-        app.clone(),
-        cluster_id.clone(),
-    )));
+    reg.register(Arc::new(pods::PodsList::new(app.clone(), cluster.clone())));
+    reg.register(Arc::new(pods::PodsGet::new(app.clone(), cluster.clone())));
     reg.register(Arc::new(pods::PodsDelete::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
-    reg.register(Arc::new(pods::PodsRun::new(
-        app.clone(),
-        cluster_id.clone(),
-    )));
+    reg.register(Arc::new(pods::PodsRun::new(app.clone(), cluster.clone())));
     reg.register(Arc::new(resources::ResourcesList::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(resources::ResourcesGet::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(resources::ResourcesDelete::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(resources::ResourcesScale::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(resources::ResourcesApply::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(events::EventsList::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(namespaces::NamespacesList::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(nodes_kubelet::NodesLog::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(nodes_kubelet::NodesStatsSummary::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(config_view::ConfigurationView::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(config_view::ConfigurationContextsList::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
+    )));
+    reg.register(Arc::new(config_view::ConfigurationUseContext::new(
+        app.clone(),
+        cluster.clone(),
     )));
 
     // Port-forward control. Operator-owned: `on_chat_close` does NOT tear
     // these down (forwards opened by the agent live on in the dock).
     reg.register(Arc::new(portforward::PortForwardList::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
     reg.register(Arc::new(portforward::PortForwardOpen::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
-    reg.register(Arc::new(portforward::PortForwardClose::new(
-        app.clone(),
-        cluster_id.clone(),
-    )));
+    reg.register(Arc::new(portforward::PortForwardClose::new(app.clone())));
 
-    // HTTP probe — no per-cluster state, so no AppHandle/cluster_id capture.
+    // HTTP probe — no per-cluster state, so no AppHandle/cluster capture.
     reg.register(Arc::new(http_fetch::HttpFetch::new()));
 
     // Pause — stateless sleep helper for poll loops.
@@ -213,21 +262,21 @@ pub(crate) fn build_registry(app: AppHandle, cluster_id: String) -> NativeRegist
     // Rollout snapshot — pairs with fs_pause for deploy/sts/ds wait loops.
     reg.register(Arc::new(rollout::RolloutStatus::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
 
     // SubjectAccessReview wrapper.
-    reg.register(Arc::new(can_i::CanI::new(app.clone(), cluster_id.clone())));
+    reg.register(Arc::new(can_i::CanI::new(app.clone(), cluster.clone())));
 
     // SSA apply — write-category, approval-gated. The agent's only
     // mutate-an-arbitrary-resource lever (port-forwards / shells excluded).
     reg.register(Arc::new(apply::ApplyResource::new(
         app.clone(),
-        cluster_id.clone(),
+        cluster.clone(),
     )));
 
     // Pod exec — kubectl-exec equivalent against an existing pod.
-    reg.register(Arc::new(pod_exec::PodExec::new(app, cluster_id)));
+    reg.register(Arc::new(pod_exec::PodExec::new(app, cluster)));
 
     reg
 }

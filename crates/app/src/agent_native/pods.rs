@@ -23,9 +23,24 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
-const MAX_PODS_PER_LIST: usize = 500;
+/// Default total cap on rows returned. Conservative so a casual list
+/// against a busy cluster doesn't dump thousands of pods into the
+/// transcript on the first call. The model can opt up to
+/// `MAX_PODS_HARD` via the `limit` arg when it actually wants the
+/// full picture.
+const DEFAULT_PODS_LIMIT: usize = 500;
+/// Hard ceiling on `limit`. 10_000 covers real investigation needs
+/// (large clusters often run 5–10k pods cluster-wide) without giving
+/// a misbehaving model the option to ask for 1M and stall the chat
+/// on a multi-second list call. Above this, narrow the selector.
+const MAX_PODS_HARD: usize = 10_000;
+/// Apiserver page size when paginating — 500 keeps each round-trip
+/// cheap. We loop until we've filled the caller's `limit` or the
+/// apiserver runs out of pages.
+const PODS_PAGE_SIZE: u32 = 500;
 
 #[derive(Debug, Deserialize)]
 struct ListArgs {
@@ -36,6 +51,11 @@ struct ListArgs {
     label_selector: Option<String>,
     #[serde(default)]
     field_selector: Option<String>,
+    /// Total rows to return. Default `DEFAULT_PODS_LIMIT` (500), max
+    /// `MAX_PODS_HARD` (10_000). Backed by apiserver pagination —
+    /// values above 500 trigger multiple GETs internally.
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,12 +99,12 @@ struct RunArgs {
 
 pub(crate) struct PodsList {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl PodsList {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -98,15 +118,22 @@ impl NativeTool for PodsList {
                 `app=foo,tier=web`) and `field_selector` (e.g. `status.phase=Running`, \
                 `spec.nodeName=node-1`) narrow the result. Returns one row per pod with name, \
                 namespace, phase, node, ready/total container count, restart count, IP, age, and \
-                top-level container reasons (CrashLoopBackOff, ImagePullBackOff, …). Capped at 500 \
-                rows; refine selectors if you hit the cap."
+                top-level container reasons (CrashLoopBackOff, ImagePullBackOff, …). Default \
+                limit is 500 rows; pass `limit` (max 10000) for bigger lists — pagination is \
+                handled internally. When `truncated: true` either bump `limit` or refine selectors."
                     .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "namespace": { "type": "string", "description": "Omit for cluster-wide." },
                     "label_selector": { "type": "string" },
-                    "field_selector": { "type": "string" }
+                    "field_selector": { "type": "string" },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10000,
+                        "description": "Total rows. Default 500, max 10000. Above 500 triggers internal pagination."
+                    }
                 },
                 "additionalProperties": false
             }),
@@ -120,27 +147,72 @@ impl NativeTool for PodsList {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: ListArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
 
         let api: Api<Pod> = match a.namespace.as_deref() {
             Some(ns) if !ns.is_empty() => Api::namespaced(client, ns),
             _ => Api::all(client),
         };
-        let mut lp = ListParams::default().limit(MAX_PODS_PER_LIST as u32);
-        if let Some(s) = a.label_selector.as_deref() {
-            lp = lp.labels(s);
-        }
-        if let Some(s) = a.field_selector.as_deref() {
-            lp = lp.fields(s);
-        }
-        let list = api.list(&lp).await.map_err(kube_err)?;
-        let truncated = list.metadata.continue_.is_some();
+        let limit = a
+            .limit
+            .unwrap_or(DEFAULT_PODS_LIMIT)
+            .clamp(1, MAX_PODS_HARD);
 
-        let rows: Vec<Value> = list.items.iter().map(project_pod_row).collect();
+        // Paginate via the apiserver's `continue` token until we've
+        // filled `limit` or the server stops returning a continue
+        // value. Each page is bounded by `PODS_PAGE_SIZE` so individual
+        // round-trips stay cheap; the requested `limit` shapes how
+        // many pages we ask for.
+        let mut rows: Vec<Pod> = Vec::with_capacity(limit.min(1024));
+        let mut continue_token: Option<String> = None;
+        let mut server_has_more = false;
+        loop {
+            let remaining = limit.saturating_sub(rows.len());
+            if remaining == 0 {
+                // We hit the operator's cap. If the server *also* ran
+                // out of pages we'd see continue=None on the previous
+                // iteration; here we don't know, so treat as truncated
+                // and let the model bump `limit` if it cares.
+                server_has_more = continue_token.is_some();
+                break;
+            }
+            let page_size = u32::try_from(remaining)
+                .unwrap_or(PODS_PAGE_SIZE)
+                .min(PODS_PAGE_SIZE);
+            let mut lp = ListParams::default().limit(page_size);
+            if let Some(s) = a.label_selector.as_deref() {
+                lp = lp.labels(s);
+            }
+            if let Some(s) = a.field_selector.as_deref() {
+                lp = lp.fields(s);
+            }
+            if let Some(tok) = continue_token.as_deref() {
+                // kube-rs exposes `continue_token` on ListParams but
+                // routes through the same field name on the wire.
+                lp = lp.continue_token(tok);
+            }
+            let list = api.list(&lp).await.map_err(kube_err)?;
+            rows.extend(list.items);
+            match list.metadata.continue_.as_deref() {
+                Some(t) if !t.is_empty() => {
+                    continue_token = Some(t.to_string());
+                }
+                _ => {
+                    // Server has no more pages — we got everything.
+                    continue_token = None;
+                    break;
+                }
+            }
+        }
+        let truncated = server_has_more && continue_token.is_some();
+
+        let projected: Vec<Value> = rows.iter().map(project_pod_row).collect();
         Ok(json!({
-            "count": rows.len(),
+            "count": projected.len(),
+            "limit": limit,
+            "limit_max": MAX_PODS_HARD,
             "truncated": truncated,
-            "pods": rows,
+            "pods": projected,
         }))
     }
 }
@@ -149,12 +221,12 @@ impl NativeTool for PodsList {
 
 pub(crate) struct PodsGet {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl PodsGet {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -187,7 +259,7 @@ impl NativeTool for PodsGet {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: NamespacedArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         let api: Api<Pod> = Api::namespaced(client, &a.namespace);
         let pod = api.get(&a.name).await.map_err(kube_err)?;
         let yaml =
@@ -200,12 +272,12 @@ impl NativeTool for PodsGet {
 
 pub(crate) struct PodsDelete {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl PodsDelete {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -243,7 +315,7 @@ impl NativeTool for PodsDelete {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: DeleteArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         let api: Api<Pod> = Api::namespaced(client, &a.namespace);
         let dp = DeleteParams {
             grace_period_seconds: a.grace_period_seconds,
@@ -262,12 +334,12 @@ impl NativeTool for PodsDelete {
 
 pub(crate) struct PodsRun {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl PodsRun {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -317,7 +389,7 @@ impl NativeTool for PodsRun {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: RunArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         let api: Api<Pod> = Api::namespaced(client, &a.namespace);
 
         let ports = a.port.map(|p| {
@@ -365,12 +437,13 @@ impl NativeTool for PodsRun {
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-async fn client_for(app: &AppHandle, cluster_id: &str) -> Result<kube::Client, NativeToolError> {
+async fn client_for(
+    app: &AppHandle,
+    cluster: &ChatClusterRef,
+) -> Result<kube::Client, NativeToolError> {
+    let id = cluster.active().await;
     let state = app.state::<AppState>();
-    let entry = state
-        .entry(cluster_id)
-        .await
-        .map_err(NativeToolError::msg)?;
+    let entry = state.entry(&id).await.map_err(NativeToolError::msg)?;
     Ok(entry.cluster.client())
 }
 

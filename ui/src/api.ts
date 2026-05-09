@@ -920,6 +920,8 @@ export const api = {
   ): Promise<{
     chatId: string;
     initialMcp: ChatInitialMcp;
+    contextLimit: number;
+    usableContext: number;
     close: () => void;
   }> => {
     const channel = new Channel<ChatEvent>();
@@ -934,6 +936,8 @@ export const api = {
         nativeToolCount: result.native_tool_count,
         servers: result.mcp_servers,
       },
+      contextLimit: result.context_limit,
+      usableContext: result.usable_context,
       close: () => {
         channel.onmessage = () => {};
       },

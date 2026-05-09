@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 /// Cap on events returned per call. The apiserver itself bounds events to a
@@ -37,12 +38,12 @@ struct NodeArgs {
 
 pub(crate) struct PodDiagnose {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl PodDiagnose {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -73,9 +74,10 @@ impl NativeTool for PodDiagnose {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: PodArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let entry = state
-            .entry(&self.cluster_id)
+            .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
         let client = entry.cluster.client();
@@ -147,12 +149,12 @@ impl NativeTool for PodDiagnose {
 
 pub(crate) struct NodeDiagnose {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl NodeDiagnose {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -183,9 +185,10 @@ impl NativeTool for NodeDiagnose {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: NodeArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let entry = state
-            .entry(&self.cluster_id)
+            .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
         let client = entry.cluster.client();

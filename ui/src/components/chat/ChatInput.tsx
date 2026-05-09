@@ -26,6 +26,15 @@ type Props = {
     completionTokens: number;
     totalTokens: number;
   } | null;
+  /// Model's full context window in tokens, resolved through models.dev.
+  /// `0` ⇒ unknown (catalogue not loaded yet); the chip falls back to
+  /// rendering only the used count when this is missing.
+  contextLimit?: number;
+  /// Usable window after subtracting the reserved output buffer the
+  /// auto-compaction trigger uses. The chip's percentage and warn tone
+  /// fire against this so what the operator sees matches when the
+  /// trigger will actually run.
+  usableContext?: number;
 };
 
 const MIN_HEIGHT = 84; // ~3 rows. Tall enough that the input reads as a
@@ -49,6 +58,8 @@ export function ChatInput({
   onCompact,
   compacting,
   usage,
+  contextLimit = 0,
+  usableContext = 0,
 }: Props) {
   const t = tokens(mode);
   const [value, setValue] = useState("");
@@ -199,9 +210,12 @@ export function ChatInput({
         ) : null}
         <span style={{ flex: 1, color: t.textDim, textAlign: "right" }}>
           {usage ? (
-            <span title={`prompt ${usage.promptTokens} · completion ${usage.completionTokens}`}>
-              {formatTokens(usage.totalTokens)} tok ·{" "}
-            </span>
+            <UsageChip
+              t={t}
+              usage={usage}
+              contextLimit={contextLimit}
+              usableContext={usableContext}
+            />
           ) : null}
           Enter to send · Shift+Enter for newline
         </span>
@@ -211,6 +225,64 @@ export function ChatInput({
 }
 
 function formatTokens(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+// Compaction trigger fraction must mirror agent.rs::COMPACTION_TRIGGER_FRACTION.
+// At/above this share of the *usable* window the backend auto-summarises;
+// the chip shifts to a warn tone as we approach so the operator gets
+// visual heads-up before the next turn fires the trigger.
+const COMPACTION_FRACTION = 0.9;
+// Visual warn threshold. We flip the chip earlier than the trigger so the
+// operator can choose to /compact preemptively before the next big tool
+// call pushes us over.
+const WARN_FRACTION = 0.75;
+
+// UsageChip — the `<used> / <limit>  P%` footer chip. Token count tints to
+// `warn` as we cross WARN_FRACTION of the usable window, then to `bad`
+// once we're above the auto-compaction trigger. Falls back to `<used> tok`
+// when the catalogue hasn't loaded yet (`contextLimit === 0`).
+function UsageChip({
+  t,
+  usage,
+  contextLimit,
+  usableContext,
+}: {
+  t: ReturnType<typeof tokens>;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+  contextLimit: number;
+  usableContext: number;
+}) {
+  const total = usage.totalTokens;
+  const denom = usableContext > 0 ? usableContext : contextLimit;
+  const fraction = denom > 0 ? total / denom : 0;
+  const tone =
+    fraction >= COMPACTION_FRACTION
+      ? t.bad
+      : fraction >= WARN_FRACTION
+        ? t.warn
+        : t.textDim;
+  const pct = denom > 0 ? Math.round(fraction * 100) : null;
+  const title =
+    `prompt ${usage.promptTokens} · completion ${usage.completionTokens}` +
+    (contextLimit > 0
+      ? `\n${total} / ${contextLimit} tokens (window)` +
+        (usableContext > 0 && usableContext !== contextLimit
+          ? `\nusable: ${total} / ${usableContext} (${pct}%) — auto-compact at ${Math.round(COMPACTION_FRACTION * 100)}%`
+          : "")
+      : "");
+  return (
+    <span title={title} style={{ color: tone }}>
+      {formatTokens(total)}
+      {contextLimit > 0 ? ` / ${formatTokens(contextLimit)}` : ""}
+      {pct !== null ? ` · ${pct}%` : ""}
+      {" tok · "}
+    </span>
+  );
 }

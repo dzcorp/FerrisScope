@@ -70,6 +70,13 @@ type OpenChat = {
     totalTokens: number;
   } | null;
   compacting: number | null;
+  /// Most recently observed context window for the chat's bound model.
+  /// `0` ⇒ catalogue not loaded yet — UI falls back to "<used> tok" only.
+  /// Updated by `ChatOpenResult`, the `usage` event (each turn re-resolves
+  /// in case the operator switched models), and the dedicated
+  /// `context_limit` event emitted on `chat_set_model`.
+  contextLimit: number;
+  usableContext: number;
 };
 
 // DockChat — top-level chat tab body. Owns the live Channel<ChatEvent>, the
@@ -153,6 +160,8 @@ export function DockChat({ mode, tab, visible }: Props) {
   const usage = active?.usage ?? null;
   const compacting = active?.compacting ?? null;
   const activeChatId = active?.chatId ?? null;
+  const contextLimit = active?.contextLimit ?? 0;
+  const usableContext = active?.usableContext ?? 0;
 
   // Per-session event flusher. Bound to a sessionId so events for
   // background sessions still drain into their own slot in the map
@@ -174,6 +183,8 @@ export function DockChat({ mode, tab, visible }: Props) {
       let nextUsage = cur.usage;
       let nextCompacting = cur.compacting;
       let nextMeta = cur.meta;
+      let nextContextLimit = cur.contextLimit;
+      let nextUsableContext = cur.usableContext;
       for (const e of queue) {
         nextView = applyChatEvent(nextView, e);
         if (e.type === "assistant_start") nextStreaming = true;
@@ -185,6 +196,17 @@ export function DockChat({ mode, tab, visible }: Props) {
             completionTokens: e.completion_tokens,
             totalTokens: e.total_tokens,
           };
+          // Backend re-resolves limits per Usage emit so the model-swap
+          // case stays consistent without an extra round trip. `0` ⇒
+          // catalogue isn't loaded yet — keep whatever we already have.
+          if (e.context_limit > 0) nextContextLimit = e.context_limit;
+          if (e.usable_context > 0) nextUsableContext = e.usable_context;
+        } else if (e.type === "context_limit") {
+          // Fired on `chat_set_model` so the footer chip refreshes
+          // immediately on model swap (rather than waiting for the next
+          // Usage event).
+          if (e.context_limit > 0) nextContextLimit = e.context_limit;
+          if (e.usable_context > 0) nextUsableContext = e.usable_context;
         } else if (e.type === "compaction_started") {
           nextCompacting = e.tokens_before;
         } else if (e.type === "compaction_completed") {
@@ -210,6 +232,8 @@ export function DockChat({ mode, tab, visible }: Props) {
           usage: nextUsage,
           compacting: nextCompacting,
           meta: nextMeta,
+          contextLimit: nextContextLimit,
+          usableContext: nextUsableContext,
         },
       };
     });
@@ -413,6 +437,8 @@ export function DockChat({ mode, tab, visible }: Props) {
             streaming: false,
             usage: seededUsage,
             compacting: null,
+            contextLimit: opened.contextLimit,
+            usableContext: opened.usableContext,
           },
         }));
         if (!cancelled) {
@@ -979,6 +1005,8 @@ export function DockChat({ mode, tab, visible }: Props) {
           });
         }}
         usage={usage}
+        contextLimit={contextLimit}
+        usableContext={usableContext}
         onCompact={
           status.kind === "ready"
             ? () => {

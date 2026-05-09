@@ -2207,6 +2207,15 @@ export type ChatOpenResult = {
   chat_id: string;
   native_tool_count: number;
   mcp_servers: McpServerStatusWire[];
+  /// Model context window in tokens (resolved through models.dev). The UI
+  /// renders `<used> / <limit>` in the chat input footer using this. `0`
+  /// means the catalogue hadn't loaded yet — caller should treat as
+  /// "unknown" and only render the used count.
+  context_limit: number;
+  /// Usable window after the reserved output buffer. The auto-compaction
+  /// trigger fires against this, not the raw context — surfacing it lets
+  /// the UI show a percentage that matches what the trigger reads.
+  usable_context: number;
 };
 
 /// Camel-cased projection of `ChatOpenResult`'s mcp fields, returned by
@@ -2262,6 +2271,13 @@ export type ChatEvent =
       prompt_tokens: number;
       completion_tokens: number;
       total_tokens: number;
+      context_limit: number;
+      usable_context: number;
+    }
+  | {
+      type: "context_limit";
+      context_limit: number;
+      usable_context: number;
     }
   | {
       type: "compaction_started";

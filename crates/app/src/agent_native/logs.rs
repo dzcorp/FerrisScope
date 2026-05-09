@@ -17,11 +17,22 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 const DEFAULT_TAIL_LINES: i64 = 200;
 const MAX_TAIL_LINES: i64 = 5_000;
-const MAX_TOTAL_BYTES: usize = 256 * 1024;
+/// Default total-bytes cap. Conservative so casual `tail` calls don't
+/// dump megabytes into the transcript. The model can opt up to
+/// `MAX_TOTAL_BYTES_HARD` via the `byte_cap` arg when it actually needs
+/// a deep read.
+const DEFAULT_TOTAL_BYTES: usize = 256 * 1024;
+/// Hard ceiling on how high `byte_cap` can go. 4 MiB is enough for a
+/// thorough investigation across a fleet of pods without letting one
+/// tool call swamp a chat's context window — at ~4 chars/token that's
+/// roughly 1M tokens, which exceeds the input budget on most models
+/// and would force compaction immediately. Keep below that.
+const MAX_TOTAL_BYTES_HARD: usize = 4 * 1024 * 1024;
 const MAX_PODS_PER_SELECTOR: usize = 10;
 
 #[derive(Debug, Deserialize)]
@@ -40,16 +51,22 @@ struct Args {
     since_seconds: Option<i64>,
     #[serde(default)]
     previous: bool,
+    /// Total-bytes cap across all pods in this call. Default
+    /// `DEFAULT_TOTAL_BYTES` (256 KiB), max `MAX_TOTAL_BYTES_HARD`
+    /// (4 MiB). Set higher when the response was truncated and the
+    /// answer is deeper in the log.
+    #[serde(default)]
+    byte_cap: Option<usize>,
 }
 
 pub(crate) struct LogsTail {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl LogsTail {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -61,8 +78,10 @@ impl NativeTool for LogsTail {
             description: "One-shot pod log tail (no follow). Pass `pod` for a single pod, or \
                 `label_selector` to fan out across matching pods (capped at 10). Returns the most \
                 recent lines bounded by `tail_lines` (default 200, max 5000) AND a total-bytes \
-                cap of 256 KiB across all pods. Set `previous: true` to read logs from the \
-                previously-terminated container instance (useful right after a crash)."
+                cap (default 256 KiB, max 4 MiB via `byte_cap`). Set `previous: true` to read \
+                logs from the previously-terminated container instance (useful right after a \
+                crash). When the response comes back with `truncated: true` and you need the \
+                fuller picture, retry with a larger `byte_cap` (e.g. 1048576 for 1 MiB)."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -76,7 +95,13 @@ impl NativeTool for LogsTail {
                     "container": { "type": "string", "description": "Container name (defaults to first)." },
                     "tail_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "default": 200 },
                     "since_seconds": { "type": "integer", "minimum": 1 },
-                    "previous": { "type": "boolean", "default": false }
+                    "previous": { "type": "boolean", "default": false },
+                    "byte_cap": {
+                        "type": "integer",
+                        "minimum": 1024,
+                        "maximum": 4_194_304,
+                        "description": "Total-bytes cap across all pods. Default 262144 (256 KiB), max 4194304 (4 MiB). Bump higher when investigating verbose / repeated-error logs."
+                    }
                 },
                 "required": ["namespace"],
                 "additionalProperties": false
@@ -96,9 +121,10 @@ impl NativeTool for LogsTail {
                 "specify exactly one of `pod` or `label_selector`",
             ));
         }
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let entry = state
-            .entry(&self.cluster_id)
+            .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
         let client = entry.cluster.client();
@@ -144,13 +170,21 @@ impl NativeTool for LogsTail {
         });
         let results = join_all(futures).await;
 
+        // Resolve the operator's request against the hard ceiling. `None`
+        // ⇒ default. We always clamp to `MAX_TOTAL_BYTES_HARD` so a model
+        // that asks for `usize::MAX` doesn't drown the transcript.
+        let byte_cap = a
+            .byte_cap
+            .unwrap_or(DEFAULT_TOTAL_BYTES)
+            .clamp(1024, MAX_TOTAL_BYTES_HARD);
+
         let mut total_bytes = 0usize;
         let mut truncated = false;
         let mut out: Vec<Value> = Vec::with_capacity(results.len());
         for (name, res) in results {
             match res {
                 Ok(s) => {
-                    let remaining = MAX_TOTAL_BYTES.saturating_sub(total_bytes);
+                    let remaining = byte_cap.saturating_sub(total_bytes);
                     let body = if s.len() > remaining {
                         truncated = true;
                         s[s.len() - remaining..].to_string()
@@ -163,7 +197,7 @@ impl NativeTool for LogsTail {
                         "container": a.container,
                         "logs": body,
                     }));
-                    if total_bytes >= MAX_TOTAL_BYTES {
+                    if total_bytes >= byte_cap {
                         truncated = true;
                         break;
                     }
@@ -181,7 +215,8 @@ impl NativeTool for LogsTail {
             "namespace": a.namespace,
             "pods": out,
             "truncated": truncated,
-            "byte_cap": MAX_TOTAL_BYTES,
+            "byte_cap": byte_cap,
+            "byte_cap_max": MAX_TOTAL_BYTES_HARD,
         }))
     }
 }

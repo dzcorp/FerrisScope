@@ -20,9 +20,16 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
-const MAX_LOG_BYTES: usize = 256 * 1024;
+/// Default total-bytes cap on a single kubelet log read. Mirrors
+/// `fs_logs_tail::DEFAULT_TOTAL_BYTES` so the model gets predictable
+/// budget across the two log paths.
+const DEFAULT_LOG_BYTES: usize = 256 * 1024;
+/// Hard ceiling — same 4 MiB as `fs_logs_tail`, kept consistent so the
+/// model only has to remember one number when bumping `byte_cap`.
+const MAX_LOG_BYTES_HARD: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct LogArgs {
@@ -32,6 +39,12 @@ struct LogArgs {
     query: String,
     #[serde(default)]
     tail_lines: Option<i64>,
+    /// Total-bytes cap for the response. Default `DEFAULT_LOG_BYTES`
+    /// (256 KiB), max `MAX_LOG_BYTES_HARD` (4 MiB). Bump higher when
+    /// the truncation flag came back true and the answer is deeper in
+    /// the log.
+    #[serde(default)]
+    byte_cap: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,12 +56,12 @@ struct StatsArgs {
 
 pub(crate) struct NodesLog {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl NodesLog {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -69,8 +82,8 @@ impl NativeTool for NodesLog {
                 (alpha in 1.27, GA in 1.30). On older clusters the kubelet ignores `?query=` \
                 and returns the directory index; we surface that with a `note` so you can pick \
                 a file path from `entries` and retry, or fall back to a node shell.\n\n\
-                File output is capped at 256 KiB; tighten with `tail_lines` if you hit the cap. \
-                Requires `nodes/proxy` RBAC."
+                File output is capped at `byte_cap` (default 256 KiB, max 4 MiB); tighten with \
+                `tail_lines` or bump `byte_cap` if you hit the cap. Requires `nodes/proxy` RBAC."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -80,7 +93,13 @@ impl NativeTool for NodesLog {
                         "type": "string",
                         "description": "File/dir under /var/log/ (e.g. `kubelet.log`, `containers/`, `/var/log/audit/`) or a service name (`kubelet`, `kube-proxy`, `containerd`) for the journald `?query=` form."
                     },
-                    "tail_lines": { "type": "integer", "minimum": 0 }
+                    "tail_lines": { "type": "integer", "minimum": 0 },
+                    "byte_cap": {
+                        "type": "integer",
+                        "minimum": 1024,
+                        "maximum": 4_194_304,
+                        "description": "Total-bytes cap. Default 262144 (256 KiB), max 4194304 (4 MiB)."
+                    }
                 },
                 "required": ["name", "query"],
                 "additionalProperties": false
@@ -95,7 +114,7 @@ impl NativeTool for NodesLog {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: LogArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
 
         // The kubelet `/logs/` endpoint already serves from `/var/log/` on the
         // node, so an input like `/var/log/kubelet.log` is `kubelet.log` from
@@ -167,9 +186,13 @@ impl NativeTool for NodesLog {
             }));
         }
 
-        let truncated = body.len() > MAX_LOG_BYTES;
+        let byte_cap = a
+            .byte_cap
+            .unwrap_or(DEFAULT_LOG_BYTES)
+            .clamp(1024, MAX_LOG_BYTES_HARD);
+        let truncated = body.len() > byte_cap;
         let body = if truncated {
-            body[body.len() - MAX_LOG_BYTES..].to_string()
+            body[body.len() - byte_cap..].to_string()
         } else {
             body
         };
@@ -179,7 +202,8 @@ impl NativeTool for NodesLog {
             "kind": "log",
             "logs": body,
             "truncated": truncated,
-            "byte_cap": MAX_LOG_BYTES,
+            "byte_cap": byte_cap,
+            "byte_cap_max": MAX_LOG_BYTES_HARD,
         }))
     }
 }
@@ -205,12 +229,12 @@ fn parse_log_listing(html: &str) -> Vec<String> {
 
 pub(crate) struct NodesStatsSummary {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl NodesStatsSummary {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -242,7 +266,7 @@ impl NativeTool for NodesStatsSummary {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: StatsArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
 
         let path = format!("/api/v1/nodes/{}/proxy/stats/summary", a.name);
         let req = Request::builder()
@@ -261,12 +285,13 @@ impl NativeTool for NodesStatsSummary {
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-async fn client_for(app: &AppHandle, cluster_id: &str) -> Result<kube::Client, NativeToolError> {
+async fn client_for(
+    app: &AppHandle,
+    cluster: &ChatClusterRef,
+) -> Result<kube::Client, NativeToolError> {
+    let id = cluster.active().await;
     let state = app.state::<AppState>();
-    let entry = state
-        .entry(cluster_id)
-        .await
-        .map_err(NativeToolError::msg)?;
+    let entry = state.entry(&id).await.map_err(NativeToolError::msg)?;
     Ok(entry.cluster.client())
 }
 

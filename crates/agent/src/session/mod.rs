@@ -77,6 +77,15 @@ pub struct SessionMeta {
     /// deserialise unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_total_tokens: Option<u32>,
+    /// The cluster id the agent was last targeting via
+    /// `fs_configuration_use_context`. `None` (the default) means the
+    /// agent never switched contexts — `cluster_id` (origin) is still
+    /// the active target. When set, chat-open restores `active = this`
+    /// so the agent's prior switches survive an app restart. The
+    /// `cluster_id` field above is still authoritative for "where this
+    /// chat lives on disk" and never changes after creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_cluster_id: Option<String>,
 }
 
 /// Streamed event records written to the JSONL transcript. The discriminator
@@ -169,6 +178,13 @@ pub struct SessionUpdate {
     /// `None` leaves alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_options: Option<Option<serde_json::Value>>,
+    /// Mirrors the same sentinel shape: `Some(Some(id))` records that the
+    /// agent switched the active cluster to `id`, `Some(None)` clears the
+    /// override (revert to origin), `None` leaves it alone. Persisted by
+    /// `fs_configuration_use_context` so a chat reopen rehydrates the
+    /// agent's last target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_cluster_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,6 +358,9 @@ impl SessionStore {
                 }
                 if let Some(po) = &update.provider_options {
                     meta.provider_options.clone_from(po);
+                }
+                if let Some(ac) = &update.active_cluster_id {
+                    meta.active_cluster_id.clone_from(ac);
                 }
             }
             // Mirror the latest token total into the index so chat

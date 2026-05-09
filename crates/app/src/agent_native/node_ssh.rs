@@ -50,6 +50,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 /// Default SSH port. Overridable per call.
@@ -67,7 +68,7 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// budget inside `SshSession`, but stitching together longer command
 /// lifetimes (e.g. journalctl --since=1h) is a normal use case for this
 /// fallback path, so the outer timeout is the larger of the two.
-const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// One open node-SSH session.
 struct Session {
@@ -149,15 +150,15 @@ struct OpenResult {
 
 pub(crate) struct NodeSshOpen {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
     sessions: NodeSshSessions,
 }
 
 impl NodeSshOpen {
-    pub(crate) fn new(app: AppHandle, cluster_id: String, sessions: NodeSshSessions) -> Self {
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef, sessions: NodeSshSessions) -> Self {
         Self {
             app,
-            cluster_id,
+            cluster,
             sessions,
         }
     }
@@ -200,7 +201,7 @@ impl NativeTool for NodeSshOpen {
         // the operator supplied both `host` and `user`, skip the round-trip.
         let need_node_lookup = parsed.host.is_none() || parsed.user.is_none();
         let node_obj = if need_node_lookup {
-            let client = client_for(&self.app, &self.cluster_id).await?;
+            let client = client_for(&self.app, &self.cluster).await?;
             let api: Api<Node> = Api::all(client);
             Some(
                 api.get(&parsed.node)
@@ -450,10 +451,11 @@ impl NativeTool for NodeSshClose {
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-async fn client_for(app: &AppHandle, cluster_id: &str) -> Result<Client, NativeToolError> {
+async fn client_for(app: &AppHandle, cluster: &ChatClusterRef) -> Result<Client, NativeToolError> {
+    let id = cluster.active().await;
     let state = app.state::<AppState>();
     let entry = state
-        .entry(cluster_id)
+        .entry(&id)
         .await
         .map_err(|e| NativeToolError::msg(format!("connect cluster: {e}")))?;
     Ok(entry.cluster.client())

@@ -42,20 +42,17 @@ use crate::state::AppState;
 /// the model getting stuck in a `tool_calls`-only loop (we've seen models do
 /// this with poorly described tool schemas). On hitting the cap we return
 /// the partial transcript and let the operator nudge the model with a
-/// follow-up message.
-const MAX_TOOL_ROUNDS: u32 = 50;
+/// follow-up message. Sized for genuine multi-step investigations — listing
+/// every namespace's pods + tailing logs across them comfortably uses
+/// dozens of rounds.
+const MAX_TOOL_ROUNDS: u32 = 500;
 
-/// Per-tool-call execution timeout. MCP calls are expected to be quick
-/// (single API request, optional formatting); a hung call would otherwise
-/// block the whole turn indefinitely. On timeout we surface an
-/// `is_error: true` `ToolResult` so the model can recover.
-const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Soft transcript size limit (chars) before we start dropping the oldest
-/// tool messages. Rough proxy for ~150k tokens at the usual ~4 chars/token
-/// ratio — leaves headroom for a 200k-context model. System + user + the
-/// latest assistant turn are always preserved.
-const TRANSCRIPT_CHAR_BUDGET: usize = 600_000;
+/// Per-tool-call execution timeout. The wrapping deadline that fires when
+/// a tool itself doesn't surface a tighter internal timeout. Operations
+/// like `helm install --wait`, long `kubectl rollout status`, or
+/// multi-second pod-creating debug shells need real headroom; on timeout
+/// we still surface `is_error: true` so the model can recover.
+const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SYSTEM_PROMPT_BASELINE: &str = "\
 You are FerrisScope's Kubernetes operator assistant. You help the user \
@@ -103,6 +100,77 @@ Do not use blockquotes, images, HTML, or nested lists — the chat renderer \
 ignores them. Be concise: skip filler text, lead with the answer, and when \
 a tool result already shows the data, cite the relevant lines instead of \
 restating the whole output.";
+
+/// Render the "you are connected to context X" block injected into the
+/// system prompt at the start of every turn. Reads the active cluster id
+/// off the chat's `ChatClusterCtx` and looks up its `ContextInfo` from the
+/// operator's registered sources. If the active context drifted (operator
+/// removed the source after the chat opened, or the id was never resolvable
+/// to begin with) we still emit a block citing the raw id — better stale
+/// than silent. Returns "" when there are no sources at all (nothing
+/// useful to say).
+async fn build_cluster_context_block(
+    cluster: &agent_native::ChatClusterRef,
+    app_state: &AppState,
+) -> String {
+    let active_id = cluster.active().await;
+    let origin_id = cluster.origin().to_string();
+    let switched = active_id != origin_id;
+
+    let sources = app_state.sources.lock().await;
+    let contexts = ferrisscope_core::kubeconfig::list_contexts(&sources).unwrap_or_default();
+    drop(sources);
+    let active = contexts.iter().find(|c| c.id == active_id);
+    let origin = contexts.iter().find(|c| c.id == origin_id);
+
+    let mut out = String::from("## Current Kubernetes context\n\n");
+    if let Some(c) = active {
+        let ns = c
+            .namespace
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("(none)");
+        let _ = std::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                "Active context: `{}` (cluster `{}`, default namespace `{}`, source group `{}`).\n",
+                c.name, c.cluster, ns, c.group
+            ),
+        );
+    } else {
+        let _ = std::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                "Active cluster id: `{active_id}` (not currently resolvable in any source).\n"
+            ),
+        );
+    }
+    if switched {
+        if let Some(c) = origin {
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "This chat opened against `{}` (cluster `{}`); you switched contexts via \
+                     `fs_configuration_use_context`. Switch again or back at any time.\n",
+                    c.name, c.cluster
+                ),
+            );
+        } else {
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "This chat opened against cluster id `{origin_id}` and was switched mid-session.\n"
+                ),
+            );
+        }
+    } else {
+        out.push_str(
+            "Use `fs_configuration_use_context` to retarget every subsequent native tool call \
+             at a different registered context. The operator's UI selection is independent.\n",
+        );
+    }
+    out
+}
 
 // ─── On-disk settings (sibling of prefs.json, owned by the app crate) ───────
 
@@ -385,6 +453,18 @@ pub(crate) struct ChatOpenResult {
     /// `message`); the streaming `mcp_status` event updates them as
     /// each spawn task completes.
     pub mcp_servers: Vec<McpServerStatusWire>,
+    /// The model's context window in tokens, resolved through the
+    /// models.dev catalogue (with the per-provider default as fallback
+    /// when the model isn't listed yet). Lets the UI render
+    /// `<used> / <limit> tok` in the chat footer immediately on open,
+    /// before the first `Usage` event lands. Updates over the wire as a
+    /// `ContextLimit` event whenever the operator switches model.
+    pub context_limit: u32,
+    /// Usable window after subtracting the reserved output buffer
+    /// (`min(20k, max_output)`, mirroring opencode). This is what the
+    /// auto-compaction trigger compares against — surfacing it lets the
+    /// UI show "% of usable" rather than a misleading raw-context %.
+    pub usable_context: u32,
 }
 
 /// Probe-only test request. The frontend supplies a candidate key inline
@@ -484,11 +564,28 @@ pub(crate) enum ChatEvent {
         /// sees matches what the LLM emitted.
         arguments: String,
     },
-    /// Usage report from the provider (token counts).
+    /// Usage report from the provider (token counts). `context_limit`
+    /// and `usable_context` are resolved from the models.dev catalogue
+    /// at the moment the event is emitted, so the UI can render
+    /// `<total>/<limit>` without a second round-trip. `0` means the
+    /// catalogue hasn't loaded yet (rare — only on the very first call
+    /// before the background fetch lands); the UI should fall back to
+    /// the value from `ChatOpenResult` / the most recent `ContextLimit`
+    /// event in that case.
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
         total_tokens: u32,
+        context_limit: u32,
+        usable_context: u32,
+    },
+    /// The chat's effective context limits changed — typically because
+    /// the operator switched models (`chat_set_model`). The UI uses this
+    /// to refresh the "used / limit" footer chip without waiting for the
+    /// next `Usage` event.
+    ContextLimit {
+        context_limit: u32,
+        usable_context: u32,
     },
     /// Auto-compaction lifecycle. UI surfaces a small "summarising
     /// older context…" indicator so a 5–15s compaction call doesn't
@@ -551,6 +648,11 @@ struct ChatRuntime {
     cluster_id: String,
     /// Most recent model id for new turns. Mirrors `SessionMeta::model`.
     model: String,
+    /// Provider kind the chat is bound to. Mirrors
+    /// `SessionMeta::provider_kind`. Cached on the runtime so the
+    /// per-round transcript-budget + Usage-event limit lookups don't
+    /// pay a `store.load()` round-trip per turn.
+    provider_kind: ProviderKind,
     /// Per-chat approval mode. Mirrors `SessionMeta::approval_mode`.
     approval_mode: ApprovalMode,
     /// Per-chat sampling overrides. `None` lets the provider pick its
@@ -605,6 +707,11 @@ struct ChatRuntime {
     /// the chat useful even before MCP finishes spawning. Merged with the
     /// MCP catalogue at `tools_to_schemas` time.
     native: NativeRegistry,
+    /// Shared cluster context used by every native tool. `origin` is `cluster_id`;
+    /// `active` defaults to origin and is rebound by `fs_configuration_use_context`.
+    /// Held here so the per-turn system prompt can describe the *active* cluster
+    /// (not just the origin) without going through tool-call round trips.
+    cluster: agent_native::ChatClusterRef,
     /// In-flight approval requests, keyed by tool call id. The agent loop
     /// awaits each receiver while the UI surfaces the approval card; the
     /// `chat_approve_tool_call` command sends the operator's decision.
@@ -631,7 +738,7 @@ pub(crate) struct AgentState {
 }
 
 impl AgentState {
-    async fn store(&self) -> Result<SessionStore, String> {
+    pub(crate) async fn store(&self) -> Result<SessionStore, String> {
         let mut slot = self.store.lock().await;
         if let Some(s) = slot.as_ref() {
             return Ok(s.clone());
@@ -1167,6 +1274,7 @@ pub(crate) async fn chat_create_session(
         max_tokens: None,
         provider_options: None,
         last_total_tokens: None,
+        active_cluster_id: None,
     };
     store
         .create(meta.clone())
@@ -1337,11 +1445,59 @@ pub(crate) async fn chat_open(
         Vec::new()
     };
 
-    // Native tools are built unconditionally and per-chat. They close over
-    // the AppHandle and cluster id, so subsequent tool calls don't need to
-    // pass cluster context — and they work even if the external MCP server
-    // failed to spawn.
-    let native = agent_native::build_registry(app.clone(), data.meta.cluster_id.clone());
+    // Native tools are built unconditionally and per-chat. They share a
+    // `ChatClusterCtx` whose `origin` is the session-bound cluster and
+    // whose `active` defaults to origin (or the agent's last-persisted
+    // override when one survives in `meta.active_cluster_id`).
+    // `fs_configuration_use_context` can rebind active mid-chat without
+    // touching the chat's session-bound cluster (which still drives
+    // storage, auto-title, and MCP child auth). The same `Arc` is also
+    // stored on `ChatRuntime` so the per-turn system-prompt builder can
+    // read the active cluster without a tool call.
+    //
+    // Restoration safety: if the persisted active id is no longer in the
+    // operator's sources (they removed that kubeconfig), fall back to
+    // origin AND clear the stale override on disk so subsequent reopens
+    // don't keep tripping. Better silent than failing every tool call.
+    let restored_active: Option<String> = match data.meta.active_cluster_id.as_deref() {
+        Some(saved) if saved != data.meta.cluster_id => {
+            let sources = app_state.sources.lock().await;
+            let resolves = ferrisscope_core::kubeconfig::list_contexts(&sources)
+                .map(|cs| cs.iter().any(|c| c.id == saved))
+                .unwrap_or(false);
+            drop(sources);
+            if resolves {
+                Some(saved.to_string())
+            } else {
+                tracing::info!(
+                    saved = saved,
+                    origin = %data.meta.cluster_id,
+                    "chat_open: persisted active cluster no longer resolves; reverting to origin",
+                );
+                let _ = store
+                    .append(
+                        &data.meta.cluster_id,
+                        &session_id,
+                        SessionEvent::SessionUpdate {
+                            update: SessionUpdate {
+                                active_cluster_id: Some(None),
+                                ..Default::default()
+                            },
+                            ts: chrono::Utc::now().timestamp_millis(),
+                        },
+                    )
+                    .await;
+                None
+            }
+        }
+        _ => None,
+    };
+    let cluster_ctx = agent_native::ChatClusterCtx::new(
+        data.meta.cluster_id.clone(),
+        session_id.clone(),
+        restored_active,
+    );
+    let native = agent_native::build_registry(app.clone(), cluster_ctx.clone());
 
     let chat_id = format!("chat-{}", uuid::Uuid::new_v4());
     let on_event_for_replay = on_event.clone();
@@ -1363,6 +1519,7 @@ pub(crate) async fn chat_open(
         session_id,
         cluster_id: data.meta.cluster_id.clone(),
         model: data.meta.model.clone(),
+        provider_kind: data.meta.provider_kind,
         approval_mode: data.meta.approval_mode,
         temperature: data.meta.temperature,
         max_tokens: data.meta.max_tokens,
@@ -1376,6 +1533,7 @@ pub(crate) async fn chat_open(
         mcp_servers: pending_servers,
         external_scratch: external_scratch.clone(),
         native,
+        cluster: cluster_ctx,
         pending_approvals: HashMap::new(),
         approved_always: HashSet::new(),
         // Reset every chat-open. The persisted `meta.title` is the
@@ -1402,6 +1560,8 @@ pub(crate) async fn chat_open(
         // takes a write lock); the user-perceived latency on chat
         // open shouldn't include this.
         let chan = on_event_for_replay;
+        let (context_limit, usable_context) =
+            context_limits_for(data.meta.provider_kind, &data.meta.model);
         tauri::async_runtime::spawn(async move {
             // Brief delay so the JS-side promise settles `chatId` and
             // any state-init effects fire before the Usage event
@@ -1413,6 +1573,8 @@ pub(crate) async fn chat_open(
                 prompt_tokens: p,
                 completion_tokens: c,
                 total_tokens: t,
+                context_limit,
+                usable_context,
             });
         });
     }
@@ -1428,10 +1590,14 @@ pub(crate) async fn chat_open(
             Err(e) => {
                 tracing::warn!(error = %e, "chat_open: cannot acquire store for orphan repair");
                 let initial = initial_status_for_open(&runtime).await;
+                let (context_limit, usable_context) =
+                    context_limits_for(data.meta.provider_kind, &data.meta.model);
                 return Ok(ChatOpenResult {
                     chat_id,
                     native_tool_count: initial.0,
                     mcp_servers: initial.1,
+                    context_limit,
+                    usable_context,
                 });
             }
         };
@@ -1526,10 +1692,14 @@ pub(crate) async fn chat_open(
     }
 
     let initial = initial_status_for_open(&runtime).await;
+    let (context_limit, usable_context) =
+        context_limits_for(data.meta.provider_kind, &data.meta.model);
     Ok(ChatOpenResult {
         chat_id,
         native_tool_count: initial.0,
         mcp_servers: initial.1,
+        context_limit,
+        usable_context,
     })
 }
 
@@ -1600,6 +1770,7 @@ pub(crate) async fn chat_send_message(
     chat_id: String,
     content: String,
     state: State<'_, AgentState>,
+    app_state: State<'_, AppState>,
 ) -> Result<(), String> {
     let runtime = {
         let chats = state.chats.lock().await;
@@ -1713,11 +1884,23 @@ pub(crate) async fn chat_send_message(
         return Ok(());
     }
 
+    // Pull the chat's cluster ctx so the system prompt can describe the
+    // *active* cluster (which may differ from origin after a
+    // `fs_configuration_use_context` call) instead of forcing the model
+    // to spend a tool round-trip on `fs_configuration_view` to know
+    // where it is.
+    let cluster_ctx = runtime.lock().await.cluster.clone();
+    let cluster_block = build_cluster_context_block(&cluster_ctx, &app_state).await;
     let system_prompt = {
         let baseline = SYSTEM_PROMPT_BASELINE.to_string();
+        let with_ctx = if cluster_block.is_empty() {
+            baseline
+        } else {
+            format!("{baseline}\n\n{cluster_block}")
+        };
         match p.settings.system_prompt_override.as_ref() {
-            Some(extra) if !extra.is_empty() => format!("{baseline}\n\n{extra}"),
-            _ => baseline,
+            Some(extra) if !extra.is_empty() => format!("{with_ctx}\n\n{extra}"),
+            _ => with_ctx,
         }
     };
 
@@ -1762,17 +1945,20 @@ pub(crate) async fn chat_cancel_streaming(
             // The aborted task can't emit `AssistantEnd` itself — its
             // future is dropped. Close the bubble + flip the streaming
             // flag from here so the UI doesn't hang on a perpetual
-            // caret. Pending approvals also get drained: their senders
+            // caret. Drop a small in-bubble notice via TokenDelta first
+            // so the operator sees "cancelled" as part of the existing
+            // bubble rather than as a separate error pill below an empty
+            // bubble. Pending approvals also get drained: their senders
             // dropping unwinds awaiting tool futures via Denied.
             if let Some(message_id) = rt.in_flight_message_id.take() {
+                let _ = rt.channel.send(ChatEvent::TokenDelta {
+                    delta: "\n\n_Cancelled by operator._".into(),
+                });
                 let _ = rt.channel.send(ChatEvent::AssistantEnd {
                     message_id,
                     finish_reason: FinishReason::Other,
                 });
             }
-            let _ = rt.channel.send(ChatEvent::Error {
-                message: "cancelled".into(),
-            });
             rt.pending_approvals.clear();
         }
     }
@@ -1853,10 +2039,19 @@ pub(crate) async fn chat_set_model(
     let Some(rt) = chats.get(&chat_id) else {
         return Err(format!("chat not found: {chat_id}"));
     };
-    let (cluster_id, session_id) = {
+    // Pull the channel + cluster/session info out under the lock so the
+    // post-update notification doesn't race a chat_close. `provider_kind`
+    // is needed for the post-update ContextLimit event; reading it from
+    // the runtime avoids a redundant `store.load`.
+    let (cluster_id, session_id, channel, kind) = {
         let mut g = rt.lock().await;
         g.model = trimmed.to_string();
-        (g.cluster_id.clone(), g.session_id.clone())
+        (
+            g.cluster_id.clone(),
+            g.session_id.clone(),
+            g.channel.clone(),
+            g.provider_kind,
+        )
     };
     drop(chats);
     let store = state.store().await?;
@@ -1874,7 +2069,17 @@ pub(crate) async fn chat_set_model(
             },
         )
         .await
-        .map_err(session_err_to_string)
+        .map_err(session_err_to_string)?;
+    // Emit a ContextLimit event so the UI footer's `<used> / <limit>`
+    // chip refreshes immediately on model swap, instead of waiting for
+    // the next assistant turn to produce a Usage event with the new
+    // limit folded in.
+    let (context_limit, usable_context) = context_limits_for(kind, trimmed);
+    let _ = channel.send(ChatEvent::ContextLimit {
+        context_limit,
+        usable_context,
+    });
+    Ok(())
 }
 
 /// Snapshot of the MCP tool catalogue for a live chat. Returned by
@@ -1947,10 +2152,20 @@ fn category_label(c: ToolCategory) -> &'static str {
 /// header; we fire a forced compaction outside the regular round
 /// loop. Safe to call mid-streaming — `compaction_in_flight` and the
 /// run-loop's per-round check serialise overlapping requests.
+///
+/// After a successful compaction, if the chat is **idle** (no in-flight
+/// turn) and the last message is an Assistant turn, we inject a
+/// synthetic "Continue from where you left off" user message and spawn
+/// the loop. Mirrors opencode's `compaction_continue` autocontinue —
+/// makes "Compact" mean "Compact and keep going" rather than "Compact
+/// and stop". Manual compaction during an active turn skips the
+/// autocontinue (the loop will pick up the post-compaction state on
+/// its next round naturally).
 #[tauri::command]
 pub(crate) async fn chat_compact(
     chat_id: String,
     state: State<'_, AgentState>,
+    app_state: State<'_, AppState>,
 ) -> Result<(), String> {
     let runtime = {
         let chats = state.chats.lock().await;
@@ -1983,8 +2198,138 @@ pub(crate) async fn chat_compact(
     )?);
     let cluster_id = runtime.lock().await.cluster_id.clone();
     run_compaction_internal(&runtime, &store, &provider, &cluster_id, &session_id, true).await;
+    autocontinue_if_idle(
+        &runtime,
+        &store,
+        &provider,
+        &cluster_id,
+        &session_id,
+        &app_state,
+        &p,
+        &cred,
+        kind,
+    )
+    .await;
     Ok(())
 }
+
+/// If the chat has no in-flight turn AND the last persisted message is an
+/// Assistant turn, append a synthetic user "Continue …" message and spawn
+/// the regular run loop. Idempotent: if the loop is running we no-op (the
+/// running loop will see the post-compaction state on its next iteration).
+///
+/// The synthetic message uses `name: Some("auto_continue")` so future
+/// reload heuristics (auto-title, etc.) can recognise it.
+#[allow(clippy::too_many_arguments)]
+async fn autocontinue_if_idle(
+    runtime: &Arc<Mutex<ChatRuntime>>,
+    store: &SessionStore,
+    provider: &Arc<dyn ChatProvider>,
+    cluster_id: &str,
+    session_id: &str,
+    app_state: &AppState,
+    persisted: &PersistedSettings,
+    cred: &Credential,
+    kind: ProviderKind,
+) {
+    // Eligibility check + push happen under one lock so a concurrent
+    // `chat_send_message` either lands first (and our spawn no-ops) or
+    // after (their message coexists with ours; the loop drains both).
+    let user_message = ChatMessage {
+        role: MessageRole::User,
+        content: AUTO_CONTINUE_PROMPT.to_string(),
+        tool_calls: vec![],
+        tool_call_id: None,
+        name: Some(AUTO_CONTINUE_NAME.to_string()),
+        reasoning_content: None,
+    };
+    let should_spawn = {
+        let mut g = runtime.lock().await;
+        if g.cancel.is_some() {
+            return;
+        }
+        // Last message must be Assistant (otherwise either the chat is
+        // brand new — odd, but handle anyway — or the previous turn left
+        // us mid-tool, in which case the loop should pick that up first
+        // rather than asking for "next steps").
+        match g.messages.last() {
+            Some(m) if matches!(m.role, MessageRole::Assistant) => {
+                // If the assistant message has unanswered tool_calls, the
+                // repair pass on the next loop iteration will pad them;
+                // we still want to autocontinue so the model reacts.
+                g.messages.push(user_message.clone());
+                true
+            }
+            _ => false,
+        }
+    };
+    if !should_spawn {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let _ = store
+        .append(
+            cluster_id,
+            session_id,
+            SessionEvent::Message {
+                message: user_message,
+                ts: now,
+            },
+        )
+        .await;
+
+    // System prompt rebuild — the active cluster could have changed since
+    // the last turn (agent may have called `fs_configuration_use_context`
+    // mid-session).
+    let cluster_ctx = runtime.lock().await.cluster.clone();
+    let cluster_block = build_cluster_context_block(&cluster_ctx, app_state).await;
+    let system_prompt = {
+        let baseline = SYSTEM_PROMPT_BASELINE.to_string();
+        let with_ctx = if cluster_block.is_empty() {
+            baseline
+        } else {
+            format!("{baseline}\n\n{cluster_block}")
+        };
+        match persisted.settings.system_prompt_override.as_ref() {
+            Some(extra) if !extra.is_empty() => format!("{with_ctx}\n\n{extra}"),
+            _ => with_ctx,
+        }
+    };
+    let is_oauth = matches!(cred, Credential::OAuth { .. });
+    let provider_options_default = resolve_provider_options(kind, &persisted.settings, is_oauth);
+
+    let runtime_clone = runtime.clone();
+    let store_clone = store.clone();
+    let cluster_id_owned = cluster_id.to_string();
+    let session_id_owned = session_id.to_string();
+    let provider_clone = provider.clone();
+    let join = tokio::spawn(async move {
+        run_turn_loop(
+            runtime_clone,
+            store_clone,
+            provider_clone,
+            system_prompt,
+            cluster_id_owned,
+            session_id_owned,
+            provider_options_default,
+        )
+        .await;
+    });
+    let abort = join.abort_handle();
+    runtime.lock().await.cancel = Some(abort);
+}
+
+/// Synthetic user-message body injected after compaction so the agent
+/// keeps working on the previous goal rather than parking with the
+/// summary on screen. Phrased to give the model a clean exit if the
+/// task is genuinely done.
+const AUTO_CONTINUE_PROMPT: &str =
+    "Continue from where you left off. If there are no remaining steps and the previous goal is satisfied, briefly say so and stop.";
+
+/// Marker recorded on the synthetic user message so future code (or a
+/// future UI affordance) can distinguish autocontinues from operator
+/// input. Never displayed.
+const AUTO_CONTINUE_NAME: &str = "auto_continue";
 
 #[tauri::command]
 pub(crate) async fn chat_close(
@@ -2245,6 +2590,20 @@ async fn run_turn_loop(
     provider_options_default: Option<serde_json::Value>,
 ) {
     let mut round: u32 = 0;
+    // Independent cap for context-overflow recoveries. We don't burn a
+    // tool-round counter on a recovery (the operator gets the same number
+    // of useful rounds before the cap fires) but we do bound recoveries
+    // separately so a wedged compaction can't loop.
+    let mut overflow_recoveries: u8 = 0;
+    // Same idea for empty-stream retries (reasoning models that close
+    // their response without emitting anything). Reset to zero on the
+    // first non-empty turn so independent flakes later in the session
+    // each get their own retry budget.
+    let mut empty_retries: u8 = 0;
+    // And for transient infra failures (5xx, upstream connection reset,
+    // rate limits). Capped at `MAX_TRANSIENT_RETRIES` with exponential
+    // backoff between attempts. Resets on first successful round.
+    let mut transient_retries: u8 = 0;
     loop {
         if round >= MAX_TOOL_ROUNDS {
             // Round cap hit. Atomically clear cancel under the same lock
@@ -2311,9 +2670,23 @@ async fn run_turn_loop(
             )
         };
 
-        // Trim oldest tool messages when the transcript grows past the soft
-        // budget. Keeps the system prompt, every user message, and the
-        // latest assistant turn intact.
+        // Build the wire-shape message list. The system prompt is freshly
+        // composed each round so a mid-session `fs_configuration_use_context`
+        // gets reflected immediately. We send the *full* transcript and let
+        // token-based pressure valves manage capacity:
+        //
+        //   1. Proactive: `maybe_run_compaction` above fires at 75% of the
+        //      model's usable window (read from the previous Usage event),
+        //      summarising the head into a checkpoint message.
+        //   2. Reactive: a context-overflow-shaped 400 (`No tool output
+        //      found …` / `context_length_exceeded` / `prompt is too long`)
+        //      lands as `RetryAfterCompaction` below, force-compacts, and
+        //      re-issues the round.
+        //
+        // Mirrors opencode's flow: trust the model's full window, summarise
+        // when we cross the threshold, recover on overflow. No char/byte
+        // pre-truncation — that's a heuristic that fights the catalogue's
+        // ground-truth token limit.
         let mut full_messages = Vec::with_capacity(messages_so_far.len() + 1);
         full_messages.push(ChatMessage {
             role: MessageRole::System,
@@ -2324,7 +2697,6 @@ async fn run_turn_loop(
             reasoning_content: None,
         });
         full_messages.extend(messages_so_far);
-        truncate_transcript(&mut full_messages, TRANSCRIPT_CHAR_BUDGET);
 
         let req = CompletionRequest {
             model,
@@ -2347,7 +2719,207 @@ async fn run_turn_loop(
                 runtime.lock().await.cancel = None;
                 return;
             }
+            ProviderRoundOutcome::RetryAfterCompaction { original_error } => {
+                if overflow_recoveries >= MAX_OVERFLOW_RECOVERIES {
+                    // Compaction couldn't shrink enough (or the error
+                    // wasn't actually overflow-shaped). Fall through to
+                    // the existing error surface so the operator sees
+                    // what happened rather than a silent loop.
+                    let err_text = format!(
+                        "**Provider error.** The request failed before the model could respond.\n\n\
+                         ```text\n{original_error}\n```\n\n\
+                         _Auto-compaction couldn't recover after {MAX_OVERFLOW_RECOVERIES} attempts. Try /compact or start a new chat._"
+                    );
+                    let assistant_msg = ChatMessage {
+                        role: MessageRole::Assistant,
+                        content: err_text.clone(),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        name: None,
+                        reasoning_content: None,
+                    };
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let _ = store
+                        .append(
+                            &cluster_id,
+                            &session_id,
+                            SessionEvent::Message {
+                                message: assistant_msg.clone(),
+                                ts: now,
+                            },
+                        )
+                        .await;
+                    {
+                        let mut g = runtime.lock().await;
+                        g.messages.push(assistant_msg);
+                        g.cancel = None;
+                    }
+                    let _ = runtime
+                        .lock()
+                        .await
+                        .channel
+                        .send(ChatEvent::Error { message: err_text });
+                    return;
+                }
+                overflow_recoveries += 1;
+                tracing::warn!(
+                    attempt = overflow_recoveries,
+                    error = %original_error,
+                    "agent: context-overflow-shaped error; running forced compaction and retrying"
+                );
+                // Force-compact even if the catalogue threshold hasn't
+                // crossed — we already know the request didn't fit.
+                run_compaction_internal(
+                    &runtime,
+                    &store,
+                    &provider,
+                    &cluster_id,
+                    &session_id,
+                    true,
+                )
+                .await;
+                // Don't increment `round`: the failed attempt produced
+                // no output, so the operator's effective round budget
+                // is unchanged. Next iteration re-issues against the
+                // post-compaction transcript.
+                round = round.saturating_sub(1);
+                continue;
+            }
+            ProviderRoundOutcome::EmptyTurn => {
+                if empty_retries >= MAX_EMPTY_RETRIES {
+                    // Reasoning model is genuinely stuck (or the prompt
+                    // is fighting itself). Surface a one-line note so the
+                    // operator knows why the chat parked, rather than
+                    // letting the empty bubble dangle.
+                    let err_text = format!(
+                        "_The model returned no output after {} attempts. Send a message to continue._",
+                        MAX_EMPTY_RETRIES + 1
+                    );
+                    let assistant_msg = ChatMessage {
+                        role: MessageRole::Assistant,
+                        content: err_text.clone(),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        name: None,
+                        reasoning_content: None,
+                    };
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let _ = store
+                        .append(
+                            &cluster_id,
+                            &session_id,
+                            SessionEvent::Message {
+                                message: assistant_msg.clone(),
+                                ts: now,
+                            },
+                        )
+                        .await;
+                    // Emit the synthetic message on the wire as a normal
+                    // assistant turn so the operator actually sees it
+                    // *now*, not just after a session reload. Without
+                    // this, the loop returned silently after persisting
+                    // the message and the chat appeared to "park" with
+                    // no assistant output between the last tool result
+                    // and the next operator message — see issue where
+                    // a follow-up "continue" produced no visible reply
+                    // because the model kept returning empty turns and
+                    // each exhaustion path was disk-only.
+                    let synthetic_id = format!("msg-{}", uuid::Uuid::new_v4());
+                    {
+                        let mut g = runtime.lock().await;
+                        g.messages.push(assistant_msg);
+                        g.cancel = None;
+                        let _ = g.channel.send(ChatEvent::AssistantStart {
+                            message_id: synthetic_id.clone(),
+                        });
+                        let _ = g.channel.send(ChatEvent::TokenDelta { delta: err_text });
+                        let _ = g.channel.send(ChatEvent::AssistantEnd {
+                            message_id: synthetic_id,
+                            finish_reason: FinishReason::Stop,
+                        });
+                    }
+                    return;
+                }
+                empty_retries += 1;
+                tracing::warn!(
+                    attempt = empty_retries,
+                    "agent: empty assistant turn (no text, no tool calls); retrying"
+                );
+                // Don't burn a round — the empty turn produced nothing
+                // and the next attempt re-issues against the same
+                // transcript. The phantom empty bubble that briefly
+                // appeared (from AssistantStart/AssistantEnd) is
+                // suppressed by the frontend's empty-bubble filter.
+                round = round.saturating_sub(1);
+                continue;
+            }
+            ProviderRoundOutcome::TransientFailure {
+                reason,
+                original_error,
+            } => {
+                if transient_retries >= MAX_TRANSIENT_RETRIES {
+                    // Upstream is genuinely down or our request is
+                    // somehow malformed in a way the LB rejects. Render
+                    // the underlying error so the operator can decide
+                    // (retry manually, switch provider, file an issue).
+                    let err_text = format!(
+                        "**Provider error.** The request failed before the model could respond.\n\n\
+                         ```text\n{original_error}\n```\n\n\
+                         _Auto-retry exhausted after {MAX_TRANSIENT_RETRIES} attempts. Likely a transient upstream issue — try sending the message again in a minute._"
+                    );
+                    let assistant_msg = ChatMessage {
+                        role: MessageRole::Assistant,
+                        content: err_text.clone(),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        name: None,
+                        reasoning_content: None,
+                    };
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let _ = store
+                        .append(
+                            &cluster_id,
+                            &session_id,
+                            SessionEvent::Message {
+                                message: assistant_msg.clone(),
+                                ts: now,
+                            },
+                        )
+                        .await;
+                    {
+                        let mut g = runtime.lock().await;
+                        g.messages.push(assistant_msg);
+                        g.cancel = None;
+                    }
+                    let _ = runtime
+                        .lock()
+                        .await
+                        .channel
+                        .send(ChatEvent::Error { message: err_text });
+                    return;
+                }
+                transient_retries += 1;
+                let delay_ms = transient_retry_delay_ms(transient_retries);
+                tracing::warn!(
+                    attempt = transient_retries,
+                    delay_ms,
+                    %reason,
+                    error = %original_error,
+                    "agent: transient provider failure; backing off and retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                // Don't burn a round — the failed attempt produced no
+                // output. Next iteration re-issues the same transcript.
+                round = round.saturating_sub(1);
+                continue;
+            }
         };
+
+        // First successful round after one or more retries — clear
+        // both counters so future independent flakes each get their
+        // own budget.
+        empty_retries = 0;
+        transient_retries = 0;
 
         if finish_reason != FinishReason::ToolCalls || tool_calls.is_empty() {
             // No tool calls — push the assistant message and decide
@@ -2377,6 +2949,14 @@ async fn run_turn_loop(
         // writes serialise on the operator's approval. Results land in the
         // original tool_calls order so the assistant→tool sequence the
         // provider expects stays intact.
+        //
+        // ToolResult is emitted to the wire AS EACH FUTURE COMPLETES — not
+        // batched after join_all — so a fast-approved sibling clears its
+        // approval card and "running" strip in the UI immediately, even
+        // when other tools in the batch are still awaiting their own
+        // operator decision. Otherwise the user has to approve every card
+        // before any of the already-approved cards get a ToolResult and
+        // disappear, which feels like the UI is stuck.
         let mut futures = Vec::with_capacity(tool_calls.len());
         for tc in &tool_calls {
             let runtime = runtime.clone();
@@ -2396,6 +2976,12 @@ async fn run_turn_loop(
                     approval_mode,
                 )
                 .await;
+                let _ = runtime.lock().await.channel.send(ChatEvent::ToolResult {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    content: content.clone(),
+                    is_error,
+                });
                 (tc, content, is_error)
             });
         }
@@ -2427,7 +3013,9 @@ async fn run_turn_loop(
             }
         }
 
-        // Persist + emit events outside the lock.
+        // Persist outside the lock. Channel emission already happened
+        // per-future above; this loop is purely about the on-disk event
+        // log so a session reload can rebuild the transcript.
         let now = chrono::Utc::now().timestamp_millis();
         for ((tc, content, is_error), tool_msg) in results.into_iter().zip(tool_msgs.into_iter()) {
             let _ = store
@@ -2445,23 +3033,13 @@ async fn run_turn_loop(
                     &cluster_id,
                     &session_id,
                     SessionEvent::ToolResult {
-                        call: tc.clone(),
+                        call: tc,
                         result: content.clone(),
-                        error: if is_error {
-                            Some(content.clone())
-                        } else {
-                            None
-                        },
+                        error: if is_error { Some(content) } else { None },
                         ts: now,
                     },
                 )
                 .await;
-            let _ = runtime.lock().await.channel.send(ChatEvent::ToolResult {
-                tool_call_id: tc.id,
-                name: tc.name,
-                content,
-                is_error,
-            });
         }
     }
 }
@@ -2492,7 +3070,172 @@ enum ProviderRoundOutcome {
         tool_calls: Vec<ToolCall>,
     },
     Stopped,
+    /// The provider returned a context-overflow-shaped error (request
+    /// body too large for the model's window, or an "orphan tool call"
+    /// shape that the API rejects when older history was elided). The
+    /// caller (`run_turn_loop`) responds by forcing a compaction and
+    /// re-issuing the same round against the post-compaction transcript.
+    /// Bounded retries (`MAX_OVERFLOW_RECOVERIES`) prevent a loop when
+    /// compaction itself can't fit.
+    RetryAfterCompaction {
+        /// Display string forwarded to the operator if recovery exhausts.
+        original_error: String,
+    },
+    /// The provider stream closed cleanly with no text and no tool calls.
+    /// Common with reasoning models (gpt-5 family on the Codex/OAuth
+    /// path, claude with extended thinking) when the model burned its
+    /// reasoning budget without emitting output. Same shape as the
+    /// operator's manual "type continue" recovery — we re-issue the
+    /// round against the unchanged transcript and the next attempt
+    /// usually produces real content. Bounded by `MAX_EMPTY_RETRIES`.
+    EmptyTurn,
+    /// Transient infrastructure failure: 5xx from the provider, an
+    /// upstream LB connection reset (Envoy "upstream connect error /
+    /// disconnect/reset"), rate-limit (429), or a network timeout. The
+    /// caller sleeps an exponential backoff and re-issues the round
+    /// against the unchanged transcript. Bounded by
+    /// `MAX_TRANSIENT_RETRIES`.
+    TransientFailure {
+        /// Short human label (`"upstream 503"`, `"rate limited"`, …)
+        /// for logs. Distinct from the underlying error, which we keep
+        /// in case the retry exhausts and we surface to the operator.
+        reason: String,
+        /// Full error text — surfaced if all retries exhaust.
+        original_error: String,
+    },
 }
+
+/// Cap on automatic retries after an empty-stream turn. Two attempts
+/// covers the typical reasoning-model flake without spinning forever
+/// when something is genuinely wrong (model misconfigured, prompt
+/// fights itself, etc.). Resets to zero on the first non-empty turn.
+const MAX_EMPTY_RETRIES: u8 = 2;
+
+/// Cap on automatic retries after a transient provider failure (5xx,
+/// upstream connection reset, rate limit, network timeout). Mirrors
+/// opencode's retry policy in spirit: they retry indefinitely with
+/// exponential backoff, but a hard cap fits operator expectations
+/// better — past 5 attempts something is genuinely wrong upstream and
+/// the operator should know rather than watching the chat sit on a
+/// silent retry loop. Resets to zero on the first successful round.
+const MAX_TRANSIENT_RETRIES: u8 = 5;
+
+/// Initial backoff before the first transient retry (in milliseconds).
+/// Doubles each attempt up to `TRANSIENT_RETRY_MAX_DELAY_MS`. Same
+/// 2s starting point opencode uses; gives the upstream a real chance
+/// to recover from a typical LB hiccup without being so long that the
+/// operator notices a perceptible stall.
+const TRANSIENT_RETRY_INITIAL_DELAY_MS: u64 = 2_000;
+/// Cap on backoff between attempts. 30s matches opencode's
+/// `RETRY_MAX_DELAY_NO_HEADERS`. Keeps a misbehaving upstream from
+/// stretching a single retry into a multi-minute pause.
+const TRANSIENT_RETRY_MAX_DELAY_MS: u64 = 30_000;
+
+/// Classify a `ProviderError` as a transient infrastructure failure
+/// worth retrying. Returns `Some(reason)` when retryable; `None`
+/// otherwise (caller falls through to either context-overflow recovery
+/// or the terminal error path). Keep the reason short — it ends up in
+/// trace logs and the eventual exhaustion message.
+///
+/// Mirrors opencode's `retry.ts::retryable` shape: 5xx codes are
+/// always retryable, plus rate-limit and "Overloaded" patterns. We
+/// also catch the Envoy / L7-LB phrasing that chatgpt.com surfaces
+/// when the OAuth backend is unreachable. Auth failures and 4xx
+/// errors aren't retryable — the request is wrong, not the upstream.
+fn is_transient_error(e: &ProviderError) -> Option<String> {
+    // Auth errors: never retryable. The credential is wrong; retrying
+    // wastes the operator's time and risks lockout if the upstream
+    // counts attempts.
+    if matches!(e, ProviderError::Auth(_)) {
+        return None;
+    }
+    let s = e.to_string().to_ascii_lowercase();
+    // 5xx server errors (always retryable).
+    for code in ["500", "502", "503", "504"] {
+        if s.contains(code) {
+            return Some(format!("upstream {code}"));
+        }
+    }
+    // Envoy / Cloudflare LB phrasings — chatgpt.com's edge surfaces
+    // these when the actual model backend is unreachable mid-request.
+    for phrase in [
+        "upstream connect error",
+        "disconnect/reset before headers",
+        "connection reset",
+        "connection refused",
+        "no healthy upstream",
+        "service unavailable",
+    ] {
+        if s.contains(phrase) {
+            return Some("upstream connection reset".into());
+        }
+    }
+    // Rate limits.
+    if s.contains("429")
+        || s.contains("rate limit")
+        || s.contains("too many requests")
+        || s.contains("overloaded")
+        || s.contains("rate increased too quickly")
+    {
+        return Some("rate limited".into());
+    }
+    // Network timeouts (ours OR theirs). reqwest surfaces these as
+    // "operation timed out" / "request timed out".
+    if s.contains("timed out") || s.contains("operation timeout") {
+        return Some("request timeout".into());
+    }
+    None
+}
+
+/// Backoff delay for the n-th retry attempt (1-indexed). 2s, 4s, 8s,
+/// 16s, then capped at 30s. Mirrors opencode's `delay()` formula
+/// without the Retry-After header dance — providers that send
+/// `Retry-After` would be a future enhancement.
+fn transient_retry_delay_ms(attempt: u8) -> u64 {
+    let exp = u32::from(attempt.saturating_sub(1)).min(20);
+    let raw = TRANSIENT_RETRY_INITIAL_DELAY_MS.saturating_mul(2u64.saturating_pow(exp));
+    raw.min(TRANSIENT_RETRY_MAX_DELAY_MS)
+}
+
+/// Heuristic: does this provider error look like a context-window /
+/// orphan-tool-call rejection that compaction can recover from?
+///
+/// The Codex Responses endpoint surfaces a too-large request as a
+/// 400 "No tool output found for function call call_…". OpenAI Chat
+/// Completions and Anthropic both have their own phrasings. We match
+/// on signal substrings rather than parsing per-vendor JSON because the
+/// error body shape changes more often than the prose — and a false
+/// negative is fine (we'd just render the error as today), while a
+/// false positive only costs an extra compaction.
+fn is_context_overflow_error(e: &ProviderError) -> bool {
+    let s = e.to_string().to_ascii_lowercase();
+    [
+        // Codex Responses orphan-tool symptom (root cause: input body too
+        // large to send all the function_call_outputs that pair with the
+        // function_calls we sent — backend drops some, then 400s).
+        "no tool output found for function call",
+        // OpenAI / OpenRouter standard phrasings.
+        "context_length_exceeded",
+        "context length",
+        "context window",
+        "maximum context",
+        "exceeds the maximum",
+        // Anthropic / generic "input too large".
+        "input is too long",
+        "input too large",
+        "prompt is too long",
+        // Codex / GPT family token-budget phrasing.
+        "exceed the model",
+        "token limit",
+        "tokens exceed",
+    ]
+    .iter()
+    .any(|needle| s.contains(needle))
+}
+
+/// Cap the auto-recover loop so a misclassified error or a transcript
+/// that can't fit even after a full summary doesn't spin forever.
+const MAX_OVERFLOW_RECOVERIES: u8 = 2;
 
 /// One provider invocation: stream tokens / tool-call deltas, persist the
 /// assistant message, return the finish reason + collected tool calls.
@@ -2565,10 +3308,21 @@ async fn run_provider_round(
     ) = match result {
         Ok(final_) => {
             if let Some(usage) = &final_.usage {
+                // Resolve the active model's context limits at emit time so
+                // the UI's `<used>/<limit>` footer stays consistent with the
+                // compaction trigger's view (both go through the same
+                // catalogue). Both kind and model live on the runtime so
+                // this is a single lock acquire — no store IO per turn.
+                let (context_limit, usable_context) = {
+                    let g = runtime.lock().await;
+                    context_limits_for(g.provider_kind, &g.model)
+                };
                 send(ChatEvent::Usage {
                     prompt_tokens: usage.prompt_tokens,
                     completion_tokens: usage.completion_tokens,
                     total_tokens: usage.total_tokens,
+                    context_limit,
+                    usable_context,
                 })
                 .await;
                 // Stash the running total so the loop can decide
@@ -2607,19 +3361,100 @@ async fn run_provider_round(
             )
         }
         Err(ProviderError::Cancelled) => {
+            // Fill the open assistant bubble with a brief cancellation
+            // notice and close it — one bubble, not "empty bubble + error
+            // pill". Cancellation isn't persisted: it's operator-initiated
+            // and adding it to the on-disk transcript would replay as
+            // assistant content on reload, which is misleading.
+            let cancel_text = "_Cancelled by operator._".to_string();
+            if let Ok(mut g) = text_accum.lock() {
+                g.push_str(&cancel_text);
+            }
+            send(ChatEvent::TokenDelta { delta: cancel_text }).await;
             runtime.lock().await.in_flight_message_id = None;
-            send(ChatEvent::Error {
-                message: "cancelled".into(),
+            send(ChatEvent::AssistantEnd {
+                message_id: message_id.clone(),
+                finish_reason: FinishReason::Other,
             })
             .await;
             return ProviderRoundOutcome::Stopped;
         }
         Err(e) => {
-            runtime.lock().await.in_flight_message_id = None;
-            send(ChatEvent::Error {
-                message: e.to_string(),
+            // Context-overflow-shaped error? Hand it back to the loop as a
+            // recoverable signal: don't render anything, don't persist —
+            // the loop will run a forced compaction and re-issue the round
+            // against the post-compaction transcript. Capped retries in
+            // the caller prevent ping-ponging when compaction itself can't
+            // shrink enough.
+            if is_context_overflow_error(&e) {
+                runtime.lock().await.in_flight_message_id = None;
+                send(ChatEvent::AssistantEnd {
+                    message_id: message_id.clone(),
+                    finish_reason: FinishReason::Other,
+                })
+                .await;
+                return ProviderRoundOutcome::RetryAfterCompaction {
+                    original_error: e.to_string(),
+                };
+            }
+            // Transient infra failure (5xx, upstream LB reset, rate
+            // limit, network timeout)? Don't render — the caller does
+            // an exponential backoff and re-issues the round. The
+            // empty assistant bubble we just opened gets hidden by
+            // the frontend's empty-bubble filter.
+            if let Some(reason) = is_transient_error(&e) {
+                runtime.lock().await.in_flight_message_id = None;
+                send(ChatEvent::AssistantEnd {
+                    message_id: message_id.clone(),
+                    finish_reason: FinishReason::Other,
+                })
+                .await;
+                return ProviderRoundOutcome::TransientFailure {
+                    reason,
+                    original_error: e.to_string(),
+                };
+            }
+            // Render the failure inside the in-flight assistant bubble
+            // (TokenDelta + AssistantEnd) and persist it as the bubble's
+            // content. Avoids the "empty bubble + separate error pill"
+            // duplication and keeps the chat transcript honest about
+            // what the operator saw.
+            let err_text = format!(
+                "**Provider error.** The request failed before the model could respond.\n\n\
+                 ```text\n{e}\n```"
+            );
+            if let Ok(mut g) = text_accum.lock() {
+                g.push_str(&err_text);
+            }
+            send(ChatEvent::TokenDelta {
+                delta: err_text.clone(),
             })
             .await;
+            runtime.lock().await.in_flight_message_id = None;
+            let assistant_msg = ChatMessage {
+                role: MessageRole::Assistant,
+                content: err_text,
+                tool_calls: vec![],
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+            };
+            let now = chrono::Utc::now().timestamp_millis();
+            let _ = store
+                .append(
+                    cluster_id,
+                    session_id,
+                    SessionEvent::Message {
+                        message: assistant_msg.clone(),
+                        ts: now,
+                    },
+                )
+                .await;
+            // Push to in-memory transcript so the next round (if the
+            // operator sends another message) sees this bubble rather
+            // than a hole. The model is expected to read the error and
+            // adjust on its next turn.
+            runtime.lock().await.messages.push(assistant_msg);
             send(ChatEvent::AssistantEnd {
                 message_id: message_id.clone(),
                 finish_reason: FinishReason::Other,
@@ -2630,6 +3465,24 @@ async fn run_provider_round(
     };
 
     let final_text = text_accum.lock().map(|g| g.clone()).unwrap_or_default();
+
+    // Empty-stream detection: the model closed the response with no text
+    // *and* no tool calls. Common with reasoning models that burn their
+    // thinking budget internally without emitting output. Don't persist
+    // a content-less bubble — close the in-flight one on the wire and
+    // signal the loop to re-issue the round. The next attempt against
+    // the same transcript usually produces real output (same recovery
+    // the operator gets by typing "continue" manually).
+    if final_text.trim().is_empty() && tool_calls.is_empty() {
+        runtime.lock().await.in_flight_message_id = None;
+        send(ChatEvent::AssistantEnd {
+            message_id,
+            finish_reason,
+        })
+        .await;
+        return ProviderRoundOutcome::EmptyTurn;
+    }
+
     let assistant_msg = ChatMessage {
         role: MessageRole::Assistant,
         content: final_text,
@@ -3099,33 +3952,6 @@ fn sanitise_title(raw: &str) -> Option<String> {
     Some(trimmed)
 }
 
-/// Drops oldest tool messages while the transcript exceeds `budget` chars.
-/// Keeps system messages, user messages, and the most recent assistant turn
-/// intact — only the historical tool noise is shed. The model loses
-/// intermediate evidence but keeps the conversation thread.
-fn truncate_transcript(messages: &mut Vec<ChatMessage>, budget: usize) {
-    let total: usize = messages.iter().map(|m| m.content.len()).sum();
-    if total <= budget {
-        return;
-    }
-    let last_assistant_idx = messages
-        .iter()
-        .rposition(|m| matches!(m.role, MessageRole::Assistant));
-    let mut current = total;
-    let mut i = 0;
-    while i < messages.len() && current > budget {
-        let drop_it = matches!(messages[i].role, MessageRole::Tool)
-            && Some(i) != last_assistant_idx
-            && messages[i].tool_call_id.is_some();
-        if drop_it {
-            current = current.saturating_sub(messages[i].content.len());
-            messages.remove(i);
-        } else {
-            i += 1;
-        }
-    }
-}
-
 fn tools_to_schemas(tools: &[McpTool]) -> Vec<ToolSchema> {
     tools
         .iter()
@@ -3182,10 +4008,61 @@ strings verbatim.\n\
 - Don't reference this summarisation step or apologise for compaction.";
 
 /// Token-headroom fraction. We trigger compaction once cumulative
-/// tokens cross this share of the model's usable window. 0.75 leaves
-/// room for the next round's input + output without blowing the cap
-/// on the very call that produces the summary.
-const COMPACTION_TRIGGER_FRACTION: f32 = 0.75;
+/// tokens cross this share of the model's usable window. 0.90 leans
+/// toward using the full catalogue capacity — for gpt-5.5 that's
+/// ~812k tokens before we summarise, vs the ~677k we'd see at 0.75.
+/// The remaining 10% is enough for the summarisation call itself plus
+/// one more round of growth; if a single tool blows past it between
+/// Usage events the reactive `RetryAfterCompaction` path catches the
+/// resulting 400 and force-compacts. Opencode runs at 1.0 because they
+/// can halt mid-stream on overflow; we trigger pre-flight, so 0.90 is
+/// the equivalent safe headroom.
+const COMPACTION_TRIGGER_FRACTION: f32 = 0.90;
+
+/// Resolve `(context, usable)` for a `(provider, model)` pair purely
+/// from the models.dev catalogue. No per-model overrides in code — the
+/// catalogue is the single source of truth, so adding / re-tiering a
+/// model in models.dev doesn't require a release here.
+///
+/// `usable` is `input_limit − reserved_output`, mirroring opencode's
+/// `usable()` formula. Critically this is **input**, not raw `context`:
+/// for the gpt-5 family the catalogue distinguishes `context` (input +
+/// output) from `input` (the actual cap on what we can send). For
+/// gpt-5.5 that's 1.05M context vs 922k input — using `context` would
+/// have us happily packing a 900k-token input that the server rejects
+/// because input alone exceeds the cap. For providers that don't split
+/// the budget (most non-OpenAI), `parse_limits` already sets
+/// `input = context`, so the formula collapses to the classic
+/// "context − output buffer".
+///
+/// When the live (OAuth/Codex) backend enforces tighter limits than
+/// the catalogue's API-tier numbers, `is_context_overflow_error` +
+/// reactive compaction recover from the resulting 400 — same end
+/// behaviour as if we'd hardcoded the tighter cap, without any
+/// model-name string matching that breaks the day a vendor renames.
+fn context_limits_for(kind: ProviderKind, model: &str) -> (u32, u32) {
+    use ferrisscope_agent::provider::catalogue;
+    use ferrisscope_agent::provider::meta;
+
+    let (context, input, output) = match catalogue::lookup(kind, model) {
+        Some(l) => (l.context, l.input, l.output),
+        None => {
+            // Catalogue miss — fall back to the per-provider default.
+            // Treat input == context (most providers don't distinguish)
+            // and assume output buffer of 8192 for the reserve calc.
+            let default = meta::for_kind(kind).default_context_window;
+            (default, default, 8192)
+        }
+    };
+
+    // Reserved output buffer: `min(20_000, max_output)`, floored at 2k
+    // so a model with a tiny declared `output` cap doesn't leave us
+    // with effectively zero headroom for the response. Mirrors
+    // `catalogue::reserved_tokens`.
+    let reserved = 20_000.min(output.max(1)).max(2048);
+    let usable = input.saturating_sub(reserved);
+    (context, usable)
+}
 
 /// Number of trailing messages we keep verbatim across a compaction.
 /// Mirrors opencode's `tail_turns: 2` default — leaves enough recent
@@ -3551,3 +4428,115 @@ fn render_head_for_summary(messages: &[ChatMessage]) -> String {
 // SSH-tunneled scratch kubeconfig logic lives in `crate::ssh_scratch` so the
 // terminal and helm-CLI paths can share it. The MCP path is one of three
 // callers; nothing here is MCP-specific.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke test: token-driven flow keeps the full transcript on the wire,
+    /// no byte/char pre-truncation. Compaction (proactive at 75%, reactive
+    /// on 400) is the only management lever now — mirrors opencode's flow.
+    #[test]
+    fn context_limits_match_catalogue_default() {
+        // Unknown model id → falls back to the per-provider default
+        // context window (200k for OpenAI). Usable subtracts the
+        // reserved output buffer (≥ 2048, ≤ 20_000).
+        let (context, usable) = context_limits_for(ProviderKind::OpenAI, "unknown");
+        assert_eq!(context, 200_000);
+        assert!(
+            usable < context && usable >= context.saturating_sub(20_000),
+            "usable {usable} should be context {context} minus reserved (≤20k)"
+        );
+    }
+
+    #[test]
+    fn context_overflow_classifier_codex_orphan() {
+        let e = ProviderError::Http(
+            "400: { \"error\": { \"message\": \"No tool output found for function call call_X\" } }".into(),
+        );
+        assert!(is_context_overflow_error(&e));
+    }
+
+    #[test]
+    fn context_overflow_classifier_openai_context_length() {
+        let e = ProviderError::Http(
+            "400: { \"error\": { \"code\": \"context_length_exceeded\" } }".into(),
+        );
+        assert!(is_context_overflow_error(&e));
+    }
+
+    #[test]
+    fn context_overflow_classifier_anthropic_input_too_long() {
+        let e = ProviderError::Http(
+            "400: { \"error\": { \"message\": \"prompt is too long: 200000 tokens > 199998 maximum\" } }".into(),
+        );
+        assert!(is_context_overflow_error(&e));
+    }
+
+    #[test]
+    fn context_overflow_classifier_negative_unrelated_400() {
+        let e = ProviderError::Http("400 Bad Request: invalid model id 'gpt-5'".into());
+        assert!(!is_context_overflow_error(&e));
+    }
+
+    #[test]
+    fn context_overflow_classifier_negative_auth() {
+        let e = ProviderError::Auth("invalid token".into());
+        assert!(!is_context_overflow_error(&e));
+    }
+
+    #[test]
+    fn transient_classifier_503_envoy_reset() {
+        let e = ProviderError::Http(
+            "503 Service Unavailable: upstream connect error or disconnect/reset before headers"
+                .into(),
+        );
+        assert!(is_transient_error(&e).is_some());
+    }
+
+    #[test]
+    fn transient_classifier_429_rate_limit() {
+        let e = ProviderError::Http("429 Too Many Requests".into());
+        assert!(is_transient_error(&e).is_some());
+    }
+
+    #[test]
+    fn transient_classifier_502_504() {
+        assert!(is_transient_error(&ProviderError::Http("502 Bad Gateway".into())).is_some());
+        assert!(is_transient_error(&ProviderError::Http("504 Gateway Timeout".into())).is_some());
+    }
+
+    #[test]
+    fn transient_classifier_overloaded() {
+        let e = ProviderError::Http(
+            "{\"error\":{\"message\":\"Overloaded\",\"type\":\"overloaded_error\"}}".into(),
+        );
+        assert!(is_transient_error(&e).is_some());
+    }
+
+    #[test]
+    fn transient_classifier_negative_400() {
+        let e = ProviderError::Http("400 Bad Request: invalid model".into());
+        assert!(is_transient_error(&e).is_none());
+    }
+
+    #[test]
+    fn transient_classifier_negative_auth() {
+        let e = ProviderError::Auth("invalid token".into());
+        assert!(is_transient_error(&e).is_none());
+    }
+
+    #[test]
+    fn transient_backoff_grows_then_caps() {
+        // 2s, 4s, 8s, 16s, 30s (capped from 32s).
+        assert_eq!(transient_retry_delay_ms(1), 2_000);
+        assert_eq!(transient_retry_delay_ms(2), 4_000);
+        assert_eq!(transient_retry_delay_ms(3), 8_000);
+        assert_eq!(transient_retry_delay_ms(4), 16_000);
+        assert_eq!(transient_retry_delay_ms(5), 30_000);
+        // Subsequent attempts stay capped (we cap MAX_TRANSIENT_RETRIES
+        // at 5 anyway, but the math has to be safe past that).
+        assert_eq!(transient_retry_delay_ms(10), 30_000);
+        assert_eq!(transient_retry_delay_ms(255), 30_000);
+    }
+}

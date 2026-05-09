@@ -29,6 +29,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -64,12 +65,12 @@ struct Args {
 
 pub(crate) struct CanI {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl CanI {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -108,7 +109,7 @@ impl NativeTool for CanI {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: Args = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         let attrs = ResourceAttributes {
             verb: Some(a.verb.clone()),
             resource: Some(a.resource.clone()),
@@ -179,10 +180,11 @@ impl NativeTool for CanI {
     }
 }
 
-async fn client_for(app: &AppHandle, cluster_id: &str) -> Result<Client, NativeToolError> {
+async fn client_for(app: &AppHandle, cluster: &ChatClusterRef) -> Result<Client, NativeToolError> {
+    let id = cluster.active().await;
     let state = app.state::<AppState>();
     let entry = state
-        .entry(cluster_id)
+        .entry(&id)
         .await
         .map_err(|e| NativeToolError::msg(format!("connect cluster: {e}")))?;
     Ok(entry.cluster.client())

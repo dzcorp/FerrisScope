@@ -33,6 +33,7 @@ use tauri::{AppHandle, Manager};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 /// Default image for the debug pod. Matches the operator-facing terminal
@@ -57,7 +58,7 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// Per-call exec timeout. The shell session itself lives until close; this
 /// just bounds one command. Long-running probes should be wrapped in
 /// `timeout` server-side or a tighter caller-supplied `timeout_seconds`.
-const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// Pod startup timeout for `open`. Includes image-pull on first use; alpine
 /// is small (~7 MB) but a fresh node still needs ~30s on a slow registry.
@@ -67,17 +68,25 @@ const POD_READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// kube-apiserver terminates the pod after this many seconds regardless of
 /// whether the agent or operator remembered to close the session — covers
 /// crashes, force-quits, model amnesia, and the chat outliving its
-/// usefulness. Five minutes is enough for an investigation but tight enough
-/// that orphaned pods don't sit around.
-const POD_TTL_SECONDS: i64 = 300;
+/// usefulness. Sized to clearly outlive a single exec running near
+/// `DEFAULT_EXEC_TIMEOUT` (240s) plus pod ready (~30s) so a long
+/// investigation doesn't have its pod yanked mid-command.
+const POD_TTL_SECONDS: i64 = 900;
 
 /// One open node-shell session. The pod field is the actual pod name on the
 /// cluster (we generate it ourselves rather than letting the API server
 /// `generateName` it, so we can return it predictably from `open`).
+///
+/// `cluster_id` is the active cluster snapshotted at open time, NOT the
+/// chat's current `ChatClusterRef::active`. If the agent switches contexts
+/// after open, exec/close still reach the cluster the debug pod was created
+/// in — otherwise we'd leak pods on the original cluster and 404 on the new
+/// one.
 #[derive(Debug, Clone)]
 struct Session {
     pod_name: String,
     namespace: String,
+    cluster_id: String,
 }
 
 /// Per-chat shell sessions, keyed by the id we hand out. `Arc<Mutex<…>>` so
@@ -137,15 +146,19 @@ struct OpenResult {
 
 pub(crate) struct NodeShellOpen {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
     sessions: NodeShellSessions,
 }
 
 impl NodeShellOpen {
-    pub(crate) fn new(app: AppHandle, cluster_id: String, sessions: NodeShellSessions) -> Self {
+    pub(crate) fn new(
+        app: AppHandle,
+        cluster: ChatClusterRef,
+        sessions: NodeShellSessions,
+    ) -> Self {
         Self {
             app,
-            cluster_id,
+            cluster,
             sessions,
         }
     }
@@ -186,7 +199,8 @@ impl NativeTool for NodeShellOpen {
             .namespace
             .unwrap_or_else(|| DEFAULT_DEBUG_NAMESPACE.into());
 
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let cluster_id = self.cluster.active().await;
+        let client = client_for_id(&self.app, &cluster_id).await?;
         let pod_name = format!("ferrisscope-nodeshell-{}", uuid::Uuid::new_v4().simple());
 
         let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
@@ -210,6 +224,7 @@ impl NativeTool for NodeShellOpen {
                 Session {
                     pod_name: pod_name.clone(),
                     namespace: namespace.clone(),
+                    cluster_id: cluster_id.clone(),
                 },
             )
             .await;
@@ -235,16 +250,20 @@ impl NativeTool for NodeShellOpen {
         if sessions.is_empty() {
             return;
         }
-        let client = match client_for(&self.app, &self.cluster_id).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, count = sessions.len(),
-                    "node-shell cleanup: cluster unreachable, leaking debug pods (TTL will reap)");
-                return;
-            }
-        };
+        // Each session captured the cluster it was opened against, so
+        // a switched-context chat still cleans up debug pods in the
+        // right cluster instead of trying to delete them in the
+        // currently-active one.
         for sess in sessions {
-            let pods: Api<Pod> = Api::namespaced(client.clone(), &sess.namespace);
+            let client = match client_for_id(&self.app, &sess.cluster_id).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, pod = %sess.pod_name, cluster = %sess.cluster_id,
+                        "node-shell cleanup: cluster unreachable, leaking debug pod (TTL will reap)");
+                    continue;
+                }
+            };
+            let pods: Api<Pod> = Api::namespaced(client, &sess.namespace);
             match pods
                 .delete(&sess.pod_name, &DeleteParams::default().grace_period(0))
                 .await
@@ -252,7 +271,6 @@ impl NativeTool for NodeShellOpen {
                 Ok(_) => tracing::info!(pod = %sess.pod_name, namespace = %sess.namespace,
                     "node-shell cleanup: deleted debug pod"),
                 Err(e) if format!("{e}").contains("NotFound") => {
-                    // Already gone — TTL fired, operator deleted, namespace GC.
                     tracing::info!(pod = %sess.pod_name,
                         "node-shell cleanup: debug pod already gone");
                 }
@@ -286,17 +304,12 @@ struct ExecResult {
 
 pub(crate) struct NodeShellExec {
     app: AppHandle,
-    cluster_id: String,
     sessions: NodeShellSessions,
 }
 
 impl NodeShellExec {
-    pub(crate) fn new(app: AppHandle, cluster_id: String, sessions: NodeShellSessions) -> Self {
-        Self {
-            app,
-            cluster_id,
-            sessions,
-        }
+    pub(crate) fn new(app: AppHandle, sessions: NodeShellSessions) -> Self {
+        Self { app, sessions }
     }
 }
 
@@ -333,7 +346,9 @@ impl NativeTool for NodeShellExec {
             .await
             .ok_or_else(|| NativeToolError::msg("session_id not found (already closed?)"))?;
 
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        // Use the session's pinned cluster — a context switch since open
+        // mustn't redirect exec to the wrong cluster.
+        let client = client_for_id(&self.app, &sess.cluster_id).await?;
         let pods: Api<Pod> = Api::namespaced(client, &sess.namespace);
 
         let timeout = parsed
@@ -387,17 +402,12 @@ struct CloseResult {
 
 pub(crate) struct NodeShellClose {
     app: AppHandle,
-    cluster_id: String,
     sessions: NodeShellSessions,
 }
 
 impl NodeShellClose {
-    pub(crate) fn new(app: AppHandle, cluster_id: String, sessions: NodeShellSessions) -> Self {
-        Self {
-            app,
-            cluster_id,
-            sessions,
-        }
+    pub(crate) fn new(app: AppHandle, sessions: NodeShellSessions) -> Self {
+        Self { app, sessions }
     }
 }
 
@@ -433,7 +443,7 @@ impl NativeTool for NodeShellClose {
             .expect("CloseResult serialises"));
         };
 
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for_id(&self.app, &sess.cluster_id).await?;
         let pods: Api<Pod> = Api::namespaced(client, &sess.namespace);
         // Grace period 0 + foreground: don't pay the 30s tail latency, the
         // pod is privileged and the user wants it gone.
@@ -453,7 +463,7 @@ impl NativeTool for NodeShellClose {
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-async fn client_for(app: &AppHandle, cluster_id: &str) -> Result<Client, NativeToolError> {
+async fn client_for_id(app: &AppHandle, cluster_id: &str) -> Result<Client, NativeToolError> {
     let state = app.state::<AppState>();
     let entry = state
         .entry(cluster_id)

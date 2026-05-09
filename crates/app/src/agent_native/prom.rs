@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -38,12 +39,12 @@ struct Args {
 
 pub(crate) struct PrometheusQuery {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl PrometheusQuery {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -86,14 +87,15 @@ impl NativeTool for PrometheusQuery {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: Args = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let entry = state
-            .entry(&self.cluster_id)
+            .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
         let client = entry.cluster.client();
 
-        let target = resolve_target(&self.cluster_id, &client, a.auto_discover).await?;
+        let target = resolve_target(&cluster_id, &client, a.auto_discover).await?;
 
         let data = if a.start.is_some() {
             let start = a.start.unwrap_or_default();

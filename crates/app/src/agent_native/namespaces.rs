@@ -9,16 +9,17 @@ use kube::api::{Api, ListParams};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 pub(crate) struct NamespacesList {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl NamespacesList {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -44,9 +45,10 @@ impl NativeTool for NamespacesList {
     }
 
     async fn call(&self, _args: Value) -> Result<Value, NativeToolError> {
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let entry = state
-            .entry(&self.cluster_id)
+            .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
         let api: Api<Namespace> = Api::all(entry.cluster.client());

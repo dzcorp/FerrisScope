@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -37,12 +38,12 @@ struct Args {
 
 pub(crate) struct RolloutStatus {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl RolloutStatus {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -76,7 +77,7 @@ impl NativeTool for RolloutStatus {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: Args = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
-        let client = client_for(&self.app, &self.cluster_id).await?;
+        let client = client_for(&self.app, &self.cluster).await?;
         match a.kind.to_lowercase().as_str() {
             "deployment" => deploy_status(&client, &a.namespace, &a.name).await,
             "statefulset" => sts_status(&client, &a.namespace, &a.name).await,
@@ -229,10 +230,11 @@ fn conditions_value<T: serde::Serialize>(conds: Option<&Vec<T>>) -> Value {
     Value::Array(out)
 }
 
-async fn client_for(app: &AppHandle, cluster_id: &str) -> Result<Client, NativeToolError> {
+async fn client_for(app: &AppHandle, cluster: &ChatClusterRef) -> Result<Client, NativeToolError> {
+    let id = cluster.active().await;
     let state = app.state::<AppState>();
     let entry = state
-        .entry(cluster_id)
+        .entry(&id)
         .await
         .map_err(|e| NativeToolError::msg(format!("connect cluster: {e}")))?;
     Ok(entry.cluster.client())

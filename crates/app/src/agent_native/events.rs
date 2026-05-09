@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 const DEFAULT_LIMIT: usize = 100;
@@ -34,12 +35,12 @@ struct Args {
 
 pub(crate) struct EventsList {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl EventsList {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -78,9 +79,10 @@ impl NativeTool for EventsList {
         let a: Args = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
         let limit = a.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let entry = state
-            .entry(&self.cluster_id)
+            .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
         let client = entry.cluster.client();

@@ -1935,6 +1935,7 @@ function ObjectEvents({
   return (
     <div style={{ overflow: "auto", height: "100%", background: t.bg }}>
       <table
+        className="fs-selectable"
         style={{
           width: "100%",
           borderCollapse: "collapse",

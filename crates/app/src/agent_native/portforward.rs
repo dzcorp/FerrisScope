@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -35,12 +36,12 @@ struct CloseArgs {
 
 pub(crate) struct PortForwardList {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl PortForwardList {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -67,11 +68,12 @@ impl NativeTool for PortForwardList {
     }
 
     async fn call(&self, _args: Value) -> Result<Value, NativeToolError> {
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let map = state.portforwards.by_id.lock().await;
         let mut out: Vec<Value> = Vec::with_capacity(map.len());
         for handle in map.values() {
-            if handle.spec.cluster_id != self.cluster_id {
+            if handle.spec.cluster_id != cluster_id {
                 continue;
             }
             let snap = ferrisscope_kube_ext::forward_snapshot(handle).await;
@@ -87,18 +89,18 @@ impl NativeTool for PortForwardList {
                 "local_url": format!("http://localhost:{}", snap.actual_local_port),
             }));
         }
-        Ok(json!({ "cluster_id": self.cluster_id, "forwards": out }))
+        Ok(json!({ "cluster_id": cluster_id, "forwards": out }))
     }
 }
 
 pub(crate) struct PortForwardOpen {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl PortForwardOpen {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -146,13 +148,14 @@ impl NativeTool for PortForwardOpen {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: OpenArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let target = ForwardTarget {
             kind: a.kind.clone(),
             namespace: a.namespace.clone(),
             name: a.name.clone(),
         };
-        let id = portforwards::make_id(&self.cluster_id, &target, a.remote_port);
+        let id = portforwards::make_id(&cluster_id, &target, a.remote_port);
         {
             let map = state.portforwards.by_id.lock().await;
             if let Some(existing) = map.get(&id) {
@@ -161,12 +164,12 @@ impl NativeTool for PortForwardOpen {
             }
         }
         let entry = state
-            .entry(&self.cluster_id)
+            .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
         let spec = ForwardSpec {
             id: id.clone(),
-            cluster_id: self.cluster_id.clone(),
+            cluster_id: cluster_id.clone(),
             target,
             remote_port: a.remote_port,
             requested_local_port: a.requested_local_port,
@@ -204,7 +207,7 @@ pub(crate) struct PortForwardClose {
 }
 
 impl PortForwardClose {
-    pub(crate) fn new(app: AppHandle, _cluster_id: String) -> Self {
+    pub(crate) fn new(app: AppHandle) -> Self {
         Self { app }
     }
 }

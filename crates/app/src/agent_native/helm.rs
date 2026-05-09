@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::agent_native::ChatClusterRef;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -38,12 +39,12 @@ struct GetArgs {
 
 pub(crate) struct HelmList {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl HelmList {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -74,9 +75,10 @@ impl NativeTool for HelmList {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: ListArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let entry = state
-            .entry(&self.cluster_id)
+            .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
         let client = entry.cluster.client();
@@ -128,12 +130,12 @@ impl NativeTool for HelmList {
 
 pub(crate) struct HelmReleaseGet {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl HelmReleaseGet {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -167,9 +169,10 @@ impl NativeTool for HelmReleaseGet {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: GetArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let entry = state
-            .entry(&self.cluster_id)
+            .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
         get_helm_release_detail(entry.cluster.client(), &a.namespace, &a.name)
@@ -180,12 +183,12 @@ impl NativeTool for HelmReleaseGet {
 
 pub(crate) struct HelmHistory {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl HelmHistory {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -218,9 +221,10 @@ impl NativeTool for HelmHistory {
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
         let a: GetArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
+        let cluster_id = self.cluster.active().await;
         let state = self.app.state::<AppState>();
         let entry = state
-            .entry(&self.cluster_id)
+            .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
         let client = entry.cluster.client();
@@ -315,12 +319,12 @@ struct UninstallArgs {
 
 pub(crate) struct HelmInstall {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl HelmInstall {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -368,8 +372,7 @@ impl NativeTool for HelmInstall {
         let a: InstallArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
         check_helm_available()?;
-        let (context_name, kubeconfig_path) =
-            resolve_kube_target(&self.app, &self.cluster_id).await;
+        let (context_name, kubeconfig_path) = resolve_kube_target(&self.app, &self.cluster).await;
 
         // Stage values.yaml in a tempdir so we can pass `-f` even when the
         // values are large. Empty values still go through the same path —
@@ -469,12 +472,12 @@ impl NativeTool for HelmInstall {
 
 pub(crate) struct HelmUninstall {
     app: AppHandle,
-    cluster_id: String,
+    cluster: ChatClusterRef,
 }
 
 impl HelmUninstall {
-    pub(crate) fn new(app: AppHandle, cluster_id: String) -> Self {
-        Self { app, cluster_id }
+    pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
+        Self { app, cluster }
     }
 }
 
@@ -512,8 +515,7 @@ impl NativeTool for HelmUninstall {
         let a: UninstallArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
         check_helm_available()?;
-        let (context_name, kubeconfig_path) =
-            resolve_kube_target(&self.app, &self.cluster_id).await;
+        let (context_name, kubeconfig_path) = resolve_kube_target(&self.app, &self.cluster).await;
 
         ferrisscope_kube_ext::helm_uninstall(
             &context_name,
@@ -548,12 +550,16 @@ fn check_helm_available() -> Result<(), NativeToolError> {
 /// SSH-backed sources have no local kubeconfig path — helm just gets
 /// `--kube-context` and trusts the operator's `KUBECONFIG`. Path is `None`
 /// for those.
-async fn resolve_kube_target(app: &AppHandle, cluster_id: &str) -> (String, Option<PathBuf>) {
-    let context_name = kubeconfig::context_name_from_id(cluster_id).to_owned();
+async fn resolve_kube_target(
+    app: &AppHandle,
+    cluster: &ChatClusterRef,
+) -> (String, Option<PathBuf>) {
+    let cluster_id = cluster.active().await;
+    let context_name = kubeconfig::context_name_from_id(&cluster_id).to_owned();
     let app_state = app.state::<AppState>();
     let path = {
         let sources = app_state.sources.lock().await;
-        kubeconfig::resolve_path_for(cluster_id, &sources)
+        kubeconfig::resolve_path_for(&cluster_id, &sources)
     };
     (context_name, path)
 }
