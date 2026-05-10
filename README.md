@@ -25,11 +25,13 @@ A lightweight Lens replacement built on Tauri 2 + `kube-rs` + React.
 <table>
   <tr>
     <td>
-      <a href="screenshots/demo.webm"><img src="screenshots/demo.gif" alt="End-to-end tour" width="420" /></a>
+      <a href="screenshots/demo.webm"><img src="screenshots/demo.gif" alt="End-to-end tour" width="840" /></a>
       <br /><sub>End-to-end tour · <a href="screenshots/demo.webm">full-quality .webm</a></sub>
     </td>
+  </tr>
+  <tr>
     <td>
-      <a href="screenshots/ai-demo.webm"><img src="screenshots/ai-demo.gif" alt="Cluster-aware AI chat" width="420" /></a>
+      <a href="screenshots/ai-demo.webm"><img src="screenshots/ai-demo.gif" alt="Cluster-aware AI chat" width="840" /></a>
       <br /><sub>Cluster-aware AI chat · <a href="screenshots/ai-demo.webm">full-quality .webm</a></sub>
     </td>
   </tr>
