@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::oneshot;
 
 use directories::ProjectDirs;
@@ -32,10 +32,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, State};
 use tokio::sync::Mutex;
 
-use crate::agent_keyring;
 use crate::agent_mcp::{McpProcess, McpProcessError};
 use crate::agent_native;
 use crate::agent_oauth;
+use crate::secret_storage::{self, StorageBackend};
 use crate::state::AppState;
 
 /// Hard cap on tool-call rounds within a single user turn. Defends against
@@ -194,6 +194,19 @@ struct PersistedSettings {
     /// since we'd lose the OAuth refresh-token + account-id fields.
     #[serde(default)]
     plaintext_credentials: HashMap<ProviderKind, String>,
+    /// Index of providers known to have a stored credential (keychain or
+    /// plaintext). Index only — no secrets. Lets us skip the keychain on
+    /// providers that have nothing stored, which matters on macOS where
+    /// each `get_password` against a real item triggers an ACL prompt.
+    #[serde(default)]
+    configured_providers: HashSet<ProviderKind>,
+    /// One-shot: have we backfilled `configured_providers` from the
+    /// keychain for an existing install? Pre-`configured_providers`
+    /// deployments arrive with the field empty even though their keychain
+    /// is full; the first `ai_get_settings` after upgrade does a sweep
+    /// and sets this true so we never re-sweep.
+    #[serde(default)]
+    keychain_index_initialized: bool,
 }
 
 async fn load_persisted() -> PersistedSettings {
@@ -273,20 +286,127 @@ async fn save_persisted(p: &PersistedSettings) -> std::io::Result<()> {
     tokio::fs::write(&path, bytes).await
 }
 
+// ─── Credential cache ───────────────────────────────────────────────────────
+//
+// The keychain is expensive on macOS: each `get_password` against a real
+// item can trigger an ACL prompt. Without caching, every `ai_get_settings`
+// (settings page open, AI chat open, provider list re-render) hammers the
+// keychain once per provider — historically 11 prompts every time.
+//
+// We mitigate three ways:
+//   1. `CRED_CACHE` — process-singleton in-memory map. Populated on first
+//      read, invalidated on write/delete. Subsequent reads skip the keychain.
+//   2. `PersistedSettings::configured_providers` — disk-persistent index of
+//      which providers have something stored. We never query the keychain
+//      for providers absent from the index (would prompt for nothing).
+//   3. `KEYCHAIN_AVAILABLE` — caches the cheap probe so we don't re-run it
+//      on every settings load.
+
+/// Cache slot semantics:
+///   * key absent  → never looked up
+///   * `Some(None)`  → looked up, nothing stored
+///   * `Some(Some(c))` → looked up, found
+fn cred_cache() -> &'static std::sync::Mutex<HashMap<ProviderKind, Option<Credential>>> {
+    static CRED_CACHE: OnceLock<std::sync::Mutex<HashMap<ProviderKind, Option<Credential>>>> =
+        OnceLock::new();
+    CRED_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+// `Option<Option<_>>` is exactly the right shape: outer `None` = never
+// looked up; inner `None` = looked up, nothing stored. A custom enum
+// would be the same three states under a different name.
+#[allow(clippy::option_option)]
+fn cache_get(kind: ProviderKind) -> Option<Option<Credential>> {
+    cred_cache().lock().ok()?.get(&kind).cloned()
+}
+
+fn cache_set(kind: ProviderKind, value: Option<Credential>) {
+    if let Ok(mut g) = cred_cache().lock() {
+        g.insert(kind, value);
+    }
+}
+
+/// Cached `secret_storage::is_available()`. The underlying probe is
+/// cheap (a `get_password` against a non-existent item, or an `ioreg`
+/// lookup for the encrypted-file backend), but there's no reason to
+/// re-run it on every settings read.
+fn secret_storage_available_cached() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(secret_storage::is_available)
+}
+
+/// One-time backfill for installs that predate `configured_providers`.
+/// Sweeps every provider, populating both the on-disk index and the
+/// in-memory cache from whatever's already in the active secret backend
+/// (or the plaintext fallback). After this runs once, subsequent
+/// `read_credential` calls only touch storage for providers actually
+/// in the index.
+///
+/// Mutates `p` in place; caller is responsible for `save_persisted`.
+async fn backfill_credential_index(p: &mut PersistedSettings) {
+    let allow_plaintext = p.settings.allow_plaintext_api_key;
+    for kind in ProviderKind::all() {
+        let mut found: Option<Credential> = None;
+        if let Ok(c) = secret_storage::get_credential(*kind) {
+            found = Some(c);
+        } else if allow_plaintext {
+            if let Some(json) = p.plaintext_credentials.get(kind) {
+                if let Ok(c) = serde_json::from_str::<Credential>(json) {
+                    found = Some(c);
+                }
+            }
+        }
+        if let Some(c) = found {
+            p.configured_providers.insert(*kind);
+            cache_set(*kind, Some(c));
+        } else {
+            cache_set(*kind, None);
+        }
+    }
+    p.keychain_index_initialized = true;
+}
+
 /// Returns the credential for `kind`, preferring the keychain. Falls back
 /// to the plaintext store iff the operator opted in. Returns `None` if
 /// neither source has anything.
+///
+/// Reads go through the in-memory cache and skip storage entirely for
+/// providers not in `configured_providers`. This is what keeps macOS
+/// quiet: we never `get_password` against a provider the operator has
+/// never configured.
 async fn read_credential(kind: ProviderKind) -> Option<Credential> {
-    if let Ok(c) = agent_keyring::get_credential(kind) {
-        return Some(c);
+    if let Some(slot) = cache_get(kind) {
+        return slot;
     }
-    let p = load_persisted().await;
-    if !p.settings.allow_plaintext_api_key {
+
+    let mut p = load_persisted().await;
+
+    // Pre-`configured_providers` install: do the one-time sweep so we
+    // know which providers have something worth reading.
+    if !p.keychain_index_initialized {
+        backfill_credential_index(&mut p).await;
+        let _ = save_persisted(&p).await;
+        // Sweep populated the cache for every provider — re-check.
+        if let Some(slot) = cache_get(kind) {
+            return slot;
+        }
+    }
+
+    if !p.configured_providers.contains(&kind) {
+        cache_set(kind, None);
         return None;
     }
-    p.plaintext_credentials
-        .get(&kind)
-        .and_then(|json| serde_json::from_str::<Credential>(json).ok())
+
+    let result = match secret_storage::get_credential(kind) {
+        Ok(c) => Some(c),
+        Err(_) if p.settings.allow_plaintext_api_key => p
+            .plaintext_credentials
+            .get(&kind)
+            .and_then(|json| serde_json::from_str::<Credential>(json).ok()),
+        Err(_) => None,
+    };
+    cache_set(kind, result.clone());
+    result
 }
 
 /// Effective credential for `kind` — the operator-configured one when
@@ -304,35 +424,58 @@ async fn effective_credential(kind: ProviderKind) -> Option<Credential> {
 }
 
 async fn write_credential(kind: ProviderKind, cred: &Credential) -> Result<(), String> {
-    if agent_keyring::is_available() {
-        agent_keyring::set_credential(kind, cred).map_err(|e| e.to_string())?;
+    let mut p = load_persisted().await;
+    let mut dirty = false;
+
+    if secret_storage_available_cached() {
+        secret_storage::set_credential(kind, cred).map_err(|e| e.to_string())?;
         // If a plaintext copy lingers from a prior plaintext-only
-        // setup, drop it so the keychain stays the single source of
-        // truth.
-        let mut p = load_persisted().await;
+        // setup, drop it so the secret-storage backend stays the
+        // single source of truth.
         if p.plaintext_credentials.remove(&kind).is_some() {
-            save_persisted(&p).await.map_err(|e| e.to_string())?;
+            dirty = true;
         }
-        Ok(())
     } else {
-        let mut p = load_persisted().await;
         if !p.settings.allow_plaintext_api_key {
             return Err(
-                "no keychain backend available and plaintext storage is not enabled".into(),
+                "no secret storage backend available and plaintext storage is not enabled".into(),
             );
         }
         let json = serde_json::to_string(cred).map_err(|e| e.to_string())?;
         p.plaintext_credentials.insert(kind, json);
-        save_persisted(&p).await.map_err(|e| e.to_string())
+        dirty = true;
     }
+
+    if p.configured_providers.insert(kind) {
+        dirty = true;
+    }
+    if !p.keychain_index_initialized {
+        // First write also satisfies the migration flag — anything we
+        // didn't see during this write isn't ours to claim.
+        p.keychain_index_initialized = true;
+        dirty = true;
+    }
+    if dirty {
+        save_persisted(&p).await.map_err(|e| e.to_string())?;
+    }
+    cache_set(kind, Some(cred.clone()));
+    Ok(())
 }
 
 async fn clear_credential(kind: ProviderKind) -> Result<(), String> {
-    let _ = agent_keyring::delete_credential(kind);
+    let _ = secret_storage::delete_credential(kind);
     let mut p = load_persisted().await;
+    let mut dirty = false;
     if p.plaintext_credentials.remove(&kind).is_some() {
+        dirty = true;
+    }
+    if p.configured_providers.remove(&kind) {
+        dirty = true;
+    }
+    if dirty {
         save_persisted(&p).await.map_err(|e| e.to_string())?;
     }
+    cache_set(kind, None);
     Ok(())
 }
 
@@ -351,6 +494,13 @@ pub(crate) struct AiSettingsWire {
     pub system_prompt_override: Option<String>,
     pub allow_plaintext_api_key: bool,
     pub keychain_available: bool,
+    /// Active secret-storage backend (`Keychain` or `EncryptedFile`).
+    /// `EncryptedFile` is selected on macOS when the running binary
+    /// isn't persistently signed — the UI can use this to render an
+    /// explanatory note ("API keys live in an encrypted local file
+    /// because this build is unsigned"). On all other platforms /
+    /// signed builds, this is `Keychain`.
+    pub secret_storage_backend: StorageBackend,
     /// Operator-configured external MCP servers. Each entry produces one
     /// child process per chat, merged with the native catalogue under the
     /// same approval gate. Empty = native tools only.
@@ -760,7 +910,8 @@ pub(crate) async fn ai_get_settings(
     _state: State<'_, AgentState>,
 ) -> Result<AiSettingsWire, String> {
     let p = load_persisted().await;
-    let kc_available = agent_keyring::is_available();
+    let kc_available = secret_storage_available_cached();
+    let storage_backend = secret_storage::backend();
     let mut providers = HashMap::with_capacity(ProviderKind::all().len());
     for kind in ProviderKind::all() {
         let m: &ProviderMeta = meta::for_kind(*kind);
@@ -822,6 +973,7 @@ pub(crate) async fn ai_get_settings(
         system_prompt_override: p.settings.system_prompt_override.clone(),
         allow_plaintext_api_key: p.settings.allow_plaintext_api_key,
         keychain_available: kc_available,
+        secret_storage_backend: storage_backend,
         mcp_servers: p.settings.mcp_servers.clone(),
         mcp_binary_path: p.settings.mcp_binary_path.clone(),
         reasoning: p.settings.reasoning,

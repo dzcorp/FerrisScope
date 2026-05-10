@@ -7,6 +7,7 @@ mod agent_native;
 mod agent_oauth;
 mod commands;
 mod kubectl_install;
+mod secret_storage;
 mod ssh_scratch;
 mod state;
 mod terminal;

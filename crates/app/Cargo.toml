@@ -69,6 +69,13 @@ tempfile = "3"
 ureq = { version = "3", default-features = true }
 sha2 = "0.11"
 
+# AEAD for the encrypted-file secret-storage backend used on unsigned macOS
+# builds, where the OS keychain ACL re-prompts on every release (the ACL is
+# keyed off the binary's cdhash). Pure-Rust, no_std-capable, audited by NCC
+# Group; the API surface is `forbid(unsafe_code)`-clean. AES-256-GCM picks up
+# AES-NI on Intel and ARMv8 crypto extensions on Apple Silicon.
+aes-gcm = "0.10"
+
 # Replace the system allocator with mimalloc. glibc's allocator (ptmalloc2)
 # tends to hold freed pages in per-thread arenas indefinitely on long-running
 # processes — the kind of behaviour that shows up as "RSS only ever grows"
