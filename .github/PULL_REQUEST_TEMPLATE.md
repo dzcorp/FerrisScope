@@ -48,7 +48,6 @@ the affected unit / integration tests.
 - [ ] If I added a Tauri command, it is registered in `main.rs` and typed in `ui/src/api.ts`.
 - [ ] If I added a kind detail panel, I composed existing primitives — no fork.
 - [ ] If I added an agent tool, the name follows `fs_<area>_<verb>`, `category()` is correct, and `on_chat_close` cleans up any external state.
-- [ ] User-visible changes are reflected in `CHANGELOG.md`'s `[Unreleased]` section.
 - [ ] I am the author of these changes (or have permission), and I agree to release them under Apache-2.0.
 
 ## Notes for reviewers

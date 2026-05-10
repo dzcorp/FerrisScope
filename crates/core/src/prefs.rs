@@ -96,6 +96,45 @@ impl Default for Settings {
     }
 }
 
+/// Background update-check state. Persisted so the "v… available" mark on
+/// the Settings → About entry survives restarts, and so a user's "Skip this
+/// version" choice is durable until a strictly-newer release ships.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateState {
+    /// Latest release version observed by the background checker. `None`
+    /// until the first successful check.
+    #[serde(default)]
+    pub last_known_version: Option<String>,
+    /// Version the operator has explicitly acknowledged via "Skip this
+    /// version". The About-entry mark suppresses while this equals
+    /// `last_known_version`; reappears when `last_known_version` advances.
+    #[serde(default)]
+    pub last_seen_version: Option<String>,
+    /// Last successful check timestamp (unix ms; 0 = never). Informational.
+    #[serde(default)]
+    pub last_check_at: u64,
+    /// Whether the periodic background check runs. Operators on air-gapped
+    /// clusters or who simply don't want the GitHub call can turn this off
+    /// in Settings → General. Defaults to true.
+    #[serde(default = "default_auto_check_enabled")]
+    pub auto_check_enabled: bool,
+}
+
+fn default_auto_check_enabled() -> bool {
+    true
+}
+
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self {
+            last_known_version: None,
+            last_seen_version: None,
+            last_check_at: 0,
+            auto_check_enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UiState {
     #[serde(default)]
@@ -123,6 +162,8 @@ pub struct Prefs {
     pub settings: Settings,
     #[serde(default)]
     pub ui: UiState,
+    #[serde(default)]
+    pub update: UpdateState,
 }
 
 #[must_use]
@@ -167,4 +208,51 @@ pub async fn save(prefs: &Prefs) -> std::io::Result<()> {
     let data = serde_json::to_string_pretty(prefs)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     crate::atomic_write::atomic_write(&path, data.as_bytes()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_prefs_without_update_block_loads_with_defaults() {
+        // A prefs.json written before the `update` field existed must
+        // deserialise cleanly. `auto_check_enabled` must default to true so
+        // existing installs opt in to the periodic check on next launch.
+        let legacy = r#"{
+            "theme": "dark",
+            "settings": {
+                "refresh_sec": 15,
+                "confirm_destructive": true,
+                "show_system_ns": false,
+                "density": "comfortable",
+                "mono_tables": true,
+                "refresh_on_launch": true
+            },
+            "ui": {}
+        }"#;
+        let prefs = parse(legacy);
+        assert_eq!(prefs.update.last_known_version, None);
+        assert_eq!(prefs.update.last_seen_version, None);
+        assert_eq!(prefs.update.last_check_at, 0);
+        assert!(
+            prefs.update.auto_check_enabled,
+            "auto_check_enabled must default to true so legacy installs opt in"
+        );
+    }
+
+    #[test]
+    fn update_state_round_trips_through_json() {
+        let mut prefs = Prefs::default();
+        prefs.update.last_known_version = Some("1.2.3".to_string());
+        prefs.update.last_seen_version = Some("1.2.2".to_string());
+        prefs.update.last_check_at = 1_700_000_000_000;
+        prefs.update.auto_check_enabled = false;
+        let json = serde_json::to_string(&prefs).unwrap();
+        let parsed = parse(&json);
+        assert_eq!(parsed.update.last_known_version, Some("1.2.3".to_string()));
+        assert_eq!(parsed.update.last_seen_version, Some("1.2.2".to_string()));
+        assert_eq!(parsed.update.last_check_at, 1_700_000_000_000);
+        assert!(!parsed.update.auto_check_enabled);
+    }
 }

@@ -211,7 +211,7 @@ Both surface as the same `ToolSchema`, hit the same `ApprovalMode` gate, and app
 - **Don't store mutable state in the tool struct itself.** Use an `Arc<Mutex<…>>` shared across related tools (see `NodeShellSessions`). Single-tool state is fine if it's truly per-tool.
 - **Don't promote a native tool to an MCP server prematurely.** If we ever need *external* MCP clients (Claude Desktop, Cursor) to use these, we can stand up an in-process MCP server — `crates/agent/src/mcp/mod.rs::McpClient` already takes any `AsyncRead`/`AsyncWrite` pair so a duplex pipe works without a second process. Future move; today, native is faster, simpler, and avoids a second framing layer.
 
-For the current shipping inventory of native tools, see the v1.0 entry in [`CHANGELOG.md`](./CHANGELOG.md). Sources live in `crates/app/src/agent_native/` (one file per area).
+For the current shipping inventory of native tools, the sources live in `crates/app/src/agent_native/` (one file per area) — that's the authoritative list. Per-release deltas are on the [GitHub releases page](https://github.com/dzcorp/FerrisScope/releases).
 
 ## Working with kube-rs
 

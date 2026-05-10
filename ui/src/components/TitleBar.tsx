@@ -143,12 +143,12 @@ export function TitleBar({ mode }: { mode: ThemeMode }) {
 }
 
 // Invisible window-edge resize handles for Linux. With `set_decorations(false)`
-// the WM no longer provides edge-grip zones, so we recreate them: thin 3px
-// strips along each side, 8px corner squares for diagonal grips. Hidden when
-// the window is maximized — there's nothing to resize and the strips would
+// the WM no longer provides edge-grip zones, so we recreate them: 6px strips
+// along each side, 14px corner squares for diagonal grips. Hidden when the
+// window is maximized — there's nothing to resize and the strips would
 // otherwise eat clicks at the screen edge. Position-fixed + high z-index puts
-// them above all app chrome; their footprint is small enough that they don't
-// interfere with normal interaction.
+// them above all app chrome; corner zones overlap with the close button's
+// corner but leave most of its 44×30 click target intact.
 export function ResizeEdges() {
   const [maximized, setMaximized] = useState(false);
 
@@ -178,8 +178,8 @@ export function ResizeEdges() {
     void w.startResizeDragging(dir);
   };
 
-  const EDGE = 3;
-  const CORNER = 8;
+  const EDGE = 6;
+  const CORNER = 14;
   const Z = 10000;
   const base: React.CSSProperties = { position: "fixed", zIndex: Z };
 

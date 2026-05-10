@@ -138,7 +138,7 @@ When you open a PR, the [`PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMP
 - [ ] If you added a Tauri command, it's typed in `ui/src/api.ts`.
 - [ ] If you added a kind detail panel, you composed existing primitives (no fork).
 - [ ] If you added an agent tool, it's named `fs_<area>_<verb>`, classifies its `category()` correctly, and cleans up via `on_chat_close` if it allocates external state.
-- [ ] If you changed user-visible behaviour, updated `README.md` and/or `CHANGELOG.md`'s `[Unreleased]` section.
+- [ ] If you changed user-visible behaviour, updated `README.md` where relevant. (Release notes are generated from PR titles + bodies on the GitHub release page — write the PR description with that in mind.)
 
 Reviewers will look for these explicitly. Self-review before submitting.
 

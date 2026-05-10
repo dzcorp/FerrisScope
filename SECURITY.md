@@ -44,7 +44,7 @@ If you're a security researcher and want to encrypt the report, mention that in 
 - **An initial assessment** — severity, affected components, whether we can reproduce — within 7 days.
 - **Regular status updates** at least weekly while a fix is in progress.
 - **Coordinated disclosure** — we'll publish the advisory and the fix together. If the issue affects a downstream packager (Linux distros, Homebrew, AUR), we'll coordinate so they can ship the fix at the same time.
-- **Public credit** in the advisory and CHANGELOG, unless you'd rather stay anonymous.
+- **Public credit** in the advisory and the release notes, unless you'd rather stay anonymous.
 
 We don't currently have a paid bug-bounty program, but every valid report gets credited prominently.
 
