@@ -14,7 +14,7 @@ import Editor from "@monaco-editor/react";
 import { useAppStore, type DockPlacement, type DockTab } from "../store";
 import { DockChat } from "./chat/DockChat";
 import { tokens, FONT_MONO, type ThemeMode } from "../theme";
-import { Btn, IconBtn, Icons, Select } from "./ui";
+import { Btn, ErrorBlock, IconBtn, Icons, Select } from "./ui";
 import { api } from "../api";
 import type { DocApplyResult } from "../types";
 import { installClipboardShortcuts } from "../lib/monacoClipboard";
@@ -994,13 +994,15 @@ function DockTerminal({
           style={{
             padding: "6px 10px",
             background: t.bad + "22",
-            color: t.bad,
-            fontFamily: FONT_MONO,
-            fontSize: 11,
             borderTop: `1px solid ${t.border}`,
           }}
         >
-          {error ?? "failed to start session"}
+          <ErrorBlock
+            t={t}
+            message={error ?? "failed to start session"}
+            kindLabel="terminal session"
+            inline
+          />
         </div>
       )}
     </div>
@@ -1219,9 +1221,13 @@ function DockYaml({
           }}
         >
           {validateError && (
-            <div style={{ color: t.bad, whiteSpace: "pre-wrap" }}>
-              {validateError}
-            </div>
+            <ErrorBlock
+              t={t}
+              message={validateError}
+              kindLabel="manifest"
+              verb="save"
+              inline
+            />
           )}
           {results?.map((r, i) => (
             <ResultLine key={i} mode={mode} r={r} />

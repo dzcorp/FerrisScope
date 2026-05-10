@@ -44,7 +44,7 @@ function backendShortLabel(b: PromBackend): string {
   }
 }
 import { DetailRow, Mute } from "./primitives";
-import { IconBtn, Icons, Section } from "../ui";
+import { ErrorBlock, IconBtn, Icons, Section } from "../ui";
 import { useAppStore } from "../../store";
 
 // Per-pod / per-PVC metrics surface. CPU + memory come exclusively from
@@ -1561,14 +1561,15 @@ function PromChart({
           padding: "8px 10px",
           background: "rgba(244,63,94,0.08)",
           border: `1px solid rgba(244,63,94,0.4)`,
-          color: t.text,
-          fontSize: 11.5,
           borderRadius: 3,
-          fontFamily: FONT_MONO,
-          wordBreak: "break-word",
         }}
       >
-        {state.error}
+        <ErrorBlock
+          t={t}
+          message={state.error}
+          kindLabel="metrics"
+          inline
+        />
       </div>
     );
   }
@@ -1764,14 +1765,15 @@ function MultiSeriesSection({
             padding: "8px 10px",
             background: "rgba(244,63,94,0.08)",
             border: `1px solid rgba(244,63,94,0.4)`,
-            color: t.text,
-            fontSize: 11.5,
             borderRadius: 3,
-            fontFamily: FONT_MONO,
-            wordBreak: "break-word",
           }}
         >
-          {state.error}
+          <ErrorBlock
+            t={t}
+            message={state.error}
+            kindLabel="metrics"
+            inline
+          />
         </div>
       ) : !have ? (
         <Mute t={t}>

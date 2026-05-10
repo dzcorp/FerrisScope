@@ -2,7 +2,15 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { tokens, FONT_MONO, type ThemeMode } from "../theme";
-import { Eyebrow, IconBtn, Icons, Select, StatusPill, Tooltip } from "./ui";
+import {
+  ErrorBlock,
+  Eyebrow,
+  IconBtn,
+  Icons,
+  Select,
+  StatusPill,
+  Tooltip,
+} from "./ui";
 import { ansiToReact } from "../lib/ansi";
 
 export type LogTarget = {
@@ -351,7 +359,13 @@ export function LogPanel({
             <div style={{ color: "#64748b" }}>Waiting for output…</div>
           )}
           {status.kind === "error" && (
-            <div style={{ color: t.bad }}>{status.message}</div>
+            <ErrorBlock
+              t={t}
+              message={status.message}
+              kindLabel="pod"
+              verb="stream"
+              inline
+            />
           )}
           {lines.length > 0 && (
             <div

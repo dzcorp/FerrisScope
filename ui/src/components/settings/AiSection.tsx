@@ -12,7 +12,7 @@ import type {
   ReasoningEffort,
 } from "../../types";
 import { tokens, FONT_MONO, type ThemeMode, type Tokens } from "../../theme";
-import { Btn, Field, SectionHeader, Select, Toggle } from "../ui";
+import { Btn, ErrorBlock, Field, SectionHeader, Select, Toggle } from "../ui";
 
 // AiSection — settings page tab for the cluster-aware AI agent. The
 // settings shape is provider-list + per-provider credential state. Each
@@ -79,7 +79,12 @@ export function AiSection({ mode }: { mode: ThemeMode }) {
           sub="Cluster-aware assistant — configure provider and defaults."
         />
         {error ? (
-          <div style={{ color: t.bad, fontSize: 12 }}>{error}</div>
+          <ErrorBlock
+            t={t}
+            message={error}
+            kindLabel="AI settings"
+            inline
+          />
         ) : (
           <div style={{ color: t.textMuted, fontSize: 12 }}>Loading…</div>
         )}
@@ -410,13 +415,15 @@ export function AiSection({ mode }: { mode: ThemeMode }) {
             background: t.bad + "1f",
             border: `1px solid ${t.bad}66`,
             borderRadius: 4,
-            color: t.bad,
-            fontSize: 11.5,
-            fontFamily: FONT_MONO,
-            whiteSpace: "pre-wrap",
           }}
         >
-          {error}
+          <ErrorBlock
+            t={t}
+            message={error}
+            kindLabel="AI settings"
+            verb="save"
+            inline
+          />
         </div>
       )}
     </div>

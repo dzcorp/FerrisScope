@@ -5,7 +5,7 @@ import type { ClusterInfo, ContextInfo } from "../types";
 import { tokens, type ThemeMode } from "../theme";
 import { ClusterBar } from "./ClusterBar";
 import { ResourceTable } from "./ResourceTable";
-import { Btn, EmptyState, LoadingLine } from "./ui";
+import { Btn, EmptyState, ErrorBlock, LoadingLine } from "./ui";
 
 type ConnectState =
   | { status: "connecting"; startedAt: number; connectId: string }
@@ -302,18 +302,13 @@ function ReconnectBanner({
           {title}
         </div>
         {reason && (
-          <div
-            style={{
-              color: t.textMuted,
-              fontSize: 11,
-              marginTop: 2,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-            title={reason}
-          >
-            {reason}
+          <div style={{ marginTop: 2 }} title={reason}>
+            <ErrorBlock
+              t={t}
+              message={reason}
+              kindLabel="cluster"
+              inline
+            />
           </div>
         )}
       </div>

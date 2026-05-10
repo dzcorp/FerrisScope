@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, onResourceDelta } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, LoadingLine, Section, StatusPill } from "../../ui";
+import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
   Copyable,
@@ -75,24 +75,6 @@ function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
   );
 }
 
-function ErrorBlock({ t, message }: { t: Tokens; message: string }) {
-  return (
-    <pre
-      style={{
-        padding: 18,
-        fontFamily: FONT_MONO,
-        fontSize: 11.5,
-        color: t.bad,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        margin: 0,
-      }}
-    >
-      {message}
-    </pre>
-  );
-}
-
 // ── Node ───────────────────────────────────────────────────────────────────
 //
 // Node conditions invert: True is *bad* for MemoryPressure / DiskPressure /
@@ -128,7 +110,7 @@ export function NodeSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="node" />;
 
   const d = state.detail;
   const ready = d.conditions.find((c) => c.type === "Ready");
@@ -719,15 +701,13 @@ function PodsOnNodeSection(props: {
           <LoadingLine t={t} label="Loading pods…" inline />
         )}
         {state.kind === "error" && (
-          <div
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 11.5,
-              color: t.bad,
-              padding: "6px 0",
-            }}
-          >
-            {state.message}
+          <div style={{ padding: "6px 0" }}>
+            <ErrorBlock
+              t={t}
+              message={state.message}
+              kindLabel="pods"
+              inline
+            />
           </div>
         )}
         {state.kind === "ready" && rows.length === 0 && (
@@ -843,7 +823,7 @@ export function NamespaceSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="namespace" />;
 
   const d = state.detail;
   return (
@@ -950,7 +930,7 @@ export function EventSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="event" />;
 
   const d = state.detail;
   const isWarning = d.type === "Warning";

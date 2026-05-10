@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, LoadingLine, Section, StatusPill } from "../../ui";
+import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
   Copyable,
@@ -68,24 +68,6 @@ function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
     >
       {children}
     </div>
-  );
-}
-
-function ErrorBlock({ t, message }: { t: Tokens; message: string }) {
-  return (
-    <pre
-      style={{
-        padding: 18,
-        fontFamily: FONT_MONO,
-        fontSize: 11.5,
-        color: t.bad,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        margin: 0,
-      }}
-    >
-      {message}
-    </pre>
   );
 }
 
@@ -160,7 +142,7 @@ export function PersistentVolumeClaimSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="persistent volume claim" />;
 
   const d = state.detail;
   return (
@@ -370,7 +352,7 @@ export function PersistentVolumeSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="persistent volume" />;
 
   const d = state.detail;
   return (
@@ -601,7 +583,7 @@ export function StorageClassSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="storage class" />;
 
   const d = state.detail;
   return (

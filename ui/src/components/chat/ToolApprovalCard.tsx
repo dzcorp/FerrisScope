@@ -1,7 +1,7 @@
 import { memo, useMemo, useState } from "react";
 import { api } from "../../api";
 import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
-import { Btn } from "../ui";
+import { Btn, ErrorBlock } from "../ui";
 import { useCopyFlash } from "../detail/primitives";
 import type { PendingApproval } from "./chatStreaming";
 
@@ -141,14 +141,14 @@ function ToolApprovalCardInner({ mode, chatId, approval }: Props) {
           {pretty}
         </pre>
         {error && (
-          <div
-            style={{
-              marginTop: 6,
-              fontSize: 11,
-              color: t.bad,
-            }}
-          >
-            {error}
+          <div style={{ marginTop: 6 }}>
+            <ErrorBlock
+              t={t}
+              message={error}
+              kindLabel="tool approval"
+              verb="save"
+              inline
+            />
           </div>
         )}
         <div

@@ -14,7 +14,7 @@ import Editor from "@monaco-editor/react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { LoadingLine, Section, StatusPill } from "../../ui";
+import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
   Copyable,
@@ -74,24 +74,6 @@ function Frame({ t, children }: { t: Tokens; children: ReactNode }) {
     >
       {children}
     </div>
-  );
-}
-
-function ErrorBlock({ t, message }: { t: Tokens; message: string }) {
-  return (
-    <pre
-      style={{
-        padding: 18,
-        fontFamily: FONT_MONO,
-        fontSize: 11.5,
-        color: t.bad,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        margin: 0,
-      }}
-    >
-      {message}
-    </pre>
   );
 }
 
@@ -349,7 +331,7 @@ export function HelmReleaseSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="helm release" />;
 
   return (
     <HelmReleaseView
@@ -1130,7 +1112,13 @@ function ErrorBanner({
           gap: 12,
         }}
       >
-        <strong style={{ color: t.bad }}>{message}</strong>
+        <ErrorBlock
+          t={t}
+          message={message}
+          kindLabel="helm release"
+          verb="save"
+          inline
+        />
         <button
           type="button"
           onClick={onDismiss}

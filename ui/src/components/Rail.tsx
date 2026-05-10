@@ -3,7 +3,7 @@ import { api } from "../api";
 import { useAppStore } from "../store";
 import type { Category, PrefsRailMode, ResourceKind } from "../types";
 import { tokens, FONT_MONO, type ThemeMode, type Tokens } from "../theme";
-import { Icons, Tooltip, resolveKindIcon } from "./ui";
+import { ErrorBlock, Icons, Tooltip, resolveKindIcon } from "./ui";
 
 const CATEGORY_ORDER: Category[] = [
   "Workloads",
@@ -210,18 +210,33 @@ export function Rail({ mode }: Props) {
             padding: "10px 0 8px",
           }}
         >
-          {kindsStatus !== "ready" ? (
+          {kindsStatus === "error" ? (
+            <div
+              style={{
+                padding: "10px 16px",
+                opacity: open ? 1 : 0,
+                transition: "opacity .15s",
+              }}
+            >
+              <ErrorBlock
+                t={t}
+                message={kindsError ?? ""}
+                kindLabel="resource kinds"
+                inline
+              />
+            </div>
+          ) : kindsStatus !== "ready" ? (
             <div
               style={{
                 padding: "10px 16px",
                 fontSize: 11,
-                color: kindsStatus === "error" ? t.bad : t.textMuted,
+                color: t.textMuted,
                 fontFamily: FONT_MONO,
                 opacity: open ? 1 : 0,
                 transition: "opacity .15s",
               }}
             >
-              {kindsStatus === "error" ? `error: ${kindsError}` : "loading…"}
+              loading…
             </div>
           ) : (
             <>

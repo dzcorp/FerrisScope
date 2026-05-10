@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { LoadingLine, Section, StatusPill } from "../../ui";
+import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   Copyable,
   DetailRow,
@@ -62,23 +62,6 @@ function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
     >
       {children}
     </div>
-  );
-}
-
-function ErrorBlock({ t, message }: { t: Tokens; message: string }) {
-  return (
-    <pre
-      style={{
-        padding: 18,
-        fontFamily: FONT_MONO,
-        fontSize: 11.5,
-        color: t.bad,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-      }}
-    >
-      {message}
-    </pre>
   );
 }
 
@@ -138,7 +121,7 @@ export function GatewayClassSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="gateway class" />;
 
   const d = state.detail;
   return (
@@ -221,7 +204,7 @@ export function GatewaySummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="gateway" />;
 
   const d = state.detail;
   return (
@@ -349,7 +332,13 @@ export function RouteSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return (
+      <ErrorBlock
+        t={t}
+        message={state.message}
+        kindLabel={props.label.toLowerCase()}
+      />
+    );
 
   const d = state.detail;
   return (
@@ -550,7 +539,7 @@ export function ReferenceGrantSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="reference grant" />;
 
   const d = state.detail;
   return (

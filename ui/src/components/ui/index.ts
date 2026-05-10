@@ -12,6 +12,7 @@ export {
   BarGauge,
   Gauge,
   EmptyState,
+  ErrorBlock,
   LoadingLine,
   Toggle,
   TextInput,

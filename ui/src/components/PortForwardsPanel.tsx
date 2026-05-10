@@ -3,7 +3,14 @@ import { api } from "../api";
 import { useAppStore } from "../store";
 import { tokens, FONT_MONO, FONT_SANS, type ThemeMode, type Tokens } from "../theme";
 import type { ForwardEntry, ForwardStatus } from "../types";
-import { Eyebrow, IconBtn, Icons, EmptyState, Tooltip } from "./ui";
+import {
+  EmptyState,
+  ErrorBlock,
+  Eyebrow,
+  IconBtn,
+  Icons,
+  Tooltip,
+} from "./ui";
 import { toast } from "../lib/dialog";
 
 type Props = { mode: ThemeMode };
@@ -303,17 +310,14 @@ function Row({
           )}
         </div>
         {reason && (
-          <div
-            style={{
-              marginTop: 4,
-              fontSize: 11,
-              color: t.bad,
-              fontFamily: FONT_MONO,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-            }}
-          >
-            {reason}
+          <div style={{ marginTop: 4 }}>
+            <ErrorBlock
+              t={t}
+              message={reason}
+              kindLabel="port forward"
+              verb="stream"
+              inline
+            />
           </div>
         )}
       </div>

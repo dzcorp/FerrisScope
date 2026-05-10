@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { api } from "../../api";
 import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
-import { Btn } from "../ui";
+import { Btn, ErrorBlock } from "../ui";
 import type { ApprovalDecision } from "../../types";
 import type { PendingApproval } from "./chatStreaming";
 
@@ -121,7 +121,13 @@ function ToolApprovalBulkBarInner({ mode, chatId, approvals }: Props) {
         </span>
       </div>
       {error && (
-        <div style={{ fontSize: 11, color: t.bad }}>{error}</div>
+        <ErrorBlock
+          t={t}
+          message={error}
+          kindLabel="tool approval"
+          verb="save"
+          inline
+        />
       )}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <Btn

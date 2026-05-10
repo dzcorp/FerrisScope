@@ -20,7 +20,7 @@ import type {
   PvcSummary,
   SecretKeysSummary,
 } from "../../types";
-import { Btn, Checkbox, Icons } from "../ui";
+import { Btn, Checkbox, ErrorBlock, Icons } from "../ui";
 
 export type KeyRefSelection = {
   name: string;
@@ -447,7 +447,14 @@ function NamePane({
         <div style={msgStyle(t)}>Loading {kindWord}s…</div>
       )}
       {state.kind === "error" && (
-        <div style={{ ...msgStyle(t), color: t.bad }}>{state.message}</div>
+        <div style={msgStyle(t)}>
+          <ErrorBlock
+            t={t}
+            message={state.message}
+            kindLabel={`${kindWord} list`}
+            inline
+          />
+        </div>
       )}
       {state.kind === "ready" && entries.length === 0 && (
         <div style={msgStyle(t)}>No {kindWord}s match the filter.</div>

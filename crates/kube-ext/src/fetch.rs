@@ -1982,7 +1982,17 @@ pub async fn list_pods_on_node(client: Client, node: &str) -> Result<Vec<Value>,
     let rows: Vec<Value> = list
         .items
         .iter()
-        .map(<crate::kinds::pods::PodSpec as crate::registry::KindSpec>::project)
+        .map(|pod| {
+            let mut row = <crate::kinds::pods::PodSpec as crate::registry::KindSpec>::project(pod);
+            // The watcher's delta path injects `uid` via `with_uid`; this list
+            // path bypasses the watcher, so we have to add it here. Without
+            // it the frontend's dedup map keys every row under `undefined`
+            // and only the last pod survives.
+            if let (Some(map), Some(uid)) = (row.as_object_mut(), pod.metadata.uid.as_ref()) {
+                map.insert("uid".to_owned(), Value::String(uid.clone()));
+            }
+            row
+        })
         .collect();
     Ok(rows)
 }

@@ -9,7 +9,7 @@
 
 import type { Tokens } from "../../theme";
 import { FONT_MONO } from "../../theme";
-import { Btn } from "../ui";
+import { Btn, ErrorBlock } from "../ui";
 import { useEditSession } from "./editSession";
 
 export function GlobalSaveBar({ t }: { t: Tokens }) {
@@ -39,16 +39,7 @@ export function GlobalSaveBar({ t }: { t: Tokens }) {
         <ConflictRow t={t} conflict={conflict} />
       )}
       {error && !conflict && (
-        <div
-          style={{
-            fontSize: 11.5,
-            fontFamily: FONT_MONO,
-            color: t.bad,
-            wordBreak: "break-word",
-          }}
-        >
-          {error}
-        </div>
+        <ErrorBlock t={t} message={error} verb="save" inline />
       )}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span

@@ -1304,3 +1304,210 @@ export function EmptyState({
     </div>
   );
 }
+
+// ── ErrorBlock — friendly error surface for failed fetches ─────────────────
+// Replaces raw `<pre>` dumps of stringified API errors. `classifyDetailError`
+// matches the common kube-rs / apiserver shapes (404 / 403 / 401 / conflict /
+// network) and turns them into a readable title + body. The raw string sits
+// behind a "Show details" toggle so power users can still copy it. Mirrors
+// `LoadingLine`'s centred / inline layout so loading and error states feel
+// like the same surface.
+export function ErrorBlock({
+  t,
+  message,
+  kindLabel,
+  inline,
+  verb = "load",
+}: {
+  t: Tokens;
+  message: string;
+  // Used in the friendly body — e.g. "The pod doesn't exist anymore". When
+  // omitted the body falls back to "this resource".
+  kindLabel?: string;
+  inline?: boolean;
+  // What the operation was trying to do. Drives the wording in the body —
+  // a 403 on a load is "permission to read", on a save is "permission to
+  // modify", on a stream is "permission to read logs". Defaults to "load".
+  verb?: "load" | "save" | "stream";
+}) {
+  const c = classifyDetailError(message, kindLabel, verb);
+  const [showRaw, setShowRaw] = useState(false);
+
+  if (inline) {
+    return (
+      <span
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 11.5,
+          color: t.bad,
+          display: "inline-flex",
+          alignItems: "baseline",
+          gap: 8,
+          flexWrap: "wrap",
+        }}
+      >
+        <span style={{ fontWeight: 600 }}>{c.title}</span>
+        <span style={{ color: t.textMuted, fontWeight: 400 }}>{c.body}</span>
+      </span>
+    );
+  }
+  return (
+    <div
+      style={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 6,
+        padding: 32,
+        textAlign: "center",
+      }}
+    >
+      <div style={{ fontSize: 14, fontWeight: 600, color: t.bad }}>
+        {c.title}
+      </div>
+      <div style={{ fontSize: 12, color: t.textMuted, maxWidth: 460 }}>
+        {c.body}
+      </div>
+      <button
+        type="button"
+        onClick={() => setShowRaw((v) => !v)}
+        style={{
+          marginTop: 4,
+          background: "none",
+          border: "none",
+          color: t.textMuted,
+          fontSize: 11,
+          fontFamily: FONT_MONO,
+          cursor: "pointer",
+          textDecoration: "underline",
+          padding: 0,
+        }}
+      >
+        {showRaw ? "Hide details" : "Show details"}
+      </button>
+      {showRaw && (
+        <pre
+          style={{
+            marginTop: 6,
+            padding: "10px 14px",
+            background: t.surfaceAlt,
+            border: `1px solid ${t.borderSoft}`,
+            borderRadius: 6,
+            color: t.textMuted,
+            fontFamily: FONT_MONO,
+            fontSize: 11,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            margin: 0,
+            maxWidth: 600,
+            maxHeight: 240,
+            overflow: "auto",
+            textAlign: "left",
+          }}
+        >
+          {c.raw}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+type ClassifiedError = { title: string; body: string; raw: string };
+type Verb = "load" | "save" | "stream";
+
+// Best-effort classifier for the strings we get from `String(e)` in catch
+// blocks. The Rust side wraps `kube::Error` as `FetchError::Kube(...)` which
+// Display-formats to `"kube error: <message>: <reason>"` — `<reason>` being
+// `NotFound` / `Forbidden` / `Unauthorized` / `Conflict` / etc. (per the
+// `Status` Display impl in kube-core). Match generously and fall back to a
+// generic title rather than mis-classify. Raw string stays available via
+// the `Show details` toggle on the rendered block.
+function classifyDetailError(
+  raw: string,
+  kindLabel?: string,
+  verb: Verb = "load",
+): ClassifiedError {
+  const noun = (kindLabel ?? "resource").toLowerCase();
+  const trimmed = raw.replace(/^kube error:\s*/, "");
+  const m = trimmed.toLowerCase();
+  if (/requires a namespace/i.test(trimmed)) {
+    return {
+      title: "Namespace required",
+      body: "This kind is namespace-scoped — open it from inside a namespace.",
+      raw: trimmed,
+    };
+  }
+  if (/\bnot ?found\b|\b404\b/.test(m)) {
+    return {
+      title: "Not found",
+      body:
+        verb === "save"
+          ? `The ${noun} was deleted while you were editing — close and re-open to refresh.`
+          : `The ${noun} doesn't exist — it may have been deleted, or the cluster is on a different revision.`,
+      raw: trimmed,
+    };
+  }
+  if (/\bforbidden\b|\b403\b/.test(m)) {
+    return {
+      title: "Access denied",
+      body:
+        verb === "save"
+          ? `Your kubeconfig user doesn't have permission to modify this ${noun}.`
+          : verb === "stream"
+            ? `Your kubeconfig user doesn't have permission to stream logs for this ${noun}.`
+            : `Your kubeconfig user doesn't have permission to read this ${noun}.`,
+      raw: trimmed,
+    };
+  }
+  if (/\bunauthorized\b|\b401\b/.test(m)) {
+    return {
+      title: "Authentication failed",
+      body: "Re-authenticate or check the kubeconfig credentials for this cluster.",
+      raw: trimmed,
+    };
+  }
+  if (/\bconflict\b|\b409\b/.test(m)) {
+    return {
+      title: "Conflict",
+      body:
+        verb === "save"
+          ? "Another change landed first. Reload to see the latest state, then re-apply."
+          : "Another change landed first. Reload to see the latest state.",
+      raw: trimmed,
+    };
+  }
+  if (
+    /timed? ?out|connection refused|connection reset|hyper(error)?\b|no such host|\bdns\b|unable to connect|broken pipe/.test(
+      m,
+    )
+  ) {
+    return {
+      title: "Connection failed",
+      body: "Couldn't reach the apiserver. Check connectivity, VPN, or the cluster URL.",
+      raw: trimmed,
+    };
+  }
+  // No known shape matched. For short messages — typically client-side
+  // validation or single-line kube errors — surface the raw text as the
+  // body so operators see the actual problem instead of a vague generic
+  // string. For longer messages (multi-line stack traces), keep the
+  // generic body and let `Show details` reveal the raw.
+  const verbWord =
+    verb === "save" ? "saving" : verb === "stream" ? "streaming" : "fetching";
+  const SHORT = 200;
+  return {
+    title:
+      verb === "save"
+        ? "Failed to save"
+        : verb === "stream"
+          ? "Stream failed"
+          : "Failed to load",
+    body:
+      trimmed.length <= SHORT && !trimmed.includes("\n")
+        ? trimmed
+        : `Something went wrong ${verbWord} this ${noun}.`,
+    raw: trimmed,
+  };
+}

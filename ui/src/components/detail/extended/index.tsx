@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { LoadingLine, Section, StatusPill } from "../../ui";
+import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   Copyable,
   DetailRow,
@@ -70,23 +70,6 @@ function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
   );
 }
 
-function ErrorBlock({ t, message }: { t: Tokens; message: string }) {
-  return (
-    <pre
-      style={{
-        padding: 18,
-        fontFamily: FONT_MONO,
-        fontSize: 11.5,
-        color: t.bad,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-      }}
-    >
-      {message}
-    </pre>
-  );
-}
-
 function NamespaceGuard({
   t,
   ns,
@@ -128,7 +111,7 @@ export function HorizontalPodAutoscalerSummary(props: {
           <LoadingLine t={t} label="Loading hpa…"/>
         </Frame>
       ) : state.kind === "error" ? (
-        <ErrorBlock t={t} message={state.message} />
+        <ErrorBlock t={t} message={state.message} kindLabel="hpa" />
       ) : (
         <Frame t={t}>
           <MetaSection
@@ -284,7 +267,7 @@ export function PodDisruptionBudgetSummary(props: {
           <LoadingLine t={t} label="Loading pdb…"/>
         </Frame>
       ) : state.kind === "error" ? (
-        <ErrorBlock t={t} message={state.message} />
+        <ErrorBlock t={t} message={state.message} kindLabel="pdb" />
       ) : (
         <Frame t={t}>
           <MetaSection
@@ -389,7 +372,7 @@ export function PriorityClassSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="priority class" />;
 
   const d = state.detail;
   return (
@@ -483,7 +466,7 @@ export function ReplicationControllerSummary(props: {
           <LoadingLine t={t} label="Loading rc…"/>
         </Frame>
       ) : state.kind === "error" ? (
-        <ErrorBlock t={t} message={state.message} />
+        <ErrorBlock t={t} message={state.message} kindLabel="replication controller" />
       ) : (
         <Frame t={t}>
           <MetaSection
@@ -592,7 +575,7 @@ export function LeaseSummary(props: {
           <LoadingLine t={t} label="Loading lease…"/>
         </Frame>
       ) : state.kind === "error" ? (
-        <ErrorBlock t={t} message={state.message} />
+        <ErrorBlock t={t} message={state.message} kindLabel="lease" />
       ) : (
         <Frame t={t}>
           <MetaSection
@@ -797,7 +780,7 @@ export function MutatingWebhookConfigurationSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="mutating webhook configuration" />;
 
   return (
     <Frame t={t}>
@@ -844,7 +827,7 @@ export function ValidatingWebhookConfigurationSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="validating webhook configuration" />;
 
   return (
     <Frame t={t}>

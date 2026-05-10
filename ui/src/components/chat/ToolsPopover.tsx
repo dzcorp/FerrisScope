@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { tokens, FONT_MONO, FONT_SANS, type ThemeMode } from "../../theme";
 import type { ChatTool } from "../../types";
 import type { McpStatus } from "./chatStreaming";
+import { ErrorBlock } from "../ui";
 
 type Props = {
   mode: ThemeMode;
@@ -237,16 +238,13 @@ export function ToolsPopover({
           </div>
         )}
         {error && (
-          <div
-            style={{
-              padding: "10px 12px",
-              color: t.bad,
-              fontSize: 11.5,
-              fontFamily: FONT_MONO,
-              wordBreak: "break-word",
-            }}
-          >
-            {error}
+          <div style={{ padding: "10px 12px" }}>
+            <ErrorBlock
+              t={t}
+              message={error}
+              kindLabel="tool list"
+              inline
+            />
           </div>
         )}
         {!loading && !error && tools.length === 0 && (

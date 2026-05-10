@@ -3,7 +3,15 @@ import { api, onFleetProbe, onKubeconfigChanged } from "../api";
 import { useAppStore } from "../store";
 import type { ClusterProbe, ContextInfo } from "../types";
 import { tokens, FONT_MONO, type ThemeMode } from "../theme";
-import { Btn, Eyebrow, EmptyState, Gauge, LoadingLine, Tooltip } from "./ui";
+import {
+  Btn,
+  EmptyState,
+  ErrorBlock,
+  Eyebrow,
+  Gauge,
+  LoadingLine,
+  Tooltip,
+} from "./ui";
 import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
 import { confirm, toast } from "../lib/dialog";
 
@@ -126,22 +134,12 @@ export function FleetLanding({ mode, onSelect }: Props) {
 
   if (contextsStatus === "error") {
     return (
-      <div style={{ flex: 1, padding: "32px 40px" }}>
-        <Eyebrow t={t} style={{ color: t.bad, marginBottom: 8 }}>
-          Failed to read kubeconfig
-        </Eyebrow>
-        <pre
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 12,
-            color: t.bad,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            margin: 0,
-          }}
-        >
-          {contextsError}
-        </pre>
+      <div style={{ flex: 1 }}>
+        <ErrorBlock
+          t={t}
+          message={contextsError ?? ""}
+          kindLabel="kubeconfig"
+        />
       </div>
     );
   }

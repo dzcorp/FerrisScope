@@ -24,6 +24,7 @@ import { tokens, FONT_MONO, type ThemeMode, type Tokens } from "../theme";
 import {
   Chip,
   ContainerDots,
+  ErrorBlock,
   Eyebrow,
   IconBtn,
   Icons,
@@ -1094,7 +1095,6 @@ export function DetailPanel({
                 mode={mode}
                 clusterId={clusterId}
                 target={target}
-                row={row ?? null}
                 kindLabel={kind.kind}
                 onNavigate={onNavigate}
                 detailVersion={detailVersion}
@@ -1113,19 +1113,11 @@ export function DetailPanel({
             )
           ) : tab === "yaml" ? (
             load.kind === "error" ? (
-              <pre
-                style={{
-                  padding: 18,
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
-                  color: t.bad,
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                  margin: 0,
-                }}
-              >
-                {load.message}
-              </pre>
+              <ErrorBlock
+                t={t}
+                message={load.message}
+                kindLabel={kind.kind.toLowerCase()}
+              />
             ) : load.kind === "loading" ? (
               <LoadingLine t={t} label="Fetching YAML…" />
             ) : (
@@ -1138,6 +1130,7 @@ export function DetailPanel({
                 refreshedAt={load.kind === "ready" ? load.refreshedAt : null}
                 clusterId={clusterId}
                 kindId={kind.id}
+                kindLabel={kind.kind.toLowerCase()}
                 namespace={target.namespace}
                 name={target.name}
                 buffer={yamlBuffer}
@@ -1226,6 +1219,7 @@ function YamlPane({
   refreshedAt,
   clusterId,
   kindId,
+  kindLabel,
   namespace,
   name,
   buffer,
@@ -1249,6 +1243,7 @@ function YamlPane({
   refreshedAt: number | null;
   clusterId: string;
   kindId: string;
+  kindLabel: string;
   namespace: string | null;
   name: string;
   buffer: string | null;
@@ -1459,14 +1454,17 @@ function YamlPane({
           style={{
             padding: "8px 14px",
             background: "rgba(244,63,94,0.1)",
-            color: t.bad,
-            fontSize: 11.5,
-            fontFamily: FONT_MONO,
             borderBottom: `1px solid ${t.borderSoft}`,
             flexShrink: 0,
           }}
         >
-          {error}
+          <ErrorBlock
+            t={t}
+            message={error}
+            kindLabel={kindLabel}
+            verb="save"
+            inline
+          />
         </div>
       )}
       {conflict && (
@@ -1566,19 +1564,7 @@ function RelatedPane({
   if (state.kind === "error") {
     return (
       <div style={{ height: "100%", background: t.bg }}>
-        <pre
-          style={{
-            padding: 18,
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
-            color: t.bad,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            margin: 0,
-          }}
-        >
-          {state.message}
-        </pre>
+        <ErrorBlock t={t} message={state.message} kindLabel="related resources" />
       </div>
     );
   }
@@ -1898,19 +1884,7 @@ function ObjectEvents({
   if (state.kind === "error") {
     return (
       <div style={{ height: "100%", background: t.bg }}>
-        <pre
-          style={{
-            padding: 18,
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
-            color: t.bad,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            margin: 0,
-          }}
-        >
-          {state.message}
-        </pre>
+        <ErrorBlock t={t} message={state.message} kindLabel="events" />
       </div>
     );
   }
@@ -2057,7 +2031,6 @@ function PodSummary({
   mode,
   clusterId,
   target,
-  row,
   kindLabel,
   onNavigate,
   detailVersion,
@@ -2065,7 +2038,6 @@ function PodSummary({
   mode: ThemeMode;
   clusterId: string;
   target: DetailTarget;
-  row: ResourceRow | null;
   kindLabel: string;
   onNavigate?: DetailNavigate;
   // Bumped by the parent each time the watcher upserts this uid, so we
@@ -2100,41 +2072,10 @@ function PodSummary({
   }, [clusterId, ns, name, kindLabel, detailVersion, refetch]);
 
   if (state.kind === "loading") {
-    // Fall back to the row payload for an instant skeleton — phase + container
-    // dots — while the typed fetch lands.
-    return (
-      <div
-        style={{
-          height: "100%",
-          overflow: "auto",
-          padding: "18px 22px 22px",
-          background: t.bg,
-          color: t.text,
-        }}
-      >
-        {row ? <SkeletonFromRow t={t} row={row} mode={mode} /> : null}
-        <div style={{ marginTop: 16 }}>
-          <LoadingLine t={t} label="Loading pod detail…" inline />
-        </div>
-      </div>
-    );
+    return <LoadingLine t={t} label="Loading pod detail…" />;
   }
   if (state.kind === "error") {
-    return (
-      <pre
-        style={{
-          padding: 18,
-          fontFamily: FONT_MONO,
-          fontSize: 11.5,
-          color: t.bad,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          margin: 0,
-        }}
-      >
-        {state.message}
-      </pre>
-    );
+    return <ErrorBlock t={t} message={state.message} kindLabel="pod" />;
   }
 
   const d = state.detail;
@@ -3310,46 +3251,6 @@ function ProbeChips({ t, probe }: { t: Tokens; probe: ContainerProbe }) {
         </Chip>
       ))}
     </ChipWrap>
-  );
-}
-
-// ── Skeleton from row payload (instant first paint) ────────────────────────
-
-function SkeletonFromRow({
-  t,
-  row,
-  mode,
-}: {
-  t: Tokens;
-  row: ResourceRow;
-  mode: ThemeMode;
-}) {
-  const phase = String(row.phase ?? row.status ?? "Unknown");
-  const states = Array.isArray(row.container_states)
-    ? (row.container_states as Array<Record<string, unknown>>)
-    : [];
-  const containers: ContainerLite[] = states.map((s) => ({
-    name: typeof s.name === "string" ? s.name : "",
-    status: typeof s.state === "string" ? s.state : phase,
-    kind:
-      s.kind === "init" || s.kind === "sidecar" || s.kind === "main"
-        ? (s.kind as "init" | "main" | "sidecar")
-        : "main",
-  }));
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        flexWrap: "wrap",
-      }}
-    >
-      <StatusPill status={phase} t={t} mode={mode} />
-      {containers.length > 0 && (
-        <ContainerDots containers={containers} t={t} size={9} />
-      )}
-    </div>
   );
 }
 

@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, LoadingLine, Section, StatusPill } from "../../ui";
+import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
   Copyable,
@@ -76,19 +76,11 @@ export function CustomResourceDefinitionSummary(props: {
   }
   if (state.kind === "error") {
     return (
-      <pre
-        style={{
-          padding: 18,
-          fontFamily: FONT_MONO,
-          fontSize: 11.5,
-          color: t.bad,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          margin: 0,
-        }}
-      >
-        {state.message}
-      </pre>
+      <ErrorBlock
+        t={t}
+        message={state.message}
+        kindLabel="custom resource definition"
+      />
     );
   }
 

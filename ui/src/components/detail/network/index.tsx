@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, LoadingLine, Section, StatusPill } from "../../ui";
+import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipStrip,
   ChipWrap,
@@ -99,24 +99,6 @@ function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
     >
       {children}
     </div>
-  );
-}
-
-function ErrorBlock({ t, message }: { t: Tokens; message: string }) {
-  return (
-    <pre
-      style={{
-        padding: 18,
-        fontFamily: FONT_MONO,
-        fontSize: 11.5,
-        color: t.bad,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        margin: 0,
-      }}
-    >
-      {message}
-    </pre>
   );
 }
 
@@ -265,7 +247,7 @@ export function ServiceSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="service" />;
 
   const d = state.detail;
   const isHeadless = d.cluster_ip === "None";
@@ -614,11 +596,15 @@ function ServicePortsEditor({
               background: "rgba(244,63,94,0.10)",
               border: "1px solid rgba(244,63,94,0.4)",
               borderRadius: 3,
-              color: t.bad,
-              fontSize: 11,
             }}
           >
-            {edit.error}
+            <ErrorBlock
+              t={t}
+              message={edit.error}
+              kindLabel="service"
+              verb="save"
+              inline
+            />
           </div>
         )}
         {edit.editing && dupNames.size > 0 && (
@@ -795,7 +781,7 @@ export function EndpointsSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="endpoints" />;
 
   const d = state.detail;
   const totalReady = d.subsets.reduce((n, s) => n + s.addresses.length, 0);
@@ -1069,7 +1055,7 @@ export function EndpointSliceSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="endpoint slice" />;
 
   const d = state.detail;
   const ready = d.endpoints.filter((e) => e.conditions?.ready === true).length;
@@ -1330,7 +1316,7 @@ export function IngressSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="ingress" />;
 
   const d = state.detail;
   const totalPaths = d.rules.reduce((n, r) => n + r.paths.length, 0);
@@ -1691,7 +1677,7 @@ export function IngressClassSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="ingress class" />;
 
   const d = state.detail;
   return (
@@ -1848,7 +1834,7 @@ export function NetworkPolicySummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="network policy" />;
 
   const d = state.detail;
   // Empty rule arrays under a declared policy_type mean "deny all in that

@@ -25,6 +25,7 @@ import type {
 import {
   BrandMark,
   Btn,
+  ErrorBlock,
   Field,
   IconBtn,
   Icons,
@@ -1286,15 +1287,17 @@ function AddSshSourceModal({
             style={{
               marginTop: 12,
               padding: "8px 10px",
-              fontSize: 12,
-              color: t.text,
               background: "rgba(244, 63, 94, 0.12)",
               border: `1px solid ${t.bad}`,
               borderRadius: 6,
-              whiteSpace: "pre-wrap",
             }}
           >
-            {error}
+            <ErrorBlock
+              t={t}
+              message={error}
+              kindLabel="kubeconfig source"
+              inline
+            />
           </div>
         )}
 
@@ -1644,13 +1647,15 @@ function ObservabilitySection({ mode }: { mode: ThemeMode }) {
             padding: "10px 12px",
             background: "rgba(244,63,94,0.08)",
             border: `1px solid rgba(244,63,94,0.4)`,
-            color: t.text,
-            fontSize: 12,
             borderRadius: 4,
-            wordBreak: "break-word",
           }}
         >
-          {error}
+          <ErrorBlock
+            t={t}
+            message={error}
+            kindLabel="observability target"
+            inline
+          />
         </div>
       )}
 
@@ -1986,7 +1991,13 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
           </div>
         )}
         {update.kind === "error" && (
-          <div style={{ fontSize: 12.5, color: t.bad }}>{update.message}</div>
+          <ErrorBlock
+            t={t}
+            message={update.message}
+            kindLabel="app update"
+            verb="save"
+            inline
+          />
         )}
       </div>
     </div>

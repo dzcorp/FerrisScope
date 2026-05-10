@@ -12,7 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, LoadingLine, Section } from "../../ui";
+import { Chip, ErrorBlock, LoadingLine, Section } from "../../ui";
 import {
   ChipWrap,
   Copyable,
@@ -77,24 +77,6 @@ function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
     >
       {children}
     </div>
-  );
-}
-
-function ErrorBlock({ t, message }: { t: Tokens; message: string }) {
-  return (
-    <pre
-      style={{
-        padding: 18,
-        fontFamily: FONT_MONO,
-        fontSize: 11.5,
-        color: t.bad,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        margin: 0,
-      }}
-    >
-      {message}
-    </pre>
   );
 }
 
@@ -400,7 +382,7 @@ export function ServiceAccountSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="service account" />;
 
   const d = state.detail;
   return (
@@ -556,7 +538,7 @@ export function RoleSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="role" />;
 
   const d = state.detail;
   return (
@@ -626,7 +608,7 @@ export function ClusterRoleSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="cluster role" />;
 
   const d = state.detail;
   const aggregated = !!d.aggregation_rule;
@@ -739,7 +721,7 @@ export function RoleBindingSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="role binding" />;
 
   const d = state.detail;
   return (
@@ -827,7 +809,7 @@ export function ClusterRoleBindingSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="cluster role binding" />;
 
   const d = state.detail;
   return (

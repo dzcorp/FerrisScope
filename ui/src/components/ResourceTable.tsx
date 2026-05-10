@@ -38,6 +38,7 @@ import { useMetricsSubscription } from "../lib/useMetricsSubscription";
 import {
   Checkbox,
   ContainerDots,
+  ErrorBlock,
   Icons,
   LoadingLine,
   StatusPill,
@@ -974,7 +975,13 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
             setMenu({ pos: { x: e.clientX, y: e.clientY }, row });
           }}
         >
-          {load.kind === "loading" && filtered.length === 0 ? (
+          {load.kind === "error" ? (
+            <ErrorBlock
+              t={t}
+              message={load.message}
+              kindLabel={kind.plural}
+            />
+          ) : load.kind === "loading" && filtered.length === 0 ? (
             // First-paint loading. R-01: no spinners on poll — but we are
             // not polling here; we're waiting for the watcher's first
             // snapshot, which is exactly when a quiet indicator helps.

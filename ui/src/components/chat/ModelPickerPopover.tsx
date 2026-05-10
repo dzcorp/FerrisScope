@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { tokens, FONT_MONO, FONT_SANS, type ThemeMode } from "../../theme";
-import { Btn, Icons } from "../ui";
+import { Btn, ErrorBlock, Icons } from "../ui";
 import type { ModelInfo, ProviderKind } from "../../types";
 
 type Props = {
@@ -241,17 +241,12 @@ export function ModelPickerPopover({
               alignItems: "center",
             }}
           >
-            <div
-              style={{
-                fontSize: 11.5,
-                color: t.bad,
-                fontFamily: FONT_MONO,
-                whiteSpace: "pre-wrap",
-                textAlign: "center",
-              }}
-            >
-              {error}
-            </div>
+            <ErrorBlock
+              t={t}
+              message={error}
+              kindLabel="model list"
+              inline
+            />
             <Btn t={t} variant="secondary" size="sm" onClick={onRetry}>
               Retry
             </Btn>

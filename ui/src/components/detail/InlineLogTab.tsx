@@ -1,7 +1,14 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api } from "../../api";
 import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
-import { Select } from "../ui";
+import { ErrorBlock, Select } from "../ui";
 import { ansiToReact } from "../../lib/ansi";
 
 // Inline Pod-logs surface for the detail-panel "Logs" tab. The full-overlay
@@ -10,6 +17,21 @@ import { ansiToReact } from "../../lib/ansi";
 // LogPanel — keep them in sync if you change either.
 
 const MAX_LINES = 5000;
+
+// Popover chrome around the label text: 4px outer padding + 10px inner
+// padding (×2) + 10px checkmark column + 8px gap + ~14px scrollbar/safety.
+const POPOVER_CHROME = 56;
+
+// Lazy canvas for `measureText`. Faster and reflow-free vs. DOM measurement.
+let _measureCtx: CanvasRenderingContext2D | null = null;
+function measureLabel(text: string, font: string): number {
+  if (!_measureCtx && typeof document !== "undefined") {
+    _measureCtx = document.createElement("canvas").getContext("2d");
+  }
+  if (!_measureCtx) return text.length * 7;
+  if (_measureCtx.font !== font) _measureCtx.font = font;
+  return _measureCtx.measureText(text).width;
+}
 
 // Ring buffer over a fixed-capacity array. Append is O(1) (overwrites the
 // oldest slot when full); `toArray` materialises the visible slice once per
@@ -83,6 +105,25 @@ export function InlineLogTab({
   const lineSeq = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const ringRef = useRef<LineRing>(new LineRing(MAX_LINES));
+
+  // Size the popover to the longest container name. Without this the
+  // popover inherits the trigger's width (which mirrors the *current*
+  // selection), so picking a short name like `csi-resizer` clips longer
+  // siblings to "cinder-c…" until the operator picks one to read its
+  // full label. Popover labels render at `fontFamily: inherit` /
+  // `fontSize: 12.5` (the trigger's mono override doesn't propagate
+  // through the portal); chrome accounts for checkmark, gap, padding,
+  // and a scrollbar allowance.
+  const popoverMinWidth = useMemo(() => {
+    if (containers.length <= 1) return undefined;
+    const font = "12.5px system-ui, -apple-system, Segoe UI, sans-serif";
+    let widest = 0;
+    for (const c of containers) {
+      const w = measureLabel(c, font);
+      if (w > widest) widest = w;
+    }
+    return Math.min(480, Math.ceil(widest) + POPOVER_CHROME);
+  }, [containers]);
 
   useEffect(() => {
     if (!container) return;
@@ -200,6 +241,7 @@ export function InlineLogTab({
             value={container ?? ""}
             onChange={(v) => setContainer(v)}
             options={containers.map((c) => ({ value: c, label: c }))}
+            popoverMinWidth={popoverMinWidth}
             style={{
               fontFamily: FONT_MONO,
               fontSize: 11,
@@ -261,7 +303,13 @@ export function InlineLogTab({
           <div style={{ color: "#64748b" }}>Waiting for output…</div>
         )}
         {status.kind === "error" && (
-          <div style={{ color: t.bad }}>{status.message}</div>
+          <ErrorBlock
+            t={t}
+            message={status.message}
+            kindLabel="pod"
+            verb="stream"
+            inline
+          />
         )}
         {lines.map((l) => (
           <LogLine key={l.id} entry={l} />

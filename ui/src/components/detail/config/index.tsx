@@ -13,7 +13,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Chip, LoadingLine, Section } from "../../ui";
+import { Chip, ErrorBlock, LoadingLine, Section } from "../../ui";
 import {
   ChipWrap,
   Copyable,
@@ -89,24 +89,6 @@ function Frame({ t, children }: { t: Tokens; children: ReactNode }) {
   );
 }
 
-function ErrorBlock({ t, message }: { t: Tokens; message: string }) {
-  return (
-    <pre
-      style={{
-        padding: 18,
-        fontFamily: FONT_MONO,
-        fontSize: 11.5,
-        color: t.bad,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        margin: 0,
-      }}
-    >
-      {message}
-    </pre>
-  );
-}
-
 function NsRequired({ t, label }: { t: Tokens; label: string }) {
   return <ErrorBlock t={t} message={`${label} requires a namespace.`} />;
 }
@@ -148,7 +130,7 @@ export function ConfigMapSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="configmap" />;
 
   const d = state.detail;
   return (
@@ -274,7 +256,9 @@ function ConfigMapView({
           onDismiss={edit.dismissConflict}
         />
       )}
-      {edit.error && <InlineError t={t} message={edit.error} />}
+      {edit.error && (
+        <SaveErrorBanner t={t} message={edit.error} kindLabel="configmap" />
+      )}
       {edit.editing && validation.duplicate.size > 0 && (
         <InlineError
           t={t}
@@ -589,6 +573,41 @@ function InlineError({ t, message }: { t: Tokens; message: string }) {
   );
 }
 
+// Save-error banner — same chrome as InlineError but renders the message
+// through the shared `ErrorBlock` classifier so a 403 from SSA reads
+// "Access denied" instead of `kube error: <noun> is forbidden: ...`. Use
+// for `edit.error` (API-shaped) sites; keep `InlineError` for validation
+// strings the editor produces itself.
+function SaveErrorBanner({
+  t,
+  message,
+  kindLabel,
+}: {
+  t: Tokens;
+  message: string;
+  kindLabel: string;
+}) {
+  return (
+    <div
+      style={{
+        margin: "0 0 12px",
+        padding: "8px 10px",
+        background: "rgba(244,63,94,0.10)",
+        border: "1px solid rgba(244,63,94,0.4)",
+        borderRadius: 3,
+      }}
+    >
+      <ErrorBlock
+        t={t}
+        message={message}
+        kindLabel={kindLabel}
+        verb="save"
+        inline
+      />
+    </div>
+  );
+}
+
 function InlineWarn({ t, message }: { t: Tokens; message: string }) {
   return (
     <div
@@ -696,7 +715,7 @@ export function SecretSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="secret" />;
 
   return (
     <SecretView
@@ -809,7 +828,9 @@ function SecretView({
           onDismiss={edit.dismissConflict}
         />
       )}
-      {edit.error && <InlineError t={t} message={edit.error} />}
+      {edit.error && (
+        <SaveErrorBanner t={t} message={edit.error} kindLabel="secret" />
+      )}
       {edit.editing && validation.duplicate.size > 0 && (
         <InlineError
           t={t}
@@ -1332,7 +1353,7 @@ export function ResourceQuotaSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="resource quota" />;
 
   return (
     <ResourceQuotaView
@@ -1438,7 +1459,9 @@ function ResourceQuotaView({
           onDismiss={edit.dismissConflict}
         />
       )}
-      {edit.error && <InlineError t={t} message={edit.error} />}
+      {edit.error && (
+        <SaveErrorBanner t={t} message={edit.error} kindLabel="resource quota" />
+      )}
       {edit.editing && validation.duplicate.size > 0 && (
         <InlineError
           t={t}
@@ -1821,7 +1844,7 @@ export function LimitRangeSummary(props: {
       </Frame>
     );
   if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} />;
+    return <ErrorBlock t={t} message={state.message} kindLabel="limit range" />;
 
   return (
     <LimitRangeView
@@ -1929,7 +1952,9 @@ function LimitRangeView({
           onDismiss={edit.dismissConflict}
         />
       )}
-      {edit.error && <InlineError t={t} message={edit.error} />}
+      {edit.error && (
+        <SaveErrorBanner t={t} message={edit.error} kindLabel="limit range" />
+      )}
       {edit.editing && validation.invalidCells.length > 0 && (
         <InlineError
           t={t}

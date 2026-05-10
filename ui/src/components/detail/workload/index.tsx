@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../../api";
 import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
 import { tokens } from "../../../theme";
-import { Section, StatusPill, LoadingLine } from "../../ui";
+import { ErrorBlock, Section, StatusPill, LoadingLine } from "../../ui";
 import {
   Copyable,
   DetailRow,
@@ -87,24 +87,6 @@ function Frame({
   );
 }
 
-function ErrorBlock({ t, message }: { t: Tokens; message: string }) {
-  return (
-    <pre
-      style={{
-        padding: 18,
-        fontFamily: FONT_MONO,
-        fontSize: 11.5,
-        color: t.bad,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        margin: 0,
-      }}
-    >
-      {message}
-    </pre>
-  );
-}
-
 function StrategyChips({
   t,
   strategy,
@@ -163,7 +145,8 @@ export function DeploymentSummary(props: {
         <LoadingLine t={t} label="Loading deployment…"/>
       </Frame>
     );
-  if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
+  if (state.kind === "error")
+    return <ErrorBlock t={t} message={state.message} kindLabel="deployment" />;
 
   const d = state.detail;
   return (
@@ -310,7 +293,8 @@ export function ReplicaSetSummary(props: {
         <LoadingLine t={t} label="Loading replica set…"/>
       </Frame>
     );
-  if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
+  if (state.kind === "error")
+    return <ErrorBlock t={t} message={state.message} kindLabel="replica set" />;
 
   const d = state.detail;
   return (
@@ -435,7 +419,8 @@ export function StatefulSetSummary(props: {
         <LoadingLine t={t} label="Loading stateful set…"/>
       </Frame>
     );
-  if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
+  if (state.kind === "error")
+    return <ErrorBlock t={t} message={state.message} kindLabel="stateful set" />;
 
   const d = state.detail;
   return (
@@ -639,7 +624,8 @@ export function DaemonSetSummary(props: {
         <LoadingLine t={t} label="Loading daemon set…"/>
       </Frame>
     );
-  if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
+  if (state.kind === "error")
+    return <ErrorBlock t={t} message={state.message} kindLabel="daemon set" />;
 
   const d = state.detail;
   return (
@@ -779,7 +765,8 @@ export function JobSummary(props: {
         <LoadingLine t={t} label="Loading job…"/>
       </Frame>
     );
-  if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
+  if (state.kind === "error")
+    return <ErrorBlock t={t} message={state.message} kindLabel="job" />;
 
   const d = state.detail;
   const duration = computeDuration(d.start_time, d.completion_time);
@@ -945,7 +932,8 @@ export function CronJobSummary(props: {
         <LoadingLine t={t} label="Loading cron job…"/>
       </Frame>
     );
-  if (state.kind === "error") return <ErrorBlock t={t} message={state.message} />;
+  if (state.kind === "error")
+    return <ErrorBlock t={t} message={state.message} kindLabel="cron job" />;
 
   const d = state.detail;
   return (
