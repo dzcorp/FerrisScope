@@ -53,13 +53,9 @@ pub async fn save(file: &TableViewsFile) -> std::io::Result<()> {
     let Some(path) = config_path() else {
         return Ok(());
     };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
     let data = serde_json::to_string_pretty(file)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    fs::write(&path, data).await?;
-    Ok(())
+    crate::atomic_write::atomic_write(&path, data.as_bytes()).await
 }
 
 #[must_use]

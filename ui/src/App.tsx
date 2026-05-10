@@ -223,6 +223,26 @@ export default function App() {
     const refresh = () =>
       setDiscoveredNs(Array.from(new Set(seen.values())).sort());
 
+    // Drop any selected namespaces that no longer exist in the cluster.
+    // Empty set means "all namespaces" — so a single-namespace filter
+    // whose target was just deleted naturally falls back to the
+    // all-namespaces view, and a multi-namespace filter simply loses
+    // the deleted entry. Called with the current `seen` snapshot from
+    // the delta handler (so we reconcile against the freshly-deleted
+    // state, not a stale read).
+    const reconcileFilter = () => {
+      const live = new Set(seen.values());
+      const sel = useAppStore.getState().selectedNamespaces;
+      if (sel.size === 0) return;
+      let changed = false;
+      const next = new Set<string>();
+      for (const name of sel) {
+        if (live.has(name)) next.add(name);
+        else changed = true;
+      }
+      if (changed) useAppStore.getState().setSelectedNamespaces(next);
+    };
+
     (async () => {
       try {
         unlisten = await onResourceDelta(
@@ -236,6 +256,7 @@ export default function App() {
               if (name) seen.set(delta.row.uid, name);
             } else if (delta.kind === "delete") {
               seen.delete(delta.uid);
+              reconcileFilter();
             } else {
               return; // init_done — nothing to update on the namespace map
             }
@@ -252,6 +273,9 @@ export default function App() {
           const name = typeof r.name === "string" ? r.name : null;
           if (name) seen.set(r.uid, name);
         }
+        // Initial snapshot might already lack a namespace the operator had
+        // filtered to (e.g. it was deleted while another cluster was active).
+        reconcileFilter();
         refresh();
       } catch {
         // Best-effort: if namespaces aren't available the modal still works

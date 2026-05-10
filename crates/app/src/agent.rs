@@ -278,12 +278,9 @@ async fn save_persisted(p: &PersistedSettings) -> std::io::Result<()> {
     let Some(path) = settings_path() else {
         return Ok(());
     };
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
     let bytes = serde_json::to_vec_pretty(p)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    tokio::fs::write(&path, bytes).await
+    ferrisscope_agent::atomic_write::atomic_write(&path, &bytes).await
 }
 
 // ─── Credential cache ───────────────────────────────────────────────────────

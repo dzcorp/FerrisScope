@@ -15,7 +15,9 @@
 use crate::types::{ChatMessage, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -245,11 +247,21 @@ struct IndexFile {
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
+    /// Serialises the read-modify-write cycle on `index.json`.
+    /// Why: `tokio::fs::write` truncates on open but does not block other
+    /// writers — two concurrent index updates (e.g. `create` racing
+    /// `append`'s bump) each hold their own handle at offset 0. The
+    /// shorter write doesn't shrink the file, leaving the longer write's
+    /// tail intact as "trailing characters" the next reader chokes on.
+    index_lock: Arc<Mutex<()>>,
 }
 
 impl SessionStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            index_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     fn index_path(&self) -> PathBuf {
@@ -278,11 +290,8 @@ impl SessionStore {
     }
 
     async fn write_index(&self, idx: &IndexFile) -> Result<(), SessionError> {
-        if let Some(parent) = self.index_path().parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         let bytes = serde_json::to_vec_pretty(idx)?;
-        tokio::fs::write(self.index_path(), bytes).await?;
+        crate::atomic_write::atomic_write(&self.index_path(), &bytes).await?;
         Ok(())
     }
 
@@ -290,6 +299,7 @@ impl SessionStore {
         &self,
         cluster_filter: Option<&str>,
     ) -> Result<Vec<SessionMeta>, SessionError> {
+        let _guard = self.index_lock.lock().await;
         let idx = self.read_index().await?;
         Ok(idx
             .sessions
@@ -311,6 +321,7 @@ impl SessionStore {
             .append(true)
             .open(&path)
             .await?;
+        let _guard = self.index_lock.lock().await;
         let mut idx = self.read_index().await?;
         idx.sessions.retain(|s| s.id != meta.id);
         idx.sessions.push(meta);
@@ -335,6 +346,7 @@ impl SessionStore {
         line.push('\n');
         file.write_all(line.as_bytes()).await?;
         // Bump updated_at on the index as a best-effort breadcrumb.
+        let _guard = self.index_lock.lock().await;
         let mut idx = self.read_index().await?;
         if let Some(meta) = idx.sessions.iter_mut().find(|s| s.id == session_id) {
             meta.updated_at_unix_ms = chrono::Utc::now().timestamp_millis();
@@ -378,6 +390,7 @@ impl SessionStore {
     }
 
     pub async fn load(&self, session_id: &str) -> Result<SessionData, SessionError> {
+        let _guard = self.index_lock.lock().await;
         let idx = self.read_index().await?;
         let Some(meta) = idx.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return Err(SessionError::NotFound(session_id.to_string()));
@@ -411,6 +424,7 @@ impl SessionStore {
     pub async fn rename(&self, session_id: &str, title: String) -> Result<(), SessionError> {
         let now = chrono::Utc::now().timestamp_millis();
         let cluster_id = {
+            let _guard = self.index_lock.lock().await;
             let idx = self.read_index().await?;
             idx.sessions
                 .iter()
@@ -433,6 +447,7 @@ impl SessionStore {
     }
 
     pub async fn delete(&self, session_id: &str) -> Result<(), SessionError> {
+        let _guard = self.index_lock.lock().await;
         let mut idx = self.read_index().await?;
         let removed = idx
             .sessions

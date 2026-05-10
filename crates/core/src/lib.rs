@@ -6,6 +6,7 @@
 //! This crate intentionally has no Tauri dependency so the same engine can
 //! later back a TUI or headless CLI.
 
+pub mod atomic_write;
 pub mod cluster;
 pub mod error;
 pub mod fleet;

@@ -764,16 +764,6 @@ pub async fn fetch_ssh_kubeconfig(
 
 fn write_yaml_atomic(path: &Path, doc: &serde_yaml::Value) -> crate::Result<()> {
     let serialized = serde_yaml::to_string(doc)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| crate::Error::Invalid(format!("path has no parent: {}", path.display())))?;
-    // Sibling tempfile so the rename stays on the same filesystem.
-    let stem = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("config");
-    let tmp = parent.join(format!(".{stem}.ferrisscope.tmp"));
-    std::fs::write(&tmp, serialized)?;
-    std::fs::rename(&tmp, path)?;
+    crate::atomic_write::atomic_write_sync(path, serialized.as_bytes())?;
     Ok(())
 }
