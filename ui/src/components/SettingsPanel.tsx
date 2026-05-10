@@ -3,7 +3,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, onPrometheusChanged } from "../api";
 import type { ReleaseInfo, SettingsSectionId, UpdaterInfo } from "../types";
-import { useAppStore } from "../store";
+import { useAppStore, selectUpdateAvailable, semverGt } from "../store";
 import {
   tokens,
   FONT_MONO,
@@ -63,6 +63,9 @@ type Props = {
 export function SettingsPanel({ mode, onClose }: Props) {
   const t = tokens(mode);
   const [active, setActive] = useState<SectionId>(DEFAULT_SECTION);
+  // Background-checker says a newer release is out and the user hasn't
+  // skipped this exact version yet → light up the dot on the About entry.
+  const updateAvailable = useAppStore(selectUpdateAvailable);
   // Pending anchor → applied once the target tab has rendered. Cleared
   // after one application so re-renders don't re-scroll the operator.
   const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
@@ -204,11 +207,17 @@ export function SettingsPanel({ mode, onClose }: Props) {
           >
             {sections.map((s) => {
               const isActive = active === s.id;
+              const showDot = s.id === "about" && updateAvailable;
               return (
                 <button
                   key={s.id}
                   type="button"
                   onClick={() => setActive(s.id)}
+                  title={
+                    showDot
+                      ? "A newer FerrisScope release is available"
+                      : undefined
+                  }
                   style={{
                     padding: "7px 12px",
                     borderRadius: 6,
@@ -222,9 +231,25 @@ export function SettingsPanel({ mode, onClose }: Props) {
                     cursor: "pointer",
                     boxShadow: isActive ? `0 0 0 1px ${t.borderSoft}` : "none",
                     transition: "background .12s",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
                   }}
                 >
-                  {s.label}
+                  <span>{s.label}</span>
+                  {showDot && (
+                    <span
+                      aria-label="Update available"
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: 3,
+                        background: t.accent,
+                        flexShrink: 0,
+                      }}
+                    />
+                  )}
                 </button>
               );
             })}
@@ -263,6 +288,10 @@ function GeneralSection({ mode }: { mode: ThemeMode }) {
   const t = tokens(mode);
   const settings = useAppStore((s) => s.settings);
   const patchSettings = useAppStore((s) => s.patchSettings);
+  const autoCheckEnabled = useAppStore(
+    (s) => s.updateState.autoCheckEnabled,
+  );
+  const patchUpdateState = useAppStore((s) => s.patchUpdateState);
 
   return (
     <div>
@@ -311,6 +340,18 @@ function GeneralSection({ mode }: { mode: ThemeMode }) {
           checked={settings.showSystemNs}
           onChange={(v) => patchSettings({ showSystemNs: v })}
           label={settings.showSystemNs ? "Visible" : "Hidden"}
+        />
+      </Field>
+      <Field
+        t={t}
+        label="Check for updates automatically"
+        hint="Marks the About entry when a newer release is out."
+      >
+        <Toggle
+          t={t}
+          checked={autoCheckEnabled}
+          onChange={(v) => patchUpdateState({ autoCheckEnabled: v })}
+          label={autoCheckEnabled ? "Enabled" : "Disabled"}
         />
       </Field>
     </div>
@@ -1776,6 +1817,10 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
   const t = tokens(mode);
   const [info, setInfo] = useState<UpdaterInfo | null>(null);
   const [update, setUpdate] = useState<UpdateState>({ kind: "idle" });
+  const lastKnownVersion = useAppStore(
+    (s) => s.updateState.lastKnownVersion,
+  );
+  const patchUpdateState = useAppStore((s) => s.patchUpdateState);
 
   useEffect(() => {
     api
@@ -1784,14 +1829,37 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
       .catch((e) => toast.bad(`Failed to read app info: ${String(e)}`));
   }, []);
 
+  // If the background checker already saw a newer release, refetch the full
+  // ReleaseInfo on mount so the banner + Update button appear without making
+  // the operator click "Check for updates" first. We don't cache the full
+  // ReleaseInfo in prefs (asset name / download URL / html_url are derivable
+  // from a fresh check); one extra GitHub call when opening Settings is fine.
+  useEffect(() => {
+    if (!info) return;
+    if (update.kind !== "idle") return;
+    if (!lastKnownVersion) return;
+    if (!semverGt(lastKnownVersion, info.current_version)) return;
+    void check();
+    // Deliberately don't depend on `update.kind` — we only want to fire once
+    // when `info` lands. `check` reads `lastKnownVersion` via the closure but
+    // the comparison above is what gates the call.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [info, lastKnownVersion]);
+
   async function check() {
     setUpdate({ kind: "checking" });
     try {
       const out = await api.checkForUpdate();
+      const now = Date.now();
       if (out.kind === "up_to_date") {
         setUpdate({ kind: "up_to_date", latest: out.latest_version });
+        patchUpdateState({ lastCheckAt: now });
       } else {
         setUpdate({ kind: "available", release: out.release });
+        patchUpdateState({
+          lastKnownVersion: out.release.version,
+          lastCheckAt: now,
+        });
       }
     } catch (e) {
       setUpdate({ kind: "error", message: String(e) });
@@ -1807,6 +1875,14 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
     } catch (e) {
       setUpdate({ kind: "error", message: String(e) });
     }
+  }
+
+  function skipThisVersion(version: string) {
+    patchUpdateState({ lastSeenVersion: version });
+    // Fold the panel state back to idle so the banner doesn't keep nagging
+    // in the same session. Re-checking manually will resurface it.
+    setUpdate({ kind: "idle" });
+    toast.ok(`Skipped v${version} — we'll let you know about newer releases.`);
   }
 
   return (
@@ -1935,6 +2011,16 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
               onClick={() => void apply(update.release)}
             >
               Update to v{update.release.version}
+            </Btn>
+          )}
+          {update.kind === "available" && (
+            <Btn
+              t={t}
+              variant="secondary"
+              onClick={() => skipThisVersion(update.release.version)}
+              title="Hide the update mark until a newer release ships"
+            >
+              Skip this version
             </Btn>
           )}
         </div>

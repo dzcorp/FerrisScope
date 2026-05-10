@@ -11,6 +11,59 @@ import type {
   SettingsTarget,
   TableView,
 } from "./types";
+
+/// In-memory mirror of `crates/core/src/prefs.rs::UpdateState`. Persisted via
+/// the same `set_prefs` round-trip as everything else. `lastKnownVersion` is
+/// the most recent latest-release the background checker observed;
+/// `lastSeenVersion` is the user's "Skip this version" acknowledgement.
+export type UpdateStateSlice = {
+  lastKnownVersion: string | null;
+  lastSeenVersion: string | null;
+  lastCheckAt: number;
+  autoCheckEnabled: boolean;
+};
+
+/// Numeric-segment semver compare for "is a strictly greater than b?". The
+/// updater only feeds us strings of the form `X.Y.Z` (Rust-side `semver` has
+/// already validated them by the time they reach the store), so a plain split
+/// + parseInt on dotted segments is sufficient. Pre-release suffixes after a
+/// `-` are folded into segments via parseInt's leading-digit rule (e.g.
+/// `"1.0.0-rc1"` → `[1,0,0,NaN]`), which is acceptable as a tie-breaker
+/// heuristic — escalate to a real semver lib only if pre-releases actually
+/// ship.
+export function semverGt(a: string, b: string): boolean {
+  // Release tags are published as `v1.0.0`; the Rust updater strips the `v`
+  // on its way out, but accept either form so a raw tag from any code path
+  // still compares correctly.
+  const stripV = (s: string) =>
+    s.startsWith("v") || s.startsWith("V") ? s.slice(1) : s;
+  const pa = stripV(a).split(/[.-]/).map((p) => parseInt(p, 10));
+  const pb = stripV(b).split(/[.-]/).map((p) => parseInt(p, 10));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const ra = pa[i];
+    const rb = pb[i];
+    const xa = ra !== undefined && Number.isFinite(ra) ? ra : 0;
+    const xb = rb !== undefined && Number.isFinite(rb) ? rb : 0;
+    if (xa > xb) return true;
+    if (xa < xb) return false;
+  }
+  return false;
+}
+
+/// True when the background checker has seen a strictly-newer release than
+/// the running binary and the user hasn't skipped that exact version. Drives
+/// the dot on the Settings → About entry.
+export function selectUpdateAvailable(s: {
+  updateState: UpdateStateSlice;
+  appVersion: string | null;
+}): boolean {
+  const lk = s.updateState.lastKnownVersion;
+  const ls = s.updateState.lastSeenVersion;
+  const cur = s.appVersion;
+  if (!lk || !cur) return false;
+  if (lk === ls) return false;
+  return semverGt(lk, cur);
+}
 import { UI_SCALE_DEFAULT, UI_SCALE_STEP, clampUiScale } from "./theme";
 import type { ThemeMode } from "./theme";
 
@@ -192,6 +245,15 @@ type AppState = {
   // Whether the global port-forwards slide-over panel is open.
   forwardsOpen: boolean;
 
+  /// Running app's CARGO_PKG_VERSION, fetched once on launch via
+  /// `api.updaterInfo()`. `null` until hydrated. Read by the
+  /// `selectUpdateAvailable` derivation in the Settings panel.
+  appVersion: string | null;
+
+  /// Background update-check state — mirror of `prefs.update`. Persisted via
+  /// the same `set_prefs` round-trip as `settings` / `ui` / `theme`.
+  updateState: UpdateStateSlice;
+
   // App-level prefs that the design's settings panel exposes. Stored here so
   // they survive cluster switches per P8.
   settings: {
@@ -300,6 +362,11 @@ type AppState = {
   setUiScale: (scale: number) => void;
   bumpUiScale: (direction: 1 | -1) => void;
   resetUiScale: () => void;
+
+  /// One-shot setter used by App.tsx after the initial `updater_info` call.
+  setAppVersion: (v: string | null) => void;
+  /// Merge-patch the update-check slice (persists via the prefs round-trip).
+  patchUpdateState: (patch: Partial<UpdateStateSlice>) => void;
 };
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -364,6 +431,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     refreshOnLaunch: true,
     uiScale: UI_SCALE_DEFAULT,
     fleetView: "tiles",
+  },
+
+  appVersion: null,
+  updateState: {
+    lastKnownVersion: null,
+    lastSeenVersion: null,
+    lastCheckAt: 0,
+    autoCheckEnabled: true,
   },
 
   setContextsLoading: () =>
@@ -647,6 +722,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         uiScale: clampUiScale(prefs.settings.ui_scale ?? UI_SCALE_DEFAULT),
         fleetView: prefs.settings.fleet_view ?? "tiles",
       },
+      // `prefs.update` lands populated by `#[serde(default)]` on the Rust side
+      // for prefs.json files written before this block existed.
+      updateState: {
+        lastKnownVersion: prefs.update?.last_known_version ?? null,
+        lastSeenVersion: prefs.update?.last_seen_version ?? null,
+        lastCheckAt: prefs.update?.last_check_at ?? 0,
+        autoCheckEnabled: prefs.update?.auto_check_enabled ?? true,
+      },
     })),
   setTableView: (clusterId, kindId, view) =>
     set((s) => {
@@ -783,4 +866,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({
       settings: { ...s.settings, uiScale: UI_SCALE_DEFAULT },
     })),
+
+  setAppVersion: (v) => set({ appVersion: v }),
+  patchUpdateState: (patch) =>
+    set((s) => ({ updateState: { ...s.updateState, ...patch } })),
 }));

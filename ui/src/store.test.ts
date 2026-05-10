@@ -6,6 +6,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   useAppStore,
   NOTIFICATION_LOG_CAP,
+  semverGt,
+  selectUpdateAvailable,
   type DockTab,
   type ConfirmModal,
   type Toast,
@@ -194,5 +196,84 @@ describe("navigateToDetail", () => {
     const s = useAppStore.getState();
     expect(s.detailHistory.map((e) => e.name)).toEqual(["a", "x"]);
     expect(s.detailIndex).toBe(1);
+  });
+});
+
+describe("semverGt", () => {
+  it("compares X.Y.Z numerically", () => {
+    expect(semverGt("1.0.1", "1.0.0")).toBe(true);
+    expect(semverGt("1.1.0", "1.0.9")).toBe(true);
+    expect(semverGt("2.0.0", "1.99.99")).toBe(true);
+    expect(semverGt("1.0.0", "1.0.0")).toBe(false);
+    expect(semverGt("1.0.0", "1.0.1")).toBe(false);
+    // Lex-incorrect compare would put "10" before "9"; numeric is correct.
+    expect(semverGt("0.10.0", "0.9.0")).toBe(true);
+  });
+
+  it("tolerates a leading v on either side (raw release-tag form)", () => {
+    expect(semverGt("v1.0.1", "1.0.0")).toBe(true);
+    expect(semverGt("1.0.1", "v1.0.0")).toBe(true);
+    expect(semverGt("v1.0.0", "v1.0.0")).toBe(false);
+  });
+});
+
+describe("selectUpdateAvailable", () => {
+  function snapshot(over: {
+    appVersion?: string | null;
+    lastKnownVersion?: string | null;
+    lastSeenVersion?: string | null;
+  }) {
+    return {
+      // `?? "1.0.0"` would coerce an explicit `null` away — use `in` so the
+      // "not hydrated yet" case (appVersion: null) actually round-trips.
+      appVersion: "appVersion" in over ? over.appVersion! : "1.0.0",
+      updateState: {
+        lastKnownVersion: over.lastKnownVersion ?? null,
+        lastSeenVersion: over.lastSeenVersion ?? null,
+        lastCheckAt: 0,
+        autoCheckEnabled: true,
+      },
+    };
+  }
+
+  it("returns false when nothing has been observed yet", () => {
+    expect(selectUpdateAvailable(snapshot({}))).toBe(false);
+  });
+
+  it("returns false when the latest equals current", () => {
+    expect(
+      selectUpdateAvailable(snapshot({ lastKnownVersion: "1.0.0" })),
+    ).toBe(false);
+  });
+
+  it("returns true when latest is newer and nothing has been skipped", () => {
+    expect(
+      selectUpdateAvailable(snapshot({ lastKnownVersion: "1.0.1" })),
+    ).toBe(true);
+  });
+
+  it("returns false when the user skipped the exact known version", () => {
+    expect(
+      selectUpdateAvailable(
+        snapshot({ lastKnownVersion: "1.0.1", lastSeenVersion: "1.0.1" }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns true when a newer version arrives after an older skip", () => {
+    // Skipped 1.0.1, then 1.0.2 ships → mark reappears.
+    expect(
+      selectUpdateAvailable(
+        snapshot({ lastKnownVersion: "1.0.2", lastSeenVersion: "1.0.1" }),
+      ),
+    ).toBe(true);
+  });
+
+  it("returns false when app version is not yet hydrated", () => {
+    expect(
+      selectUpdateAvailable(
+        snapshot({ appVersion: null, lastKnownVersion: "9.9.9" }),
+      ),
+    ).toBe(false);
   });
 });

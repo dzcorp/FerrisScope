@@ -299,6 +299,73 @@ jobs:
       - name: List downloaded artifacts
         run: ls -laR release-artifacts
 
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Flatten into one checksum file alongside the other assets so a
+          # single `sha256sum -c SHA256SUMS.txt --ignore-missing` works from
+          # the directory the operator downloaded into.
+          mkdir -p release-artifacts
+          (
+            cd release-artifacts
+            find . -type f \
+              \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
+                 -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \) \
+              -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed -E 's| \./[^/]+/|  |' > SHA256SUMS.txt
+          )
+          echo "=== SHA256SUMS.txt ==="
+          cat release-artifacts/SHA256SUMS.txt
+
+      - name: Compose release notes
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Body that lands above GitHub's auto-generated "What's Changed"
+          # section (we keep generate_release_notes: true so the PR list is
+          # appended automatically). Keep this terse — operators skim
+          # release pages and the install matrix is the actually-useful bit.
+          cat > RELEASE_NOTES.md <<EOF
+          **FerrisScope ${TAG}** — Rust-native, open-source desktop IDE for Kubernetes. Tauri 2 · kube-rs.
+
+          ## Install
+
+          | Platform | How |
+          |---|---|
+          | **Arch / AUR** | \`yay -Syu ferrisscope-bin\`   *(or \`paru\` / refreshed \`pacman -Syu\`)* |
+          | **Linux AppImage** *(self-updating)* | Download \`*-linux-x64.AppImage\`, \`chmod +x\`, run |
+          | **Debian / Ubuntu** | \`sudo apt install ./ferrisscope-*-linux-x64.deb\` |
+          | **Fedora / RHEL** | \`sudo dnf install ./ferrisscope-*-linux-x64.rpm\` |
+          | **macOS** | Open \`*-macos-{arm64,x64}.dmg\`, drag **FerrisScope.app** to **/Applications** (see macOS note below) |
+          | **Windows** | Run \`*-windows-x64.exe\` (NSIS installer) |
+
+          ## macOS first launch
+
+          We're not yet code-signed by an Apple Developer cert, so macOS quarantines the bundle on first open ("FerrisScope can't be opened because Apple cannot check it for malicious software"). After dragging to **/Applications**, run once:
+
+          \`\`\`bash
+          sudo xattr -dr com.apple.quarantine /Applications/FerrisScope.app
+          \`\`\`
+
+          ## Links
+
+          - 📖 [README](https://github.com/dzcorp/FerrisScope#readme) · setup, screenshots, scope
+          - 🪲 [Issues](https://github.com/dzcorp/FerrisScope/issues) · feedback welcome
+
+          ---
+          EOF
+          # YAML-indent → 10 leading spaces survive into the heredoc; strip
+          # them so markdown doesn't read every line as an indented code
+          # block. Same pattern as the PKGBUILD step further down.
+          sed -i 's/^          //' RELEASE_NOTES.md
+          echo "=== RELEASE_NOTES.md ==="
+          cat RELEASE_NOTES.md
+
       - name: Recreate existing release for this tag
         uses: actions/github-script@v9
         with:
@@ -334,7 +401,12 @@ jobs:
             release-artifacts/**/*.dmg
             release-artifacts/**/*.msi
             release-artifacts/**/*.exe
+            release-artifacts/SHA256SUMS.txt
           fail_on_unmatched_files: true
+          # body_path lands above the auto-generated PR list; install
+          # matrix + verification block first, GitHub's "What's Changed"
+          # appended underneath.
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
 
   aur-publish:

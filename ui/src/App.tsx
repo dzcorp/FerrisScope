@@ -97,6 +97,10 @@ export default function App() {
   const bumpUiScale = useAppStore((s) => s.bumpUiScale);
   const resetUiScale = useAppStore((s) => s.resetUiScale);
   const selectedKindId = useAppStore((s) => s.selectedKindId);
+  const updateState = useAppStore((s) => s.updateState);
+  const setAppVersion = useAppStore((s) => s.setAppVersion);
+  const patchUpdateState = useAppStore((s) => s.patchUpdateState);
+  const autoCheckEnabled = updateState.autoCheckEnabled;
   // Set once after the initial prefs load — gates the persist effect so the
   // hydration write doesn't immediately echo defaults back to disk.
   const [prefsLoaded, setPrefsLoaded] = useState(false);
@@ -166,6 +170,12 @@ export default function App() {
             dock_size_right: dockSize.right,
             dock_size_bottom: dockSize.bottom,
           },
+          update: {
+            last_known_version: updateState.lastKnownVersion,
+            last_seen_version: updateState.lastSeenVersion,
+            last_check_at: updateState.lastCheckAt,
+            auto_check_enabled: updateState.autoCheckEnabled,
+          },
         })
         .catch(() => {});
     }, 250);
@@ -179,7 +189,57 @@ export default function App() {
     selectedNamespaces,
     settings,
     dockSize,
+    updateState,
   ]);
+
+  // Boot-time: cache the running app's CARGO_PKG_VERSION so the
+  // `selectUpdateAvailable` derivation has a baseline to compare against.
+  // Cheap, no-cluster Tauri call — runs once, ignored on failure.
+  useEffect(() => {
+    api
+      .updaterInfo()
+      .then((info) => setAppVersion(info.current_version))
+      .catch(() => {});
+  }, [setAppVersion]);
+
+  // Periodic background update check. First run 15s after launch (don't
+  // compete with cluster connect / prefs hydrate for early bandwidth);
+  // then every 6h while the window is open. Failures are silent — we
+  // don't surface a toast for every flaky-network 6h cycle.
+  useEffect(() => {
+    if (!autoCheckEnabled) return;
+    const run = () => {
+      api
+        .checkForUpdate()
+        .then((out) => {
+          const now = Date.now();
+          if (out.kind === "update_available") {
+            const v = out.release.version;
+            const prev = useAppStore.getState().updateState.lastKnownVersion;
+            const seen = useAppStore.getState().updateState.lastSeenVersion;
+            patchUpdateState({ lastKnownVersion: v, lastCheckAt: now });
+            // One-time notification: only fire when this is a freshly-
+            // discovered version the user hasn't already skipped. The bell
+            // log keeps the breadcrumb; the Settings → About dot is the
+            // durable signal.
+            if (prev !== v && seen !== v) {
+              toast.info(
+                `FerrisScope v${v} is available\nOpen Settings → About to update or skip this version.`,
+              );
+            }
+          } else {
+            patchUpdateState({ lastCheckAt: now });
+          }
+        })
+        .catch(() => {});
+    };
+    const kick = setTimeout(run, 15_000);
+    const id = setInterval(run, 6 * 60 * 60 * 1000);
+    return () => {
+      clearTimeout(kick);
+      clearInterval(id);
+    };
+  }, [autoCheckEnabled, patchUpdateState]);
 
   // Cluster metrics are no longer subscribed eagerly here. Each consumer
   // (ClusterBar gauges, ResourceTable's CPU/Mem cells when kind=pods,
@@ -223,6 +283,26 @@ export default function App() {
     const refresh = () =>
       setDiscoveredNs(Array.from(new Set(seen.values())).sort());
 
+    // Drop any selected namespaces that no longer exist in the cluster.
+    // Empty set means "all namespaces" — so a single-namespace filter
+    // whose target was just deleted naturally falls back to the
+    // all-namespaces view, and a multi-namespace filter simply loses
+    // the deleted entry. Called with the current `seen` snapshot from
+    // the delta handler (so we reconcile against the freshly-deleted
+    // state, not a stale read).
+    const reconcileFilter = () => {
+      const live = new Set(seen.values());
+      const sel = useAppStore.getState().selectedNamespaces;
+      if (sel.size === 0) return;
+      let changed = false;
+      const next = new Set<string>();
+      for (const name of sel) {
+        if (live.has(name)) next.add(name);
+        else changed = true;
+      }
+      if (changed) useAppStore.getState().setSelectedNamespaces(next);
+    };
+
     (async () => {
       try {
         unlisten = await onResourceDelta(
@@ -236,6 +316,7 @@ export default function App() {
               if (name) seen.set(delta.row.uid, name);
             } else if (delta.kind === "delete") {
               seen.delete(delta.uid);
+              reconcileFilter();
             } else {
               return; // init_done — nothing to update on the namespace map
             }
@@ -252,6 +333,9 @@ export default function App() {
           const name = typeof r.name === "string" ? r.name : null;
           if (name) seen.set(r.uid, name);
         }
+        // Initial snapshot might already lack a namespace the operator had
+        // filtered to (e.g. it was deleted while another cluster was active).
+        reconcileFilter();
         refresh();
       } catch {
         // Best-effort: if namespaces aren't available the modal still works

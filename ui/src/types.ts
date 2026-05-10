@@ -152,6 +152,15 @@ export type PrefsUiState = {
   dock_size_right: number | null;
   dock_size_bottom: number | null;
 };
+/// Background update-check state. Mirrors `crates/core/src/prefs.rs::UpdateState`.
+/// Persisted so the "v… available" mark on Settings → About survives restarts,
+/// and so "Skip this version" is durable until a strictly-newer release ships.
+export type PrefsUpdateState = {
+  last_known_version: string | null;
+  last_seen_version: string | null;
+  last_check_at: number;
+  auto_check_enabled: boolean;
+};
 /// Which Prom-API-compatible TSDB the discovered Service appears to be
 /// running. Inferred from labels on the backend; only the probe (`up`
 /// query) is authoritative for "speaks Prom API". Drives the chart badge.
@@ -178,6 +187,7 @@ export type Prefs = {
   theme: PrefsTheme;
   settings: PrefsSettings;
   ui: PrefsUiState;
+  update: PrefsUpdateState;
 };
 
 /// Source of a cached Prometheus target. `User` choices are sticky across

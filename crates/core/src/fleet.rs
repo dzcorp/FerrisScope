@@ -79,11 +79,8 @@ pub async fn load_cache() -> HashMap<String, ClusterProbe> {
 
 pub async fn save_cache(map: &HashMap<String, ClusterProbe>) {
     let Some(path) = cache_path() else { return };
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent).await;
-    }
     if let Ok(data) = serde_json::to_string_pretty(map) {
-        let _ = fs::write(&path, data).await;
+        let _ = crate::atomic_write::atomic_write(&path, data.as_bytes()).await;
     }
 }
 

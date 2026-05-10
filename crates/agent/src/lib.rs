@@ -5,6 +5,7 @@
 //! and on-disk paths. This crate owns the *shape* of the agent loop, the
 //! provider trait, and the session-store format.
 
+pub mod atomic_write;
 pub mod config;
 pub mod mcp;
 pub mod native;

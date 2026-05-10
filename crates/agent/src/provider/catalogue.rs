@@ -290,10 +290,7 @@ pub async fn refresh(cache_root: PathBuf) {
     // are non-fatal — the in-memory state is the source of truth for
     // the running process.
     let path = cache_root.join(CACHE_FILENAME);
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    if let Err(e) = tokio::fs::write(&path, &bytes).await {
+    if let Err(e) = crate::atomic_write::atomic_write(&path, &bytes).await {
         tracing::warn!(error = %e, "models.dev: cache write failed");
     }
 }
