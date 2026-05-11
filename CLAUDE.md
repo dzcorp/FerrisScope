@@ -23,6 +23,7 @@ The `core` crate must stay Tauri-free so a future TUI / CLI can reuse the engine
 - **Commits.** Conventional commits (`feat:`, `fix:`, `refactor:`, `chore:`, `docs:`). Small and reviewable.
 - **Task completion check.** Any task touching Rust → `cargo fmt --all -- --check` before reporting done. CI fails on drift.
 - **Tests.** Backend: unit tests next to code, integration tests in `tests/` against a `kind` cluster (gated behind the `integration` feature). Frontend: Vitest for utilities; Playwright is reserved for once the UI stabilises.
+- **Every new functionality must ship with tests.** No exceptions, including bug fixes (regression test) and small refactors that change behaviour. New Rust function / module → `#[cfg(test)]` next to it; new Tauri command → command-shape test in `ui/src/api.test.ts` plus the relevant backend integration test; new store reducer → reducer test in `ui/src/store.test.ts`; new component or atom → render + interaction test next to it (`*.test.tsx`); new pure utility under `ui/src/lib/` → unit test next to it. PRs without tests are incomplete — push back rather than land code that drops coverage. The only acceptable exception is purely visual tweaks (colour, spacing) where there is genuinely nothing to assert beyond what the snapshot would already show, and even then prefer a render test that pins the structural class names / aria attributes.
 
 ## Design system
 

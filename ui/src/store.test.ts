@@ -295,6 +295,399 @@ describe("semverGt", () => {
   });
 });
 
+describe("dock tabs", () => {
+  const mkTab = (id: string, placement: "bottom" | "right" = "bottom"): DockTab => ({
+    id,
+    kind: placement === "right" ? "chat" : "terminal",
+    title: id,
+    placement,
+    state: {},
+  });
+
+  it("addDockTab appends, focuses the new tab, and un-minimises only its placement", () => {
+    useAppStore.setState({
+      dockMin: { bottom: true, right: true },
+    });
+    useAppStore.getState().addDockTab(mkTab("t1", "bottom"));
+    const s = useAppStore.getState();
+    expect(s.dockTabs.map((t) => t.id)).toEqual(["t1"]);
+    expect(s.dockActiveId).toBe("t1");
+    // Only `bottom` un-minimised — `right` left alone so the chat panel
+    // stays collapsed if it was.
+    expect(s.dockMin.bottom).toBe(false);
+    expect(s.dockMin.right).toBe(true);
+  });
+
+  it("closeDockTab on the active tab activates the next survivor in the same placement", () => {
+    useAppStore.getState().addDockTab(mkTab("b1", "bottom"));
+    useAppStore.getState().addDockTab(mkTab("b2", "bottom"));
+    useAppStore.getState().addDockTab(mkTab("r1", "right"));
+    // Active is r1 (last added). Closing it should leave the bottom group
+    // alone and pick the last surviving right-placed tab — but there's
+    // none, so fall through to the last overall tab.
+    useAppStore.getState().closeDockTab("r1");
+    expect(useAppStore.getState().dockActiveId).toBe("b2");
+    // Closing the active b2 falls back to b1 (same placement).
+    useAppStore.getState().closeDockTab("b2");
+    expect(useAppStore.getState().dockActiveId).toBe("b1");
+    // Closing the final tab nulls active.
+    useAppStore.getState().closeDockTab("b1");
+    expect(useAppStore.getState().dockActiveId).toBeNull();
+  });
+
+  it("closeDockTab on a non-active tab leaves the active selection alone", () => {
+    useAppStore.getState().addDockTab(mkTab("a"));
+    useAppStore.getState().addDockTab(mkTab("b"));
+    // a is no longer active; closing it shouldn't move focus.
+    expect(useAppStore.getState().dockActiveId).toBe("b");
+    useAppStore.getState().closeDockTab("a");
+    expect(useAppStore.getState().dockActiveId).toBe("b");
+  });
+
+  it("closeAllDockTabs / closeDockTabsByPlacement", () => {
+    useAppStore.getState().addDockTab(mkTab("b1", "bottom"));
+    useAppStore.getState().addDockTab(mkTab("r1", "right"));
+    useAppStore.getState().closeDockTabsByPlacement("right");
+    expect(useAppStore.getState().dockTabs.map((t) => t.id)).toEqual(["b1"]);
+    // The active tab was r1; with right closed it falls back to the last
+    // remaining tab.
+    expect(useAppStore.getState().dockActiveId).toBe("b1");
+    useAppStore.getState().closeAllDockTabs();
+    expect(useAppStore.getState().dockTabs).toHaveLength(0);
+    expect(useAppStore.getState().dockActiveId).toBeNull();
+  });
+
+  it("patchDockTabState merges into the tab's local state without touching siblings", () => {
+    useAppStore.getState().addDockTab({
+      id: "y1",
+      kind: "yaml",
+      title: "scratch",
+      placement: "bottom",
+      state: { yaml: "x", cursor: 0 },
+    });
+    useAppStore.getState().patchDockTabState("y1", { cursor: 12 });
+    const s = useAppStore.getState();
+    expect(s.dockTabs[0]?.state).toEqual({ yaml: "x", cursor: 12 });
+  });
+
+  it("setDockMin / setDockSize only touch the targeted placement", () => {
+    useAppStore.getState().setDockMin("bottom", true);
+    expect(useAppStore.getState().dockMin.bottom).toBe(true);
+    expect(useAppStore.getState().dockMin.right).toBe(false);
+    useAppStore.getState().setDockSize("right", 480);
+    expect(useAppStore.getState().dockSize.right).toBe(480);
+  });
+});
+
+describe("selection map", () => {
+  it("toggleSelection adds and then removes", () => {
+    useAppStore.getState().toggleSelection("uid-1", { namespace: "default", name: "p1" });
+    expect(useAppStore.getState().selection.size).toBe(1);
+    useAppStore.getState().toggleSelection("uid-1", { namespace: "default", name: "p1" });
+    expect(useAppStore.getState().selection.size).toBe(0);
+  });
+
+  it("clearSelection wipes the map", () => {
+    useAppStore.getState().toggleSelection("a", { namespace: null, name: "x" });
+    useAppStore.getState().toggleSelection("b", { namespace: null, name: "y" });
+    expect(useAppStore.getState().selection.size).toBe(2);
+    useAppStore.getState().clearSelection();
+    expect(useAppStore.getState().selection.size).toBe(0);
+  });
+});
+
+describe("table filter / count", () => {
+  it("setTableFilter sets it; clearTableFilter empties it", () => {
+    useAppStore.getState().setTableFilter("nginx");
+    expect(useAppStore.getState().tableFilter).toBe("nginx");
+    useAppStore.getState().clearTableFilter();
+    expect(useAppStore.getState().tableFilter).toBe("");
+  });
+  it("setTableCount accepts the count or null (filter disengaged)", () => {
+    useAppStore.getState().setTableCount({ filtered: 3, total: 10 });
+    expect(useAppStore.getState().tableCount).toEqual({ filtered: 3, total: 10 });
+    useAppStore.getState().setTableCount(null);
+    expect(useAppStore.getState().tableCount).toBeNull();
+  });
+});
+
+describe("settings target & misc open/close pairs", () => {
+  it("openSettings(target) records the target, closeSettings clears the open flag", () => {
+    useAppStore.getState().openSettings({ section: "appearance" });
+    let s = useAppStore.getState();
+    expect(s.settingsOpen).toBe(true);
+    expect(s.settingsTarget).toEqual({ section: "appearance" });
+
+    // consumeSettingsTarget returns then clears.
+    expect(useAppStore.getState().consumeSettingsTarget()).toEqual({
+      section: "appearance",
+    });
+    expect(useAppStore.getState().settingsTarget).toBeNull();
+
+    useAppStore.getState().closeSettings();
+    expect(useAppStore.getState().settingsOpen).toBe(false);
+  });
+
+  it("openSettings() with no target resets settingsTarget (no stale anchor)", () => {
+    useAppStore.setState({ settingsTarget: { section: "appearance" } });
+    useAppStore.getState().openSettings();
+    expect(useAppStore.getState().settingsTarget).toBeNull();
+  });
+
+  it("openSettings ignores a non-object target (MouseEvent guard)", () => {
+    // Components occasionally wire `onClick={openSettings}` — the click event
+    // shouldn't be treated as a SettingsTarget.
+    useAppStore.getState().openSettings("oops" as unknown as never);
+    expect(useAppStore.getState().settingsTarget).toBeNull();
+    expect(useAppStore.getState().settingsOpen).toBe(true);
+  });
+
+  it("toggles for palette / nsModal / filter editor / addMenu / notifications / forwardsPanel", () => {
+    const s = useAppStore.getState();
+    s.openPalette();
+    expect(useAppStore.getState().paletteOpen).toBe(true);
+    s.closePalette();
+    expect(useAppStore.getState().paletteOpen).toBe(false);
+
+    s.openNsModal();
+    expect(useAppStore.getState().nsModalOpen).toBe(true);
+    s.closeNsModal();
+
+    s.openFilterEditor();
+    expect(useAppStore.getState().filterEditing).toBe(true);
+    s.closeFilterEditor();
+
+    s.setAddMenuOpen(true);
+    expect(useAppStore.getState().addMenuOpen).toBe(true);
+
+    s.openNotifications();
+    expect(useAppStore.getState().notificationsOpen).toBe(true);
+    s.closeNotifications();
+    expect(useAppStore.getState().notificationsOpen).toBe(false);
+
+    s.openForwardsPanel();
+    expect(useAppStore.getState().forwardsOpen).toBe(true);
+    s.closeForwardsPanel();
+  });
+
+  it("clearNotifications wipes the log and bumps seen-at", () => {
+    useAppStore.setState({
+      notifications: [
+        { id: "x", tone: "info", text: "hi", createdAt: 0 },
+      ],
+    });
+    const before = useAppStore.getState().notificationsSeenAt;
+    useAppStore.getState().clearNotifications();
+    expect(useAppStore.getState().notifications).toHaveLength(0);
+    expect(useAppStore.getState().notificationsSeenAt).toBeGreaterThanOrEqual(before);
+  });
+});
+
+describe("port-forwards reducer", () => {
+  const mkEntry = (id: string, status: "listening" | "active" | "stopped" = "listening") => ({
+    spec: {
+      id,
+      cluster_id: "ctx",
+      target: { kind: "Pod", namespace: "default", name: "p" } as never,
+      remote_port: 80,
+      requested_local_port: null,
+      autostart: false,
+    },
+    actual_local_port: 8080,
+    status: { kind: status } as never,
+  });
+
+  it("hydrateForwards builds the map from a list", () => {
+    useAppStore.getState().hydrateForwards([mkEntry("a"), mkEntry("b")]);
+    expect(Object.keys(useAppStore.getState().forwards).sort()).toEqual(["a", "b"]);
+  });
+
+  it("upsertForward inserts or replaces a single entry", () => {
+    useAppStore.getState().upsertForward(mkEntry("a", "listening"));
+    useAppStore.getState().upsertForward(mkEntry("a", "active"));
+    expect(useAppStore.getState().forwards["a"]?.status.kind).toBe("active");
+  });
+
+  it("applyForwardStatus updates an existing entry's status; 'stopped' removes it", () => {
+    useAppStore.getState().hydrateForwards([mkEntry("a")]);
+    useAppStore.getState().applyForwardStatus("a", { kind: "active" });
+    expect(useAppStore.getState().forwards["a"]?.status.kind).toBe("active");
+    useAppStore.getState().applyForwardStatus("a", { kind: "stopped" });
+    expect(useAppStore.getState().forwards["a"]).toBeUndefined();
+  });
+
+  it("applyForwardStatus on unknown id is a no-op", () => {
+    useAppStore.getState().applyForwardStatus("ghost", { kind: "active" });
+    expect(useAppStore.getState().forwards).toEqual({});
+  });
+
+  it("removeForward deletes by id", () => {
+    useAppStore.getState().hydrateForwards([mkEntry("a"), mkEntry("b")]);
+    useAppStore.getState().removeForward("a");
+    expect(Object.keys(useAppStore.getState().forwards)).toEqual(["b"]);
+  });
+});
+
+describe("cluster health", () => {
+  it("applyClusterHealth records status + reason, clearClusterHealth removes both", () => {
+    useAppStore.getState().applyClusterHealth("ctx", "unavailable", "tcp refused");
+    expect(useAppStore.getState().clusterHealth["ctx"]).toBe("unavailable");
+    expect(useAppStore.getState().clusterHealthReason["ctx"]).toBe("tcp refused");
+    useAppStore.getState().clearClusterHealth("ctx");
+    expect(useAppStore.getState().clusterHealth["ctx"]).toBeUndefined();
+    expect(useAppStore.getState().clusterHealthReason["ctx"]).toBeUndefined();
+  });
+});
+
+describe("tableViews", () => {
+  it("setTableView stores a populated view and deletes one with empty sorting + sizing", () => {
+    useAppStore.getState().setTableView("ctx", "pods", {
+      sorting: [{ id: "name", desc: false }],
+      column_sizing: { name: 200 },
+    } as never);
+    expect(useAppStore.getState().tableViews["ctx::pods"]).toBeDefined();
+    useAppStore.getState().setTableView("ctx", "pods", {
+      sorting: [],
+      column_sizing: {},
+    } as never);
+    expect(useAppStore.getState().tableViews["ctx::pods"]).toBeUndefined();
+  });
+
+  it("hydrateTableViews replaces the whole map", () => {
+    useAppStore.getState().hydrateTableViews({
+      "ctx::pods": { sorting: [], column_sizing: {} } as never,
+    });
+    expect(Object.keys(useAppStore.getState().tableViews)).toEqual(["ctx::pods"]);
+  });
+});
+
+describe("UI scale", () => {
+  it("setUiScale clamps + snaps the value", () => {
+    useAppStore.getState().setUiScale(99);
+    expect(useAppStore.getState().settings.uiScale).toBeLessThanOrEqual(2); // generous upper-bound assumption
+    useAppStore.getState().setUiScale(0);
+    expect(useAppStore.getState().settings.uiScale).toBeGreaterThan(0);
+  });
+
+  it("bumpUiScale +1/-1 walks by the step", () => {
+    useAppStore.getState().resetUiScale();
+    const base = useAppStore.getState().settings.uiScale;
+    useAppStore.getState().bumpUiScale(1);
+    expect(useAppStore.getState().settings.uiScale).toBeGreaterThan(base);
+    useAppStore.getState().bumpUiScale(-1);
+    // Round-trip back to base (within snapping).
+    expect(useAppStore.getState().settings.uiScale).toBeCloseTo(base, 5);
+  });
+});
+
+describe("detail navigation back/forward", () => {
+  it("back walks the history; forward returns; closeDetail clears", () => {
+    const s = useAppStore.getState();
+    s.navigateToDetail("pods", "default", "a");
+    s.navigateToDetail("pods", "default", "b");
+    s.navigateToDetail("pods", "default", "c");
+    expect(useAppStore.getState().detailIndex).toBe(2);
+
+    useAppStore.getState().detailBack();
+    expect(useAppStore.getState().detailIndex).toBe(1);
+    expect(useAppStore.getState().pendingDetail?.name).toBe("b");
+
+    useAppStore.getState().detailBack();
+    expect(useAppStore.getState().detailIndex).toBe(0);
+
+    // Already at index 0 — further back is a no-op.
+    useAppStore.getState().detailBack();
+    expect(useAppStore.getState().detailIndex).toBe(0);
+
+    useAppStore.getState().detailForward();
+    expect(useAppStore.getState().detailIndex).toBe(1);
+    expect(useAppStore.getState().pendingDetail?.name).toBe("b");
+
+    // Past the end is a no-op.
+    useAppStore.getState().detailForward();
+    useAppStore.getState().detailForward();
+    useAppStore.getState().detailForward();
+    expect(useAppStore.getState().detailIndex).toBe(2);
+
+    useAppStore.getState().closeDetail();
+    expect(useAppStore.getState().detailHistory).toHaveLength(0);
+    expect(useAppStore.getState().detailIndex).toBe(-1);
+    expect(useAppStore.getState().pendingDetail).toBeNull();
+  });
+
+  it("pushDetailEntry adds to history but does NOT switch kind or arm pendingDetail", () => {
+    const s = useAppStore.getState();
+    s.pushDetailEntry("pods", "default", "a");
+    expect(useAppStore.getState().detailHistory).toHaveLength(1);
+    expect(useAppStore.getState().pendingDetail).toBeNull();
+    // Pushing the same again is deduped.
+    s.pushDetailEntry("pods", "default", "a");
+    expect(useAppStore.getState().detailHistory).toHaveLength(1);
+  });
+
+  it("consumePendingDetail clears the slot once a panel has picked it up", () => {
+    useAppStore.getState().navigateToDetail("pods", "default", "x");
+    expect(useAppStore.getState().pendingDetail).not.toBeNull();
+    useAppStore.getState().consumePendingDetail();
+    expect(useAppStore.getState().pendingDetail).toBeNull();
+  });
+});
+
+describe("kinds + rail mode", () => {
+  it("setKinds falls back to the first kind when the previous selection is gone", () => {
+    useAppStore.setState({ selectedKindId: "stale" });
+    useAppStore.getState().setKinds([
+      { id: "pods", name: "Pod" } as never,
+      { id: "deployments", name: "Deployment" } as never,
+    ]);
+    // Stale id can't survive; rail picks the first kind so the table isn't
+    // left with nothing to render.
+    expect(useAppStore.getState().selectedKindId).toBe("pods");
+  });
+
+  it("setKinds preserves selectedKindId when it survives the new list", () => {
+    useAppStore.setState({ selectedKindId: "deployments" });
+    useAppStore.getState().setKinds([
+      { id: "pods", name: "Pod" } as never,
+      { id: "deployments", name: "Deployment" } as never,
+    ]);
+    expect(useAppStore.getState().selectedKindId).toBe("deployments");
+  });
+
+  it("setKinds against an empty list nulls selectedKindId", () => {
+    useAppStore.setState({ selectedKindId: "pods" });
+    useAppStore.getState().setKinds([]);
+    expect(useAppStore.getState().selectedKindId).toBeNull();
+  });
+
+  it("setKindsError flips status to error and records the message", () => {
+    useAppStore.getState().setKindsLoading();
+    expect(useAppStore.getState().kindsStatus).toBe("loading");
+    useAppStore.getState().setKindsError("boom");
+    expect(useAppStore.getState().kindsStatus).toBe("error");
+    expect(useAppStore.getState().kindsError).toBe("boom");
+  });
+
+  it("setContextsError + setContextsLoading flip status the same way", () => {
+    useAppStore.getState().setContextsLoading();
+    expect(useAppStore.getState().contextsStatus).toBe("loading");
+    useAppStore.getState().setContextsError("nope");
+    expect(useAppStore.getState().contextsStatus).toBe("error");
+    expect(useAppStore.getState().contextsError).toBe("nope");
+  });
+
+  it("cycleRailMode walks through the rail modes deterministically", () => {
+    const m0 = useAppStore.getState().railMode;
+    useAppStore.getState().cycleRailMode();
+    const m1 = useAppStore.getState().railMode;
+    expect(m1).not.toBe(m0);
+    useAppStore.getState().cycleRailMode();
+    useAppStore.getState().cycleRailMode();
+    // Three cycles wraps back to the starting mode (only 3 modes exist).
+    expect(useAppStore.getState().railMode).toBe(m0);
+  });
+});
+
 describe("selectUpdateAvailable", () => {
   function snapshot(over: {
     appVersion?: string | null;
