@@ -374,12 +374,14 @@ impl NativeTool for NodeShellExec {
             .stdin(false)
             .tty(false);
 
-        let result =
-            tokio::time::timeout(timeout, run_exec(&pods, &sess.pod_name, exec_args, attach))
-                .await
-                .map_err(|_| {
-                    NativeToolError::msg(format!("exec timed out after {}s", timeout.as_secs()))
-                })??;
+        let result = Box::pin(tokio::time::timeout(
+            timeout,
+            run_exec(&pods, &sess.pod_name, exec_args, attach),
+        ))
+        .await
+        .map_err(|_| {
+            NativeToolError::msg(format!("exec timed out after {}s", timeout.as_secs()))
+        })??;
 
         Ok(serde_json::to_value(result).expect("ExecResult serialises"))
     }

@@ -79,9 +79,9 @@ pub(crate) struct DevMemoryStats {
 pub(crate) fn dev_memory_stats() -> DevMemoryStats {
     #[cfg(target_os = "linux")]
     {
-        return DevMemoryStats {
+        DevMemoryStats {
             rss_bytes: read_linux_vmrss_bytes(),
-        };
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {

@@ -142,10 +142,10 @@ impl NativeTool for PodExec {
             .stdin(false)
             .tty(false);
 
-        let result = tokio::time::timeout(
+        let result = Box::pin(tokio::time::timeout(
             timeout,
             run_exec(&pods, &a.name, a.command, attach, &container),
-        )
+        ))
         .await
         .map_err(|_| {
             NativeToolError::msg(format!("exec timed out after {}s", timeout.as_secs()))
