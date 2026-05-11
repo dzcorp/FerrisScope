@@ -186,11 +186,7 @@ pub fn project_detail(pod: &Pod) -> Value {
         .as_ref()
         .map(|m| m.iter().map(|(k, v)| json!([k, v])).collect())
         .unwrap_or_default();
-    let annotations: Vec<Value> = meta
-        .annotations
-        .as_ref()
-        .map(|m| m.iter().map(|(k, v)| json!([k, v])).collect())
-        .unwrap_or_default();
+    let annotations = crate::kinds::pod_template::project_annotations(meta.annotations.as_ref());
 
     let controlled_by = meta
         .owner_references

@@ -5,6 +5,7 @@ members = [
     "crates/kube-ext",
     "crates/agent",
     "crates/app",
+    "crates/mimalloc-ext",
     "crates/test-support",
 ]
 
@@ -97,6 +98,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 ferrisscope-core = { path = "crates/core" }
 ferrisscope-kube-ext = { path = "crates/kube-ext" }
 ferrisscope-agent = { path = "crates/agent" }
+ferrisscope-mimalloc-ext = { path = "crates/mimalloc-ext" }
 ferrisscope-test-support = { path = "crates/test-support" }
 
 # Test deps

@@ -28,6 +28,18 @@ use crate::state::AppState;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
+    // Tell mimalloc to use `MADV_DONTNEED` (immediate RSS decrement)
+    // instead of `MADV_FREE` (lazy reclaim that leaves freed pages in
+    // `RssAnon` until memory pressure). Must run before mimalloc's
+    // first allocation; we set the env vars *and* call `mi_option_set`
+    // for belt-and-suspenders. See the rustdoc on
+    // `ferrisscope_mimalloc_ext::init_purge_policy` for the full
+    // rationale — short version: on Linux desktops with plenty of
+    // free RAM, MADV_FREE means RSS plateaus at the high-water mark
+    // of any past burst, which is what operators were seeing after
+    // briefly opening a large cluster.
+    ferrisscope_mimalloc_ext::init_purge_policy();
+
     // Linux render-path setup. Default is GPU-accelerated (WebKitGTK 2.46+
     // handles DMA-BUF + compositing fine across Mesa / nvidia-open). On
     // NVIDIA + Wayland we additionally disable EGL-Wayland's explicit-sync
@@ -83,6 +95,8 @@ fn main() {
         .manage(agent::AgentState::default())
         .invoke_handler(tauri::generate_handler![
             commands::ping,
+            commands::dev_memory_stats,
+            commands::dev_compact_memory,
             commands::updater_info,
             commands::check_for_update,
             commands::apply_update,

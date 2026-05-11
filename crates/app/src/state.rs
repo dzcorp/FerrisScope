@@ -60,6 +60,35 @@ pub(crate) struct ClusterEntry {
     /// by `state.entry()` rather than `connect_context`). Same CAS
     /// pattern: true on first claim, false thereafter.
     health_wired: AtomicBool,
+    /// JoinHandle for the health-event forwarder task spawned by
+    /// `spawn_health_forwarder`. Stored here so `drop_cluster_watchers`
+    /// / `tear_down_unhealthy` can abort it explicitly on teardown.
+    ///
+    /// Why this is load-bearing for memory: the forwarder's `rx.recv()`
+    /// only returns `Err(Closed)` when the broadcast sender drops, but
+    /// the sender lives inside `entry.health` which the forwarder used
+    /// to keep alive via its captured `Arc<ClusterEntry>`. That's a
+    /// self-sustaining cycle — after `drop_cluster_watchers` removed
+    /// the entry from the state map, the forwarder still held the only
+    /// strong ref, so the entry never dropped, the `Cluster` + kube
+    /// `Client` HTTP/2 pool + `ClusterHealth` probe task all stayed
+    /// resident. Operators saw RSS plateau at the high-water mark of
+    /// the largest cluster ever opened. Aborting the forwarder breaks
+    /// the cycle.
+    ///
+    /// Uses `std::sync::Mutex` (not tokio's): holds are a single
+    /// `replace` / `take` per insert / teardown, so the sync mutex
+    /// keeps the call sites a plain function (no `.await`) and avoids
+    /// the spawn-a-task-to-insert race that an async mutex would force.
+    pub(crate) health_forwarder: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// JoinHandle for the metrics-event forwarder spawned by
+    /// `spawn_metrics_forwarder`. Same retention-cycle hazard as
+    /// `health_forwarder`: the forwarder holds `Arc<MetricsService>`,
+    /// the service holds the broadcast sender, and `unsubscribe_metrics
+    /// .slot.service.take()` only drops one of the two strong refs —
+    /// the forwarder's clone keeps the service alive (and its polling
+    /// task running) until we abort explicitly.
+    pub(crate) metrics_forwarder: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 impl ClusterEntry {
@@ -178,6 +207,16 @@ impl AppState {
     /// Get the entry for `id` (a composite `ContextInfo::id`), connecting if it
     /// isn't cached yet. Resolves the source's kubeconfig path (file/folder)
     /// or SSH config so connect loads from the right place.
+    /// Non-creating lookup. Returns the cached entry if connected,
+    /// `None` otherwise. Use this in teardown / unsubscribe paths so a
+    /// concurrent `drop_cluster_watchers` can win the race without
+    /// triggering a phantom reconnect — `state.entry()` reconnects on
+    /// miss, which would re-instate a fresh `Cluster` + kube `Client`
+    /// for a cluster the operator just left.
+    pub(crate) async fn get_existing(&self, id: &str) -> Option<Arc<ClusterEntry>> {
+        self.inner.lock().await.get(id).cloned()
+    }
+
     pub(crate) async fn entry(&self, id: &str) -> Result<Arc<ClusterEntry>, String> {
         let mut map = self.inner.lock().await;
         if let Some(existing) = map.get(id) {
@@ -222,6 +261,8 @@ impl AppState {
             unavailable: AtomicBool::new(false),
             connect_probes_done: AtomicBool::new(false),
             health_wired: AtomicBool::new(false),
+            health_forwarder: std::sync::Mutex::new(None),
+            metrics_forwarder: std::sync::Mutex::new(None),
         });
         map.insert(id.to_owned(), entry.clone());
         Ok(entry)
@@ -259,6 +300,8 @@ impl AppState {
             unavailable: AtomicBool::new(false),
             connect_probes_done: AtomicBool::new(false),
             health_wired: AtomicBool::new(false),
+            health_forwarder: std::sync::Mutex::new(None),
+            metrics_forwarder: std::sync::Mutex::new(None),
         });
         map.insert(id, entry.clone());
         entry
@@ -278,6 +321,22 @@ impl AppState {
     /// fully released instead of lingering for the rest of the session.
     pub(crate) async fn remove_cluster(&self, id: &str) -> Option<Arc<ClusterEntry>> {
         self.inner.lock().await.remove(id)
+    }
+
+    /// Snapshot of currently-cached cluster entries — id + the Arc.
+    /// Used by dev-memory introspection so the caller can poke each
+    /// entry without holding the inner map lock for long.
+    pub(crate) async fn entries_snapshot(&self) -> Vec<(ClusterId, Arc<ClusterEntry>)> {
+        let map = self.inner.lock().await;
+        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    pub(crate) async fn log_stream_count(&self) -> usize {
+        self.logs.lock().await.len()
+    }
+
+    pub(crate) async fn active_connect_count(&self) -> usize {
+        self.connects.lock().await.len()
     }
 
     /// Register a freshly-opened search index for `id`. Called from

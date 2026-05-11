@@ -1079,6 +1079,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cty"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b365fabc795046672053e29c954733ec3b05e4be654ab130fe8f1f94d7051f35"
+
+[[package]]
 name = "curve25519-dalek"
 version = "5.0.0-pre.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1702,6 +1708,7 @@ dependencies = [
  "ferrisscope-agent",
  "ferrisscope-core",
  "ferrisscope-kube-ext",
+ "ferrisscope-mimalloc-ext",
  "ferrisscope-test-support",
  "futures",
  "getrandom 0.4.2",
@@ -1793,6 +1800,13 @@ dependencies = [
  "tokio-test",
  "tracing",
  "which",
+]
+
+[[package]]
+name = "ferrisscope-mimalloc-ext"
+version = "1.0.0"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -3413,6 +3427,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d1eacfa31c33ec25e873c136ba5669f00f9866d0688bea7be4d3f7e43067df6"
 dependencies = [
  "cc",
+ "cty",
 ]
 
 [[package]]

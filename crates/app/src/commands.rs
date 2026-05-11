@@ -66,6 +66,215 @@ pub(crate) fn ping() -> AppInfo {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct DevMemoryStats {
+    /// Resident set size of the main (Rust) process, in bytes. `None` on
+    /// platforms where we can't cheaply read it without pulling in a sysinfo
+    /// dep — currently macOS / Windows. The WebKit subprocess is not included.
+    pub(crate) rss_bytes: Option<u64>,
+}
+
+/// Dev-only memory introspection for the header HUD. Reads `/proc/self/status`
+/// on Linux; returns `None` elsewhere. Cheap enough to poll at ~1Hz.
+#[tauri::command]
+pub(crate) fn dev_memory_stats() -> DevMemoryStats {
+    #[cfg(target_os = "linux")]
+    {
+        return DevMemoryStats {
+            rss_bytes: read_linux_vmrss_bytes(),
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        DevMemoryStats { rss_bytes: None }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_vmrss_bytes() -> Option<u64> {
+    read_linux_status_kb("VmRSS").map(|kb| kb.saturating_mul(1024))
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_status_kb(prefix: &str) -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            // Format: "<prefix>:\t   12345 kB". `strip_prefix` left a `:`,
+            // then whitespace, then number, then ` kB`.
+            let rest = rest.strip_prefix(':').unwrap_or(rest);
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb);
+        }
+    }
+    None
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+#[allow(clippy::struct_field_names)] // matches /proc/self/status field names
+pub(crate) struct LinuxRssBreakdown {
+    /// Heap + uncommitted private mappings — what mimalloc holds.
+    pub(crate) anon_kb: u64,
+    /// Shared libraries + mmap'd files (sqlite WAL, etc.).
+    pub(crate) file_kb: u64,
+    /// SysV / POSIX shared memory.
+    pub(crate) shmem_kb: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_rss_breakdown() -> LinuxRssBreakdown {
+    LinuxRssBreakdown {
+        anon_kb: read_linux_status_kb("RssAnon").unwrap_or(0),
+        file_kb: read_linux_status_kb("RssFile").unwrap_or(0),
+        shmem_kb: read_linux_status_kb("RssShmem").unwrap_or(0),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_linux_rss_breakdown() -> LinuxRssBreakdown {
+    LinuxRssBreakdown::default()
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CompactMemoryResult {
+    pub(crate) rss_before: Option<u64>,
+    pub(crate) rss_after: Option<u64>,
+    /// mimalloc's own view of allocator-reserved memory. Difference
+    /// between this and OS RSS tells you what the allocator is sitting
+    /// on vs. what's actually in live Rust objects.
+    pub(crate) mi_current_commit: u64,
+    pub(crate) mi_peak_commit: u64,
+    /// Number of cached `ClusterEntry`s in the state map.
+    pub(crate) clusters: usize,
+    /// Per-cluster breakdown: id, number of active `KindSlot`s,
+    /// number of subscribers across them, search-index registered y/n.
+    pub(crate) per_cluster: Vec<ClusterMemoryInfo>,
+    /// Catch-all counts of other top-level state that could retain
+    /// per-cluster Arcs after the entry itself was removed.
+    pub(crate) search_indices: usize,
+    pub(crate) port_forwards: usize,
+    pub(crate) terminals: usize,
+    pub(crate) log_streams: usize,
+    pub(crate) active_connects: usize,
+    pub(crate) fleet_in_flight: usize,
+    pub(crate) fleet_cached: usize,
+    pub(crate) rss_anon_kb: u64,
+    pub(crate) rss_file_kb: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ClusterMemoryInfo {
+    pub(crate) cluster_id: String,
+    pub(crate) kinds_active: usize,
+    pub(crate) subscribers_total: usize,
+    pub(crate) metrics_active: bool,
+    pub(crate) search_index_active: bool,
+}
+
+/// Force mimalloc to release retained pages back to the OS, and
+/// report a per-cluster breakdown of what backend state is currently
+/// held. Used by the dev HUD to localise where memory is going.
+///
+/// If `rss_after` is close to `rss_before`, the previous high-water
+/// is real Rust state (look at `per_cluster` for the load), not
+/// allocator fragmentation. If `mi_current_commit` is much larger
+/// than the live working set we expect, that's still the allocator
+/// holding pages (force-collect should have moved them; if it didn't,
+/// the pages are still actually committed because real allocations
+/// reference them).
+#[tauri::command]
+pub(crate) async fn dev_compact_memory(
+    state: State<'_, AppState>,
+) -> Result<CompactMemoryResult, String> {
+    #[cfg(target_os = "linux")]
+    let rss_before = read_linux_vmrss_bytes();
+    #[cfg(not(target_os = "linux"))]
+    let rss_before: Option<u64> = None;
+
+    ferrisscope_mimalloc_ext::collect(true);
+
+    #[cfg(target_os = "linux")]
+    let rss_after = read_linux_vmrss_bytes();
+    #[cfg(not(target_os = "linux"))]
+    let rss_after: Option<u64> = None;
+
+    let mi = ferrisscope_mimalloc_ext::process_info();
+
+    // Per-cluster breakdown — kept brief (counts only). Probing each
+    // cluster's `kinds` map requires its async mutex; iterate the
+    // snapshot one entry at a time so we don't sit on the state's
+    // outer mutex for the duration.
+    let snap = state.entries_snapshot().await;
+    let clusters = snap.len();
+    let mut per_cluster = Vec::with_capacity(clusters);
+    let search_active: std::collections::HashSet<String> =
+        state.search_indices.lock().await.keys().cloned().collect();
+    for (id, entry) in snap {
+        let (kinds_active, subscribers_total) = {
+            let kinds = entry.kinds.lock().await;
+            let active = kinds.values().filter(|s| s.watcher.is_some()).count();
+            let subs = kinds.values().map(|s| s.subscribers).sum::<usize>();
+            (active, subs)
+        };
+        let metrics_active = entry.metrics.lock().await.service.is_some();
+        let search_index_active = search_active.contains(&id);
+        per_cluster.push(ClusterMemoryInfo {
+            cluster_id: id,
+            kinds_active,
+            subscribers_total,
+            metrics_active,
+            search_index_active,
+        });
+    }
+
+    let port_forwards = state.portforwards.by_id.lock().await.len();
+    let terminals = state.terminals.count().await;
+    let log_streams = state.log_stream_count().await;
+    let active_connects = state.active_connect_count().await;
+    let (fleet_in_flight, fleet_cached) = {
+        let g = state.fleet.lock().await;
+        (g.in_flight.len(), g.map.len())
+    };
+
+    tracing::info!(
+        rss_before_kb = rss_before.map(|b| b / 1024),
+        rss_after_kb = rss_after.map(|b| b / 1024),
+        delta_kb = rss_before
+            .zip(rss_after)
+            .map(|(b, a)| (b as i64 - a as i64) / 1024),
+        mi_current_commit_kb = mi.current_commit / 1024,
+        mi_peak_commit_kb = mi.peak_commit / 1024,
+        clusters,
+        search_indices = search_active.len(),
+        port_forwards,
+        terminals,
+        log_streams,
+        active_connects,
+        fleet_cached,
+        ?per_cluster,
+        "dev_compact_memory: forced mimalloc collect + state snapshot"
+    );
+
+    let breakdown = read_linux_rss_breakdown();
+    Ok(CompactMemoryResult {
+        rss_before,
+        rss_after,
+        mi_current_commit: mi.current_commit as u64,
+        mi_peak_commit: mi.peak_commit as u64,
+        clusters,
+        per_cluster,
+        search_indices: search_active.len(),
+        port_forwards,
+        terminals,
+        log_streams,
+        active_connects,
+        fleet_in_flight,
+        fleet_cached,
+        rss_anon_kb: breakdown.anon_kb,
+        rss_file_kb: breakdown.file_kb,
+    })
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct UpdaterInfo {
     pub(crate) current_version: &'static str,
     pub(crate) releases_url: &'static str,
@@ -425,7 +634,24 @@ fn spawn_search_bootstrap(
 /// the probe runs but its `Unavailable` event never reaches the UI.
 fn wire_cluster_health(app: &AppHandle, cluster_id: &str, entry: Arc<crate::state::ClusterEntry>) {
     if entry.claim_health_wiring() {
-        spawn_health_forwarder(app.clone(), cluster_id.to_owned(), entry);
+        let handle =
+            spawn_health_forwarder(app.clone(), cluster_id.to_owned(), entry.health.clone());
+        // Stash on the entry so teardown paths can abort it. The CAS in
+        // `claim_health_wiring` already guarantees we only get here
+        // once per entry lifetime, but be defensive — replace any
+        // stale handle and abort it instead of leaking the task.
+        if let Some(old) = entry
+            .health_forwarder
+            .lock()
+            .expect("health_forwarder mutex poisoned")
+            .replace(handle)
+        {
+            tracing::warn!(
+                cluster_id = %cluster_id,
+                "wire_cluster_health: replaced a pre-existing forwarder handle"
+            );
+            old.abort();
+        }
     }
 }
 
@@ -683,7 +909,14 @@ pub(crate) async fn unsubscribe_resource(
     kind_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let entry = state.entry(&cluster_id).await?;
+    // Non-creating lookup: if the cluster was already torn down (the
+    // operator left the cluster and `drop_cluster_watchers` ran first),
+    // there is nothing to unsubscribe from. Using `state.entry()` here
+    // would lazy-reconnect — phantom-reviving the cluster we just
+    // tore down and undoing the teardown's memory win.
+    let Some(entry) = state.get_existing(&cluster_id).await else {
+        return Ok(());
+    };
     let mut slots = entry.kinds.lock().await;
     if let Some(slot) = slots.get_mut(&kind_id) {
         slot.subscribers = slot.subscribers.saturating_sub(1);
@@ -742,7 +975,11 @@ pub(crate) async fn unsubscribe_resource(
 /// apiserver-side watch slots immediately, not 60 s later. Returns the
 /// number of watchers torn down (purely for the log line).
 async fn drop_all_kind_watchers(state: &AppState, cluster_id: &str) -> usize {
-    let Ok(entry) = state.entry(cluster_id).await else {
+    // Non-creating: if the cluster isn't cached we have nothing to
+    // tear down. Using `state.entry()` here would lazy-reconnect (full
+    // `Cluster::connect` round trip — TLS, exec-auth plugin, the lot)
+    // just to drop watchers that never existed.
+    let Some(entry) = state.get_existing(cluster_id).await else {
         return 0;
     };
     let mut slots = entry.kinds.lock().await;
@@ -757,6 +994,39 @@ async fn drop_all_kind_watchers(state: &AppState, cluster_id: &str) -> usize {
         slot.subscribers = 0;
     }
     slots.clear();
+    drop(slots);
+
+    // Abort the per-cluster event forwarders. Each holds an `Arc` that
+    // pins its broadcast source (`ClusterHealth` / `MetricsService`)
+    // alive — without abort, the forwarder's `rx.recv()` blocks
+    // forever and the source's task + kube `Client` HTTP keepalive
+    // stay resident. See `ClusterEntry::health_forwarder` rustdoc for
+    // the retention-cycle write-up.
+    if let Some(h) = entry
+        .health_forwarder
+        .lock()
+        .expect("health_forwarder mutex poisoned")
+        .take()
+    {
+        h.abort();
+    }
+    if let Some(h) = entry
+        .metrics_forwarder
+        .lock()
+        .expect("metrics_forwarder mutex poisoned")
+        .take()
+    {
+        h.abort();
+    }
+    // Also tear down the metrics service itself so the next
+    // `subscribe_metrics` against this cluster (after reconnect) starts
+    // from a fresh poll task instead of reusing a dangling Arc.
+    {
+        let mut slot = entry.metrics.lock().await;
+        slot.subscribers = 0;
+        slot.service.take();
+    }
+
     dropped
 }
 
@@ -769,7 +1039,8 @@ async fn drop_all_kind_watchers(state: &AppState, cluster_id: &str) -> usize {
 /// is `reconnect_cluster`, which drops the entry and lets the next
 /// `connect_context` rebuild from a fresh client.
 async fn tear_down_unhealthy(state: &AppState, cluster_id: &str) {
-    let Ok(entry) = state.entry(cluster_id).await else {
+    // Non-creating: see `drop_all_kind_watchers`.
+    let Some(entry) = state.get_existing(cluster_id).await else {
         return;
     };
     // Set the gate first so any subscribe_* arriving during teardown
@@ -894,6 +1165,15 @@ pub(crate) async fn drop_cluster_watchers(
         index_closed,
         "drop_cluster_watchers: cluster left, watchers torn down"
     );
+    // Tearing down a cluster frees a lot of memory in a short window:
+    // the watcher row caches, the kube `Client` HTTP/2 pool, TLS
+    // state, the search-index writer task, and the broadcast
+    // retention rings. Without prompting, mimalloc holds those pages
+    // in its arenas until its next opportunistic collect (minutes),
+    // so RSS plateaus at the high-water mark. Force a collect so the
+    // operator returning to the fleet sees the real working set, not
+    // the arena overhang.
+    ferrisscope_mimalloc_ext::collect(true);
     Ok(())
 }
 
@@ -916,6 +1196,10 @@ pub(crate) async fn reconnect_cluster(
         removed,
         "reconnect_cluster: entry dropped, awaiting fresh connect_context"
     );
+    // Same rationale as `drop_cluster_watchers`: return freed pages to
+    // the OS so the post-reconnect RSS doesn't pile on top of the
+    // pre-reconnect high-water.
+    ferrisscope_mimalloc_ext::collect(true);
     Ok(())
 }
 
@@ -1076,6 +1360,19 @@ fn spawn_resource_forwarder(
                         "forwarder: init_done emitted, switching to steady-phase batching"
                     );
                     steady = true;
+                    // The initial-sync burst allocates a lot of transient
+                    // memory: typed `Pod`/`Deployment`/... structs from
+                    // kube-rs are deserialised, projected to `Value`,
+                    // then dropped; intermediate JSON serialisations
+                    // for IPC are emitted then freed; the broadcast
+                    // retention ring fills then drains. The allocator
+                    // (mimalloc) often holds those arena pages until
+                    // its next opportunistic collect — which can be
+                    // minutes. Force one now so the operator sees RSS
+                    // settle to the steady-state working set, not the
+                    // high-water mark of the init burst.
+                    //
+                    ferrisscope_mimalloc_ext::collect(false);
                 }
             }
         }
@@ -2156,7 +2453,19 @@ pub(crate) async fn subscribe_metrics(
         s.clone()
     } else {
         let s = MetricsService::start(entry.cluster.client());
-        spawn_metrics_forwarder(app.clone(), cluster_id.clone(), s.clone());
+        let handle = spawn_metrics_forwarder(app.clone(), cluster_id.clone(), s.clone());
+        // Stash handle on the entry so teardown can abort it. Replace
+        // any stale handle (shouldn't exist because we only spawn when
+        // service was None, but be defensive — a stray handle would
+        // pin the next service via JoinHandle ↔ task captures).
+        if let Some(old) = entry
+            .metrics_forwarder
+            .lock()
+            .expect("metrics_forwarder mutex poisoned")
+            .replace(handle)
+        {
+            old.abort();
+        }
         slot.service = Some(s.clone());
         s
     };
@@ -2172,11 +2481,27 @@ pub(crate) async fn unsubscribe_metrics(
     cluster_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let entry = state.entry(&cluster_id).await?;
+    // Non-creating lookup — see `unsubscribe_resource` for rationale.
+    let Some(entry) = state.get_existing(&cluster_id).await else {
+        return Ok(());
+    };
     let mut slot = entry.metrics.lock().await;
     slot.subscribers = slot.subscribers.saturating_sub(1);
     if slot.subscribers == 0 {
-        // Dropping the Arc aborts the polling task via MetricsService::Drop.
+        // Dropping the Arc aborts the polling task via MetricsService::Drop —
+        // but only once the *forwarder* releases its clone too. Abort it
+        // first so the chain unwinds: forwarder dies → its Arc drops →
+        // entry's Arc drops next → MetricsService::Drop runs → poll task
+        // aborts. Without this we'd leak the poll task + metrics-server
+        // HTTP keepalive for the rest of the cluster's session.
+        if let Some(h) = entry
+            .metrics_forwarder
+            .lock()
+            .expect("metrics_forwarder mutex poisoned")
+            .take()
+        {
+            h.abort();
+        }
         slot.service.take();
     }
     Ok(())
@@ -3271,14 +3596,23 @@ pub(crate) async fn terminal_close(
 /// emitting `Unavailable`, which closes the broadcast and exits this
 /// task — `reconnect_cluster` rebuilds the entry, re-spawning a fresh
 /// forwarder via the next `connect_context`.
+///
+/// **Lifetime / memory.** Captures `Arc<ClusterHealth>` (not the full
+/// `Arc<ClusterEntry>` we used to take) so a forgotten abort can't pin
+/// the whole `Cluster` + kube `Client` HTTP/2 pool. The returned
+/// `JoinHandle` is stored on `ClusterEntry::health_forwarder` and
+/// aborted by `drop_cluster_watchers` / `tear_down_unhealthy`; without
+/// the abort the forwarder's `rx.recv()` blocks forever (the only
+/// `Sender` lives inside the captured `ClusterHealth`), which keeps
+/// `ClusterHealth` and its probe task resident even after the entry
+/// has been removed from the state map.
 fn spawn_health_forwarder(
     app: AppHandle,
     cluster_id: String,
-    entry: Arc<crate::state::ClusterEntry>,
-) {
-    let mut rx = entry.health.subscribe();
+    health: Arc<ferrisscope_core::health::ClusterHealth>,
+) -> tauri::async_runtime::JoinHandle<()> {
+    let mut rx = health.subscribe();
     let event_name = format!("cluster-health://{}", sanitize_event_segment(&cluster_id));
-    let entry_for_replay = entry.clone();
     tauri::async_runtime::spawn(async move {
         // Replay the current health snapshot so a forwarder spawned
         // *after* the probe already declared `Unavailable` (entry was
@@ -3287,7 +3621,7 @@ fn spawn_health_forwarder(
         // click into the cluster and trigger the forwarder spawn) still
         // gets the UI into the right state. The broadcast channel does
         // not buffer past events.
-        let snap = entry_for_replay.health.snapshot().await;
+        let snap = health.snapshot().await;
         if matches!(snap.status, ClusterHealthStatus::Unavailable) {
             tracing::warn!(
                 ?cluster_id,
@@ -3324,11 +3658,28 @@ fn spawn_health_forwarder(
                 }
             }
         }
-    });
+    })
 }
 
-fn spawn_metrics_forwarder(app: AppHandle, cluster_id: String, svc: Arc<MetricsService>) {
+/// **Lifetime / memory.** The returned `JoinHandle` is stored on
+/// `ClusterEntry::metrics_forwarder` and aborted by
+/// `drop_cluster_watchers` / `tear_down_unhealthy`. Subscribing here
+/// holds an `Arc<MetricsService>` clone alive — without explicit abort
+/// the service (and its poll task) would survive `slot.service.take()`
+/// in `unsubscribe_metrics`, because the forwarder's clone keeps the
+/// refcount > 0 and the broadcast `Sender` therefore never drops. The
+/// abort breaks that cycle so `MetricsService::Drop` actually runs.
+fn spawn_metrics_forwarder(
+    app: AppHandle,
+    cluster_id: String,
+    svc: Arc<MetricsService>,
+) -> tauri::async_runtime::JoinHandle<()> {
     let mut rx = svc.subscribe();
+    // Drop the strong ref before entering the async block — the
+    // subscription survives via `rx` alone (broadcast receivers don't
+    // hold the sender alive), so capturing `svc` would re-introduce
+    // the retention cycle this signature was redesigned to avoid.
+    drop(svc);
     let event_name = format!("metrics://{}", sanitize_event_segment(&cluster_id));
     tauri::async_runtime::spawn(async move {
         loop {
@@ -3349,7 +3700,7 @@ fn spawn_metrics_forwarder(app: AppHandle, cluster_id: String, svc: Arc<MetricsS
                 }
             }
         }
-    });
+    })
 }
 
 // ── Port forwarding ────────────────────────────────────────────────────────

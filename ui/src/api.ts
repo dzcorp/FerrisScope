@@ -28,6 +28,8 @@ import type {
   CronJobDetail,
   DaemonSetDetail,
   DeploymentDetail,
+  CompactMemoryResult,
+  DevMemoryStats,
   DocApplyResult,
   DrainReport,
   EndpointSliceDetail,
@@ -105,6 +107,8 @@ import type {
 
 export const api = {
   ping: () => invoke<AppInfo>("ping"),
+  devMemoryStats: () => invoke<DevMemoryStats>("dev_memory_stats"),
+  devCompactMemory: () => invoke<CompactMemoryResult>("dev_compact_memory"),
   updaterInfo: () => invoke<UpdaterInfo>("updater_info"),
   checkForUpdate: () => invoke<UpdateCheckOutcome>("check_for_update"),
   applyUpdate: (release: ReleaseInfo) =>

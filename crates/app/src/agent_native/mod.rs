@@ -102,6 +102,61 @@ impl ChatClusterCtx {
 
 pub(crate) type ChatClusterRef = Arc<ChatClusterCtx>;
 
+/// Capped variant of `read_to_end` — drains `r` into `buf` until it would
+/// exceed `cap` bytes, then stops appending and returns `(written, true)`
+/// so the caller can mark the result `truncated`. Subsequent stream data
+/// is silently consumed (best-effort drain) to let the remote side finish
+/// cleanly, but bounded by `DRAIN_CAP` so a pathological writer can't keep
+/// us looping forever.
+///
+/// Why this exists: kube-rs's `AttachedProcess` exposes async `AsyncRead`
+/// handles for exec'd commands; calling `read_to_end` on them buffers the
+/// *entire* command output into `buf` before we get a chance to truncate
+/// it. A runaway `dmesg`, `find /`, or journal dump streams hundreds of MB
+/// into the app process — the post-hoc truncate to 64 KiB defeats its own
+/// purpose. This helper applies the cap *during* the read so the Vec
+/// never grows past `cap + a small slack`.
+pub(crate) async fn read_capped<R>(r: &mut R, buf: &mut Vec<u8>, cap: usize) -> bool
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    // Drain at most this much extra after hitting the cap before bailing.
+    // Lets the remote side flush its protocol epilogue without letting a
+    // gigabit writer pin us to the loop indefinitely.
+    const DRAIN_CAP: usize = 1024 * 1024;
+
+    let mut chunk = [0u8; 8 * 1024];
+    let mut truncated = false;
+    let mut drained = 0usize;
+    loop {
+        match r.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if buf.len() >= cap {
+                    truncated = true;
+                    drained += n;
+                    if drained >= DRAIN_CAP {
+                        break;
+                    }
+                    continue;
+                }
+                let take = (cap - buf.len()).min(n);
+                buf.extend_from_slice(&chunk[..take]);
+                if take < n {
+                    truncated = true;
+                    drained += n - take;
+                    if drained >= DRAIN_CAP {
+                        break;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    truncated
+}
+
 /// Build the per-chat native registry. Tools close over `AppHandle` (cheap
 /// clone, internally ref-counted) and a shared `ChatClusterRef`; AppState is
 /// fetched per-call via `app.state::<AppState>()` so we don't need to thread

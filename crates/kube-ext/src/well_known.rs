@@ -116,11 +116,7 @@ pub(crate) fn dyn_meta_value(obj: &DynamicObject) -> Value {
         .as_ref()
         .map(|m| m.iter().map(|(k, v)| serde_json::json!([k, v])).collect())
         .unwrap_or_default();
-    let annotations: Vec<Value> = m
-        .annotations
-        .as_ref()
-        .map(|m| m.iter().map(|(k, v)| serde_json::json!([k, v])).collect())
-        .unwrap_or_default();
+    let annotations = crate::kinds::pod_template::project_annotations(m.annotations.as_ref());
     let controlled_by = m
         .owner_references
         .as_ref()

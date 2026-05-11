@@ -29,7 +29,14 @@ use tokio::task::JoinHandle;
 
 use crate::registry::KindSpec;
 
-const DELTA_BUFFER: usize = 1024;
+/// Per-watcher broadcast capacity. tokio's broadcast retains the last N
+/// sends for any laggy receiver, so this is a steady-state floor on memory
+/// per active reflector (≈ rows × ~1 KB each). The forwarder consumer in
+/// `commands.rs` drains in <1 s under normal conditions, so a smaller ring
+/// is plenty; 256 keeps headroom for a brief stall (resync after 410 Gone,
+/// chatty kinds like `events`) without holding tens of MB across ~20
+/// active reflectors when the operator is idle on a tab.
+const DELTA_BUFFER: usize = 256;
 
 /// Build a kube-rs watcher Config that matches the cluster's chosen
 /// strategy. Streaming uses `InitialListStrategy::StreamingList` (one watch

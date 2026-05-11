@@ -30,10 +30,9 @@ use kube::{Api, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
-use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 
-use crate::agent_native::ChatClusterRef;
+use crate::agent_native::{read_capped, ChatClusterRef};
 use crate::state::AppState;
 
 /// Default image for the debug pod. Matches the operator-facing terminal
@@ -603,20 +602,25 @@ async fn run_exec(
 
     // Drain stdout and stderr concurrently — serially risks the duplex buffer
     // filling on the side we're not yet reading and back-pressuring the
-    // server-side message loop.
+    // server-side message loop. Each side is capped at `MAX_OUTPUT_BYTES`
+    // *during* the read (`read_capped`), not after — a runaway command
+    // (find /, journalctl -k, dmesg) would otherwise buffer hundreds of
+    // MB of node output into the app process before the cap applied.
     let stdout_fut = async move {
         let mut buf = Vec::with_capacity(4096);
+        let mut trunc = false;
         if let Some(mut out) = stdout_h {
-            let _ = out.read_to_end(&mut buf).await;
+            trunc = read_capped(&mut out, &mut buf, MAX_OUTPUT_BYTES).await;
         }
-        buf
+        (buf, trunc)
     };
     let stderr_fut = async move {
         let mut buf = Vec::with_capacity(1024);
+        let mut trunc = false;
         if let Some(mut err) = stderr_h {
-            let _ = err.read_to_end(&mut buf).await;
+            trunc = read_capped(&mut err, &mut buf, MAX_OUTPUT_BYTES).await;
         }
-        buf
+        (buf, trunc)
     };
     let status_fut = async move {
         match status_h {
@@ -625,18 +629,10 @@ async fn run_exec(
         }
     };
 
-    let (mut stdout_buf, mut stderr_buf, status) =
+    let ((stdout_buf, stdout_trunc), (mut stderr_buf, stderr_trunc), status) =
         futures::join!(stdout_fut, stderr_fut, status_fut);
 
-    let mut truncated = false;
-    if stdout_buf.len() > MAX_OUTPUT_BYTES {
-        stdout_buf.truncate(MAX_OUTPUT_BYTES);
-        truncated = true;
-    }
-    if stderr_buf.len() > MAX_OUTPUT_BYTES {
-        stderr_buf.truncate(MAX_OUTPUT_BYTES);
-        truncated = true;
-    }
+    let truncated = stdout_trunc || stderr_trunc;
 
     // Parse the apiserver's exec status. Three shapes matter:
     //   1. Success → exit 0.

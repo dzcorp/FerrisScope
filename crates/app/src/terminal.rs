@@ -140,6 +140,10 @@ pub(crate) struct TerminalRegistry {
 }
 
 impl TerminalRegistry {
+    pub(crate) async fn count(&self) -> usize {
+        self.sessions.lock().await.len()
+    }
+
     /// `extras` is a list of scratch files the caller created on the session's
     /// behalf (e.g. an SSH-tunneled kubeconfig). They get appended to the
     /// session's cleanup list and are removed when the session closes.

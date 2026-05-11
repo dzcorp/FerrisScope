@@ -83,3 +83,8 @@ aes-gcm = "0.10"
 # aggressively and has better small-allocation locality. Zero correctness
 # risk; drop-in via #[global_allocator] in main.rs.
 mimalloc = { version = "0.1", default-features = false }
+# Safe wrapper around `mi_collect` — the high-level `mimalloc` crate
+# doesn't re-export the extended API, and the raw FFI from
+# `libmimalloc-sys` would trip the workspace's `forbid(unsafe_code)`
+# lint. The shim crate isolates that one `unsafe` block.
+ferrisscope-mimalloc-ext.workspace = true

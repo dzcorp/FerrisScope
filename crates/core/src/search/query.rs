@@ -16,6 +16,46 @@ const TRIGRAM_MIN: usize = 3;
 /// the IPC payload bounded if the frontend asks for too many.
 const MAX_RESULTS: i64 = 200;
 
+/// FTS5 column weights, in the order columns appear in the `rows_fts`
+/// schema: `name`, `namespace`, `kind_id`, `blob`. A name match should
+/// dominate a blob mention, otherwise a Pod literally called `mysql-0`
+/// can lose to a ConfigMap that merely references mysql in an env var.
+/// Kind weight is mild but non-zero so typing `pod` still surfaces Pods.
+const BM25_WEIGHTS: &str = "10.0, 3.0, 2.0, 1.0";
+
+/// Per-kind score multiplier. FTS5 `bm25()` returns negative numbers (more
+/// negative = more relevant), so multiplying by `> 1.0` strengthens a hit
+/// and `< 1.0` weakens it. Workload + canonical-destination kinds get a
+/// small boost; noisy / derived / internal kinds (Events, ReplicaSets,
+/// Endpoints, EndpointSlices, Leases) are pushed down so a real workload
+/// match isn't drowned by hundreds of Events that happen to mention the
+/// same string.
+///
+/// Unlisted kinds (CRDs, RBAC, storage, etc.) take the neutral `1.0`
+/// branch — we don't punish them, we just don't boost them.
+const KIND_BIAS_CASE: &str = "CASE r.kind_id
+        WHEN 'pods'                   THEN 1.5
+        WHEN 'deployments'            THEN 1.4
+        WHEN 'services'               THEN 1.4
+        WHEN 'statefulsets'           THEN 1.3
+        WHEN 'daemonsets'             THEN 1.3
+        WHEN 'configmaps'             THEN 1.2
+        WHEN 'secrets'                THEN 1.2
+        WHEN 'ingresses'              THEN 1.2
+        WHEN 'nodes'                  THEN 1.2
+        WHEN 'namespaces'             THEN 1.2
+        WHEN 'cronjobs'               THEN 1.2
+        WHEN 'helm_releases'          THEN 1.2
+        WHEN 'jobs'                   THEN 1.1
+        WHEN 'persistentvolumeclaims' THEN 1.1
+        WHEN 'events'                 THEN 0.2
+        WHEN 'endpoints'              THEN 0.3
+        WHEN 'endpointslices'         THEN 0.3
+        WHEN 'leases'                 THEN 0.3
+        WHEN 'replicasets'            THEN 0.4
+        ELSE 1.0
+    END";
+
 pub(super) fn run(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
     let trimmed = query.trim();
     if trimmed.chars().count() < MIN_QUERY_LEN {
@@ -36,15 +76,17 @@ pub(super) fn run(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Se
     }
     let match_query = fts_tokens.join(" ");
 
-    let mut stmt = conn.prepare_cached(
-        "SELECT r.kind_id, r.uid, r.namespace, r.name, r.blob, bm25(rows_fts) AS score
+    let sql = format!(
+        "SELECT r.kind_id, r.uid, r.namespace, r.name, r.blob,
+                bm25(rows_fts, {BM25_WEIGHTS}) * ({KIND_BIAS_CASE}) AS score
          FROM rows_fts
          JOIN rows r ON r.rowid = rows_fts.rowid
          WHERE rows_fts MATCH ?1
            AND r.deleted_at IS NULL
          ORDER BY score
-         LIMIT ?2",
-    )?;
+         LIMIT ?2"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
     let mut rows = stmt.query(rusqlite::params![match_query, limit])?;
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
@@ -65,16 +107,20 @@ fn escape_fts_phrase(token: &str) -> String {
 
 /// LIKE fallback for very short queries (every token < 3 chars). Slow on
 /// large indices but bounded by `LIMIT`, and only fires when FTS can't.
+/// Bias by kind first (Events / ReplicaSets / Endpoints last), then by
+/// recency — without BM25 we have no real relevance signal, so the kind
+/// bias is doing all the work of demoting noisy rows for 2-char queries.
 fn like_fallback(conn: &Connection, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let pattern = format!("%{}%", escape_like(query));
-    let mut stmt = conn.prepare_cached(
-        "SELECT kind_id, uid, namespace, name, blob, 0.0 AS score
-         FROM rows
-         WHERE deleted_at IS NULL
-           AND (name LIKE ?1 ESCAPE '\\' OR namespace LIKE ?1 ESCAPE '\\')
-         ORDER BY updated_at DESC
-         LIMIT ?2",
-    )?;
+    let sql = format!(
+        "SELECT r.kind_id, r.uid, r.namespace, r.name, r.blob, 0.0 AS score
+         FROM rows r
+         WHERE r.deleted_at IS NULL
+           AND (r.name LIKE ?1 ESCAPE '\\' OR r.namespace LIKE ?1 ESCAPE '\\')
+         ORDER BY ({KIND_BIAS_CASE}) DESC, r.updated_at DESC
+         LIMIT ?2"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
     let mut rows = stmt.query(rusqlite::params![pattern, limit])?;
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {

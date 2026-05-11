@@ -335,6 +335,40 @@ pub fn project_label_selector(
     })
 }
 
+/// Annotation keys we drop at projection time so they never reach the IPC
+/// boundary or the frontend store. Currently just the legacy
+/// `kubectl.kubernetes.io/last-applied-configuration` blob — kubectl
+/// embeds a full JSON copy of the object there (commonly 5–30 KB) and the
+/// SSA migration this app commits to has retired it. Shipping it costs
+/// per-detail-fetch memory and pollutes the annotations chip strip with
+/// noise the operator can't act on.
+///
+/// SSA safety: ferrisscope never sends this key in apply payloads, so it
+/// never claims ownership of it — dropping it from the projection cannot
+/// release ownership and the kubectl-client-side-apply manager continues
+/// to own/maintain the annotation untouched.
+pub const HIDDEN_ANNOTATION_KEYS: &[&str] = &["kubectl.kubernetes.io/last-applied-configuration"];
+
+#[inline]
+fn is_hidden_annotation(key: &str) -> bool {
+    HIDDEN_ANNOTATION_KEYS.contains(&key)
+}
+
+/// Build the `Vec<[k, v]>` annotation projection used by every detail
+/// payload, with [`HIDDEN_ANNOTATION_KEYS`] elided.
+pub fn project_annotations(
+    annotations: Option<&std::collections::BTreeMap<String, String>>,
+) -> Vec<Value> {
+    annotations
+        .map(|m| {
+            m.iter()
+                .filter(|(k, _)| !is_hidden_annotation(k))
+                .map(|(k, v)| json!([k, v]))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Common metadata projection — name, namespace, uid, created, labels,
 /// annotations (full), controlled_by, managers. Reused so every workload
 /// shares the same detail header shape.
@@ -344,11 +378,7 @@ pub fn project_meta(meta: &k8s_openapi::apimachinery::pkg::apis::meta::v1::Objec
         .as_ref()
         .map(|m| m.iter().map(|(k, v)| json!([k, v])).collect())
         .unwrap_or_default();
-    let annotations: Vec<Value> = meta
-        .annotations
-        .as_ref()
-        .map(|m| m.iter().map(|(k, v)| json!([k, v])).collect())
-        .unwrap_or_default();
+    let annotations = project_annotations(meta.annotations.as_ref());
     let controlled_by = meta
         .owner_references
         .as_ref()

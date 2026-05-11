@@ -24,9 +24,8 @@ use kube::{Api, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
-use tokio::io::AsyncReadExt;
 
-use crate::agent_native::ChatClusterRef;
+use crate::agent_native::{read_capped, ChatClusterRef};
 use crate::state::AppState;
 
 /// Output cap matches `fs_node_shell_exec` so the agent gets a consistent
@@ -171,19 +170,25 @@ async fn run_exec(
     let stderr_h = process.stderr();
     let status_h = process.take_status();
 
+    // Streaming cap, not a post-hoc truncate: a runaway exec (find /,
+    // dmesg, cat /var/log/*) would otherwise buffer hundreds of MB into
+    // the app process before the cap applied. `read_capped` stops
+    // appending the moment `buf.len() >= MAX_OUTPUT_BYTES`.
     let stdout_fut = async move {
         let mut buf = Vec::with_capacity(4096);
+        let mut trunc = false;
         if let Some(mut out) = stdout_h {
-            let _ = out.read_to_end(&mut buf).await;
+            trunc = read_capped(&mut out, &mut buf, MAX_OUTPUT_BYTES).await;
         }
-        buf
+        (buf, trunc)
     };
     let stderr_fut = async move {
         let mut buf = Vec::with_capacity(1024);
+        let mut trunc = false;
         if let Some(mut err) = stderr_h {
-            let _ = err.read_to_end(&mut buf).await;
+            trunc = read_capped(&mut err, &mut buf, MAX_OUTPUT_BYTES).await;
         }
-        buf
+        (buf, trunc)
     };
     let status_fut = async move {
         match status_h {
@@ -192,18 +197,13 @@ async fn run_exec(
         }
     };
 
-    let (mut stdout_buf, mut stderr_buf, status) =
+    let ((stdout_buf, stdout_trunc), (mut stderr_buf, stderr_trunc), status) =
         futures::join!(stdout_fut, stderr_fut, status_fut);
 
-    let mut truncated = false;
-    if stdout_buf.len() > MAX_OUTPUT_BYTES {
-        stdout_buf.truncate(MAX_OUTPUT_BYTES);
-        truncated = true;
-    }
-    if stderr_buf.len() > MAX_OUTPUT_BYTES {
-        stderr_buf.truncate(MAX_OUTPUT_BYTES);
-        truncated = true;
-    }
+    // `truncated` already reflects the streaming cap; the explicit
+    // post-hoc `Vec::truncate` that used to live here is unnecessary now
+    // that `read_capped` never overshoots `MAX_OUTPUT_BYTES`.
+    let truncated = stdout_trunc || stderr_trunc;
 
     // Same status-decoding logic as fs_node_shell_exec — non-Success without
     // an ExitCode cause means the command never started (binary missing,

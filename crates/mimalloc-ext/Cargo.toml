@@ -1,0 +1,23 @@
+[package]
+name = "ferrisscope-mimalloc-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Workspace `forbid(unsafe_code)` would block the FFI call to
+# `mi_collect` that is the whole point of this crate. The unsafe
+# surface is one function — an `extern "C"` symbol with no
+# preconditions beyond mimalloc being the active allocator. Keeping it
+# isolated here means the rest of the workspace retains its
+# unsafe-free invariant.
+[lints.rust]
+unsafe_code = "allow"
+
+[dependencies]
+# `extended` exposes `mi_collect` (and the other mimalloc beyond-malloc
+# entry points) — the default features only re-export the standard
+# malloc/free shape.
+libmimalloc-sys = { version = "0.1", features = ["extended"] }

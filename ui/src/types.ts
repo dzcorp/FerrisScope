@@ -6,6 +6,41 @@ export type AppInfo = {
   version: string;
 };
 
+// Dev-only memory readout for the header HUD. `rss_bytes` is the Rust process's
+// resident set; null on platforms where we don't read it (macOS/Windows).
+export type DevMemoryStats = {
+  rss_bytes: number | null;
+};
+
+// Before/after snapshot from a forced mimalloc collect — see
+// `dev_compact_memory`. Used by the dev HUD chip to show how much RSS
+// the allocator was holding in unreturned arena pages.
+export type CompactMemoryResult = {
+  rss_before: number | null;
+  rss_after: number | null;
+  mi_current_commit: number;
+  mi_peak_commit: number;
+  clusters: number;
+  per_cluster: ClusterMemoryInfo[];
+  search_indices: number;
+  port_forwards: number;
+  terminals: number;
+  log_streams: number;
+  active_connects: number;
+  fleet_in_flight: number;
+  fleet_cached: number;
+  rss_anon_kb: number;
+  rss_file_kb: number;
+};
+
+export type ClusterMemoryInfo = {
+  cluster_id: string;
+  kinds_active: number;
+  subscribers_total: number;
+  metrics_active: boolean;
+  search_index_active: boolean;
+};
+
 // How this build was installed. Matches Rust `updater::InstallMethod`.
 //   - "app_image" / "mac_os_app_bundle" / "windows_nsis" → in-app updater can apply directly
 //   - "aur_bin" / "apt_deb" / "rpm_dnf" / "homebrew"     → render `update_hint` instead

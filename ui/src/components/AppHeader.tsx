@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ContextInfo } from "../types";
 import { FF_MONO, type ThemeMode, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
 import { BrandMark, IconBtn, Icons, Kbd } from "./ui";
@@ -6,6 +6,7 @@ import { MOD_KEY } from "../lib/keyboard";
 import { HeaderToast } from "./HeaderToast";
 import { parseTableFilter } from "../lib/tableFilter";
 import { useAppStore, useResolvedTheme } from "../store";
+import { api } from "../api";
 
 type Props = {
   mode: ThemeMode;
@@ -384,6 +385,8 @@ export function AppHeader({
 
         <div style={{ flex: 1 }} />
 
+        <DevMemoryChip />
+
         <HeaderToast mode={mode} />
 
         <button
@@ -531,4 +534,126 @@ export function AppHeader({
       </div>
     </div>
   );
+}
+
+// Dev-only HUD: shows the Rust process RSS, polled at 1.5s. Lives as a sibling
+// component so its setState doesn't ripple through the whole AppHeader.
+// Compiled out of production via the `import.meta.env.DEV` guard — Vite tree-
+// shakes the body and the api call when building for release.
+function DevMemoryChip() {
+  const t = useResolvedTheme().tokens;
+  const [rssBytes, setRssBytes] = useState<number | null>(null);
+  const [unsupported, setUnsupported] = useState(false);
+  // Last forced-compact delta so the operator can see whether RSS went
+  // down because of real frees or just because mimalloc returned arena
+  // pages after a manual nudge.
+  const [lastDelta, setLastDelta] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const stats = await api.devMemoryStats();
+        if (cancelled) return;
+        if (stats.rss_bytes == null) {
+          setUnsupported(true);
+        } else {
+          setRssBytes(stats.rss_bytes);
+        }
+      } catch {
+        // Backend not yet available (early startup) — keep retrying silently.
+      }
+    };
+    void tick();
+    const id = window.setInterval(tick, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  if (!import.meta.env.DEV) return null;
+  if (unsupported) return null;
+
+  const label = rssBytes == null ? "RSS —" : `RSS ${formatBytes(rssBytes)}`;
+  const deltaLabel = lastDelta == null
+    ? null
+    : lastDelta > 0
+    ? `−${formatBytes(lastDelta)}`
+    : "no change";
+
+  const compact = async () => {
+    try {
+      const r = await api.devCompactMemory();
+      if (r.rss_before != null && r.rss_after != null) {
+        setLastDelta(r.rss_before - r.rss_after);
+        setRssBytes(r.rss_after);
+      }
+      // Dump the breakdown to the JS console so the operator can
+      // localise where memory is going. Format roughly matches the
+      // backend tracing line so logs and console stay aligned.
+      const lines: string[] = [];
+      // On Linux, mimalloc's `current_commit` reports virtual address
+      // space the allocator has reserved (often many GB), not the
+      // resident set. Don't print it — it confuses the diagnostic.
+      // `peak_commit` is the high-water mark of actual usage; that's
+      // useful for spotting transient burst peaks.
+      lines.push(
+        `RSS breakdown: anon=${formatBytes(r.rss_anon_kb * 1024)} file=${formatBytes(r.rss_file_kb * 1024)}`,
+      );
+      lines.push(`mimalloc peak commit: ${formatBytes(r.mi_peak_commit)}`);
+      lines.push(`clusters cached: ${r.clusters}`);
+      for (const c of r.per_cluster) {
+        lines.push(
+          `  ${c.cluster_id}: kinds=${c.kinds_active} subs=${c.subscribers_total} metrics=${c.metrics_active ? "y" : "-"} search=${c.search_index_active ? "y" : "-"}`,
+        );
+      }
+      lines.push(
+        `other state: search_indices=${r.search_indices} port_forwards=${r.port_forwards} terminals=${r.terminals} log_streams=${r.log_streams} active_connects=${r.active_connects} fleet_cached=${r.fleet_cached}`,
+      );
+      // eslint-disable-next-line no-console
+      console.info("[dev memory]\n" + lines.join("\n"));
+    } catch {
+      // ignore — dev surface only
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={compact}
+      title="Click to force mimalloc compact — releases retained arena pages back to the OS. A big RSS drop means the previous high-water was allocator fragmentation, not real Rust-side retention."
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "2px 8px",
+        height: 22,
+        borderRadius: R_MD,
+        border: `1px solid ${t.borderSoft}`,
+        background: t.surface,
+        color: t.textDim,
+        fontFamily: FF_MONO,
+        fontSize: FS_SM,
+        fontVariantNumeric: "tabular-nums",
+        whiteSpace: "nowrap",
+        cursor: "pointer",
+      }}
+    >
+      <span>{label}</span>
+      {deltaLabel && (
+        <span style={{ color: lastDelta && lastDelta > 0 ? t.good : t.textDim }}>
+          {deltaLabel}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }

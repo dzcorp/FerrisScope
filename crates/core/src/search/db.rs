@@ -91,6 +91,21 @@ pub(super) fn open_and_init(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
+    // Bound SQLite's page cache. Default is 2000 pages × 4 KiB = ~8 MiB
+    // per connection; with one connection per cluster this becomes
+    // 8 MiB × N open clusters of pure cache, on top of the FTS5 index's
+    // own working set. Negative values are interpreted as KiB by
+    // SQLite, so `-2048` caps the cache at 2 MiB — plenty for the
+    // single-writer access pattern we have (one writer task per
+    // index, queries via `spawn_blocking` that don't hold long
+    // transactions). Visible RSS win on the operator's machine
+    // proportional to the number of clusters they've connected to.
+    conn.pragma_update(None, "cache_size", -2048)?;
+    // Disable mmap. The default mmap_size on rusqlite is 0 on most
+    // platforms but be explicit — mmap'd page cache counts against
+    // the process's anonymous mappings on Linux and inflates RSS
+    // beyond what we'd see with the page cache alone.
+    conn.pragma_update(None, "mmap_size", 0)?;
     conn.execute_batch(SCHEMA_SQL)?;
     Ok(conn)
 }

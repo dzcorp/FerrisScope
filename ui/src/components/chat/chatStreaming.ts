@@ -64,6 +64,31 @@ function summarizeToolContent(content: string): {
   return { preview, lineCount };
 }
 
+// Per-tool-result content cap on the *view* state. The wire / persisted
+// transcript on disk keeps the full payload; this cap only bounds what we
+// retain in the React store while the chat is open.
+//
+// Why: native tools return up to 64 KiB (exec/shell) or ~4 MiB (logs)
+// each. A long session with dozens of tool calls would otherwise pin
+// hundreds of MB on the JS heap — the bubble preview is what the operator
+// actually reads, and on expand they need enough head context to act, not
+// the whole stream. 64 KiB matches the exec/shell ceiling so those tools
+// surface unchanged; only the very chatty results (logs, large `kubectl
+// get -o yaml` dumps via http_fetch) get clipped.
+const TOOL_CONTENT_CAP = 64 * 1024;
+
+function capToolContent(content: string): string {
+  // JS strings are UTF-16 codeunits, not bytes; using `.length` as a
+  // proxy is close enough for a per-result cap and avoids a TextEncoder
+  // round-trip on every event. Worst case a 4-byte UTF-8 emoji counts as
+  // 2 codeunits, so the actual byte cap is ~2× this number — still
+  // well-bounded.
+  if (content.length <= TOOL_CONTENT_CAP) return content;
+  const head = content.slice(0, TOOL_CONTENT_CAP);
+  const elided = content.length - TOOL_CONTENT_CAP;
+  return `${head}\n\n[… ${elided.toLocaleString()} more chars elided — reopen chat to view full payload from the session log]`;
+}
+
 // Tool catalogue snapshot for the live chat. Native tools are always
 // counted; `servers` carries one entry per operator-configured MCP server
 // with per-server availability + tool counts. The UI uses the most recent
@@ -120,8 +145,13 @@ export function chatStateFromMessages(
     if (m.role === "system") return [];
     const role: "user" | "assistant" | "tool" =
       m.role === "tool" ? "tool" : (m.role as "user" | "assistant");
-    const content = m.content ?? "";
-    const summary = role === "tool" ? summarizeToolContent(content) : null;
+    const rawContent = m.content ?? "";
+    const summary = role === "tool" ? summarizeToolContent(rawContent) : null;
+    // Cap tool-result content at TOOL_CONTENT_CAP for memory; preview /
+    // lineCount are computed from the *full* payload first so they stay
+    // accurate. Non-tool messages aren't capped (assistant prose and
+    // user input are bounded by the LLM context window already).
+    const content = role === "tool" ? capToolContent(rawContent) : rawContent;
     return [
       {
         id: `hist-${i}`,
@@ -267,12 +297,14 @@ export function applyChatEvent(
       // Append a synthetic "tool" view message carrying the result. The
       // backend already persisted the tool message; this entry is the UI
       // mirror so operators see what actually came back from MCP.
+      // Preview / lineCount come from the *full* payload so they stay
+      // accurate even when the in-memory `content` gets clipped.
       const messages = prev.messages.slice();
       const summary = summarizeToolContent(evt.content);
       messages.push({
         id: `tool-${evt.tool_call_id}`,
         role: "tool",
-        content: evt.content,
+        content: capToolContent(evt.content),
         toolCallId: evt.tool_call_id,
         toolName: evt.name,
         toolIsError: evt.is_error,
