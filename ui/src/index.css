@@ -125,6 +125,28 @@ textarea,
 .fs-copy-flash {
   animation: fs-copy-flash-kf 480ms ease-out;
 }
+/* Log gutters (line number + timestamp). Two requirements:
+   • Never appear in clipboard when the operator drags a selection across
+     a row. `.fs-selectable *` (above) overrides `user-select` inheritance
+     for every descendant of the log surface, so the inline `userSelect`
+     we set in TSX has no effect. The `!important` here defeats that;
+     plus we render the value via `::before { content: attr(data-…) }`
+     so it's pseudo-element content (never selectable, never copied).
+   • Look like an IDE gutter: right-aligned line number, thin divider on
+     the right, tabular numbers, no shift when widths change between
+     rows. Colors come from inline styles so the active theme drives them. */
+.fs-log-gutter,
+.fs-log-gutter::before {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: default;
+}
+.fs-log-gutter--no::before {
+  content: attr(data-line-no);
+}
+.fs-log-gutter--ts::before {
+  content: attr(data-ts);
+}
 /* Settings deep-link landing pulse — applied to the matched
    `data-fs-anchor` element by SettingsPanel after `scrollIntoView`. A
    single soft ring fade so the operator's eye lands on the right

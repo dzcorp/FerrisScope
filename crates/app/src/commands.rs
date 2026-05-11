@@ -2387,12 +2387,23 @@ pub(crate) async fn stop_log_stream(
     Ok(())
 }
 
+/// Maximum lines to coalesce into a single `LogEvent::Batch` frame.
+/// Caps allocation + IPC payload size; on a noisy pod we expect to hit
+/// this rather than the time-bound.
+const LOG_BATCH_MAX: usize = 64;
+
 /// Forward log events directly over a `tauri::ipc::Channel` rather than the
 /// global event bus. Channels are typed, skip the listener fan-out, and avoid
 /// the `format!("logs://{id}")` string-keyed dispatch — measurably cheaper for
 /// the highest-bandwidth surface in the app. The frontend supplies the
 /// `Channel<LogEvent>` at `start_log_stream` time; we send into it until the
 /// stream ends or the channel reports a send error (frontend dropped).
+///
+/// Consecutive `Line` events get coalesced into a `Batch` frame whenever the
+/// broadcast queue has backlog. The initial 200-line tail burst would
+/// otherwise hit the JS main thread as 200 separate JSON-parse + dispatch
+/// hops; batching pulls that down to ~3-4 frames and unfreezes the panel
+/// on open of a chatty pod.
 fn spawn_log_forwarder(
     channel: tauri::ipc::Channel<LogEvent>,
     stream_id: String,
@@ -2401,26 +2412,84 @@ fn spawn_log_forwarder(
     let mut rx = stream.subscribe();
     tauri::async_runtime::spawn(async move {
         loop {
-            match rx.recv().await {
-                Ok(evt) => {
-                    let is_end = matches!(&evt, LogEvent::Ended { .. });
-                    if let Err(e) = channel.send(evt) {
-                        tracing::warn!(
-                            error = %e,
-                            ?stream_id,
-                            "log forwarder exiting (channel send failed; frontend likely dropped)"
-                        );
+            // Block on the first event. Most of the time on a quiet stream
+            // we send exactly one Line and loop back here immediately.
+            let first = match rx.recv().await {
+                Ok(e) => e,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    if channel.send(LogEvent::Lagged { dropped: n }).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::debug!(?stream_id, "log forwarder exiting (broadcast closed)");
+                    return;
+                }
+            };
+
+            // Hot path: first event is a Line. Try to drain any backlog
+            // (synchronously, no await) and ship as one Batch frame.
+            if let LogEvent::Line { text } = first {
+                let mut lines: Vec<String> = Vec::with_capacity(8);
+                lines.push(text);
+                let mut trailing: Option<LogEvent> = None;
+                while lines.len() < LOG_BATCH_MAX {
+                    match rx.try_recv() {
+                        Ok(LogEvent::Line { text }) => lines.push(text),
+                        Ok(other) => {
+                            trailing = Some(other);
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                            trailing = Some(LogEvent::Lagged { dropped: n });
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                            // Flush what we have, then exit after the loop.
+                            trailing = Some(LogEvent::Ended {
+                                reason: "stream closed".to_owned(),
+                            });
+                            break;
+                        }
+                    }
+                }
+                let payload = if lines.len() == 1 {
+                    LogEvent::Line {
+                        text: lines.pop().expect("len==1"),
+                    }
+                } else {
+                    LogEvent::Batch { lines }
+                };
+                if channel.send(payload).is_err() {
+                    tracing::warn!(
+                        ?stream_id,
+                        "log forwarder exiting (channel send failed; frontend likely dropped)"
+                    );
+                    return;
+                }
+                if let Some(t) = trailing {
+                    let is_end = matches!(&t, LogEvent::Ended { .. });
+                    if channel.send(t).is_err() {
                         return;
                     }
                     if is_end {
                         return;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    let _ = channel.send(LogEvent::Lagged { dropped: n });
+            } else {
+                // Non-Line first event: ship as-is.
+                let is_end = matches!(&first, LogEvent::Ended { .. });
+                if let Err(e) = channel.send(first) {
+                    tracing::warn!(
+                        error = %e,
+                        ?stream_id,
+                        "log forwarder exiting (channel send failed; frontend likely dropped)"
+                    );
+                    return;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    tracing::debug!(?stream_id, "log forwarder exiting (broadcast closed)");
+                if is_end {
                     return;
                 }
             }

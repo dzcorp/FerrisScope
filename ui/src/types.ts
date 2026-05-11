@@ -350,6 +350,7 @@ export type SearchHit = {
 
 export type LogEvent =
   | { kind: "line"; text: string }
+  | { kind: "batch"; lines: string[] }
   | { kind: "lagged"; dropped: number }
   | { kind: "ended"; reason: string };
 

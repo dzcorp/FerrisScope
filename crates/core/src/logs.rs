@@ -28,6 +28,13 @@ pub enum LogEvent {
     Line {
         text: String,
     },
+    /// Multiple consecutive log lines coalesced into a single IPC frame.
+    /// Emitted by the forwarder when the broadcast queue has backlog —
+    /// keeps the JS main thread from drowning in per-line JSON-parse
+    /// overhead during the initial tail burst or noisy pods.
+    Batch {
+        lines: Vec<String>,
+    },
     /// Backend signalling that N lines were dropped because the consumer lagged.
     Lagged {
         dropped: u64,
@@ -62,7 +69,10 @@ impl LogStream {
             follow: true,
             tail_lines: Some(TAIL_LINES),
             container: container.map(ToOwned::to_owned),
-            timestamps: false,
+            // Apiserver prepends an RFC3339Nano timestamp per line; the
+            // frontend parses + reformats it for the gutter. Cheap (~30
+            // bytes per line) and avoids a second per-line round trip.
+            timestamps: true,
             ..Default::default()
         };
 
