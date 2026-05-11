@@ -29,7 +29,7 @@
     "zustand": "5.0.13"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "4.2.4",
+    "@tailwindcss/vite": "4.3.0",
     "@tauri-apps/cli": "2.11.1",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
@@ -40,9 +40,9 @@
     "@vitejs/plugin-react": "6.0.1",
     "@vitest/coverage-v8": "^4.1.5",
     "jsdom": "^29.1.1",
-    "tailwindcss": "4.2.4",
+    "tailwindcss": "4.3.0",
     "typescript": "6.0.3",
-    "vite": "8.0.11",
+    "vite": "8.0.12",
     "vitest": "^4.1.5"
   }
 }
