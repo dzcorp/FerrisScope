@@ -1,13 +1,13 @@
 import { useEffect } from "react";
 import type { MouseEvent } from "react";
-import { useAppStore } from "../store";
+import { useAppStore, useResolvedTheme } from "../store";
 import type { Toast as ToastT } from "../store";
 import {
-  tokens,
-  FONT_MONO,
+  
+  FF_MONO,
   FONT_SANS,
   type ThemeMode,
-  type Tokens,
+  type Tokens, R_LG, R_MD, FS_MD, FS_XS
 } from "../theme";
 import { IconBtn, Icons } from "./ui";
 
@@ -23,8 +23,8 @@ type Props = { mode: ThemeMode };
 // Per Helmsman v2 design principles, on-screen feedback (Terminating row,
 // status pills) is the primary signal; this strip is reserved for things
 // that happened off-screen or completed in the background.
-export function HeaderToast({ mode }: Props) {
-  const t = tokens(mode);
+export function HeaderToast({}: Props) {
+  const t = useResolvedTheme().tokens;
   const toasts = useAppStore((s) => s.toasts);
   const newest = toasts[toasts.length - 1];
   if (!newest) return null;
@@ -100,12 +100,12 @@ function HeaderToastCard({
         background: t.surface,
         color: t.text,
         border: `1px solid ${t.border}`,
-        borderRadius: 7,
+        borderRadius: R_MD,
         boxShadow: ringShadow,
         cursor: "pointer",
         overflow: "hidden",
         animation: "fs-toast-slide-in .18s cubic-bezier(.2,.7,.2,1)",
-        fontSize: 12.5,
+        fontSize: FS_MD,
         fontFamily: FONT_SANS,
         textAlign: "left",
         padding: 0,
@@ -139,14 +139,14 @@ function HeaderToastCard({
       {queued > 0 && (
         <span
           style={{
-            fontSize: 10.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
             fontVariantNumeric: "tabular-nums",
             color: t.textDim,
             padding: "1px 6px",
             marginRight: 4,
             background: t.chip,
-            borderRadius: 9,
+            borderRadius: R_LG,
             lineHeight: 1.3,
           }}
         >

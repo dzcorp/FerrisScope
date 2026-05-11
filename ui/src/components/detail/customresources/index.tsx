@@ -6,9 +6,10 @@
 // other kind.
 
 import { useEffect, useRef, useState } from "react";
+import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
@@ -49,7 +50,7 @@ export function CustomResourceDefinitionSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const reqId = useRef(0);
@@ -100,8 +101,8 @@ export function CustomResourceDefinitionSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
             wordBreak: "break-all",
@@ -111,7 +112,7 @@ export function CustomResourceDefinitionSummary(props: {
         </span>
         <StatusPill status={d.scope} t={t} mode={props.mode} dense />
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -134,21 +135,21 @@ export function CustomResourceDefinitionSummary(props: {
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Group">
           <Copyable text={d.group}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.group}
             </span>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Kind">
           <Copyable text={d.names.kind}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.names.kind}
             </span>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Plural">
           <Copyable text={d.names.plural}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.names.plural}
             </span>
           </Copyable>
@@ -156,14 +157,14 @@ export function CustomResourceDefinitionSummary(props: {
         {d.names.singular && (
           <DetailRow t={t} label="Singular">
             <Copyable text={d.names.singular}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.names.singular}
               </span>
             </Copyable>
           </DetailRow>
         )}
         <DetailRow t={t} label="Scope">
-          <span style={{ fontSize: 12 }}>{d.scope}</span>
+          <span style={{ fontSize: FS_MD }}>{d.scope}</span>
         </DetailRow>
         {d.names.short_names.length > 0 && (
           <DetailRow t={t} label="Short Names">
@@ -193,7 +194,7 @@ export function CustomResourceDefinitionSummary(props: {
         )}
         {d.conversion_strategy && (
           <DetailRow t={t} label="Conversion">
-            <span style={{ fontSize: 12 }}>{d.conversion_strategy}</span>
+            <span style={{ fontSize: FS_MD }}>{d.conversion_strategy}</span>
           </DetailRow>
         )}
       </div>
@@ -205,8 +206,8 @@ export function CustomResourceDefinitionSummary(props: {
           storageVersion ? (
             <span
               style={{
-                fontSize: 10.5,
-                fontFamily: FONT_MONO,
+                fontSize: FS_XS,
+                fontFamily: FF_MONO,
                 color: t.textMuted,
               }}
             >
@@ -232,9 +233,9 @@ export function CustomResourceDefinitionSummary(props: {
               {v.deprecated && (
                 <span
                   style={{
-                    fontSize: 11,
+                    fontSize: FS_SM,
                     color: t.warn,
-                    fontFamily: FONT_MONO,
+                    fontFamily: FF_MONO,
                   }}
                 >
                   deprecated
@@ -243,9 +244,9 @@ export function CustomResourceDefinitionSummary(props: {
               {v.printer_columns.length > 0 && (
                 <span
                   style={{
-                    fontSize: 11,
+                    fontSize: FS_SM,
                     color: t.textMuted,
-                    fontFamily: FONT_MONO,
+                    fontFamily: FF_MONO,
                   }}
                 >
                   {v.printer_columns.length} printer column
@@ -257,9 +258,9 @@ export function CustomResourceDefinitionSummary(props: {
               <div
                 style={{
                   marginTop: 4,
-                  fontSize: 11.5,
+                  fontSize: FS_SM,
                   color: t.warn,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {v.deprecation_warning}

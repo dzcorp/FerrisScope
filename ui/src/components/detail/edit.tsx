@@ -22,7 +22,7 @@ import {
   type ReactNode,
 } from "react";
 import { api } from "../../api";
-import { FONT_MONO, type Tokens } from "../../theme";
+import { FF_MONO, type Tokens, R_SM, FS_MD, FS_SM } from "../../theme";
 import { Icons } from "../ui";
 import type { ApplyResult } from "../../types";
 
@@ -144,7 +144,7 @@ function iconBtnStyle(t: Tokens): CSSProperties {
     justifyContent: "center",
     width: 22,
     height: 22,
-    borderRadius: 3,
+    borderRadius: R_SM,
     border: "none",
     background: "transparent",
     cursor: "pointer",
@@ -159,12 +159,12 @@ function chipBtnStyle(t: Tokens): CSSProperties {
     alignItems: "center",
     height: 22,
     padding: "0 8px",
-    borderRadius: 3,
+    borderRadius: R_SM,
     border: "none",
     background: t.chip,
     color: t.textDim,
-    fontFamily: FONT_MONO,
-    fontSize: 11,
+    fontFamily: FF_MONO,
+    fontSize: FS_SM,
     fontWeight: 700,
     letterSpacing: 0.4,
     cursor: "pointer",
@@ -235,10 +235,10 @@ export function EditableTextValue({
     width: "100%",
     background: t.bg,
     color: t.text,
-    fontFamily: monospace ? FONT_MONO : "inherit",
-    fontSize: 12,
+    fontFamily: monospace ? FF_MONO : "inherit",
+    fontSize: FS_MD,
     border: `1px solid ${invalid ? t.bad : t.borderSoft}`,
-    borderRadius: 3,
+    borderRadius: R_SM,
     padding: "4px 6px",
     outline: "none",
     boxSizing: "border-box",
@@ -299,9 +299,9 @@ export function AddRowButton({
         background: t.chip,
         color: t.textDim,
         border: `1px dashed ${t.borderSoft}`,
-        borderRadius: 3,
-        fontFamily: FONT_MONO,
-        fontSize: 11,
+        borderRadius: R_SM,
+        fontFamily: FF_MONO,
+        fontSize: FS_SM,
         fontWeight: 600,
         cursor: "pointer",
       }}
@@ -336,9 +336,9 @@ export function ConflictBanner({
         padding: "10px 12px",
         background: "rgba(245,158,11,0.12)",
         border: `1px solid rgba(245,158,11,0.4)`,
-        borderRadius: 3,
+        borderRadius: R_SM,
         color: t.text,
-        fontSize: 12,
+        fontSize: FS_MD,
         display: "flex",
         flexDirection: "column",
         gap: 8,
@@ -355,8 +355,8 @@ export function ConflictBanner({
       {conflict.fields.length > 0 && (
         <div
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             color: t.textDim,
             wordBreak: "break-all",
           }}
@@ -366,7 +366,7 @@ export function ConflictBanner({
       )}
       <div
         style={{
-          fontSize: 11.5,
+          fontSize: FS_SM,
           color: t.textMuted,
           whiteSpace: "pre-wrap",
         }}
@@ -553,8 +553,8 @@ export function KvEditor({
                 gap: 8,
                 opacity: 0.45,
                 textDecoration: "line-through",
-                fontFamily: FONT_MONO,
-                fontSize: 11.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_SM,
                 padding: "2px 0",
               }}
             >
@@ -877,8 +877,8 @@ export function ListEditor<F>({
                 gap: 8,
                 opacity: 0.45,
                 textDecoration: "line-through",
-                fontFamily: FONT_MONO,
-                fontSize: 11.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_SM,
                 padding: `${rowGap}px 0`,
               }}
             >

@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
+import { useResolvedTheme } from "../../store";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
+import { tokens, FF_MONO, type ThemeMode, R_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { Eyebrow } from "../ui";
 import {
   shouldRenderMessage,
@@ -47,7 +48,7 @@ const ROW_GAP = 12;
 // below the virtual container — small fixed count, easier than folding
 // them into the row array.
 export function MessageList({ mode, state, streaming, chatId, compacting }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const { scrollRef, stuck, snapToBottom } = useStickToBottom();
   // Filter out messages that MessageBubble would render as null
   // (settled assistant turns with no text — typically tool-call-only
@@ -232,14 +233,14 @@ export function MessageList({ mode, state, streaming, chatId, compacting }: Prop
               justifyContent: "center",
               flex: 1,
               color: t.textMuted,
-              fontSize: 12,
+              fontSize: FS_MD,
               textAlign: "center",
               padding: 24,
             }}
           >
             <div>
               <Eyebrow t={t}>Cluster-aware AI chat</Eyebrow>
-              <div style={{ marginTop: 6, fontFamily: FONT_MONO }}>
+              <div style={{ marginTop: 6, fontFamily: FF_MONO }}>
                 Ask anything about this cluster.
               </div>
             </div>
@@ -339,10 +340,10 @@ function JumpToLatestButton({
         transform: "translateX(-50%)",
         background: t.surface,
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 999,
+        borderRadius: R_LG,
         padding: "5px 12px",
-        fontFamily: FONT_MONO,
-        fontSize: 11,
+        fontFamily: FF_MONO,
+        fontSize: FS_SM,
         color: t.text,
         cursor: "pointer",
         boxShadow: "0 2px 8px rgba(15,20,30,0.18)",
@@ -381,18 +382,18 @@ function ThinkingPlaceholder({ t }: { t: ReturnType<typeof tokens> }) {
           maxWidth: "92%",
           background: t.surface,
           border: `1px solid ${t.border}`,
-          borderRadius: 10,
+          borderRadius: R_LG,
           padding: "9px 13px 10px",
           color: t.text,
-          fontSize: 13,
+          fontSize: FS_MD,
           lineHeight: 1.55,
           boxShadow: "0 1px 3px rgba(15,20,30,0.05)",
         }}
       >
         <div
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             color: t.textDim,
             letterSpacing: 0.6,
             textTransform: "uppercase",
@@ -421,18 +422,18 @@ function CompactingBubble({ t }: { t: ReturnType<typeof tokens> }) {
           maxWidth: "92%",
           background: t.surface,
           border: `1px solid ${t.border}`,
-          borderRadius: 10,
+          borderRadius: R_LG,
           padding: "9px 13px 10px",
           color: t.text,
-          fontSize: 13,
+          fontSize: FS_MD,
           lineHeight: 1.55,
           boxShadow: "0 1px 3px rgba(15,20,30,0.05)",
         }}
       >
         <div
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             color: t.textDim,
             letterSpacing: 0.6,
             textTransform: "uppercase",
@@ -449,7 +450,7 @@ function CompactingBubble({ t }: { t: ReturnType<typeof tokens> }) {
             alignItems: "center",
             gap: 8,
             color: t.textDim,
-            fontSize: 12,
+            fontSize: FS_MD,
           }}
         >
           <span>summarising older context</span>

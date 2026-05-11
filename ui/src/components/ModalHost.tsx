@@ -1,7 +1,7 @@
 import { useEffect } from "react";
-import { useAppStore } from "../store";
+import { useAppStore, useResolvedTheme } from "../store";
 import type { ConfirmModal } from "../store";
-import { tokens, FONT_SANS, FONT_MONO, type ThemeMode } from "../theme";
+import { tokens, FONT_SANS, FF_MONO, type ThemeMode, R_LG, FS_MD } from "../theme";
 import { Btn, IconBtn, Icons } from "./ui";
 
 type Props = { mode: ThemeMode };
@@ -10,8 +10,8 @@ type Props = { mode: ThemeMode };
 // Modals slide down from the top edge per the design (R-09): they sit above
 // every panel (DetailPanel z-index 31; modal scrim 60). Esc and backdrop click
 // resolve as Cancel.
-export function ModalHost({ mode }: Props) {
-  const t = tokens(mode);
+export function ModalHost({}: Props) {
+  const t = useResolvedTheme().tokens;
   const modals = useAppStore((s) => s.modals);
   const resolveModal = useAppStore((s) => s.resolveModal);
 
@@ -81,7 +81,7 @@ function Modal({
         background: t.surface,
         color: t.text,
         border: `1px solid ${t.border}`,
-        borderRadius: 10,
+        borderRadius: R_LG,
         boxShadow: "0 24px 60px rgba(0,0,0,0.35)",
         zIndex: 61,
         animation: "fs-modal-drop .18s cubic-bezier(.2,.7,.2,1)",
@@ -101,7 +101,7 @@ function Modal({
           id={`modal-title-${m.id}`}
           style={{
             flex: 1,
-            fontSize: 13.5,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
             wordBreak: "break-word",
@@ -122,14 +122,14 @@ function Modal({
           style={{
             padding: "12px 16px",
             color: t.textDim,
-            fontSize: 12.5,
+            fontSize: FS_MD,
             lineHeight: 1.55,
             whiteSpace: "pre-wrap",
             fontFamily:
               // Use mono only if the body looks like an identifier list
               // (multi-line with slashes) — keeps copy-friendly content tabular
               // and still legible.
-              /\n.+\//.test(m.body) ? FONT_MONO : FONT_SANS,
+              /\n.+\//.test(m.body) ? FF_MONO : FONT_SANS,
             maxHeight: "60vh",
             overflowY: "auto",
           }}

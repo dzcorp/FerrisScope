@@ -1,7 +1,8 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useResolvedTheme } from "../store";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
-import { tokens, FONT_MONO, type ThemeMode } from "../theme";
+import { tokens, FF_MONO, type ThemeMode, FS_LG, FS_SM } from "../theme";
 import {
   ErrorBlock,
   Eyebrow,
@@ -31,7 +32,7 @@ type LineEntry = { id: number; text: string; system: boolean };
 const MAX_LINES = 5000;
 
 // Single-line row height seed for the virtualizer. Matches the inline
-// rendering style (`fontSize: 11.5`, `lineHeight: 1.65`); rows that
+// rendering style (`fontSize: FS_SM`, `lineHeight: 1.65`); rows that
 // actually wrap (`whiteSpace: pre-wrap`, `wordBreak: break-all`) are
 // re-measured via `measureElement`.
 const LOG_ROW_HEIGHT = Math.round(11.5 * 1.65);
@@ -92,7 +93,7 @@ export function LogPanel({
   defaultContainer,
   onClose,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const initialContainer =
     (defaultContainer && pod.containers.includes(defaultContainer)
       ? defaultContainer
@@ -272,11 +273,11 @@ export function LogPanel({
               }}
             >
               <Eyebrow t={t}>Pod logs</Eyebrow>
-              <span style={{ color: t.textMuted, fontSize: 11 }}>·</span>
+              <span style={{ color: t.textMuted, fontSize: FS_SM }}>·</span>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   color: t.textDim,
                 }}
               >
@@ -285,9 +286,9 @@ export function LogPanel({
             </div>
             <div
               style={{
-                fontSize: 14,
+                fontSize: FS_LG,
                 fontWeight: 600,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
                 wordBreak: "break-all",
                 lineHeight: 1.3,
                 color: t.text,
@@ -312,8 +313,8 @@ export function LogPanel({
                   onChange={(v) => setContainer(v)}
                   options={pod.containers.map((c) => ({ value: c, label: c }))}
                   style={{
-                    fontFamily: FONT_MONO,
-                    fontSize: 11,
+                    fontFamily: FF_MONO,
+                    fontSize: FS_SM,
                     height: 26,
                     padding: "3px 28px 3px 8px",
                   }}
@@ -321,9 +322,9 @@ export function LogPanel({
               ) : (
                 <span
                   style={{
-                    fontSize: 11,
+                    fontSize: FS_SM,
                     color: t.textMuted,
-                    fontFamily: FONT_MONO,
+                    fontFamily: FF_MONO,
                   }}
                 >
                   container: {container ?? "—"}
@@ -344,19 +345,21 @@ export function LogPanel({
           style={{
             flex: 1,
             overflow: "auto",
-            background: mode === "dark" ? "#0a0c10" : "#1a1d23",
-            color: "#cbd5e1",
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            // Log surface follows the active palette — light themes get a
+            // light log pane (IDE-style), dark themes stay dark.
+            background: t.surfaceAlt,
+            color: t.text,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             lineHeight: 1.65,
             padding: 14,
           }}
         >
           {lines.length === 0 && status.kind === "starting" && (
-            <div style={{ color: "#64748b" }}>Connecting to log stream…</div>
+            <div style={{ color: t.textMuted }}>Connecting to log stream…</div>
           )}
           {lines.length === 0 && status.kind === "streaming" && (
-            <div style={{ color: "#64748b" }}>Waiting for output…</div>
+            <div style={{ color: t.textMuted }}>Waiting for output…</div>
           )}
           {status.kind === "error" && (
             <ErrorBlock
@@ -391,7 +394,7 @@ export function LogPanel({
                       transform: `translateY(${vi.start}px)`,
                     }}
                   >
-                    <LogLine entry={l} />
+                    <LogLine entry={l} text={t.text} systemColor={t.warn} />
                   </div>
                 );
               })}
@@ -403,9 +406,9 @@ export function LogPanel({
           style={{
             padding: "8px 22px",
             borderTop: `1px solid ${t.borderSoft}`,
-            fontSize: 11,
+            fontSize: FS_SM,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             display: "flex",
             alignItems: "center",
             gap: 12,
@@ -458,9 +461,9 @@ function StreamStatus({
       <Tooltip label={status.reason}>
         <span
           style={{
-            fontSize: 11,
+            fontSize: FS_SM,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           ended · {status.reason}
@@ -474,11 +477,21 @@ function StreamStatus({
 // `LineEntry` reference is stable in the ring buffer, so a shallow prop
 // equality check is enough to short-circuit. `contain: content` isolates
 // layout/paint per row, which keeps long logs scrolling smoothly.
-const LogLine = memo(function LogLine({ entry }: { entry: LineEntry }) {
+// `text` / `systemColor` are stable across renders (memo'd resolved theme),
+// so they don't bust LogLine's prop equality.
+const LogLine = memo(function LogLine({
+  entry,
+  text,
+  systemColor,
+}: {
+  entry: LineEntry;
+  text: string;
+  systemColor: string;
+}) {
   return (
     <div
       style={{
-        color: entry.system ? "#fbbf24" : "#cbd5e1",
+        color: entry.system ? systemColor : text,
         whiteSpace: "pre-wrap",
         wordBreak: "break-all",
         contain: "content",

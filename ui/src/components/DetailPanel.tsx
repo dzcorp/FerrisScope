@@ -8,7 +8,7 @@ import {
   type Json,
 } from "../lib/yamlEdit";
 import { installClipboardShortcuts } from "../lib/monacoClipboard";
-import { useAppStore } from "../store";
+import { useAppStore, useResolvedTheme } from "../store";
 import type {
   ContainerDetail,
   ContainerLastState,
@@ -20,7 +20,7 @@ import type {
   ResourceKind,
   ResourceRow,
 } from "../types";
-import { tokens, FONT_MONO, type ThemeMode, type Tokens } from "../theme";
+import { tokens, FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
 import {
   Chip,
   ContainerDots,
@@ -270,7 +270,7 @@ export function DetailPanel({
   onNavigate,
   onOpenExec,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const isPod = kind.id === "pods";
   const isNode = kind.id === "nodes";
   const isPvc = kind.id === "persistentvolumeclaims";
@@ -734,11 +734,11 @@ export function DetailPanel({
               }}
             >
               <Eyebrow t={t}>{kind.kind}</Eyebrow>
-              <span style={{ color: t.textMuted, fontSize: 11 }}>·</span>
+              <span style={{ color: t.textMuted, fontSize: FS_SM }}>·</span>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   color: t.textDim,
                 }}
               >
@@ -746,11 +746,11 @@ export function DetailPanel({
               </span>
               {target.namespace && (
                 <>
-                  <span style={{ color: t.textMuted, fontSize: 11 }}>·</span>
+                  <span style={{ color: t.textMuted, fontSize: FS_SM }}>·</span>
                   <span
                     style={{
-                      fontFamily: FONT_MONO,
-                      fontSize: 11,
+                      fontFamily: FF_MONO,
+                      fontSize: FS_SM,
                       color: t.textDim,
                     }}
                   >
@@ -761,9 +761,9 @@ export function DetailPanel({
             </div>
             <div
               style={{
-                fontSize: 14,
+                fontSize: FS_LG,
                 fontWeight: 600,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
                 wordBreak: "break-all",
                 lineHeight: 1.3,
                 color: t.text,
@@ -1086,7 +1086,9 @@ export function DetailPanel({
           style={{
             flex: 1,
             minHeight: 0,
-            background: mode === "dark" ? "#1e1e1e" : "#fafbfc",
+            // Tab-body surface — slightly inset from the panel chrome. Drives
+            // from the active palette so theme switches recolor here too.
+            background: t.surfaceAlt,
           }}
         >
           {tab === "summary" && hasSummary ? (
@@ -1258,6 +1260,9 @@ function YamlPane({
   setError: (v: string | null) => void;
   onSaved: () => void;
 }) {
+  // Monaco wants a literal font stack — pull the theme's mono so it
+  // tracks VS Code's Cascadia etc.
+  const monoFont = useResolvedTheme().typography.fontMono;
   const editing = buffer !== null;
   // Operator-facing toggle: when true, render the unstripped raw YAML
   // (managedFields / status / etc visible). Forced false in edit mode so
@@ -1384,8 +1389,8 @@ function YamlPane({
       >
         <span
           style={{
-            fontSize: 10.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
             color: t.textMuted,
             textTransform: "uppercase",
             letterSpacing: 0.6,
@@ -1421,12 +1426,12 @@ function YamlPane({
                 gap: 6,
                 height: 22,
                 padding: "0 8px",
-                borderRadius: 3,
+                borderRadius: R_SM,
                 border: "none",
                 background: showHidden ? t.accentSoft : t.chip,
                 color: showHidden ? t.accent : t.textDim,
-                fontFamily: FONT_MONO,
-                fontSize: 11,
+                fontFamily: FF_MONO,
+                fontSize: FS_SM,
                 fontWeight: 700,
                 letterSpacing: 0.4,
                 cursor: "pointer",
@@ -1492,9 +1497,9 @@ function YamlPane({
           options={{
             readOnly: !editing || saving,
             minimap: { enabled: false },
-            fontSize: 12,
-            fontFamily:
-              '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+            // Monaco wants a literal font + numeric size.
+            fontSize: 12.5,
+            fontFamily: monoFont,
             wordWrap: "on",
             scrollBeyondLastLine: false,
             renderLineHighlight: "none",
@@ -1516,7 +1521,7 @@ function YamlPane({
 //     chain. Child-pod resolution would need a new backend command and
 //     lives elsewhere — flagged inline so the operator knows where to look.
 function RelatedPane({
-  mode,
+  
   clusterId,
   kindId,
   kindLabel,
@@ -1532,7 +1537,7 @@ function RelatedPane({
   onNavigate?: DetailNavigate;
   detailVersion: number;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   type State =
     | { kind: "loading" }
     | { kind: "ready"; items: RelatedItem[] }
@@ -1601,8 +1606,8 @@ function RelatedPane({
               right={
                 <span
                   style={{
-                    fontSize: 10.5,
-                    fontFamily: FONT_MONO,
+                    fontSize: FS_XS,
+                    fontFamily: FF_MONO,
                     color: t.textMuted,
                   }}
                 >
@@ -1625,13 +1630,13 @@ function RelatedPane({
                     copyText={it.targetName}
                     enabled={!!onNavigate}
                   >
-                    <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                    <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                       {it.targetKind} · {it.targetName}
                     </span>
                   </LinkValue>
                 ) : (
                   <Copyable text={it.targetName}>
-                    <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                    <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                       {it.targetName}
                     </span>
                   </Copyable>
@@ -1773,9 +1778,9 @@ function TabButton({
       type="button"
       onClick={onClick}
       style={{
-        fontSize: 11,
+        fontSize: FS_SM,
         fontWeight: 600,
-        fontFamily: FONT_MONO,
+        fontFamily: FF_MONO,
         textTransform: "uppercase",
         letterSpacing: 0.6,
         padding: "10px 14px",
@@ -1807,7 +1812,7 @@ function ObjectEvents({
   clusterId: string;
   targetUid: string;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const [state, setState] = useState<EventState>({ kind: "loading" });
   const rowsRef = useRef<Map<string, ResourceRow>>(new Map());
   const initialDoneRef = useRef(false);
@@ -1895,7 +1900,7 @@ function ObjectEvents({
         <div
           style={{
             marginTop: 6,
-            fontSize: 12,
+            fontSize: FS_MD,
             color: t.textMuted,
           }}
         >
@@ -1913,7 +1918,7 @@ function ObjectEvents({
         style={{
           width: "100%",
           borderCollapse: "collapse",
-          fontSize: 12,
+          fontSize: FS_MD,
           color: t.text,
         }}
       >
@@ -1938,12 +1943,12 @@ function ObjectEvents({
                 style={{
                   textAlign: "left",
                   padding: "10px 14px",
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   fontWeight: 700,
                   color: t.textMuted,
                   textTransform: "uppercase",
                   letterSpacing: 0.5,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                   width: typeof w === "number" ? w : undefined,
                 }}
               >
@@ -1975,8 +1980,8 @@ function ObjectEvents({
                 style={{
                   padding: "8px 14px",
                   color: t.textDim,
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                 }}
               >
                 {String(r.reason ?? "")}
@@ -1994,7 +1999,7 @@ function ObjectEvents({
                 style={{
                   padding: "8px 14px",
                   fontVariantNumeric: "tabular-nums",
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                   color: t.textDim,
                 }}
               >
@@ -2004,7 +2009,7 @@ function ObjectEvents({
                 style={{
                   padding: "8px 14px",
                   fontVariantNumeric: "tabular-nums",
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                   color: t.textMuted,
                 }}
               >
@@ -2044,7 +2049,7 @@ function PodSummary({
   // refetch without re-mounting.
   detailVersion: number;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const [state, setState] = useState<DetailState>({ kind: "loading" });
   const [refetch, setRefetch] = useState(0);
   const reqId = useRef(0);
@@ -2116,7 +2121,7 @@ function PodSummary({
         {containerLites.length > 0 && (
           <ContainerDots containers={containerLites} t={t} size={9} />
         )}
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {readyCount(d)} ready · {totalRestarts(d)} restarts
           {d.created_at ? ` · ${ageFromIso(d.created_at)} old` : ""}
         </span>
@@ -2129,7 +2134,7 @@ function PodSummary({
         <DetailRow t={t} label="Created">
           {d.created_at ? (
             <Copyable text={d.created_at}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {ageFromIso(d.created_at)} ago
                 <span style={{ color: t.textMuted, marginLeft: 8 }}>
                   ({d.created_at})
@@ -2142,7 +2147,7 @@ function PodSummary({
         </DetailRow>
         <DetailRow t={t} label="Name">
           <Copyable text={d.name}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{d.name}</span>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.name}</span>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Namespace">
@@ -2164,8 +2169,8 @@ function PodSummary({
             <Copyable text={d.uid}>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   color: t.textDim,
                   wordBreak: "break-all",
                 }}
@@ -2212,7 +2217,7 @@ function PodSummary({
         />
         {d.controlled_by && (
           <DetailRow t={t} label="Controlled By">
-            <span style={{ fontSize: 12 }}>{d.controlled_by.kind}</span>{" "}
+            <span style={{ fontSize: FS_MD }}>{d.controlled_by.kind}</span>{" "}
             <LinkValue
               t={t}
               onClick={() =>
@@ -2239,7 +2244,7 @@ function PodSummary({
           {d.status_reason && (
             <span
               style={{
-                fontSize: 11.5,
+                fontSize: FS_SM,
                 color: t.textDim,
                 marginLeft: 8,
               }}
@@ -2303,14 +2308,14 @@ function PodSummary({
         {d.qos_class && (
           <DetailRow t={t} label="QoS Class">
             <Copyable text={d.qos_class}>
-              <span style={{ fontSize: 12 }}>{d.qos_class}</span>
+              <span style={{ fontSize: FS_MD }}>{d.qos_class}</span>
             </Copyable>
           </DetailRow>
         )}
         {d.termination_grace_period_s != null && (
           <DetailRow t={t} label="Termination Grace Period">
             <Copyable text={`${d.termination_grace_period_s}s`}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.termination_grace_period_s}s
               </span>
             </Copyable>
@@ -2319,7 +2324,7 @@ function PodSummary({
         {d.priority_class && (
           <DetailRow t={t} label="Priority Class">
             <Copyable text={d.priority_class}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.priority_class}
               </span>
             </Copyable>
@@ -2327,7 +2332,7 @@ function PodSummary({
         )}
         {d.tolerations.length > 0 && (
           <DetailRow t={t} label="Tolerations">
-            <span style={{ fontSize: 12, color: t.textDim }}>
+            <span style={{ fontSize: FS_MD, color: t.textDim }}>
               {d.tolerations.length} total
             </span>
           </DetailRow>
@@ -2394,8 +2399,8 @@ function PodSummary({
                     display: "flex",
                     flexDirection: "column",
                     gap: 4,
-                    fontSize: 11.5,
-                    fontFamily: FONT_MONO,
+                    fontSize: FS_SM,
+                    fontFamily: FF_MONO,
                   }}
                 >
                   {d.scheduling.topology_spread.map((c, i) => (
@@ -2455,7 +2460,7 @@ function PodSummary({
               d.scheduling.scheduler_name !== "default-scheduler" && (
                 <DetailRow t={t} label="Scheduler">
                   <Copyable text={d.scheduling.scheduler_name}>
-                    <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                    <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                       {d.scheduling.scheduler_name}
                     </span>
                   </Copyable>
@@ -2463,7 +2468,7 @@ function PodSummary({
               )}
             {d.scheduling.priority != null && (
               <DetailRow t={t} label="Priority">
-                <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                   {d.scheduling.priority}
                 </span>
               </DetailRow>
@@ -2471,7 +2476,7 @@ function PodSummary({
             {d.scheduling.runtime_class && (
               <DetailRow t={t} label="Runtime Class">
                 <Copyable text={d.scheduling.runtime_class}>
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                  <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                     {d.scheduling.runtime_class}
                   </span>
                 </Copyable>
@@ -2479,7 +2484,7 @@ function PodSummary({
             )}
             {d.restart_policy && d.restart_policy !== "Always" && (
               <DetailRow t={t} label="Restart Policy">
-                <span style={{ fontSize: 12 }}>{d.restart_policy}</span>
+                <span style={{ fontSize: FS_MD }}>{d.restart_policy}</span>
               </DetailRow>
             )}
           </div>
@@ -2509,9 +2514,9 @@ function PodSummary({
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {initContainers.length} total
@@ -2544,9 +2549,9 @@ function PodSummary({
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {mainContainers.length} total
@@ -2714,12 +2719,12 @@ function PodSecuritySection({
       )}
       {s.seccomp_profile_type && (
         <DetailRow t={t} label="Seccomp Profile">
-          <span style={{ fontSize: 12 }}>{s.seccomp_profile_type}</span>
+          <span style={{ fontSize: FS_MD }}>{s.seccomp_profile_type}</span>
         </DetailRow>
       )}
       {s.se_linux_type && (
         <DetailRow t={t} label="SELinux">
-          <span style={{ fontSize: 12 }}>{s.se_linux_type}</span>
+          <span style={{ fontSize: FS_MD }}>{s.se_linux_type}</span>
         </DetailRow>
       )}
       {hostFlags.length > 0 && (
@@ -2850,7 +2855,7 @@ function ContainerCard({
     <div
       style={{
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         marginBottom: 10,
         background: t.surface,
         overflow: "hidden",
@@ -2874,8 +2879,8 @@ function ContainerCard({
         />
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 12.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             flex: 1,
             minWidth: 0,
@@ -2888,12 +2893,12 @@ function ContainerCard({
         </span>
         <span
           style={{
-            fontSize: 9.5,
+            fontSize: FS_XS,
             fontWeight: 700,
             color: t.textMuted,
             textTransform: "uppercase",
             letterSpacing: 0.4,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           {c.kind}
@@ -2903,7 +2908,7 @@ function ContainerCard({
 
       <div style={{ padding: "4px 12px" }}>
         <DetailRow t={t} label="Status">
-          <span style={{ fontSize: 12, color: c.ready ? t.good : t.textDim }}>
+          <span style={{ fontSize: FS_MD, color: c.ready ? t.good : t.textDim }}>
             {c.state.toLowerCase()}
             {c.ready ? ", ready" : ""}
           </span>
@@ -2915,9 +2920,9 @@ function ContainerCard({
           {c.restart_count > 0 && (
             <span
               style={{
-                fontSize: 11,
+                fontSize: FS_SM,
                 color: c.restart_count > 5 ? t.bad : t.warn,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
               }}
             >
               · {c.restart_count} restart{c.restart_count === 1 ? "" : "s"}
@@ -2926,7 +2931,7 @@ function ContainerCard({
         </DetailRow>
         {c.started_at && (
           <DetailRow t={t} label="Started">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {ageFromIso(c.started_at)} ago
               <span style={{ color: t.textMuted, marginLeft: 8 }}>
                 ({c.started_at})
@@ -2982,8 +2987,8 @@ function ContainerCard({
               <Copyable text={c.image}>
                 <span
                   style={{
-                    fontFamily: FONT_MONO,
-                    fontSize: 11.5,
+                    fontFamily: FF_MONO,
+                    fontSize: FS_SM,
                     wordBreak: "break-all",
                   }}
                 >
@@ -2998,8 +3003,8 @@ function ContainerCard({
             <Copyable text={c.image_id}>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   color: t.textDim,
                   wordBreak: "break-all",
                 }}
@@ -3014,8 +3019,8 @@ function ContainerCard({
             <Copyable text={c.container_id}>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   color: t.textDim,
                   wordBreak: "break-all",
                 }}
@@ -3027,7 +3032,7 @@ function ContainerCard({
         )}
         {!namespace && c.image_pull_policy && (
           <DetailRow t={t} label="ImagePullPolicy">
-            <span style={{ fontSize: 12 }}>{c.image_pull_policy}</span>
+            <span style={{ fontSize: FS_MD }}>{c.image_pull_policy}</span>
           </DetailRow>
         )}
         {namespace && (
@@ -3144,8 +3149,8 @@ function ContainerCard({
           <DetailRow t={t} label="Command">
             <span
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 11.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_SM,
                 wordBreak: "break-all",
               }}
             >
@@ -3157,8 +3162,8 @@ function ContainerCard({
           <DetailRow t={t} label="Args">
             <span
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 11.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_SM,
                 wordBreak: "break-all",
               }}
             >

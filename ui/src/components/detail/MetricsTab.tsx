@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import { api, onMetrics, onPrometheusChanged } from "../../api";
-import { tokens, FONT_MONO, type ThemeMode, type Tokens } from "../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_SM, FS_MD, FS_SM, FS_XS } from "../../theme";
 import type {
   MetricsSnapshot,
   PromBackend,
@@ -45,7 +45,7 @@ function backendShortLabel(b: PromBackend): string {
 }
 import { DetailRow, Mute } from "./primitives";
 import { ErrorBlock, IconBtn, Icons, Section } from "../ui";
-import { useAppStore } from "../../store";
+import { useAppStore, useResolvedTheme } from "../../store";
 
 // Per-pod / per-PVC metrics surface. CPU + memory come exclusively from
 // Prometheus (PromQL range queries) — metrics-server is not used here, by
@@ -433,7 +433,7 @@ export function MetricsTab(props: {
   // kube_pod_owner / kube_<kind>_status_* lookup to use.
   controllerKind?: WorkloadKind;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const target: Mode = useMemo(() => {
     if (!props.name) {
       throw new Error("MetricsTab requires name");
@@ -560,8 +560,8 @@ function PodMetrics({
             right={
               <span
                 style={{
-                  fontSize: 10.5,
-                  fontFamily: FONT_MONO,
+                  fontSize: FS_XS,
+                  fontFamily: FF_MONO,
                   color: t.textMuted,
                 }}
               >
@@ -625,7 +625,7 @@ function PvcMetrics({
   if (!v) {
     return (
       <Mute t={t}>
-        <span style={{ fontSize: 12 }}>Loading volume metrics…</span>
+        <span style={{ fontSize: FS_MD }}>Loading volume metrics…</span>
       </Mute>
     );
   }
@@ -635,7 +635,7 @@ function PvcMetrics({
       <Section t={t} title="Volume usage" />
       <UsageGauge t={t} v={v} />
       <DetailRow t={t} label="Mounted by">
-        <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
           {v.pod_namespace}/{v.pod_name}
         </span>
       </DetailRow>
@@ -698,7 +698,7 @@ function PromPodHistory({
   if (entry === undefined) {
     return (
       <Mute t={t}>
-        <span style={{ fontSize: 12 }}>Detecting Prometheus…</span>
+        <span style={{ fontSize: FS_MD }}>Detecting Prometheus…</span>
       </Mute>
     );
   }
@@ -880,7 +880,7 @@ function NodeMetrics({
   if (entry === undefined) {
     return (
       <Mute t={t}>
-        <span style={{ fontSize: 12 }}>Detecting Prometheus…</span>
+        <span style={{ fontSize: FS_MD }}>Detecting Prometheus…</span>
       </Mute>
     );
   }
@@ -1017,7 +1017,7 @@ function NamespaceMetrics({
   if (entry === undefined) {
     return (
       <Mute t={t}>
-        <span style={{ fontSize: 12 }}>Detecting Prometheus…</span>
+        <span style={{ fontSize: FS_MD }}>Detecting Prometheus…</span>
       </Mute>
     );
   }
@@ -1151,7 +1151,7 @@ function WorkloadMetrics({
   if (entry === undefined) {
     return (
       <Mute t={t}>
-        <span style={{ fontSize: 12 }}>Detecting Prometheus…</span>
+        <span style={{ fontSize: FS_MD }}>Detecting Prometheus…</span>
       </Mute>
     );
   }
@@ -1384,8 +1384,8 @@ function FallbackChart({
       extraRight={
         <span
           style={{
-            fontSize: 10,
-            fontFamily: FONT_MONO,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
             color: t.textMuted,
             letterSpacing: 0.4,
             textTransform: "uppercase",
@@ -1469,13 +1469,13 @@ function RangePicker({
             onClick={() => onChange(o)}
             style={{
               padding: "3px 10px",
-              fontSize: 11,
-              fontFamily: FONT_MONO,
+              fontSize: FS_SM,
+              fontFamily: FF_MONO,
               fontVariantNumeric: "tabular-nums",
               background: active ? t.accent : "transparent",
               color: active ? "#fff" : t.textMuted,
               border: `1px solid ${active ? t.accent : t.border}`,
-              borderRadius: 3,
+              borderRadius: R_SM,
               cursor: "pointer",
               letterSpacing: 0.3,
             }}
@@ -1528,12 +1528,12 @@ function PromBadge({ t }: { t: Tokens }) {
   return (
     <span
       style={{
-        fontSize: 10,
-        fontFamily: FONT_MONO,
+        fontSize: FS_XS,
+        fontFamily: FF_MONO,
         color: t.accent,
         background: t.accentSoft,
         padding: "2px 6px",
-        borderRadius: 3,
+        borderRadius: R_SM,
         letterSpacing: 0.4,
         textTransform: "uppercase",
       }}
@@ -1561,7 +1561,7 @@ function PromChart({
           padding: "8px 10px",
           background: "rgba(244,63,94,0.08)",
           border: `1px solid rgba(244,63,94,0.4)`,
-          borderRadius: 3,
+          borderRadius: R_SM,
         }}
       >
         <ErrorBlock
@@ -1576,7 +1576,7 @@ function PromChart({
   if (state.samples.length < 2) {
     return (
       <Mute t={t}>
-        <span style={{ fontSize: 12 }}>
+        <span style={{ fontSize: FS_MD }}>
           {state.loading ? "Querying Prometheus…" : "No samples in range"}
         </span>
       </Mute>
@@ -1616,9 +1616,9 @@ function PromMultiChart({
           background: "rgba(244,63,94,0.08)",
           border: `1px solid rgba(244,63,94,0.4)`,
           color: t.text,
-          fontSize: 11.5,
-          borderRadius: 3,
-          fontFamily: FONT_MONO,
+          fontSize: FS_SM,
+          borderRadius: R_SM,
+          fontFamily: FF_MONO,
           wordBreak: "break-word",
         }}
       >
@@ -1631,7 +1631,7 @@ function PromMultiChart({
   if (!anyHasData) {
     return (
       <Mute t={t}>
-        <span style={{ fontSize: 12 }}>
+        <span style={{ fontSize: FS_MD }}>
           {anyLoading ? "Querying Prometheus…" : "No samples in range"}
         </span>
       </Mute>
@@ -1688,8 +1688,8 @@ function MetricSection({
             {last && (
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   color: t.text,
                   fontVariantNumeric: "tabular-nums",
                 }}
@@ -1746,8 +1746,8 @@ function MultiSeriesSection({
             {have && (
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   color: t.textMuted,
                   fontVariantNumeric: "tabular-nums",
                 }}
@@ -1765,7 +1765,7 @@ function MultiSeriesSection({
             padding: "8px 10px",
             background: "rgba(244,63,94,0.08)",
             border: `1px solid rgba(244,63,94,0.4)`,
-            borderRadius: 3,
+            borderRadius: R_SM,
           }}
         >
           <ErrorBlock
@@ -1777,7 +1777,7 @@ function MultiSeriesSection({
         </div>
       ) : !have ? (
         <Mute t={t}>
-          <span style={{ fontSize: 12 }}>
+          <span style={{ fontSize: FS_MD }}>
             {state.loading ? "Querying Prometheus…" : "No samples in range"}
           </span>
         </Mute>
@@ -1814,7 +1814,7 @@ function UsageGauge({ t, v }: { t: Tokens; v: VolumeMetric }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <DetailRow t={t} label="Used">
-        <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
           {fmtBytes(v.used_bytes)} / {fmtBytes(v.capacity_bytes)}{" "}
           <span style={{ color: tone, marginLeft: 8 }}>
             ({(pct * 100).toFixed(1)}%)
@@ -1822,7 +1822,7 @@ function UsageGauge({ t, v }: { t: Tokens; v: VolumeMetric }) {
         </span>
       </DetailRow>
       <DetailRow t={t} label="Available">
-        <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
           {fmtBytes(v.available_bytes)}
         </span>
       </DetailRow>
@@ -1838,8 +1838,8 @@ function UsageGaugeInline({ t, v }: { t: Tokens; v: VolumeMetric }) {
     <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1 }}>
       <span
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 12,
+          fontFamily: FF_MONO,
+          fontSize: FS_MD,
           minWidth: 200,
         }}
       >
@@ -1856,7 +1856,7 @@ function InodeRow({ t, v }: { t: Tokens; v: VolumeMetric }) {
   const pct = v.used_inodes / v.capacity_inodes;
   return (
     <DetailRow t={t} label="Inodes">
-      <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+      <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
         {v.used_inodes.toLocaleString()} / {v.capacity_inodes.toLocaleString()}{" "}
         <span style={{ color: gaugeTone(t, pct), marginLeft: 8 }}>
           ({(pct * 100).toFixed(1)}%)
@@ -1899,7 +1899,7 @@ function Bar({
         minWidth: compact ? 100 : undefined,
         background: t.surfaceAlt,
         border: `1px solid ${t.border}`,
-        borderRadius: 3,
+        borderRadius: R_SM,
         overflow: "hidden",
       }}
     >
@@ -1969,8 +1969,8 @@ function UnavailableBanner({
         background: "rgba(245,158,11,0.12)",
         border: `1px solid rgba(245,158,11,0.4)`,
         color: t.text,
-        fontSize: 12,
-        borderRadius: 3,
+        fontSize: FS_MD,
+        borderRadius: R_SM,
         marginBottom: 18,
         display: "flex",
         alignItems: "flex-start",
@@ -2174,7 +2174,7 @@ function Chart({
                 x={PAD_L - 6}
                 y={y + 3.5}
                 fontSize={10}
-                fontFamily={FONT_MONO}
+                fontFamily={FF_MONO}
                 fill={axisTextColor}
                 textAnchor="end"
               >
@@ -2194,7 +2194,7 @@ function Chart({
               x={x}
               y={PAD_T + innerH + 14}
               fontSize={10}
-              fontFamily={FONT_MONO}
+              fontFamily={FF_MONO}
               fill={axisTextColor}
               textAnchor={anchor}
             >
@@ -2263,7 +2263,7 @@ function Chart({
                     x={x + 18}
                     y={y}
                     fontSize={10}
-                    fontFamily={FONT_MONO}
+                    fontFamily={FF_MONO}
                     fill={t.textMuted}
                   >
                     {sr.label}
@@ -2284,9 +2284,9 @@ function Chart({
             background: t.surface,
             border: `1px solid ${t.border}`,
             padding: "5px 9px",
-            fontSize: 11,
-            fontFamily: FONT_MONO,
-            borderRadius: 3,
+            fontSize: FS_SM,
+            fontFamily: FF_MONO,
+            borderRadius: R_SM,
             pointerEvents: "none",
             whiteSpace: "nowrap",
             boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
@@ -2294,7 +2294,7 @@ function Chart({
             fontVariantNumeric: "tabular-nums",
           }}
         >
-          <div style={{ color: t.textMuted, fontSize: 10, marginBottom: 2 }}>
+          <div style={{ color: t.textMuted, fontSize: FS_XS, marginBottom: 2 }}>
             {formatRelTime(hoveredRef.t, tLast)}
           </div>
           {series.map((sr, i) => {
@@ -2314,7 +2314,7 @@ function Chart({
                   style={{
                     width: 8,
                     height: 8,
-                    borderRadius: 2,
+                    borderRadius: R_SM,
                     background: sr.stroke,
                     display: "inline-block",
                   }}

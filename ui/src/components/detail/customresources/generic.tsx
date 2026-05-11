@@ -21,8 +21,9 @@ import {
   useState,
 } from "react";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { useResolvedTheme } from "../../../store";
+import { FF_MONO, type ThemeMode, type Tokens, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XL, FS_XS } from "../../../theme";
+import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill, Tooltip } from "../../ui";
 import {
   ChipWrap,
@@ -70,7 +71,7 @@ export function CustomResourceSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [specFocus, setSpecFocus] = useState<Segment[]>([]);
@@ -134,8 +135,8 @@ export function CustomResourceSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
             wordBreak: "break-all",
@@ -152,7 +153,7 @@ export function CustomResourceSummary(props: {
           </Chip>
         </Copyable>
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -183,7 +184,7 @@ export function CustomResourceSummary(props: {
                     <Mute t={t}>—</Mute>
                   ) : (
                     <Copyable text={String(v)}>
-                      <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                      <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                         {c.type === "date" && typeof v === "string"
                           ? `${ageFromIso(v)} (${v})`
                           : String(v)}
@@ -216,8 +217,8 @@ export function CustomResourceSummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
-                  fontFamily: FONT_MONO,
+                  fontSize: FS_XS,
+                  fontFamily: FF_MONO,
                   color: t.textMuted,
                 }}
               >
@@ -239,9 +240,9 @@ export function CustomResourceSummary(props: {
                 {c.reason && (
                   <span
                     style={{
-                      fontSize: 11.5,
+                      fontSize: FS_SM,
                       color: t.textMuted,
-                      fontFamily: FONT_MONO,
+                      fontFamily: FF_MONO,
                     }}
                   >
                     {c.reason}
@@ -250,7 +251,7 @@ export function CustomResourceSummary(props: {
                 {c.message && (
                   <span
                     style={{
-                      fontSize: 11.5,
+                      fontSize: FS_SM,
                       color: t.textMuted,
                       wordBreak: "break-word",
                     }}
@@ -261,9 +262,9 @@ export function CustomResourceSummary(props: {
                 {c.lastTransitionTime && (
                   <span
                     style={{
-                      fontSize: 11,
+                      fontSize: FS_SM,
                       color: t.textMuted,
-                      fontFamily: FONT_MONO,
+                      fontFamily: FF_MONO,
                     }}
                   >
                     {ageFromIso(c.lastTransitionTime)}
@@ -466,13 +467,13 @@ function TreeView({
         title="Exit focus"
         aria-label="Exit focus"
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 10,
+          fontFamily: FF_MONO,
+          fontSize: FS_XS,
           padding: "2px 6px",
           background: t.surface,
           color: t.textMuted,
           border: `1px solid ${t.borderSoft}`,
-          borderRadius: 3,
+          borderRadius: R_SM,
           cursor: "pointer",
           textTransform: "none",
           letterSpacing: 0,
@@ -506,7 +507,7 @@ function TreeView({
                     padding: "10px 12px 14px",
                     background: t.surface,
                     border: `1px solid ${t.borderSoft}`,
-                    borderRadius: 6,
+                    borderRadius: R_MD,
                   }}
                 >
                   {trailLabels.length > 0 && (
@@ -517,8 +518,8 @@ function TreeView({
                         flexWrap: "wrap",
                         gap: 4,
                         marginBottom: 8,
-                        fontSize: 11,
-                        fontFamily: FONT_MONO,
+                        fontSize: FS_SM,
+                        fontFamily: FF_MONO,
                         color: t.textMuted,
                       }}
                     >
@@ -562,9 +563,9 @@ function TreeView({
                         border: `1px solid ${t.borderSoft}`,
                         color: t.textMuted,
                         padding: "2px 8px",
-                        borderRadius: 3,
+                        borderRadius: R_SM,
                         cursor: "pointer",
-                        fontSize: 14,
+                        fontSize: FS_LG,
                         lineHeight: 1,
                       }}
                     >
@@ -572,7 +573,7 @@ function TreeView({
                     </button>
                     <span
                       style={{
-                        fontSize: 16,
+                        fontSize: FS_XL,
                         fontWeight: 600,
                         color: t.text,
                         wordBreak: "break-word",
@@ -677,22 +678,22 @@ function SectionToolbar({
         placeholder="filter…"
         spellCheck={false}
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 11,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           padding: "2px 6px",
           minWidth: 140,
           background: t.surface,
           color: t.text,
           border: `1px solid ${t.borderSoft}`,
-          borderRadius: 3,
+          borderRadius: R_SM,
           outline: "none",
         }}
       />
       {matchCount !== null && (
         <span
           style={{
-            fontSize: 10,
-            fontFamily: FONT_MONO,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
             color: matchCount === 0 ? t.warn : t.textMuted,
           }}
         >
@@ -719,13 +720,13 @@ function ToolbarButton({
       type="button"
       onClick={onClick}
       style={{
-        fontFamily: FONT_MONO,
-        fontSize: 10,
+        fontFamily: FF_MONO,
+        fontSize: FS_XS,
         padding: "2px 6px",
         background: t.surface,
         color: t.textMuted,
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 3,
+        borderRadius: R_SM,
         cursor: "pointer",
       }}
     >
@@ -827,12 +828,12 @@ function LabelWithDoc({
               justifyContent: "center",
               width: 12,
               height: 12,
-              borderRadius: 6,
+              borderRadius: R_MD,
               border: `1px solid ${t.borderSoft}`,
               color: t.textMuted,
-              fontSize: 9,
+              fontSize: FS_XS,
               cursor: "help",
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             ?
@@ -868,7 +869,7 @@ function Leaf({
     const s = String(v);
     return (
       <Copyable text={s}>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{s}</span>
+        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{s}</span>
       </Copyable>
     );
   }
@@ -891,7 +892,7 @@ function Leaf({
       const s = v.map(String).join(", ");
       return (
         <Copyable text={s}>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{s}</span>
+          <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{s}</span>
         </Copyable>
       );
     }
@@ -926,7 +927,7 @@ function ScalarString({
   if (schema?.format === "date-time" || isIsoDate(v)) {
     return (
       <Copyable text={v}>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
           {ageFromIso(v)} ({v})
         </span>
       </Copyable>
@@ -936,8 +937,8 @@ function ScalarString({
     <Copyable text={v}>
       <span
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 12,
+          fontFamily: FF_MONO,
+          fontSize: FS_MD,
           wordBreak: "break-all",
         }}
       >
@@ -1125,11 +1126,11 @@ function ArrayItem({
       <div
         style={{
           border: `1px solid ${t.borderSoft}`,
-          borderRadius: 6,
+          borderRadius: R_MD,
           padding: "6px 10px",
           background: t.surface,
-          fontFamily: FONT_MONO,
-          fontSize: 12,
+          fontFamily: FF_MONO,
+          fontSize: FS_MD,
         }}
       >
         <span style={{ color: t.textMuted, marginRight: 8 }}>[{index}]</span>
@@ -1146,13 +1147,13 @@ function ArrayItem({
 
   const titleNode = (
     <span style={{ display: "inline-flex", gap: 8, alignItems: "center", minWidth: 0 }}>
-      <span style={{ color: t.textMuted, fontFamily: FONT_MONO, fontSize: 11 }}>
+      <span style={{ color: t.textMuted, fontFamily: FF_MONO, fontSize: FS_SM }}>
         [{index}]
       </span>
       <span
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 12,
+          fontFamily: FF_MONO,
+          fontSize: FS_MD,
           fontWeight: 600,
           color: t.text,
           wordBreak: "break-all",
@@ -1191,7 +1192,7 @@ function ArrayItem({
     <div
       style={{
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
         background: t.surface,
         overflow: "hidden",
       }}
@@ -1295,12 +1296,12 @@ function NestedRow({
     <>
       <div
         style={{
-          fontSize: 10,
+          fontSize: FS_XS,
           fontWeight: 700,
           color: t.textMuted,
           textTransform: "uppercase",
           letterSpacing: 0.5,
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
           alignSelf: "start",
           marginTop: 3,
           minWidth: 0,
@@ -1354,7 +1355,7 @@ function CardBranch({
       style={{
         width: "100%",
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
         background: t.surface,
         overflow: "hidden",
       }}
@@ -1462,7 +1463,7 @@ function DisclosureHeader({
         cursor: "pointer",
         userSelect: "none",
         background: !compact && open ? t.surfaceAlt : "transparent",
-        borderRadius: 3,
+        borderRadius: R_SM,
       }}
     >
       <span
@@ -1490,12 +1491,12 @@ function DisclosureHeader({
             title="Focus on this subtree"
             aria-label="Focus on this subtree"
             style={{
-              fontSize: 10,
-              fontFamily: FONT_MONO,
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
               color: t.textMuted,
               padding: "1px 6px",
               border: `1px solid ${t.borderSoft}`,
-              borderRadius: 3,
+              borderRadius: R_SM,
               background: t.surface,
               cursor: "pointer",
               lineHeight: 1.2,
@@ -1509,12 +1510,12 @@ function DisclosureHeader({
             <span
               onClick={(e) => e.stopPropagation()}
               style={{
-                fontSize: 10,
-                fontFamily: FONT_MONO,
+                fontSize: FS_XS,
+                fontFamily: FF_MONO,
                 color: t.textMuted,
                 padding: "1px 6px",
                 border: `1px solid ${t.borderSoft}`,
-                borderRadius: 3,
+                borderRadius: R_SM,
               }}
             >
               copy
@@ -1534,8 +1535,8 @@ function Caret({ open, t }: { open: boolean; t: Tokens }) {
         width: 10,
         textAlign: "center",
         color: t.textMuted,
-        fontFamily: FONT_MONO,
-        fontSize: 11,
+        fontFamily: FF_MONO,
+        fontSize: FS_SM,
         transition: "transform 80ms ease",
         transform: open ? "rotate(90deg)" : "rotate(0deg)",
       }}
@@ -1549,13 +1550,13 @@ function Pill({ t, children }: { t: Tokens; children: React.ReactNode }) {
   return (
     <span
       style={{
-        fontSize: 10,
-        fontFamily: FONT_MONO,
+        fontSize: FS_XS,
+        fontFamily: FF_MONO,
         color: t.textMuted,
         background: t.surfaceAlt,
         border: `1px solid ${t.borderSoft}`,
         padding: "0 5px",
-        borderRadius: 3,
+        borderRadius: R_SM,
         whiteSpace: "nowrap",
       }}
     >
@@ -1579,9 +1580,9 @@ function SummaryLine({
       {tail && (
         <span
           style={{
-            fontSize: 11.5,
+            fontSize: FS_SM,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             whiteSpace: "nowrap",
             overflow: "hidden",
             textOverflow: "ellipsis",

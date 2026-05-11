@@ -129,7 +129,24 @@ export type TableViewsFile = {
 // Persisted user preferences. Stored at `<config>/prefs.json` next to
 // sources/table_views/fleet. Field shape mirrors `crates/core/src/prefs.rs`.
 // `selected_namespaces` is a sorted array on the wire (Set on the frontend).
-export type PrefsTheme = "light" | "dark";
+export type PrefsThemeMode = "light" | "dark";
+/// Theme record. `id` selects a theme from the bundled registry; `palette_id`
+/// picks a palette within it; `mode` chooses the light/dark variant.
+/// `overrides` is a free-form bag the Customize UI fills in — kept opaque on
+/// the wire so a future schema bump on the override side doesn't break the
+/// outer Prefs round-trip.
+export type PrefsThemeRecord = {
+  id: string;
+  palette_id: string;
+  mode: PrefsThemeMode;
+  overrides: unknown;
+};
+/// Legacy bare-string form of `prefs.theme` from before the theme record
+/// landed. Kept as a wire alternative so the frontend can read older
+/// prefs.json files written by Rust binaries that haven't migrated yet —
+/// the Rust `parse()` handles the on-disk migration, this alias just keeps
+/// the TS type honest for transitional builds.
+export type PrefsTheme = PrefsThemeRecord | PrefsThemeMode;
 export type PrefsDensity = "compact" | "comfortable" | "spacious";
 export type PrefsFleetView = "tiles" | "mini" | "rows";
 export type PrefsRailMode = "auto" | "pinned" | "collapsed";

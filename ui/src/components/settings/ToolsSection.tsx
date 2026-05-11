@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
+import { useResolvedTheme } from "../../store";
 import { api } from "../../api";
 import type { KubectlDetection } from "../../types";
-import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
+import { FF_MONO, type ThemeMode, R_MD, FS_SM } from "../../theme";
 import { Btn, Field, SectionHeader } from "../ui";
 
 // ToolsSection — manage third-party CLI binaries the operator's machine
@@ -9,8 +10,8 @@ import { Btn, Field, SectionHeader } from "../ui";
 // install lives under <config>/bin/, which the embedded terminal prepends
 // to $PATH for child processes — meaning a managed kubectl is picked up
 // transparently by every kubectl / exec / shell tab.
-export function ToolsSection({ mode }: { mode: ThemeMode }) {
-  const t = tokens(mode);
+export function ToolsSection({}: { mode: ThemeMode }) {
+  const t = useResolvedTheme().tokens;
   const [kubectl, setKubectl] = useState<KubectlDetection | null>(null);
   const [busy, setBusy] = useState<"install" | "uninstall" | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -70,13 +71,13 @@ export function ToolsSection({ mode }: { mode: ThemeMode }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <div
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 11,
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
               color: t.text,
               padding: "6px 8px",
               background: t.surfaceAlt,
               border: `1px solid ${t.borderSoft}`,
-              borderRadius: 4,
+              borderRadius: R_MD,
             }}
           >
             {kubectlStatusLine(kubectl)}
@@ -122,8 +123,8 @@ export function ToolsSection({ mode }: { mode: ThemeMode }) {
           {msg && (
             <div
               style={{
-                fontSize: 11,
-                fontFamily: FONT_MONO,
+                fontSize: FS_SM,
+                fontFamily: FF_MONO,
                 color:
                   msg.startsWith("Installed") || msg.startsWith("Removed")
                     ? t.good

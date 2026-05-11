@@ -7,7 +7,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
-import { FONT_MONO, type Tokens } from "../../theme";
+import { FF_MONO, type Tokens, R_MD, R_SM, FS_XS } from "../../theme";
 import { Tooltip } from "./Tooltip";
 
 export type BtnVariant = "primary" | "secondary" | "ghost" | "danger";
@@ -81,7 +81,7 @@ export function Btn({
     },
     danger: {
       bg: hover ? "rgba(244,63,94,0.12)" : "transparent",
-      fg: "#dc2626",
+      fg: t.bad,
       border: hover ? "rgba(244,63,94,0.32)" : "transparent",
       shadow: "none",
     },
@@ -110,7 +110,7 @@ export function Btn({
         height: sizes.h,
         width: fullWidth ? "100%" : undefined,
         border: `1px solid ${v.border}`,
-        borderRadius: 7,
+        borderRadius: R_MD,
         background: v.bg,
         color: v.fg,
         fontFamily: "inherit",
@@ -154,10 +154,10 @@ export function Btn({
       {kbd && (
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             padding: "1px 5px",
-            borderRadius: 3,
+            borderRadius: R_SM,
             background:
               variant === "primary" ? "rgba(255,255,255,0.18)" : t.chip,
             color:
@@ -221,7 +221,7 @@ export const IconBtn = forwardRef<HTMLButtonElement, IconBtnProps>(
     const fg = disabled
       ? t.textMuted
       : danger
-        ? "#dc2626"
+        ? t.bad
         : active
           ? t.accent
           : t.textDim;

@@ -3,9 +3,10 @@
 // shape as the existing family files: useDetail → fetch → compose primitives.
 
 import { useEffect, useRef, useState } from "react";
+import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM } from "../../../theme";
+import {  } from "../../../theme";
 import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   Copyable,
@@ -96,7 +97,7 @@ export function HorizontalPodAutoscalerSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const ns = props.namespace;
   const state = useDetail<HorizontalPodAutoscalerDetail>(
@@ -131,7 +132,7 @@ export function HorizontalPodAutoscalerSummary(props: {
             {state.detail.scale_target_ref ? (
               <>
                 <DetailRow t={t} label="Kind">
-                  <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                     {state.detail.scale_target_ref.kind}
                   </span>
                 </DetailRow>
@@ -153,7 +154,7 @@ export function HorizontalPodAutoscalerSummary(props: {
                 </DetailRow>
                 {state.detail.scale_target_ref.api_version && (
                   <DetailRow t={t} label="API Version">
-                    <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+                    <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                       {state.detail.scale_target_ref.api_version}
                     </span>
                   </DetailRow>
@@ -167,27 +168,27 @@ export function HorizontalPodAutoscalerSummary(props: {
           <Section t={t} title="Replicas" />
           <div style={{ marginBottom: 22 }}>
             <DetailRow t={t} label="Min">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.min_replicas ?? <Mute t={t}>—</Mute>}
               </span>
             </DetailRow>
             <DetailRow t={t} label="Max">
-              <span style={{ fontSize: 12 }}>{state.detail.max_replicas}</span>
+              <span style={{ fontSize: FS_MD }}>{state.detail.max_replicas}</span>
             </DetailRow>
             <DetailRow t={t} label="Current">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.current_replicas ?? <Mute t={t}>—</Mute>}
               </span>
             </DetailRow>
             <DetailRow t={t} label="Desired">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.desired_replicas ?? <Mute t={t}>—</Mute>}
               </span>
             </DetailRow>
             {state.detail.last_scale_time && (
               <DetailRow t={t} label="Last Scaled">
                 <Copyable text={state.detail.last_scale_time}>
-                  <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                     {ageFromIso(state.detail.last_scale_time)} ago
                   </span>
                 </Copyable>
@@ -205,7 +206,7 @@ export function HorizontalPodAutoscalerSummary(props: {
               <div style={{ marginBottom: 22 }}>
                 {state.detail.metrics.map((m, i) => (
                   <DetailRow key={i} t={t} label={m.type}>
-                    <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+                    <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                       {m.name ?? m.metric_name ?? "—"}
                       {m.target?.average_utilization != null
                         ? ` @ ${m.target.average_utilization}%`
@@ -227,7 +228,7 @@ export function HorizontalPodAutoscalerSummary(props: {
               <div style={{ marginBottom: 22 }}>
                 {state.detail.conditions.map((c, i) => (
                   <DetailRow key={i} t={t} label={c.type}>
-                    <span style={{ fontSize: 12 }}>
+                    <span style={{ fontSize: FS_MD }}>
                       {c.status}
                       {c.reason ? ` — ${c.reason}` : ""}
                     </span>
@@ -252,7 +253,7 @@ export function PodDisruptionBudgetSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const ns = props.namespace;
   const state = useDetail<PodDisruptionBudgetDetail>(
@@ -285,18 +286,18 @@ export function PodDisruptionBudgetSummary(props: {
           <Section t={t} title="Spec" />
           <div style={{ marginBottom: 22 }}>
             <DetailRow t={t} label="Min Available">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.min_available ?? <Mute t={t}>—</Mute>}
               </span>
             </DetailRow>
             <DetailRow t={t} label="Max Unavailable">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.max_unavailable ?? <Mute t={t}>—</Mute>}
               </span>
             </DetailRow>
             {state.detail.unhealthy_pod_eviction_policy && (
               <DetailRow t={t} label="Eviction Policy">
-                <span style={{ fontSize: 12 }}>
+                <span style={{ fontSize: FS_MD }}>
                   {state.detail.unhealthy_pod_eviction_policy}
                 </span>
               </DetailRow>
@@ -315,16 +316,16 @@ export function PodDisruptionBudgetSummary(props: {
           <Section t={t} title="Status" />
           <div style={{ marginBottom: 22 }}>
             <DetailRow t={t} label="Current Healthy">
-              <span style={{ fontSize: 12 }}>{state.detail.current_healthy}</span>
+              <span style={{ fontSize: FS_MD }}>{state.detail.current_healthy}</span>
             </DetailRow>
             <DetailRow t={t} label="Desired Healthy">
-              <span style={{ fontSize: 12 }}>{state.detail.desired_healthy}</span>
+              <span style={{ fontSize: FS_MD }}>{state.detail.desired_healthy}</span>
             </DetailRow>
             <DetailRow t={t} label="Expected Pods">
-              <span style={{ fontSize: 12 }}>{state.detail.expected_pods}</span>
+              <span style={{ fontSize: FS_MD }}>{state.detail.expected_pods}</span>
             </DetailRow>
             <DetailRow t={t} label="Disruptions Allowed">
-              <span style={{ fontSize: 12 }}>{state.detail.disruptions_allowed}</span>
+              <span style={{ fontSize: FS_MD }}>{state.detail.disruptions_allowed}</span>
             </DetailRow>
           </div>
 
@@ -334,7 +335,7 @@ export function PodDisruptionBudgetSummary(props: {
               <div style={{ marginBottom: 22 }}>
                 {state.detail.conditions.map((c, i) => (
                   <DetailRow key={i} t={t} label={c.type}>
-                    <span style={{ fontSize: 12 }}>
+                    <span style={{ fontSize: FS_MD }}>
                       {c.status}
                       {c.reason ? ` — ${c.reason}` : ""}
                     </span>
@@ -358,7 +359,7 @@ export function PriorityClassSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<PriorityClassDetail>(
     () => api.getPriorityClassDetail(props.clusterId, props.name),
@@ -388,8 +389,8 @@ export function PriorityClassSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
           }}
@@ -417,20 +418,20 @@ export function PriorityClassSummary(props: {
       <Section t={t} title="Spec" />
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Value">
-          <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>{d.value}</span>
+          <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>{d.value}</span>
         </DetailRow>
         <DetailRow t={t} label="Global Default">
-          <span style={{ fontSize: 12 }}>{d.global_default ? "true" : "false"}</span>
+          <span style={{ fontSize: FS_MD }}>{d.global_default ? "true" : "false"}</span>
         </DetailRow>
         <DetailRow t={t} label="Preemption">
-          <span style={{ fontSize: 12 }}>
+          <span style={{ fontSize: FS_MD }}>
             {d.preemption_policy ?? <Mute t={t}>—</Mute>}
           </span>
         </DetailRow>
         {d.description && (
           <DetailRow t={t} label="Description">
             <Copyable text={d.description}>
-              <span style={{ fontSize: 12, wordBreak: "break-word" }}>
+              <span style={{ fontSize: FS_MD, wordBreak: "break-word" }}>
                 {d.description}
               </span>
             </Copyable>
@@ -451,7 +452,7 @@ export function ReplicationControllerSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const ns = props.namespace;
   const state = useDetail<ReplicationControllerDetail>(
@@ -484,12 +485,12 @@ export function ReplicationControllerSummary(props: {
           <Section t={t} title="Spec" />
           <div style={{ marginBottom: 22 }}>
             <DetailRow t={t} label="Replicas">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.replicas ?? <Mute t={t}>—</Mute>}
               </span>
             </DetailRow>
             <DetailRow t={t} label="Min Ready">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.min_ready_seconds ?? 0}s
               </span>
             </DetailRow>
@@ -505,25 +506,25 @@ export function ReplicationControllerSummary(props: {
           <Section t={t} title="Status" />
           <div style={{ marginBottom: 22 }}>
             <DetailRow t={t} label="Current">
-              <span style={{ fontSize: 12 }}>{state.detail.current}</span>
+              <span style={{ fontSize: FS_MD }}>{state.detail.current}</span>
             </DetailRow>
             <DetailRow t={t} label="Ready">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.ready ?? <Mute t={t}>—</Mute>}
               </span>
             </DetailRow>
             <DetailRow t={t} label="Available">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.available ?? <Mute t={t}>—</Mute>}
               </span>
             </DetailRow>
             <DetailRow t={t} label="Fully Labeled">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.fully_labeled ?? <Mute t={t}>—</Mute>}
               </span>
             </DetailRow>
             <DetailRow t={t} label="Observed Generation">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.observed_generation ?? <Mute t={t}>—</Mute>}
               </span>
             </DetailRow>
@@ -535,7 +536,7 @@ export function ReplicationControllerSummary(props: {
               <div style={{ marginBottom: 22 }}>
                 {state.detail.conditions.map((c, i) => (
                   <DetailRow key={i} t={t} label={c.type}>
-                    <span style={{ fontSize: 12 }}>
+                    <span style={{ fontSize: FS_MD }}>
                       {c.status}
                       {c.reason ? ` — ${c.reason}` : ""}
                     </span>
@@ -560,7 +561,7 @@ export function LeaseSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const ns = props.namespace;
   const state = useDetail<LeaseDetail>(
@@ -595,7 +596,7 @@ export function LeaseSummary(props: {
             <DetailRow t={t} label="Holder Identity">
               {state.detail.holder_identity ? (
                 <Copyable text={state.detail.holder_identity}>
-                  <span style={{ fontSize: 12, fontFamily: FONT_MONO, wordBreak: "break-all" }}>
+                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO, wordBreak: "break-all" }}>
                     {state.detail.holder_identity}
                   </span>
                 </Copyable>
@@ -604,20 +605,20 @@ export function LeaseSummary(props: {
               )}
             </DetailRow>
             <DetailRow t={t} label="Duration">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.lease_duration_seconds ?? <Mute t={t}>—</Mute>}
                 {state.detail.lease_duration_seconds != null ? "s" : ""}
               </span>
             </DetailRow>
             <DetailRow t={t} label="Transitions">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {state.detail.lease_transitions ?? 0}
               </span>
             </DetailRow>
             <DetailRow t={t} label="Acquired">
               {state.detail.acquire_time ? (
                 <Copyable text={state.detail.acquire_time}>
-                  <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                     {ageFromIso(state.detail.acquire_time)} ago
                   </span>
                 </Copyable>
@@ -628,7 +629,7 @@ export function LeaseSummary(props: {
             <DetailRow t={t} label="Renewed">
               {state.detail.renew_time ? (
                 <Copyable text={state.detail.renew_time}>
-                  <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                     {ageFromIso(state.detail.renew_time)} ago
                   </span>
                 </Copyable>
@@ -668,14 +669,14 @@ function WebhookList({
           <div key={i} style={{ marginBottom: 22 }}>
             <DetailRow t={t} label="Name">
               <Copyable text={w.name}>
-                <span style={{ fontSize: 12, fontFamily: FONT_MONO, wordBreak: "break-all" }}>
+                <span style={{ fontSize: FS_MD, fontFamily: FF_MONO, wordBreak: "break-all" }}>
                   {w.name}
                 </span>
               </Copyable>
             </DetailRow>
             {w.client_config.service && (
               <DetailRow t={t} label="Service">
-                <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+                <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                   {w.client_config.service.namespace}/{w.client_config.service.name}
                   {w.client_config.service.path ?? ""}
                   {w.client_config.service.port != null
@@ -687,14 +688,14 @@ function WebhookList({
             {w.client_config.url && (
               <DetailRow t={t} label="URL">
                 <Copyable text={w.client_config.url}>
-                  <span style={{ fontSize: 12, fontFamily: FONT_MONO, wordBreak: "break-all" }}>
+                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO, wordBreak: "break-all" }}>
                     {w.client_config.url}
                   </span>
                 </Copyable>
               </DetailRow>
             )}
             <DetailRow t={t} label="CA Bundle">
-              <span style={{ fontSize: 12 }}>
+              <span style={{ fontSize: FS_MD }}>
                 {w.client_config.ca_bundle_present ? "present" : "—"}
               </span>
             </DetailRow>
@@ -710,28 +711,28 @@ function WebhookList({
             )}
             {w.match_policy && (
               <DetailRow t={t} label="Match Policy">
-                <span style={{ fontSize: 12 }}>{w.match_policy}</span>
+                <span style={{ fontSize: FS_MD }}>{w.match_policy}</span>
               </DetailRow>
             )}
             {w.side_effects && (
               <DetailRow t={t} label="Side Effects">
-                <span style={{ fontSize: 12 }}>{w.side_effects}</span>
+                <span style={{ fontSize: FS_MD }}>{w.side_effects}</span>
               </DetailRow>
             )}
             {w.timeout_seconds != null && (
               <DetailRow t={t} label="Timeout">
-                <span style={{ fontSize: 12 }}>{w.timeout_seconds}s</span>
+                <span style={{ fontSize: FS_MD }}>{w.timeout_seconds}s</span>
               </DetailRow>
             )}
             {showReinvocation && w.reinvocation_policy && (
               <DetailRow t={t} label="Reinvocation">
-                <span style={{ fontSize: 12 }}>{w.reinvocation_policy}</span>
+                <span style={{ fontSize: FS_MD }}>{w.reinvocation_policy}</span>
               </DetailRow>
             )}
             {w.admission_review_versions &&
               w.admission_review_versions.length > 0 && (
                 <DetailRow t={t} label="Review Versions">
-                  <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                     {w.admission_review_versions.join(", ")}
                   </span>
                 </DetailRow>
@@ -742,7 +743,7 @@ function WebhookList({
                   {w.rules.map((r, ri) => (
                     <span
                       key={ri}
-                      style={{ fontSize: 11.5, fontFamily: FONT_MONO, wordBreak: "break-all" }}
+                      style={{ fontSize: FS_SM, fontFamily: FF_MONO, wordBreak: "break-all" }}
                     >
                       {r.operations.join(",")} {r.api_groups.join(",") || "core"}/
                       {r.api_versions.join(",")} {r.resources.join(",")}
@@ -766,7 +767,7 @@ export function MutatingWebhookConfigurationSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<MutatingWebhookConfigurationDetail>(
     () => api.getMutatingWebhookConfigurationDetail(props.clusterId, props.name),
@@ -813,7 +814,7 @@ export function ValidatingWebhookConfigurationSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<ValidatingWebhookConfigurationDetail>(
     () => api.getValidatingWebhookConfigurationDetail(props.clusterId, props.name),

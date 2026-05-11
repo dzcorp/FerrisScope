@@ -11,9 +11,9 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import jsYaml from "js-yaml";
 import Editor from "@monaco-editor/react";
-import { useAppStore, type DockPlacement, type DockTab } from "../store";
+import { useAppStore, type DockPlacement, type DockTab, useResolvedTheme } from "../store";
 import { DockChat } from "./chat/DockChat";
-import { tokens, FONT_MONO, type ThemeMode } from "../theme";
+import { FF_MONO, type ThemeMode, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../theme";
 import { Btn, ErrorBlock, IconBtn, Icons, Select } from "./ui";
 import { api } from "../api";
 import type { DocApplyResult } from "../types";
@@ -144,7 +144,7 @@ export function Dock({
   leftInset,
   placement,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const allTabs = useAppStore((s) => s.dockTabs);
   const activeTabId = useAppStore((s) => s.dockActiveId);
   const dockMin = useAppStore((s) => s.dockMin);
@@ -228,7 +228,7 @@ export function Dock({
             alignItems: "center",
             gap: 8,
             zIndex: 25,
-            fontSize: 11,
+            fontSize: FS_SM,
           }}
         >
           <span style={{ color: t.textDim, display: "inline-flex" }}>
@@ -285,7 +285,7 @@ export function Dock({
             alignItems: "center",
             gap: 10,
             zIndex: 25,
-            fontSize: 12,
+            fontSize: FS_MD,
           }}
         >
           <span style={{ color: t.textDim, display: "inline-flex" }}>
@@ -431,7 +431,7 @@ export function Dock({
                   marginBottom: -1,
                   cursor: "pointer",
                   minWidth: 0,
-                  fontSize: 11.5,
+                  fontSize: FS_SM,
                   color: isActive ? t.text : t.textDim,
                   fontWeight: isActive ? 600 : 500,
                 }}
@@ -450,7 +450,7 @@ export function Dock({
                 </span>
                 <span
                   style={{
-                    fontFamily: FONT_MONO,
+                    fontFamily: FF_MONO,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
@@ -481,7 +481,7 @@ export function Dock({
                       cursor: "pointer",
                       color: t.textMuted,
                       display: "flex",
-                      borderRadius: 3,
+                      borderRadius: R_SM,
                     }}
                   >
                     <svg
@@ -552,11 +552,11 @@ export function Dock({
               alignItems: "center",
               gap: 6,
               padding: "3px 8px",
-              borderRadius: 4,
+              borderRadius: R_MD,
               background: t.chip,
-              fontSize: 10.5,
+              fontSize: FS_XS,
               color: t.textDim,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             <span
@@ -650,7 +650,6 @@ export function Dock({
 // ── Terminal tab ───────────────────────────────────────────────────────────
 
 function DockTerminal({
-  mode,
   tab,
   visible,
 }: {
@@ -658,7 +657,8 @@ function DockTerminal({
   tab: DockTab;
   visible: boolean;
 }) {
-  const t = tokens(mode);
+  const resolved = useResolvedTheme();
+  const t = resolved.tokens;
   const hostRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -755,16 +755,27 @@ function DockTerminal({
         if (cancelled) return;
 
         term = new Terminal({
-          fontFamily: FONT_MONO,
-          fontSize: 12,
+          // xterm wants a literal font string and a numeric size — CSS
+          // custom properties don't apply inside the canvas-rendered grid.
+          // `typography.fontMono` is a literal per-theme stack (e.g.
+          // VS Code's Cascadia, Default's JetBrains), so we can pass it
+          // through.
+          fontFamily: resolved.typography.fontMono,
+          fontSize: 13,
           lineHeight: 1.2,
           cursorBlink: true,
           convertEol: true,
           allowProposedApi: true,
           theme: {
-            background: mode === "dark" ? "#0a0c10" : "#0f1115",
-            foreground: "#cbd5e1",
-            cursor: "#22c55e",
+            // xterm reads literal colors at construction time — it doesn't
+            // respond to subsequent token changes. The active palette's
+            // surface + text flow through here so light themes get a
+            // light-paper terminal (IDE-style) and dark themes stay dark.
+            // ANSI colors emitted by the shell aren't remapped — that's
+            // the program's choice.
+            background: t.surfaceAlt,
+            foreground: t.text,
+            cursor: t.good,
           },
         });
         fit = new FitAddon();
@@ -973,7 +984,9 @@ function DockTerminal({
       style={{
         position: "absolute",
         inset: 0,
-        background: mode === "dark" ? "#0a0c10" : "#0f1115",
+        // Matches the xterm theme background so the surrounding chrome
+        // doesn't peek through during fit-resizes.
+        background: t.surfaceAlt,
         display: "flex",
         flexDirection: "column",
         // Padding belongs on the outer wrapper, not the host. xterm's inner
@@ -1048,7 +1061,8 @@ function DockYaml({
   tab: DockTab;
   onPatch: (p: Partial<YamlTabState>) => void;
 }) {
-  const t = tokens(mode);
+  const resolved = useResolvedTheme();
+  const t = resolved.tokens;
   const st = tab.state as Partial<YamlTabState>;
   const content = st.content ?? "";
   const templateId = st.templateId ?? DEFAULT_YAML_TEMPLATE_ID;
@@ -1197,9 +1211,12 @@ function DockYaml({
           onMount={installClipboardShortcuts}
           options={{
             minimap: { enabled: false },
-            fontSize: 12,
-            fontFamily:
-              '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+            // Monaco wants literal font + numeric size — CSS vars don't
+            // apply inside the canvas-rendered editor. Pull the literal
+            // mono stack from the active theme so VS Code's Cascadia
+            // shows up here too.
+            fontSize: 12.5,
+            fontFamily: resolved.typography.fontMono,
             wordWrap: "on",
             scrollBeyondLastLine: false,
             renderLineHighlight: "none",
@@ -1216,8 +1233,8 @@ function DockYaml({
             padding: "8px 14px",
             borderTop: `1px solid ${t.borderSoft}`,
             background: t.surfaceAlt,
-            fontFamily: FONT_MONO,
-            fontSize: 11,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
           }}
         >
           {validateError && (
@@ -1244,7 +1261,7 @@ function DockYaml({
           background: t.surfaceAlt,
         }}
       >
-        <span style={{ color: t.textMuted, fontSize: 11 }}>Template</span>
+        <span style={{ color: t.textMuted, fontSize: FS_SM }}>Template</span>
         <div style={{ width: 220 }}>
           <Select
             t={t}
@@ -1308,13 +1325,13 @@ function DockYaml({
 }
 
 function ResultLine({
-  mode,
+  
   r,
 }: {
   mode: ThemeMode;
   r: DocApplyResult;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const tone: CSSProperties =
     r.status === "applied"
       ? { color: t.good }

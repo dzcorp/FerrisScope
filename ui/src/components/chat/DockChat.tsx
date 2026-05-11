@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DockTab } from "../../store";
-import { useAppStore } from "../../store";
-import { tokens, FONT_SANS, type ThemeMode } from "../../theme";
+import { useAppStore, useResolvedTheme } from "../../store";
+import { FONT_SANS, type ThemeMode, FS_MD } from "../../theme";
 import { api } from "../../api";
 import type {
   AgentChatMessage,
@@ -83,7 +83,7 @@ type OpenChat = {
 // current session metadata, and the in-flight streaming state. Composes
 // ChatHeader + MessageList + ChatInput so each is a small atom.
 export function DockChat({ mode, tab, visible }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const patchTabState = useAppStore((s) => s.patchDockTabState);
   const tabState = tab.state as Partial<ChatTabState>;
   const clusterId = tabState.clusterId ?? "";
@@ -1036,7 +1036,7 @@ export function DockChat({ mode, tab, visible }: Props) {
 }
 
 function ChatStatusOverlay({
-  mode,
+  
   message,
   tone,
   action,
@@ -1046,7 +1046,7 @@ function ChatStatusOverlay({
   tone?: "default" | "bad";
   action?: React.ReactNode;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   return (
     <div
       style={{
@@ -1060,7 +1060,7 @@ function ChatStatusOverlay({
         padding: 24,
         textAlign: "center",
         color: tone === "bad" ? t.bad : t.textMuted,
-        fontSize: 12,
+        fontSize: FS_MD,
       }}
     >
       <div style={{ display: "inline-flex", color: t.textDim }}>

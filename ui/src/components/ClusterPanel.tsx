@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, onClusterHealth, onClusterInfoChanged } from "../api";
-import { useAppStore } from "../store";
+import { useAppStore, useResolvedTheme } from "../store";
 import type { ClusterInfo, ContextInfo } from "../types";
-import { tokens, type ThemeMode } from "../theme";
+import { type ThemeMode, FS_MD } from "../theme";
 import { ClusterBar } from "./ClusterBar";
 import { ResourceTable } from "./ResourceTable";
 import { Btn, EmptyState, ErrorBlock, LoadingLine } from "./ui";
@@ -39,7 +39,7 @@ function newConnectId(): string {
 //   - The backend also enforces a 15s wall-clock timeout — a wedged auth
 //     plugin or unreachable apiserver still resolves with an error.
 export function ClusterPanel({ mode, context }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   // Initialise straight to "connecting" so the first paint already renders
   // the Cancel-button-bearing layout. The placeholder connectId is replaced
   // by the useEffect below within the same commit, so cancelConnect always
@@ -262,7 +262,7 @@ function ConnectingLabel({
 // across all three so the operator sees a consistent affordance
 // regardless of how the cluster got broken.
 function ReconnectBanner({
-  mode,
+  
   title,
   reason,
   onReconnect,
@@ -272,7 +272,7 @@ function ReconnectBanner({
   reason: string | null;
   onReconnect: () => void;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   return (
     <div
       role="alert"
@@ -298,7 +298,7 @@ function ReconnectBanner({
         }}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ color: t.text, fontSize: 12.5, fontWeight: 600 }}>
+        <div style={{ color: t.text, fontSize: FS_MD, fontWeight: 600 }}>
           {title}
         </div>
         {reason && (

@@ -26,14 +26,29 @@ The `core` crate must stay Tauri-free so a future TUI / CLI can reuse the engine
 
 ## Design system
 
-The visual + interaction reference lives in [`./design/Helmsman v2/`](./design) (`hv2-rail.jsx`, `hv2-dock.jsx`, `hv2-settings.jsx`, `hv2-ui.jsx`, plus `Helmsman v2.html` for previews). Source of truth for layout, spacing, colors, motion, component anatomy.
+The visual + interaction reference for the **Default theme** lives in [`./design/Helmsman v2/`](./design) (`hv2-rail.jsx`, `hv2-dock.jsx`, `hv2-settings.jsx`, `hv2-ui.jsx`, plus `Helmsman v2.html` for previews). It's the source of truth for layout, spacing, colors, motion, and component anatomy for that theme.
 
-- **Read before you build.** Open the matching `hv2-*.jsx` before changing any UI surface (rail, dock, modal, table, palette, settings, fleet card, status pill, container dot…). Don't reinvent.
+Other themes (Lens, VS Code, Readable) are intentional siblings without matching `hv2-*.jsx` artifacts. They diverge on typography, sizing, chrome, and palette by design. Don't try to "harmonize" them back into Helmsman.
+
+- **Read before you build (Default).** Open the matching `hv2-*.jsx` before changing any UI surface in the Default theme (rail, dock, modal, table, palette, settings, fleet card, status pill, container dot…). Don't reinvent.
 - **Don't edit `design/`.** Reference artifact, not application code. Push divergences back into the relevant atom in `ui/src/components/ui/`.
-- **Tokens flow one direction: design → `ui/src/theme.ts`.** No hardcoded hex values or pixel paddings inline. New token? Add it to `theme.ts` first and reference *that*.
+- **Tokens flow one direction: design → `ui/src/theme.ts`.** No hardcoded hex values or pixel paddings inline. New token? Add it to `theme.ts` first and reference *that*. Typography sizes go through the scale steps (`xs/sm/md/lg/xl`), not new literals.
 - **Status semantics are fixed.** Buckets (`good` / `warn` / `bad` / `info` / `unknown`) and the transient set (Running / Pending / Terminating / Init / ContainerCreating) are defined once in `theme.ts`. Don't introduce parallel logic; extend the helpers.
 - **Reuse atoms.** Container dots, status pills, gauges, loading/empty states have canonical shapes — reuse the existing atoms in `ui/src/components/ui/`.
 - **When design and reality conflict** (e.g. very long context names), adapt the layout principle (tile/flex/grid) and push the change back into the atom so every surface benefits.
+
+## Theme system
+
+`ui/src/theme.ts` is the single source of truth for tokens, typography, sizing, and per-theme display options. A "theme" is the whole bundle; a "palette" is the color set within it.
+
+- **Themes shipped**: `default` (Helmsman v2, canonical), `lens`, `vscode`, `readable`. Each ships with at least one palette plus its own `Typography`, `Sizing`, and `Display` defaults.
+- **Resolver**: `resolveTheme({ themeId, paletteId, mode, overrides }) → ResolvedTheme`. Components read it via `useResolvedTheme()` in `store.ts`. The legacy `tokens(mode)` helper still returns the Default theme's palette and stays in place for the migration tail — new code prefers `useResolvedTheme()`.
+- **CSS custom properties.** `App.tsx` publishes the active theme as `:root` custom props on every render: `--fs-font-sans`, `--fs-font-mono`, `--fs-fs-{xs,sm,md,lg,xl}`, `--fs-radius-{sm,md,lg}`, `--fs-control-h`, `--fs-border-w`. Components read them via `var(--fs-fs-md, 12.5px)` so anything not yet swept still works via the literal fallback.
+- **Atom convention** (`ui/src/components/ui/atoms.tsx`): module-level constants `FS_XS / FS_SM / FS_MD / FS_LG / FS_XL` and `FF_MONO` wrap the CSS vars + fallbacks. Use those instead of inline `fontSize: 12` / `fontFamily: FONT_MONO`. Same pattern in `ResourceTable.tsx` for the hot cell styles (`TABLE_FS_CELL`, `TABLE_FONT_MONO`) — kept module-level so React's referential-equality short-circuit still applies.
+- **Density + monoTables are theme-seeded, user-overrideable.** `setTheme(themeId)` writes the new theme's `display.densityDefault` and `display.monoTablesDefault` into `settings`; the Settings → Appearance toggles still win afterward.
+- **UI Scale stacks on top.** `theme.typography.base` is the baseline; the UI Scale slider continues to apply via `document.documentElement.style.zoom` on top of that.
+- **Adding a theme** is rare (Lens / VS Code / Readable already cover the spread). When it happens: add a `Theme` literal to `THEMES` in `theme.ts` and a swatch in the Settings picker. No backend changes — `prefs.theme.id` is a plain string and unknown ids fall back to Default at resolve time.
+- **Don't rename a shipped theme id.** Persisted prefs reference ids verbatim. If you must, add a migration in `crates/core/src/prefs.rs::parse()` (the legacy bare-string-theme handling via `ThemePrefsWire` is the precedent).
 
 ## Icons
 

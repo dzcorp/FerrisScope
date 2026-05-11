@@ -49,6 +49,84 @@ describe("toggleTheme", () => {
   });
 });
 
+describe("setTheme", () => {
+  it("switches theme, resets palette, and seeds density / mono when they're at the previous theme's defaults", () => {
+    const s0 = useAppStore.getState();
+    expect(s0.themeId).toBe("default");
+    expect(s0.settings.density).toBe("comfortable"); // Default's default
+
+    useAppStore.getState().setTheme("readable");
+    const sR = useAppStore.getState();
+    expect(sR.themeId).toBe("readable");
+    expect(sR.paletteId).toBe("warm");
+    // density was at Default's default ⇒ reseed to Readable's.
+    expect(sR.settings.density).toBe("spacious");
+    expect(sR.settings.monoTables).toBe(false);
+
+    useAppStore.getState().setTheme("vscode");
+    const sV = useAppStore.getState();
+    expect(sV.themeId).toBe("vscode");
+    expect(sV.paletteId).toBe("dark-plus");
+    expect(sV.settings.density).toBe("compact");
+  });
+  it("preserves an operator-set density across theme switches (seed-once)", () => {
+    // Start on Default, switch density to compact manually. Compact isn't
+    // Default's default (comfortable), so it counts as user-touched.
+    useAppStore.getState().patchSettings({ density: "compact" });
+    expect(useAppStore.getState().settings.density).toBe("compact");
+
+    // Switching theme must NOT reseed density — user's choice survives.
+    useAppStore.getState().setTheme("readable");
+    expect(useAppStore.getState().settings.density).toBe("compact");
+    useAppStore.getState().setTheme("vscode");
+    expect(useAppStore.getState().settings.density).toBe("compact");
+  });
+  it("unknown theme id falls back to Default at resolve time", () => {
+    useAppStore.getState().setTheme("nonexistent");
+    const s = useAppStore.getState();
+    expect(s.themeId).toBe("default");
+    expect(s.paletteId).toBe("default");
+  });
+});
+
+describe("setPalette", () => {
+  it("swaps palette inside the current theme", () => {
+    useAppStore.getState().setTheme("default");
+    useAppStore.getState().setPalette("default");
+    expect(useAppStore.getState().paletteId).toBe("default");
+  });
+  it("rejects a palette that doesn't belong to the active theme", () => {
+    useAppStore.getState().setTheme("default");
+    useAppStore.getState().setPalette("warm"); // belongs to Readable
+    // No change.
+    expect(useAppStore.getState().paletteId).toBe("default");
+  });
+});
+
+describe("patchThemeOverrides", () => {
+  it("merges overrides on top of any existing patch", () => {
+    useAppStore.getState().patchThemeOverrides({
+      tokens: { accent: "#abcdef" },
+    });
+    expect(useAppStore.getState().themeOverrides?.tokens?.accent).toBe(
+      "#abcdef",
+    );
+    useAppStore.getState().patchThemeOverrides({
+      typography: { base: 18 },
+    });
+    const s = useAppStore.getState();
+    expect(s.themeOverrides?.tokens?.accent).toBe("#abcdef");
+    expect(s.themeOverrides?.typography?.base).toBe(18);
+  });
+  it("null clears all overrides", () => {
+    useAppStore.getState().patchThemeOverrides({
+      tokens: { accent: "#abcdef" },
+    });
+    useAppStore.getState().patchThemeOverrides(null);
+    expect(useAppStore.getState().themeOverrides).toBeNull();
+  });
+});
+
 describe("setContexts", () => {
   const ctx = (id: string, name: string) => ({
     id,

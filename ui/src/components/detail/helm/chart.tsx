@@ -14,10 +14,11 @@
 // dispatch so we can recover both halves here.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useResolvedTheme } from "../../../store";
 import Editor from "@monaco-editor/react";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_MD, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import {  } from "../../../theme";
 import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
@@ -119,7 +120,7 @@ export function HelmChartSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const parsed = useMemo(() => parseChartUid(props.uid), [props.uid]);
 
   // Hooks must run unconditionally — ALL state hooks above the early
@@ -242,15 +243,15 @@ export function HelmChartSummary(props: {
           marginBottom: 18,
         }}
       >
-        <strong style={{ fontFamily: FONT_MONO, fontSize: 13 }}>
+        <strong style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
           {d.chart_name}
         </strong>
         <span
           style={{
-            fontSize: 10.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
             padding: "2px 8px",
-            borderRadius: 4,
+            borderRadius: R_MD,
             background: t.chip,
             color: t.textMuted,
           }}
@@ -262,7 +263,7 @@ export function HelmChartSummary(props: {
         >
           {d.source === "cluster" ? "in-cluster" : d.source}
         </span>
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           v{d.chart_version}
           {d.app_version ? ` · app ${d.app_version}` : ""}
           {d.used_by.length > 0
@@ -276,18 +277,18 @@ export function HelmChartSummary(props: {
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Name">
           <Copyable text={d.chart_name}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{d.chart_name}</span>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.chart_name}</span>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Version">
           <Copyable text={d.chart_version}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{d.chart_version}</span>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.chart_version}</span>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="App version">
           {d.app_version ? (
             <Copyable text={d.app_version}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{d.app_version}</span>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.app_version}</span>
             </Copyable>
           ) : (
             <Mute t={t}>—</Mute>
@@ -296,7 +297,7 @@ export function HelmChartSummary(props: {
         <DetailRow t={t} label="Description">
           {d.description ? (
             <Copyable text={d.description}>
-              <span style={{ fontSize: 12 }}>{d.description}</span>
+              <span style={{ fontSize: FS_MD }}>{d.description}</span>
             </Copyable>
           ) : (
             <Mute t={t}>—</Mute>
@@ -305,7 +306,7 @@ export function HelmChartSummary(props: {
         <DetailRow t={t} label="Home">
           {d.home ? (
             <Copyable text={d.home}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12, wordBreak: "break-all" }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD, wordBreak: "break-all" }}>
                 {d.home}
               </span>
             </Copyable>
@@ -320,10 +321,10 @@ export function HelmChartSummary(props: {
                 <Copyable key={`${s}-${i}`} text={s}>
                   <span
                     style={{
-                      fontFamily: FONT_MONO,
-                      fontSize: 11.5,
+                      fontFamily: FF_MONO,
+                      fontSize: FS_SM,
                       padding: "2px 8px",
-                      borderRadius: 4,
+                      borderRadius: R_MD,
                       background: t.chip,
                       color: t.text,
                       wordBreak: "break-all",
@@ -343,10 +344,10 @@ export function HelmChartSummary(props: {
                 <span
                   key={`${k}-${i}`}
                   style={{
-                    fontFamily: FONT_MONO,
-                    fontSize: 11.5,
+                    fontFamily: FF_MONO,
+                    fontSize: FS_SM,
                     padding: "2px 8px",
-                    borderRadius: 4,
+                    borderRadius: R_MD,
                     background: t.chip,
                     color: t.textMuted,
                   }}
@@ -366,7 +367,7 @@ export function HelmChartSummary(props: {
         t={t}
         title="Used by"
         right={
-          <span style={{ fontSize: 10.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_XS, color: t.textMuted }}>
             {d.used_by.length} release{d.used_by.length === 1 ? "" : "s"}
           </span>
         }
@@ -389,13 +390,13 @@ export function HelmChartSummary(props: {
         title="Install"
         right={
           d.helm_available ? (
-            <span style={{ fontSize: 10.5, color: t.textMuted }}>
+            <span style={{ fontSize: FS_XS, color: t.textMuted }}>
               `helm install` against this chart
             </span>
           ) : (
             <span
               title="Install helm CLI to enable install"
-              style={{ fontSize: 10.5, color: t.textMuted }}
+              style={{ fontSize: FS_XS, color: t.textMuted }}
             >
               read-only · helm CLI not found
             </span>
@@ -422,7 +423,7 @@ export function HelmChartSummary(props: {
             placeholder="default"
             style={inputStyle(t)}
           />
-          <span style={{ fontSize: 10.5, color: t.textMuted, marginLeft: 8 }}>
+          <span style={{ fontSize: FS_XS, color: t.textMuted, marginLeft: 8 }}>
             created if missing (`--create-namespace`)
           </span>
         </DetailRow>
@@ -466,10 +467,10 @@ export function HelmChartSummary(props: {
           }}
           disabled={installStatus.kind === "saving"}
           style={{
-            fontSize: 11.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_SM,
+            fontFamily: FF_MONO,
             padding: "5px 12px",
-            borderRadius: 4,
+            borderRadius: R_MD,
             border: `1px solid ${t.border}`,
             background: "transparent",
             color: t.textDim,
@@ -483,10 +484,10 @@ export function HelmChartSummary(props: {
           onClick={onInstall}
           disabled={!canInstall}
           style={{
-            fontSize: 11.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_SM,
+            fontFamily: FF_MONO,
             padding: "5px 14px",
-            borderRadius: 4,
+            borderRadius: R_MD,
             border: `1px solid ${canInstall ? t.accent : t.border}`,
             background: canInstall ? t.accent : t.chip,
             color: canInstall ? "#fff" : t.textMuted,
@@ -502,10 +503,10 @@ export function HelmChartSummary(props: {
 
 function inputStyle(t: Tokens): React.CSSProperties {
   return {
-    fontFamily: FONT_MONO,
-    fontSize: 12,
+    fontFamily: FF_MONO,
+    fontSize: FS_MD,
     padding: "4px 8px",
-    borderRadius: 4,
+    borderRadius: R_MD,
     border: `1px solid ${t.border}`,
     background: t.surface,
     color: t.text,
@@ -529,8 +530,8 @@ function UsedByRow({
         gridTemplateColumns: "180px 110px 110px 1fr",
         gap: 12,
         padding: "6px 0",
-        fontSize: 12,
-        fontFamily: FONT_MONO,
+        fontSize: FS_MD,
+        fontFamily: FF_MONO,
         borderTop: `1px solid ${t.borderSoft}`,
       }}
     >
@@ -580,11 +581,12 @@ function ValuesEditor({
   height: number;
   disabled?: boolean;
 }) {
+  const monoFont = useResolvedTheme().typography.fontMono;
   return (
     <div
       style={{
         border: `1px solid ${disabled ? t.border : t.accent}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
         overflow: "hidden",
       }}
     >
@@ -598,9 +600,9 @@ function ValuesEditor({
         options={{
           readOnly: !!disabled,
           minimap: { enabled: false },
-          fontSize: 12,
-          fontFamily:
-            '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+          // Monaco wants a literal font + numeric size.
+          fontSize: 12.5,
+          fontFamily: monoFont,
           wordWrap: "on",
           scrollBeyondLastLine: false,
           renderLineHighlight: "line",
@@ -632,8 +634,8 @@ function SuccessBanner({
         background: "rgba(34,197,94,0.10)",
         border: `1px solid rgba(34,197,94,0.45)`,
         color: t.text,
-        fontSize: 11.5,
-        borderRadius: 6,
+        fontSize: FS_SM,
+        borderRadius: R_MD,
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
@@ -645,8 +647,8 @@ function SuccessBanner({
         type="button"
         onClick={onDismiss}
         style={{
-          fontSize: 10.5,
-          fontFamily: FONT_MONO,
+          fontSize: FS_XS,
+          fontFamily: FF_MONO,
           background: "transparent",
           border: "none",
           color: t.textMuted,
@@ -678,8 +680,8 @@ function ErrorBanner({
         background: "rgba(244,63,94,0.10)",
         border: `1px solid rgba(244,63,94,0.45)`,
         color: t.text,
-        fontSize: 11.5,
-        borderRadius: 6,
+        fontSize: FS_SM,
+        borderRadius: R_MD,
       }}
     >
       <div
@@ -701,8 +703,8 @@ function ErrorBanner({
           type="button"
           onClick={onDismiss}
           style={{
-            fontSize: 10.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
             background: "transparent",
             border: "none",
             color: t.textMuted,
@@ -719,9 +721,9 @@ function ErrorBanner({
             padding: "8px 10px",
             background: t.surface,
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 4,
-            fontFamily: FONT_MONO,
-            fontSize: 11,
+            borderRadius: R_MD,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             color: t.text,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",

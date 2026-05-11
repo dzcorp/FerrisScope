@@ -5,8 +5,9 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { tokens, FONT_MONO, type ThemeMode } from "../theme";
+import { tokens, FF_MONO, type ThemeMode, R_LG, FS_MD, FS_XS } from "../theme";
 
+import { useResolvedTheme } from "../store";
 export type MenuItem =
   | {
       kind: "item";
@@ -30,7 +31,7 @@ type Props = {
 // Right-click menu — mirrors HV2PodMenu. Mono header pins the row's identity,
 // danger items always trail (R-04). Esc and outside-click both close.
 export function ContextMenu({ mode, position, items, onClose, rowName }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const ref = useRef<HTMLDivElement | null>(null);
   const [adjusted, setAdjusted] = useState<MenuPosition>(position);
 
@@ -78,7 +79,7 @@ export function ContextMenu({ mode, position, items, onClose, rowName }: Props) 
         zIndex: 50,
         background: t.surface,
         border: `1px solid ${t.border}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         boxShadow:
           mode === "dark"
             ? "0 12px 32px rgba(0,0,0,0.45)"
@@ -90,9 +91,9 @@ export function ContextMenu({ mode, position, items, onClose, rowName }: Props) 
         <div
           style={{
             padding: "4px 12px 6px",
-            fontSize: 10.5,
+            fontSize: FS_XS,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -158,10 +159,10 @@ function MenuRow({
         ? "rgba(244,63,94,0.10)"
         : t.hover
       : "transparent",
-    color: disabled ? t.textMuted : danger ? "#dc2626" : t.text,
+    color: disabled ? t.textMuted : danger ? t.bad : t.text,
     cursor: disabled ? "not-allowed" : "pointer",
     fontFamily: "inherit",
-    fontSize: 12.5,
+    fontSize: FS_MD,
     textAlign: "left",
     minHeight: 30,
     opacity: disabled ? 0.55 : 1,

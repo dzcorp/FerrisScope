@@ -1,4 +1,5 @@
-import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
+import { FF_MONO, type ThemeMode, R_MD, FS_MD, FS_XS } from "../../theme";
+import { useResolvedTheme } from "../../store";
 import { totalToolCount, type McpStatus } from "./chatStreaming";
 import { Btn, Icons } from "../ui";
 
@@ -29,7 +30,7 @@ type Props = {
 // coloured if any configured server failed to spawn so the operator notices
 // without having to open the popover.
 export function ChatHeader({
-  mode,
+  
   title,
   contextLabel,
   modelId,
@@ -44,7 +45,7 @@ export function ChatHeader({
   onToggleProviderPicker,
   providerPickerOpen,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const total = totalToolCount(mcp ?? undefined);
   const failedServers = (mcp?.servers ?? []).filter(
     (s) => !s.available && s.message,
@@ -108,7 +109,7 @@ export function ChatHeader({
           <div
             style={{
               color: t.text,
-              fontSize: 12.5,
+              fontSize: FS_MD,
               fontWeight: 600,
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -120,8 +121,8 @@ export function ChatHeader({
           <div
             style={{
               color: t.textMuted,
-              fontSize: 10.5,
-              fontFamily: FONT_MONO,
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -151,7 +152,7 @@ export function ChatHeader({
                 border: `1px solid ${
                   providerPickerOpen ? t.borderSoft : "transparent"
                 }`,
-                borderRadius: 4,
+                borderRadius: R_MD,
                 padding: "1px 6px 1px 6px",
                 cursor: "pointer",
                 fontFamily: "inherit",
@@ -199,7 +200,7 @@ export function ChatHeader({
                 border: `1px solid ${
                   modelPickerOpen ? t.borderSoft : "transparent"
                 }`,
-                borderRadius: 4,
+                borderRadius: R_MD,
                 padding: "1px 6px 1px 6px",
                 cursor: "pointer",
                 fontFamily: "inherit",
@@ -243,7 +244,7 @@ export function ChatHeader({
                 border: `1px solid ${
                   toolsOpen ? t.borderSoft : "transparent"
                 }`,
-                borderRadius: 4,
+                borderRadius: R_MD,
                 padding: "1px 4px",
                 cursor: "pointer",
                 fontFamily: "inherit",

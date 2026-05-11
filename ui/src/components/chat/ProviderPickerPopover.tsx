@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import { tokens, FONT_MONO, FONT_SANS, type ThemeMode } from "../../theme";
+import { useResolvedTheme } from "../../store";
+import { FF_MONO, FONT_SANS, type ThemeMode, R_LG, FS_MD, FS_XS } from "../../theme";
 import { Btn, Icons } from "../ui";
 import type { AiSettingsWire, ProviderKind } from "../../types";
 
@@ -25,14 +26,14 @@ type Props = {
 // not offered — different providers translate transcripts into different
 // wire formats, and tool-call ID streams don't carry across cleanly.
 export function ProviderPickerPopover({
-  mode,
+  
   settings,
   currentProviderKind,
   onPick,
   onOpenSettings,
   onClose,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const ref = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -82,7 +83,7 @@ export function ProviderPickerPopover({
         zIndex: 50,
         background: t.surface,
         border: `1px solid ${t.border}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
         marginTop: 4,
         maxHeight: 420,
@@ -113,8 +114,8 @@ export function ProviderPickerPopover({
           <div
             style={{
               color: t.textMuted,
-              fontSize: 10.5,
-              fontFamily: FONT_MONO,
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
               letterSpacing: 0.5,
               textTransform: "uppercase",
             }}
@@ -124,8 +125,8 @@ export function ProviderPickerPopover({
           <div
             style={{
               color: t.textDim,
-              fontSize: 10.5,
-              fontFamily: FONT_MONO,
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -188,7 +189,7 @@ export function ProviderPickerPopover({
                 cursor: "pointer",
                 color: usable ? t.text : t.textDim,
                 fontFamily: FONT_SANS,
-                fontSize: 12.5,
+                fontSize: FS_MD,
                 opacity: usable ? 1 : 0.65,
               }}
             >
@@ -213,7 +214,7 @@ export function ProviderPickerPopover({
               >
                 <span
                   style={{
-                    fontSize: 12.5,
+                    fontSize: FS_MD,
                     color: usable ? t.text : t.textDim,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
@@ -224,8 +225,8 @@ export function ProviderPickerPopover({
                 </span>
                 <span
                   style={{
-                    fontFamily: FONT_MONO,
-                    fontSize: 10.5,
+                    fontFamily: FF_MONO,
+                    fontSize: FS_XS,
                     color: t.textMuted,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
@@ -237,8 +238,8 @@ export function ProviderPickerPopover({
               </span>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 10.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_XS,
                   color: usable
                     ? p.account_label === "free tier"
                       ? t.info

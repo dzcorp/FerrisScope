@@ -1,5 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { tokens, FONT_MONO, type ThemeMode, type Tokens } from "../../theme";
+import { useResolvedTheme } from "../../store";
+import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_MD, FS_SM } from "../../theme";
 import type { ChatViewMessage, ExecutingToolCall } from "./chatStreaming";
 
 // A row inside a tool group is either a resolved result message or an
@@ -44,8 +45,8 @@ function itemKey(item: ToolGroupItem): string {
 // Collapsed: a viewport showing the latest few rows; older ones scroll
 // out of view smoothly. Expanded: every row stacked, each individually
 // expandable into its payload.
-function ToolGroupBubbleInner({ mode, items }: Props) {
-  const t = tokens(mode);
+function ToolGroupBubbleInner({ items }: Props) {
+  const t = useResolvedTheme().tokens;
   const [expanded, setExpanded] = useState(false);
   const [openIds, setOpenIds] = useState<Set<string>>(() => new Set());
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -140,7 +141,7 @@ function ToolGroupBubbleInner({ mode, items }: Props) {
         flexDirection: "column",
         background: t.surface,
         border: `1px solid ${t.border}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         boxShadow: "0 1px 2px rgba(15,20,30,0.04)",
         // Paint containment: the viewport's scroll + the row enter
         // animation shouldn't bleed paint into sibling bubbles.
@@ -159,8 +160,8 @@ function ToolGroupBubbleInner({ mode, items }: Props) {
           border: "none",
           borderBottom: expanded ? `1px solid ${t.borderSoft}` : "none",
           color: t.textMuted,
-          fontFamily: FONT_MONO,
-          fontSize: 11,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           cursor: "pointer",
           textAlign: "left",
           width: "100%",
@@ -283,10 +284,10 @@ function ExecutingRow({
           alignItems: "center",
           gap: 8,
           padding: "3px 6px",
-          borderRadius: 6,
+          borderRadius: R_MD,
           color: t.textMuted,
-          fontFamily: FONT_MONO,
-          fontSize: 11,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           textAlign: "left",
           width: "100%",
           contain: "content",
@@ -354,10 +355,10 @@ function ResultRow({
           gap: 8,
           padding: "3px 6px",
           border: `1px solid ${showPayload ? t.borderSoft : "transparent"}`,
-          borderRadius: 6,
+          borderRadius: R_MD,
           color: t.textMuted,
-          fontFamily: FONT_MONO,
-          fontSize: 11,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           cursor: expanded ? "pointer" : "default",
           textAlign: "left",
           width: "100%",
@@ -404,10 +405,10 @@ function ResultRow({
             background: t.surface,
             border: `1px solid ${t.border}`,
             borderLeft: `3px solid ${status}`,
-            borderRadius: 6,
+            borderRadius: R_MD,
             color: t.text,
-            fontFamily: FONT_MONO,
-            fontSize: 11,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             lineHeight: 1.55,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",

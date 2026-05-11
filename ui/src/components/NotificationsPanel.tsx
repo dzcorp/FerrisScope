@@ -1,7 +1,7 @@
 import { useEffect } from "react";
-import { useAppStore } from "../store";
+import { useAppStore, useResolvedTheme } from "../store";
 import type { Notification } from "../store";
-import { tokens, FONT_MONO, FONT_SANS, type ThemeMode, type Tokens } from "../theme";
+import { FF_MONO, FONT_SANS, type ThemeMode, type Tokens, R_SM, FS_MD, FS_SM, FS_XS } from "../theme";
 import { Btn, Eyebrow, IconBtn, Icons, EmptyState } from "./ui";
 
 type Props = { mode: ThemeMode };
@@ -10,7 +10,7 @@ type Props = { mode: ThemeMode };
 // Same slide-from-right pattern as DetailPanel; in-memory only — closing the
 // app drops the log.
 export function NotificationsPanel({ mode }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const open = useAppStore((s) => s.notificationsOpen);
   const close = useAppStore((s) => s.closeNotifications);
   const notifications = useAppStore((s) => s.notifications);
@@ -81,7 +81,7 @@ export function NotificationsPanel({ mode }: Props) {
             <div
               style={{
                 marginTop: 2,
-                fontSize: 13.5,
+                fontSize: FS_MD,
                 fontWeight: 600,
                 color: t.text,
               }}
@@ -140,14 +140,14 @@ function Row({ t, n }: { t: Tokens; n: Notification }) {
           width: 3,
           alignSelf: "stretch",
           background: accent,
-          borderRadius: 2,
+          borderRadius: R_SM,
           flexShrink: 0,
         }}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
-            fontSize: 12.5,
+            fontSize: FS_MD,
             color: t.text,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
@@ -161,9 +161,9 @@ function Row({ t, n }: { t: Tokens; n: Notification }) {
           <div
             style={{
               marginTop: 4,
-              fontSize: 11.5,
+              fontSize: FS_SM,
               color: t.textDim,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
               lineHeight: 1.45,
@@ -175,9 +175,9 @@ function Row({ t, n }: { t: Tokens; n: Notification }) {
         <div
           style={{
             marginTop: 4,
-            fontSize: 10.5,
+            fontSize: FS_XS,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           {timeAgo(n.createdAt)} · {n.tone}

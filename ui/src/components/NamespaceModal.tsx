@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { tokens, FONT_MONO, type ThemeMode } from "../theme";
-import { useAppStore } from "../store";
+import { FF_MONO, type ThemeMode, R_LG, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../theme";
+import { useAppStore, useResolvedTheme } from "../store";
 import { Btn, Icons, Kbd } from "./ui";
 
 // Treat anything in the kube-* family plus the dashboard add-ons as "system."
@@ -29,14 +29,14 @@ type Props = {
 // Empty selection means "all" (matches HV2 semantics). Apply is the canonical
 // action (P2); Clear is secondary; Esc cancels.
 export function NamespaceModal({
-  mode,
+  
   namespaces,
   counts,
   initial,
   onApply,
   onClose,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const showSystemNs = useAppStore((s) => s.settings.showSystemNs);
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<Set<string>>(new Set(initial));
@@ -117,7 +117,7 @@ export function NamespaceModal({
           flexDirection: "column",
           background: t.surface,
           border: `1px solid ${t.border}`,
-          borderRadius: 12,
+          borderRadius: R_LG,
           boxShadow: "0 24px 56px rgba(0,0,0,0.28)",
           zIndex: 41,
           overflow: "hidden",
@@ -140,7 +140,7 @@ export function NamespaceModal({
             <div>
               <div
                 style={{
-                  fontSize: 13,
+                  fontSize: FS_MD,
                   fontWeight: 600,
                   letterSpacing: -0.2,
                   color: t.text,
@@ -150,10 +150,10 @@ export function NamespaceModal({
               </div>
               <div
                 style={{
-                  fontSize: 11.5,
+                  fontSize: FS_SM,
                   color: t.textMuted,
                   marginTop: 2,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {visible.length} available
@@ -171,7 +171,7 @@ export function NamespaceModal({
                 cursor: "pointer",
                 color: t.textMuted,
                 padding: 4,
-                borderRadius: 4,
+                borderRadius: R_MD,
                 display: "flex",
               }}
             >
@@ -203,10 +203,10 @@ export function NamespaceModal({
                 padding: "7px 10px 7px 30px",
                 background: t.surfaceAlt,
                 border: `1px solid ${t.borderSoft}`,
-                borderRadius: 6,
+                borderRadius: R_MD,
                 color: t.text,
                 fontFamily: "inherit",
-                fontSize: 12.5,
+                fontSize: FS_MD,
                 outline: "none",
               }}
             />
@@ -260,14 +260,14 @@ export function NamespaceModal({
               />
             )}
           </span>
-          <span style={{ fontSize: 12.5, fontWeight: 600, flex: 1 }}>
+          <span style={{ fontSize: FS_MD, fontWeight: 600, flex: 1 }}>
             All namespaces
           </span>
           <span
             style={{
-              fontSize: 11,
+              fontSize: FS_SM,
               color: t.textMuted,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             {visible.length}
@@ -281,7 +281,7 @@ export function NamespaceModal({
                 padding: "24px 18px",
                 textAlign: "center",
                 color: t.textMuted,
-                fontSize: 12,
+                fontSize: FS_MD,
               }}
             >
               No namespaces match "{q}"
@@ -319,7 +319,7 @@ export function NamespaceModal({
                     style={{
                       width: 14,
                       height: 14,
-                      borderRadius: 3,
+                      borderRadius: R_SM,
                       border: `1.5px solid ${checked ? t.accent : t.border}`,
                       background: checked ? t.accent : "transparent",
                       display: "inline-flex",
@@ -345,8 +345,8 @@ export function NamespaceModal({
                   </span>
                   <span
                     style={{
-                      fontSize: 12.5,
-                      fontFamily: FONT_MONO,
+                      fontSize: FS_MD,
+                      fontFamily: FF_MONO,
                       flex: 1,
                       minWidth: 0,
                       overflow: "hidden",
@@ -358,9 +358,9 @@ export function NamespaceModal({
                   </span>
                   <span
                     style={{
-                      fontSize: 10.5,
+                      fontSize: FS_XS,
                       color: t.textMuted,
-                      fontFamily: FONT_MONO,
+                      fontFamily: FF_MONO,
                     }}
                   >
                     {counts && counts[ns] != null ? `${counts[ns]} pods` : "—"}
@@ -381,7 +381,7 @@ export function NamespaceModal({
             background: t.surfaceAlt,
           }}
         >
-          <span style={{ fontSize: 11.5, color: t.textMuted, flex: 1 }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted, flex: 1 }}>
             {draft.size === 0
               ? "Showing all namespaces"
               : `${draft.size} selected`}

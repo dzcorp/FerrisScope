@@ -4,9 +4,10 @@
 // compose shared primitives, dispatch from DetailPanel.
 
 import { useEffect, useRef, useState } from "react";
+import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipStrip,
@@ -120,9 +121,9 @@ function LoadBalancerSection({
         right={
           <span
             style={{
-              fontSize: 10.5,
+              fontSize: FS_XS,
               color: t.textMuted,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             {ingress.length} ingress
@@ -138,7 +139,7 @@ function LoadBalancerSection({
                 <Mute t={t}>—</Mute>
               ) : (
                 <Copyable text={addr}>
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                  <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                     {addr}
                   </span>
                 </Copyable>
@@ -180,7 +181,7 @@ function SelectorBlock({
     <>
       {hasLabels && <KeyValueChips t={t} pairs={selector.match_labels} />}
       {hasExpr && (
-        <span style={{ fontSize: 11.5, color: t.textDim, marginLeft: 6 }}>
+        <span style={{ fontSize: FS_SM, color: t.textDim, marginLeft: 6 }}>
           + {selector.match_expressions} matchExpression
           {selector.match_expressions === 1 ? "" : "s"}
         </span>
@@ -203,7 +204,7 @@ function TargetRefRow({
   if (!ref?.name || !ref.kind) return null;
   return (
     <DetailRow t={t} label={label}>
-      <span style={{ fontSize: 12, color: t.textDim }}>{ref.kind}</span>
+      <span style={{ fontSize: FS_MD, color: t.textDim }}>{ref.kind}</span>
       <LinkValue
         t={t}
         onClick={() => onNavigate?.(ref.kind!, ref.namespace ?? null, ref.name!)}
@@ -213,7 +214,7 @@ function TargetRefRow({
         {ref.name}
       </LinkValue>
       {ref.namespace && (
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {ref.namespace}
         </span>
       )}
@@ -231,7 +232,7 @@ export function ServiceSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<ServiceDetail>(
@@ -269,12 +270,12 @@ export function ServiceSummary(props: {
           <StatusPill status="Headless" t={t} mode={props.mode} dense />
         )}
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {ageFromIso(d.meta.created_at)} old
           </span>
         )}
         {d.ports.length > 0 && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {d.ports.length} port{d.ports.length === 1 ? "" : "s"}
           </span>
         )}
@@ -296,7 +297,7 @@ export function ServiceSummary(props: {
       <Section t={t} title="Spec" />
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Type">
-          <span style={{ fontSize: 12 }}>{d.type}</span>
+          <span style={{ fontSize: FS_MD }}>{d.type}</span>
         </DetailRow>
         {isExternalName ? (
           d.external_name && (
@@ -304,8 +305,8 @@ export function ServiceSummary(props: {
               <Copyable text={d.external_name}>
                 <span
                   style={{
-                    fontFamily: FONT_MONO,
-                    fontSize: 12,
+                    fontFamily: FF_MONO,
+                    fontSize: FS_MD,
                     wordBreak: "break-all",
                   }}
                 >
@@ -319,7 +320,7 @@ export function ServiceSummary(props: {
             {d.cluster_ip && (
               <DetailRow t={t} label="Cluster IP">
                 <Copyable text={d.cluster_ip}>
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                  <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                     {d.cluster_ip}
                   </span>
                 </Copyable>
@@ -355,17 +356,17 @@ export function ServiceSummary(props: {
         )}
         {d.session_affinity && d.session_affinity !== "None" && (
           <DetailRow t={t} label="Session Affinity">
-            <span style={{ fontSize: 12 }}>{d.session_affinity}</span>
+            <span style={{ fontSize: FS_MD }}>{d.session_affinity}</span>
           </DetailRow>
         )}
         {d.internal_traffic_policy && (
           <DetailRow t={t} label="Internal Traffic Policy">
-            <span style={{ fontSize: 12 }}>{d.internal_traffic_policy}</span>
+            <span style={{ fontSize: FS_MD }}>{d.internal_traffic_policy}</span>
           </DetailRow>
         )}
         {d.external_traffic_policy && (
           <DetailRow t={t} label="External Traffic Policy">
-            <span style={{ fontSize: 12 }}>{d.external_traffic_policy}</span>
+            <span style={{ fontSize: FS_MD }}>{d.external_traffic_policy}</span>
           </DetailRow>
         )}
         {d.ip_families.length > 0 && (
@@ -378,7 +379,7 @@ export function ServiceSummary(props: {
               ))}
             </ChipWrap>
             {d.ip_family_policy && (
-              <span style={{ fontSize: 11.5, color: t.textDim, marginLeft: 8 }}>
+              <span style={{ fontSize: FS_SM, color: t.textDim, marginLeft: 8 }}>
                 {d.ip_family_policy}
               </span>
             )}
@@ -387,7 +388,7 @@ export function ServiceSummary(props: {
         {d.load_balancer_class && (
           <DetailRow t={t} label="LB Class">
             <Copyable text={d.load_balancer_class}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 11.5 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_SM }}>
                 {d.load_balancer_class}
               </span>
             </Copyable>
@@ -408,19 +409,19 @@ export function ServiceSummary(props: {
         )}
         {d.health_check_node_port != null && (
           <DetailRow t={t} label="Health Check NodePort">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.health_check_node_port}
             </span>
           </DetailRow>
         )}
         {d.publish_not_ready_addresses && (
           <DetailRow t={t} label="Publish Not Ready">
-            <span style={{ fontSize: 12 }}>true</span>
+            <span style={{ fontSize: FS_MD }}>true</span>
           </DetailRow>
         )}
         {d.allocate_load_balancer_node_ports === false && (
           <DetailRow t={t} label="Allocate NodePorts">
-            <span style={{ fontSize: 12 }}>false</span>
+            <span style={{ fontSize: FS_MD }}>false</span>
           </DetailRow>
         )}
         <DetailRow t={t} label="Selector">
@@ -567,9 +568,9 @@ function ServicePortsEditor({
             rightExtra={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {ports.length} total
@@ -595,7 +596,7 @@ function ServicePortsEditor({
               padding: "6px 8px",
               background: "rgba(244,63,94,0.10)",
               border: "1px solid rgba(244,63,94,0.4)",
-              borderRadius: 3,
+              borderRadius: R_SM,
             }}
           >
             <ErrorBlock
@@ -611,9 +612,9 @@ function ServicePortsEditor({
           <div
             style={{
               margin: "0 0 6px",
-              fontSize: 11,
+              fontSize: FS_SM,
               color: t.bad,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             Duplicate port names: {[...dupNames].join(", ")}
@@ -730,7 +731,7 @@ function ServicePortRow({
   return (
     <DetailRow t={t} label={label}>
       <Copyable text={`${port.port}/${port.protocol}`}>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
           {port.port}/{port.protocol}
           {target}
           {nodePort}
@@ -764,7 +765,7 @@ export function EndpointsSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<EndpointsDetail>(
@@ -803,8 +804,8 @@ export function EndpointsSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: totalReady > 0 ? t.good : totalNotReady > 0 ? t.warn : t.bad,
           }}
@@ -814,8 +815,8 @@ export function EndpointsSummary(props: {
         {totalNotReady > 0 && (
           <span
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 12,
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
               color: t.warn,
             }}
           >
@@ -823,7 +824,7 @@ export function EndpointsSummary(props: {
           </span>
         )}
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -854,7 +855,7 @@ export function EndpointsSummary(props: {
           >
             {d.meta.name}
           </LinkValue>
-          <span style={{ fontSize: 11, color: t.textMuted, marginLeft: 6 }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted, marginLeft: 6 }}>
             (Endpoints share the Service's name)
           </span>
         </DetailRow>
@@ -907,9 +908,9 @@ function SubsetBlock({
         right={
           <span
             style={{
-              fontSize: 10.5,
+              fontSize: FS_XS,
               color: t.textMuted,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             {subset.addresses.length} ready · {subset.not_ready_addresses.length} not ready ·{" "}
@@ -976,8 +977,8 @@ function EndpointAddressRow({
           display: "inline-flex",
           alignItems: "center",
           padding: "1px 7px",
-          borderRadius: 3,
-          fontSize: 11,
+          borderRadius: R_SM,
+          fontSize: FS_SM,
           fontWeight: 600,
           background:
             tone === "good"
@@ -989,12 +990,12 @@ function EndpointAddressRow({
         {label === "Ready" ? "READY" : "NOT READY"}
       </span>
       <Copyable text={address.ip}>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
           {address.ip}
         </span>
       </Copyable>
       {address.hostname && (
-        <span style={{ fontSize: 11.5, color: t.textDim }}>
+        <span style={{ fontSize: FS_SM, color: t.textDim }}>
           {address.hostname}
         </span>
       )}
@@ -1038,7 +1039,7 @@ export function EndpointSliceSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<EndpointSliceDetail>(
@@ -1074,8 +1075,8 @@ export function EndpointSliceSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: ready === total && total > 0 ? t.good : ready === 0 ? t.bad : t.warn,
           }}
@@ -1086,7 +1087,7 @@ export function EndpointSliceSummary(props: {
           {d.address_type}
         </Chip>
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -1108,7 +1109,7 @@ export function EndpointSliceSummary(props: {
       <Section t={t} title="Spec" />
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Address Type">
-          <span style={{ fontSize: 12 }}>{d.address_type}</span>
+          <span style={{ fontSize: FS_MD }}>{d.address_type}</span>
         </DetailRow>
         {d.service_name && (
           <DetailRow t={t} label="Backing Service">
@@ -1143,9 +1144,9 @@ export function EndpointSliceSummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.endpoints.length} total
@@ -1212,7 +1213,7 @@ function EndpointSliceEntryRow({
     <div
       style={{
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         marginBottom: 10,
         background: t.surface,
         padding: "10px 12px",
@@ -1229,10 +1230,10 @@ function EndpointSliceEntryRow({
       >
         <span
           style={{
-            fontSize: 10,
+            fontSize: FS_XS,
             fontWeight: 700,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             letterSpacing: 0.4,
             textTransform: "uppercase",
           }}
@@ -1255,7 +1256,7 @@ function EndpointSliceEntryRow({
       {entry.hostname && (
         <DetailRow t={t} label="Hostname">
           <Copyable text={entry.hostname}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {entry.hostname}
             </span>
           </Copyable>
@@ -1275,7 +1276,7 @@ function EndpointSliceEntryRow({
       )}
       {entry.zone && (
         <DetailRow t={t} label="Zone">
-          <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+          <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
             {entry.zone}
           </span>
         </DetailRow>
@@ -1300,7 +1301,7 @@ export function IngressSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<IngressDetail>(
@@ -1337,12 +1338,12 @@ export function IngressSummary(props: {
             class={d.ingress_class_name}
           </Chip>
         )}
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {d.rules.length} rule{d.rules.length === 1 ? "" : "s"} · {totalPaths} path
           {totalPaths === 1 ? "" : "s"} · {d.tls.length} TLS
         </span>
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -1403,9 +1404,9 @@ export function IngressSummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.tls.length} entries
@@ -1462,9 +1463,9 @@ export function IngressSummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.rules.length} total
@@ -1505,7 +1506,7 @@ function IngressRuleBlock({
     <div
       style={{
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         marginBottom: 10,
         background: t.surface,
         overflow: "hidden",
@@ -1523,12 +1524,12 @@ function IngressRuleBlock({
       >
         <span
           style={{
-            fontSize: 9.5,
+            fontSize: FS_XS,
             fontWeight: 700,
             color: t.textMuted,
             textTransform: "uppercase",
             letterSpacing: 0.4,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           Host
@@ -1537,8 +1538,8 @@ function IngressRuleBlock({
           <Copyable text={rule.host}>
             <span
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 12.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_MD,
                 fontWeight: 600,
                 wordBreak: "break-all",
               }}
@@ -1613,7 +1614,7 @@ function BackendValue({
         : null);
     return (
       <>
-        <span style={{ fontSize: 11.5, color: t.textDim }}>Service</span>
+        <span style={{ fontSize: FS_SM, color: t.textDim }}>Service</span>
         <LinkValue
           t={t}
           onClick={() =>
@@ -1625,7 +1626,7 @@ function BackendValue({
           {backend.service.name}
         </LinkValue>
         {port && (
-          <span style={{ fontFamily: FONT_MONO, fontSize: 11.5, color: t.textDim }}>
+          <span style={{ fontFamily: FF_MONO, fontSize: FS_SM, color: t.textDim }}>
             :{port}
           </span>
         )}
@@ -1635,16 +1636,16 @@ function BackendValue({
   if (backend.resource) {
     return (
       <>
-        <span style={{ fontSize: 11.5, color: t.textDim }}>
+        <span style={{ fontSize: FS_SM, color: t.textDim }}>
           {backend.resource.kind}
         </span>
         <Copyable text={backend.resource.name}>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+          <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
             {backend.resource.name}
           </span>
         </Copyable>
         {backend.resource.api_group && (
-          <span style={{ fontSize: 11, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             ({backend.resource.api_group})
           </span>
         )}
@@ -1663,7 +1664,7 @@ export function IngressClassSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<IngressClassDetail>(
     () => api.getIngressClassDetail(props.clusterId, props.name),
@@ -1694,8 +1695,8 @@ export function IngressClassSummary(props: {
         {d.controller && (
           <span
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 13,
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
               fontWeight: 600,
               color: t.text,
               wordBreak: "break-all",
@@ -1708,7 +1709,7 @@ export function IngressClassSummary(props: {
           <StatusPill status="Default" t={t} mode={props.mode} dense />
         )}
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -1734,8 +1735,8 @@ export function IngressClassSummary(props: {
             <Copyable text={d.controller}>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 12,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_MD,
                   wordBreak: "break-all",
                 }}
               >
@@ -1747,7 +1748,7 @@ export function IngressClassSummary(props: {
           )}
         </DetailRow>
         <DetailRow t={t} label="Default">
-          <span style={{ fontSize: 12 }}>{d.is_default ? "true" : "false"}</span>
+          <span style={{ fontSize: FS_MD }}>{d.is_default ? "true" : "false"}</span>
         </DetailRow>
       </div>
 
@@ -1756,7 +1757,7 @@ export function IngressClassSummary(props: {
           <Section t={t} title="Parameters" />
           <div style={{ marginBottom: 22 }}>
             <DetailRow t={t} label="Kind">
-              <span style={{ fontSize: 12 }}>{d.parameters.kind}</span>
+              <span style={{ fontSize: FS_MD }}>{d.parameters.kind}</span>
             </DetailRow>
             <DetailRow t={t} label="Name">
               <LinkValue
@@ -1790,12 +1791,12 @@ export function IngressClassSummary(props: {
             )}
             {d.parameters.scope && (
               <DetailRow t={t} label="Scope">
-                <span style={{ fontSize: 12 }}>{d.parameters.scope}</span>
+                <span style={{ fontSize: FS_MD }}>{d.parameters.scope}</span>
               </DetailRow>
             )}
             {d.parameters.api_group && (
               <DetailRow t={t} label="API Group">
-                <span style={{ fontFamily: FONT_MONO, fontSize: 11.5 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_SM }}>
                   {d.parameters.api_group}
                 </span>
               </DetailRow>
@@ -1817,7 +1818,7 @@ export function NetworkPolicySummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<NetworkPolicyDetail>(
@@ -1859,11 +1860,11 @@ export function NetworkPolicySummary(props: {
             {p}
           </Chip>
         ))}
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {d.ingress.length} ingress · {d.egress.length} egress
         </span>
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -1910,9 +1911,9 @@ export function NetworkPolicySummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.ingress.length === 0
@@ -1924,7 +1925,7 @@ export function NetworkPolicySummary(props: {
           <div style={{ marginBottom: 22 }}>
             {d.ingress.length === 0 ? (
               <DetailRow t={t} label="—">
-                <span style={{ fontSize: 12, color: t.bad }}>
+                <span style={{ fontSize: FS_MD, color: t.bad }}>
                   Empty ingress list — all inbound traffic is denied.
                 </span>
               </DetailRow>
@@ -1952,9 +1953,9 @@ export function NetworkPolicySummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.egress.length === 0
@@ -1966,7 +1967,7 @@ export function NetworkPolicySummary(props: {
           <div style={{ marginBottom: 22 }}>
             {d.egress.length === 0 ? (
               <DetailRow t={t} label="—">
-                <span style={{ fontSize: 12, color: t.bad }}>
+                <span style={{ fontSize: FS_MD, color: t.bad }}>
                   Empty egress list — all outbound traffic is denied.
                 </span>
               </DetailRow>
@@ -2006,7 +2007,7 @@ function NetPolicyRuleBlock({
     <div
       style={{
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         marginBottom: 10,
         background: t.surface,
         padding: "10px 12px",
@@ -2014,10 +2015,10 @@ function NetPolicyRuleBlock({
     >
       <div
         style={{
-          fontSize: 10,
+          fontSize: FS_XS,
           fontWeight: 700,
           color: t.textMuted,
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
           letterSpacing: 0.4,
           textTransform: "uppercase",
           marginBottom: 6,
@@ -2089,14 +2090,14 @@ function NetPolicyPeerRow({
   if (peer.ip_block) {
     parts.push(
       <span key="ip" style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 11.5, color: t.textDim }}>ipBlock</span>
+        <span style={{ fontSize: FS_SM, color: t.textDim }}>ipBlock</span>
         <Copyable text={peer.ip_block.cidr}>
           <Chip t={t} mono>
             {peer.ip_block.cidr}
           </Chip>
         </Copyable>
         {peer.ip_block.except.length > 0 && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             except {peer.ip_block.except.join(", ")}
           </span>
         )}
@@ -2106,7 +2107,7 @@ function NetPolicyPeerRow({
   if (peer.namespace_selector) {
     parts.push(
       <span key="ns" style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 11.5, color: t.textDim }}>namespaces</span>
+        <span style={{ fontSize: FS_SM, color: t.textDim }}>namespaces</span>
         <SelectorBlock t={t} selector={peer.namespace_selector} />
       </span>,
     );
@@ -2114,7 +2115,7 @@ function NetPolicyPeerRow({
   if (peer.pod_selector) {
     parts.push(
       <span key="pod" style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 11.5, color: t.textDim }}>pods</span>
+        <span style={{ fontSize: FS_SM, color: t.textDim }}>pods</span>
         <SelectorBlock t={t} selector={peer.pod_selector} />
       </span>,
     );

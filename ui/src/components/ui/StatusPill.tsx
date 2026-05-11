@@ -73,7 +73,10 @@ export function StatusPill({ status, t, mode, dense, compact }: Props) {
         style={{
           width: dense ? 5 : 6,
           height: dense ? 5 : 6,
-          borderRadius: 3,
+          // Status dot is always a perfect circle — not theme-radius-aware.
+          // (A 4-6px square with theme corners scales to look like a rounded
+          // square, especially under the .fs-pulse-dot 1.35× scale animation.)
+          borderRadius: "50%",
           background: dot,
         }}
       />

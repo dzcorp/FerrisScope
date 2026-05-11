@@ -5,9 +5,10 @@
 // annotations are editable without each kind reimplementing the pencil.
 
 import { useEffect, useRef, useState } from "react";
+import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
@@ -87,8 +88,8 @@ function Scalar({
     <Copyable text={s}>
       <span
         style={{
-          fontFamily: mono ? FONT_MONO : "inherit",
-          fontSize: 12,
+          fontFamily: mono ? FF_MONO : "inherit",
+          fontSize: FS_MD,
           wordBreak: "break-all",
         }}
       >
@@ -123,7 +124,7 @@ export function PersistentVolumeClaimSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<PersistentVolumeClaimDetail>(
@@ -160,8 +161,8 @@ export function PersistentVolumeClaimSummary(props: {
         {d.capacity && (
           <span
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 13,
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
               fontWeight: 600,
               color: t.text,
             }}
@@ -170,12 +171,12 @@ export function PersistentVolumeClaimSummary(props: {
           </span>
         )}
         {d.requested_storage && d.requested_storage !== d.capacity && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             requested {d.requested_storage}
           </span>
         )}
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -254,7 +255,7 @@ export function PersistentVolumeClaimSummary(props: {
               <KeyValueChips t={t} pairs={d.selector.match_labels} />
             )}
             {d.selector.match_expressions > 0 && (
-              <span style={{ fontSize: 11.5, color: t.textDim, marginLeft: 6 }}>
+              <span style={{ fontSize: FS_SM, color: t.textDim, marginLeft: 6 }}>
                 + {d.selector.match_expressions} matchExpression
                 {d.selector.match_expressions === 1 ? "" : "s"}
               </span>
@@ -269,7 +270,7 @@ export function PersistentVolumeClaimSummary(props: {
           <div style={{ marginBottom: 22 }}>
             {d.data_source && d.data_source.kind && d.data_source.name && (
               <DetailRow t={t} label="From">
-                <span style={{ fontSize: 12, color: t.textDim }}>
+                <span style={{ fontSize: FS_MD, color: t.textDim }}>
                   {d.data_source.kind}
                 </span>
                 <LinkValue
@@ -287,7 +288,7 @@ export function PersistentVolumeClaimSummary(props: {
                   {d.data_source.name}
                 </LinkValue>
                 {d.data_source.api_group && (
-                  <span style={{ fontSize: 11, color: t.textMuted }}>
+                  <span style={{ fontSize: FS_SM, color: t.textMuted }}>
                     {d.data_source.api_group}
                   </span>
                 )}
@@ -296,7 +297,7 @@ export function PersistentVolumeClaimSummary(props: {
             {d.data_source_ref && d.data_source_ref.kind &&
               d.data_source_ref.name && (
                 <DetailRow t={t} label="From Ref">
-                  <span style={{ fontSize: 12, color: t.textDim }}>
+                  <span style={{ fontSize: FS_MD, color: t.textDim }}>
                     {d.data_source_ref.kind}
                   </span>
                   <LinkValue
@@ -314,7 +315,7 @@ export function PersistentVolumeClaimSummary(props: {
                     {d.data_source_ref.name}
                   </LinkValue>
                   {d.data_source_ref.namespace && (
-                    <span style={{ fontSize: 11, color: t.textMuted }}>
+                    <span style={{ fontSize: FS_SM, color: t.textMuted }}>
                       ns {d.data_source_ref.namespace}
                     </span>
                   )}
@@ -338,7 +339,7 @@ export function PersistentVolumeSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<PersistentVolumeDetail>(
     () => api.getPersistentVolumeDetail(props.clusterId, props.name),
@@ -370,8 +371,8 @@ export function PersistentVolumeSummary(props: {
         {d.capacity && (
           <span
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 13,
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
               fontWeight: 600,
               color: t.text,
             }}
@@ -388,7 +389,7 @@ export function PersistentVolumeSummary(props: {
           />
         )}
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -497,8 +498,8 @@ export function PersistentVolumeSummary(props: {
                 <Copyable text={d.claim_ref.uid}>
                   <span
                     style={{
-                      fontFamily: FONT_MONO,
-                      fontSize: 11.5,
+                      fontFamily: FF_MONO,
+                      fontSize: FS_SM,
                       color: t.textDim,
                       wordBreak: "break-all",
                     }}
@@ -517,7 +518,7 @@ export function PersistentVolumeSummary(props: {
           <Section t={t} title="Node Affinity" />
           <div style={{ marginBottom: 22 }}>
             <DetailRow t={t} label="Required Terms">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.node_affinity.term_count}
               </span>
             </DetailRow>
@@ -543,7 +544,7 @@ export function PersistentVolumeSummary(props: {
               <DetailRow t={t} label="Message">
                 <span
                   style={{
-                    fontSize: 11.5,
+                    fontSize: FS_SM,
                     color: t.textMuted,
                     whiteSpace: "pre-wrap",
                     wordBreak: "break-word",
@@ -569,7 +570,7 @@ export function StorageClassSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<StorageClassDetail>(
     () => api.getStorageClassDetail(props.clusterId, props.name),
@@ -599,8 +600,8 @@ export function StorageClassSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
             wordBreak: "break-all",
@@ -615,7 +616,7 @@ export function StorageClassSummary(props: {
           <StatusPill status="Expandable" t={t} mode={props.mode} dense />
         )}
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -646,7 +647,7 @@ export function StorageClassSummary(props: {
           <Scalar t={t} value={d.binding_mode} mono={false} />
         </DetailRow>
         <DetailRow t={t} label="Allow Expansion">
-          <span style={{ fontSize: 12 }}>
+          <span style={{ fontSize: FS_MD }}>
             {d.allow_volume_expansion === true
               ? "true"
               : d.allow_volume_expansion === false
@@ -655,7 +656,7 @@ export function StorageClassSummary(props: {
           </span>
         </DetailRow>
         <DetailRow t={t} label="Default">
-          <span style={{ fontSize: 12 }}>{d.is_default ? "true" : "false"}</span>
+          <span style={{ fontSize: FS_MD }}>{d.is_default ? "true" : "false"}</span>
         </DetailRow>
       </div>
 
@@ -667,9 +668,9 @@ export function StorageClassSummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.parameters.length} total
@@ -700,7 +701,7 @@ export function StorageClassSummary(props: {
           <Section t={t} title="Allowed Topologies" />
           <div style={{ marginBottom: 22 }}>
             <DetailRow t={t} label="Terms">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.allowed_topologies.term_count}
               </span>
             </DetailRow>

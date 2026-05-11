@@ -4,9 +4,10 @@
 // `ConditionsSection`, `PodTemplateSection`) plus a kind-specific block.
 
 import { useEffect, useRef, useState } from "react";
+import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import {  } from "../../../theme";
 import { ErrorBlock, Section, StatusPill, LoadingLine } from "../../ui";
 import {
   Copyable,
@@ -99,19 +100,19 @@ function StrategyChips({
   if (!strategy) return null;
   return (
     <DetailRow t={t} label={label}>
-      <span style={{ fontSize: 12 }}>{strategy.type}</span>
+      <span style={{ fontSize: FS_MD }}>{strategy.type}</span>
       {strategy.max_surge != null && (
-        <span style={{ fontSize: 11.5, color: t.textDim, marginLeft: 8 }}>
+        <span style={{ fontSize: FS_SM, color: t.textDim, marginLeft: 8 }}>
           maxSurge={strategy.max_surge}
         </span>
       )}
       {strategy.max_unavailable != null && (
-        <span style={{ fontSize: 11.5, color: t.textDim, marginLeft: 8 }}>
+        <span style={{ fontSize: FS_SM, color: t.textDim, marginLeft: 8 }}>
           maxUnavailable={strategy.max_unavailable}
         </span>
       )}
       {strategy.partition != null && (
-        <span style={{ fontSize: 11.5, color: t.textDim, marginLeft: 8 }}>
+        <span style={{ fontSize: FS_SM, color: t.textDim, marginLeft: 8 }}>
           partition={strategy.partition}
         </span>
       )}
@@ -129,7 +130,7 @@ export function DeploymentSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<DeploymentDetail>(
@@ -175,7 +176,7 @@ export function DeploymentSummary(props: {
             desired={d.replicas.desired}
           />
           <ReplicasEditor t={t} desired={d.replicas.desired} />
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {d.replicas.updated} up-to-date · {d.replicas.available} available
             {d.replicas.unavailable > 0
               ? ` · ${d.replicas.unavailable} unavailable`
@@ -218,28 +219,28 @@ export function DeploymentSummary(props: {
           <StrategyChips t={t} strategy={d.strategy} />
           {d.min_ready_seconds != null && d.min_ready_seconds > 0 && (
             <DetailRow t={t} label="Min Ready">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.min_ready_seconds}s
               </span>
             </DetailRow>
           )}
           {d.progress_deadline_seconds != null && (
             <DetailRow t={t} label="Progress Deadline">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.progress_deadline_seconds}s
               </span>
             </DetailRow>
           )}
           {d.revision_history_limit != null && (
             <DetailRow t={t} label="Revision History">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.revision_history_limit}
               </span>
             </DetailRow>
           )}
           {d.observed_generation != null && (
             <DetailRow t={t} label="Observed Generation">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.observed_generation}
               </span>
             </DetailRow>
@@ -277,7 +278,7 @@ export function ReplicaSetSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<ReplicaSetDetail>(
@@ -323,7 +324,7 @@ export function ReplicaSetSummary(props: {
             desired={d.replicas.desired}
           />
           <ReplicasEditor t={t} desired={d.replicas.desired} />
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {d.replicas.current} current · {d.replicas.available} available
             {d.meta.created_at ? ` · ${ageFromIso(d.meta.created_at)} old` : ""}
           </span>
@@ -358,14 +359,14 @@ export function ReplicaSetSummary(props: {
           <SelectorRow t={t} selector={d.selector} />
           {d.min_ready_seconds != null && d.min_ready_seconds > 0 && (
             <DetailRow t={t} label="Min Ready">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.min_ready_seconds}s
               </span>
             </DetailRow>
           )}
           {d.observed_generation != null && (
             <DetailRow t={t} label="Observed Generation">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.observed_generation}
               </span>
             </DetailRow>
@@ -403,7 +404,7 @@ export function StatefulSetSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<StatefulSetDetail>(
@@ -449,7 +450,7 @@ export function StatefulSetSummary(props: {
             desired={d.replicas.desired}
           />
           <ReplicasEditor t={t} desired={d.replicas.desired} />
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {d.replicas.current} current · {d.replicas.updated} updated ·{" "}
             {d.replicas.available} available
             {d.meta.created_at ? ` · ${ageFromIso(d.meta.created_at)} old` : ""}
@@ -486,7 +487,7 @@ export function StatefulSetSummary(props: {
           {d.service_name && (
             <DetailRow t={t} label="Service">
               <Copyable text={d.service_name}>
-                <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                   {d.service_name}
                 </span>
               </Copyable>
@@ -494,7 +495,7 @@ export function StatefulSetSummary(props: {
           )}
           {d.pod_management_policy && (
             <DetailRow t={t} label="Pod Management">
-              <span style={{ fontSize: 12 }}>{d.pod_management_policy}</span>
+              <span style={{ fontSize: FS_MD }}>{d.pod_management_policy}</span>
             </DetailRow>
           )}
           <StrategyChips
@@ -505,7 +506,7 @@ export function StatefulSetSummary(props: {
           {d.current_revision && (
             <DetailRow t={t} label="Current Revision">
               <Copyable text={d.current_revision}>
-                <span style={{ fontFamily: FONT_MONO, fontSize: 11.5 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_SM }}>
                   {d.current_revision}
                 </span>
               </Copyable>
@@ -515,7 +516,7 @@ export function StatefulSetSummary(props: {
             d.update_revision !== d.current_revision && (
               <DetailRow t={t} label="Update Revision">
                 <Copyable text={d.update_revision}>
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 11.5 }}>
+                  <span style={{ fontFamily: FF_MONO, fontSize: FS_SM }}>
                     {d.update_revision}
                   </span>
                 </Copyable>
@@ -523,7 +524,7 @@ export function StatefulSetSummary(props: {
             )}
           {d.observed_generation != null && (
             <DetailRow t={t} label="Observed Generation">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.observed_generation}
               </span>
             </DetailRow>
@@ -538,9 +539,9 @@ export function StatefulSetSummary(props: {
               right={
                 <span
                   style={{
-                    fontSize: 10.5,
+                    fontSize: FS_XS,
                     color: t.textMuted,
-                    fontFamily: FONT_MONO,
+                    fontFamily: FF_MONO,
                   }}
                 >
                   {d.volume_claim_templates.length} total
@@ -551,21 +552,21 @@ export function StatefulSetSummary(props: {
               {d.volume_claim_templates.map((vct) => (
                 <DetailRow key={vct.name} t={t} label={vct.name}>
                   {vct.storage && (
-                    <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                    <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                       {vct.storage}
                     </span>
                   )}
                   {vct.access_modes.length > 0 && (
-                    <span style={{ fontSize: 11.5, color: t.textDim }}>
+                    <span style={{ fontSize: FS_SM, color: t.textDim }}>
                       {vct.access_modes.join(", ")}
                     </span>
                   )}
                   {vct.storage_class && (
                     <span
                       style={{
-                        fontSize: 11.5,
+                        fontSize: FS_SM,
                         color: t.textMuted,
-                        fontFamily: FONT_MONO,
+                        fontFamily: FF_MONO,
                       }}
                     >
                       sc={vct.storage_class}
@@ -608,7 +609,7 @@ export function DaemonSetSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<DaemonSetDetail>(
@@ -653,7 +654,7 @@ export function DaemonSetSummary(props: {
             ready={d.replicas.ready}
             desired={d.replicas.desired_scheduled}
           />
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {d.replicas.up_to_date} up-to-date · {d.replicas.available} available
             {d.replicas.misscheduled > 0
               ? ` · ${d.replicas.misscheduled} misscheduled`
@@ -698,21 +699,21 @@ export function DaemonSetSummary(props: {
           />
           {d.min_ready_seconds != null && d.min_ready_seconds > 0 && (
             <DetailRow t={t} label="Min Ready">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.min_ready_seconds}s
               </span>
             </DetailRow>
           )}
           {d.revision_history_limit != null && (
             <DetailRow t={t} label="Revision History">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.revision_history_limit}
               </span>
             </DetailRow>
           )}
           {d.observed_generation != null && (
             <DetailRow t={t} label="Observed Generation">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.observed_generation}
               </span>
             </DetailRow>
@@ -750,7 +751,7 @@ export function JobSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<JobDetail>(
@@ -791,7 +792,7 @@ export function JobSummary(props: {
           }}
         >
           <StatusPill status={d.phase} t={t} mode={props.mode} />
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {d.status.succeeded}/{d.completions_desired ?? 1} completed ·{" "}
             {d.status.active} active · {d.status.failed} failed
             {duration ? ` · ${duration}` : ""}
@@ -816,41 +817,41 @@ export function JobSummary(props: {
         <Section t={t} title="Spec" />
         <div style={{ marginBottom: 22 }}>
           <DetailRow t={t} label="Completions">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.status.succeeded} / {d.completions_desired ?? 1}
               {d.completion_mode ? ` · ${d.completion_mode}` : ""}
             </span>
           </DetailRow>
           {d.parallelism != null && (
             <DetailRow t={t} label="Parallelism">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.parallelism}
               </span>
             </DetailRow>
           )}
           {d.backoff_limit != null && (
             <DetailRow t={t} label="Backoff Limit">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.backoff_limit}
               </span>
             </DetailRow>
           )}
           {d.active_deadline_seconds != null && (
             <DetailRow t={t} label="Active Deadline">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.active_deadline_seconds}s
               </span>
             </DetailRow>
           )}
           {d.ttl_seconds_after_finished != null && (
             <DetailRow t={t} label="TTL After Finished">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.ttl_seconds_after_finished}s
               </span>
             </DetailRow>
           )}
           <DetailRow t={t} label="Status">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               active={d.status.active} succeeded={d.status.succeeded} failed=
               {d.status.failed}
               {d.status.ready != null ? ` ready=${d.status.ready}` : ""}
@@ -862,7 +863,7 @@ export function JobSummary(props: {
           {d.start_time && (
             <DetailRow t={t} label="Started">
               <Copyable text={d.start_time}>
-                <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                   {ageFromIso(d.start_time)} ago
                   <span style={{ color: t.textMuted, marginLeft: 8 }}>
                     ({d.start_time})
@@ -874,7 +875,7 @@ export function JobSummary(props: {
           {d.completion_time && (
             <DetailRow t={t} label="Completed">
               <Copyable text={d.completion_time}>
-                <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                   {ageFromIso(d.completion_time)} ago
                   <span style={{ color: t.textMuted, marginLeft: 8 }}>
                     ({d.completion_time})
@@ -917,7 +918,7 @@ export function CronJobSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<CronJobDetail>(
@@ -958,8 +959,8 @@ export function CronJobSummary(props: {
         >
           <span
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 13,
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
               fontWeight: 600,
               color: t.text,
             }}
@@ -969,7 +970,7 @@ export function CronJobSummary(props: {
           {d.suspend && (
             <StatusPill status="Suspended" t={t} mode={props.mode} dense />
           )}
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {d.active.length} active
             {d.last_schedule_time
               ? ` · last ran ${ageFromIso(d.last_schedule_time)} ago`
@@ -997,7 +998,7 @@ export function CronJobSummary(props: {
         <DetailRow t={t} label="Cron Expression">
           {d.schedule ? (
             <Copyable text={d.schedule}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.schedule}
               </span>
             </Copyable>
@@ -1007,36 +1008,36 @@ export function CronJobSummary(props: {
         </DetailRow>
         {d.time_zone && (
           <DetailRow t={t} label="Time Zone">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.time_zone}
             </span>
           </DetailRow>
         )}
         <DetailRow t={t} label="Suspend">
-          <span style={{ fontSize: 12 }}>{d.suspend ? "true" : "false"}</span>
+          <span style={{ fontSize: FS_MD }}>{d.suspend ? "true" : "false"}</span>
         </DetailRow>
         {d.concurrency_policy && (
           <DetailRow t={t} label="Concurrency Policy">
-            <span style={{ fontSize: 12 }}>{d.concurrency_policy}</span>
+            <span style={{ fontSize: FS_MD }}>{d.concurrency_policy}</span>
           </DetailRow>
         )}
         {d.starting_deadline_seconds != null && (
           <DetailRow t={t} label="Starting Deadline">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.starting_deadline_seconds}s
             </span>
           </DetailRow>
         )}
         {d.successful_jobs_history_limit != null && (
           <DetailRow t={t} label="History (succeeded)">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.successful_jobs_history_limit}
             </span>
           </DetailRow>
         )}
         {d.failed_jobs_history_limit != null && (
           <DetailRow t={t} label="History (failed)">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.failed_jobs_history_limit}
             </span>
           </DetailRow>
@@ -1044,7 +1045,7 @@ export function CronJobSummary(props: {
         {d.last_schedule_time && (
           <DetailRow t={t} label="Last Schedule">
             <Copyable text={d.last_schedule_time}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {ageFromIso(d.last_schedule_time)} ago
                 <span style={{ color: t.textMuted, marginLeft: 8 }}>
                   ({d.last_schedule_time})
@@ -1056,7 +1057,7 @@ export function CronJobSummary(props: {
         {d.last_successful_time && (
           <DetailRow t={t} label="Last Success">
             <Copyable text={d.last_successful_time}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {ageFromIso(d.last_successful_time)} ago
                 <span style={{ color: t.textMuted, marginLeft: 8 }}>
                   ({d.last_successful_time})
@@ -1075,9 +1076,9 @@ export function CronJobSummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.active.length} total
@@ -1090,7 +1091,7 @@ export function CronJobSummary(props: {
                 {ref.name ? (
                   <Copyable text={ref.name}>
                     <span
-                      style={{ fontFamily: FONT_MONO, fontSize: 12 }}
+                      style={{ fontFamily: FF_MONO, fontSize: FS_MD }}
                     >
                       {ref.name}
                     </span>
@@ -1099,7 +1100,7 @@ export function CronJobSummary(props: {
                   <Mute t={t}>—</Mute>
                 )}
                 {ref.namespace && (
-                  <span style={{ fontSize: 11.5, color: t.textMuted }}>
+                  <span style={{ fontSize: FS_SM, color: t.textMuted }}>
                     {ref.namespace}
                   </span>
                 )}
@@ -1115,35 +1116,35 @@ export function CronJobSummary(props: {
           <div style={{ marginBottom: 22 }}>
             {d.job_template.completions != null && (
               <DetailRow t={t} label="Completions">
-                <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                   {d.job_template.completions}
                 </span>
               </DetailRow>
             )}
             {d.job_template.parallelism != null && (
               <DetailRow t={t} label="Parallelism">
-                <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                   {d.job_template.parallelism}
                 </span>
               </DetailRow>
             )}
             {d.job_template.backoff_limit != null && (
               <DetailRow t={t} label="Backoff Limit">
-                <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                   {d.job_template.backoff_limit}
                 </span>
               </DetailRow>
             )}
             {d.job_template.active_deadline_seconds != null && (
               <DetailRow t={t} label="Active Deadline">
-                <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                   {d.job_template.active_deadline_seconds}s
                 </span>
               </DetailRow>
             )}
             {d.job_template.ttl_seconds_after_finished != null && (
               <DetailRow t={t} label="TTL After Finished">
-                <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                   {d.job_template.ttl_seconds_after_finished}s
                 </span>
               </DetailRow>
@@ -1190,8 +1191,8 @@ function SubGridReplicas({
         display: "flex",
         flexWrap: "wrap",
         gap: "2px 16px",
-        fontFamily: FONT_MONO,
-        fontSize: 11.5,
+        fontFamily: FF_MONO,
+        fontSize: FS_SM,
         color: t.text,
       }}
     >

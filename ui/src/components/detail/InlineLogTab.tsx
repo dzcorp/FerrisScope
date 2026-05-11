@@ -7,7 +7,8 @@ import {
   useState,
 } from "react";
 import { api } from "../../api";
-import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
+import { useResolvedTheme } from "../../store";
+import { FF_MONO, type ThemeMode, FS_SM } from "../../theme";
 import { ErrorBlock, Select } from "../ui";
 import { ansiToReact } from "../../lib/ansi";
 
@@ -79,7 +80,6 @@ type Status =
   | { kind: "error"; message: string };
 
 export function InlineLogTab({
-  mode,
   clusterId,
   namespace,
   name,
@@ -93,7 +93,7 @@ export function InlineLogTab({
   containers: string[];
   defaultContainer?: string | null;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const initialContainer =
     (defaultContainer && containers.includes(defaultContainer)
       ? defaultContainer
@@ -111,7 +111,7 @@ export function InlineLogTab({
   // selection), so picking a short name like `csi-resizer` clips longer
   // siblings to "cinder-c…" until the operator picks one to read its
   // full label. Popover labels render at `fontFamily: inherit` /
-  // `fontSize: 12.5` (the trigger's mono override doesn't propagate
+  // `fontSize: FS_MD` (the trigger's mono override doesn't propagate
   // through the portal); chrome accounts for checkmark, gap, padding,
   // and a scrollbar allowance.
   const popoverMinWidth = useMemo(() => {
@@ -243,8 +243,8 @@ export function InlineLogTab({
             options={containers.map((c) => ({ value: c, label: c }))}
             popoverMinWidth={popoverMinWidth}
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 11,
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
               height: 26,
               padding: "3px 28px 3px 8px",
             }}
@@ -252,9 +252,9 @@ export function InlineLogTab({
         ) : (
           <span
             style={{
-              fontSize: 11,
+              fontSize: FS_SM,
               color: t.textMuted,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             container: {container ?? "—"}
@@ -262,14 +262,14 @@ export function InlineLogTab({
         )}
         <span
           style={{
-            fontSize: 11,
+            fontSize: FS_SM,
             color:
               status.kind === "error"
                 ? t.bad
                 : status.kind === "streaming"
                   ? t.good
                   : t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           {status.kind === "starting"
@@ -288,19 +288,20 @@ export function InlineLogTab({
         style={{
           flex: 1,
           overflow: "auto",
-          background: mode === "dark" ? "#0a0c10" : "#1a1d23",
-          color: "#cbd5e1",
-          fontFamily: FONT_MONO,
-          fontSize: 11.5,
+          // Log surface follows the active palette.
+          background: t.surfaceAlt,
+          color: t.text,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           lineHeight: 1.65,
           padding: 14,
         }}
       >
         {lines.length === 0 && status.kind === "starting" && (
-          <div style={{ color: "#64748b" }}>Connecting to log stream…</div>
+          <div style={{ color: t.textMuted }}>Connecting to log stream…</div>
         )}
         {lines.length === 0 && status.kind === "streaming" && (
-          <div style={{ color: "#64748b" }}>Waiting for output…</div>
+          <div style={{ color: t.textMuted }}>Waiting for output…</div>
         )}
         {status.kind === "error" && (
           <ErrorBlock
@@ -312,16 +313,21 @@ export function InlineLogTab({
           />
         )}
         {lines.map((l) => (
-          <LogLine key={l.id} entry={l} />
+          <LogLine
+            key={l.id}
+            entry={l}
+            text={t.text}
+            systemColor={t.warn}
+          />
         ))}
       </div>
       <div
         style={{
           padding: "6px 14px",
           borderTop: `1px solid ${t.borderSoft}`,
-          fontSize: 11,
+          fontSize: FS_SM,
           color: t.textMuted,
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
           display: "flex",
           alignItems: "center",
           gap: 12,
@@ -358,11 +364,21 @@ export function InlineLogTab({
 // Memo per-line: stable LineEntry refs from the ring buffer let unchanged
 // rows skip render when a new tail line arrives. `contain: content`
 // isolates per-row layout/paint to keep long logs scrolling smoothly.
-const LogLine = memo(function LogLine({ entry }: { entry: LineEntry }) {
+// `text` / `systemColor` are stable across renders (memo'd resolved theme),
+// so they don't bust LogLine's prop equality.
+const LogLine = memo(function LogLine({
+  entry,
+  text,
+  systemColor,
+}: {
+  entry: LineEntry;
+  text: string;
+  systemColor: string;
+}) {
   return (
     <div
       style={{
-        color: entry.system ? "#fbbf24" : "#cbd5e1",
+        color: entry.system ? systemColor : text,
         whiteSpace: "pre-wrap",
         wordBreak: "break-all",
         contain: "content",

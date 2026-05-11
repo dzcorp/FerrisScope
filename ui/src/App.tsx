@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, onPortForwardStatus, onResourceDelta } from "./api";
-import { useAppStore } from "./store";
+import { useAppStore, useResolvedTheme } from "./store";
 import type { AppInfo, ResourceKind } from "./types";
-import { tokens, FONT_SANS, UI_SCALE_DEFAULT } from "./theme";
+import { FONT_SANS, UI_SCALE_DEFAULT, R_LG, FS_MD } from "./theme";
 import { AppHeader } from "./components/AppHeader";
 import { TitleBar, ResizeEdges, TITLEBAR_INSET_PX } from "./components/TitleBar";
 import { Rail } from "./components/Rail";
@@ -34,6 +34,9 @@ export default function App() {
   const [discoveredNs, setDiscoveredNs] = useState<string[]>([]);
 
   const themeMode = useAppStore((s) => s.themeMode);
+  const themeId = useAppStore((s) => s.themeId);
+  const paletteId = useAppStore((s) => s.paletteId);
+  const themeOverrides = useAppStore((s) => s.themeOverrides);
   const toggleTheme = useAppStore((s) => s.toggleTheme);
   const selectedContextName = useAppStore((s) => s.selectedContext);
   const selectContext = useAppStore((s) => s.selectContext);
@@ -151,7 +154,12 @@ export default function App() {
     const t = setTimeout(() => {
       api
         .setPrefs({
-          theme: themeMode,
+          theme: {
+            id: themeId,
+            palette_id: paletteId,
+            mode: themeMode,
+            overrides: themeOverrides,
+          },
           settings: {
             refresh_sec: settings.refreshSec,
             confirm_destructive: settings.confirmDestructive,
@@ -183,6 +191,9 @@ export default function App() {
   }, [
     prefsLoaded,
     themeMode,
+    themeId,
+    paletteId,
+    themeOverrides,
     railMode,
     selectedContextName,
     selectedKindId,
@@ -527,9 +538,33 @@ export default function App() {
     resetUiScale,
   ]);
 
-  const t = tokens(themeMode);
+  const resolved = useResolvedTheme();
+  const t = resolved.tokens;
   document.body.style.background = t.bg;
   document.body.style.color = t.text;
+  // Theme typography flows to the document so every component that doesn't
+  // explicitly override font / base size picks it up. Cheap blanket effect —
+  // covers the long tail of components that haven't been swept to consume
+  // ResolvedTheme directly.
+  document.body.style.fontFamily = resolved.typography.fontSans;
+  document.body.style.fontSize = `${resolved.typography.base}px`;
+  // Publish the typography + sizing scale as CSS custom properties so
+  // components can read `var(--fs-fs-sm)` etc. without each one threading
+  // ResolvedTheme through props. Incremental migration: components keep
+  // their inline pixel literals as the var fallback until they're swept.
+  const root = document.documentElement.style;
+  root.setProperty("--fs-font-sans", resolved.typography.fontSans);
+  root.setProperty("--fs-font-mono", resolved.typography.fontMono);
+  root.setProperty("--fs-fs-xs", `${resolved.typography.scale.xs}px`);
+  root.setProperty("--fs-fs-sm", `${resolved.typography.scale.sm}px`);
+  root.setProperty("--fs-fs-md", `${resolved.typography.scale.md}px`);
+  root.setProperty("--fs-fs-lg", `${resolved.typography.scale.lg}px`);
+  root.setProperty("--fs-fs-xl", `${resolved.typography.scale.xl}px`);
+  root.setProperty("--fs-radius-sm", `${resolved.sizing.radius.sm}px`);
+  root.setProperty("--fs-radius-md", `${resolved.sizing.radius.md}px`);
+  root.setProperty("--fs-radius-lg", `${resolved.sizing.radius.lg}px`);
+  root.setProperty("--fs-control-h", `${resolved.sizing.controlHeight}px`);
+  root.setProperty("--fs-border-w", `${resolved.sizing.borderWidth}px`);
   // Publish the custom-titlebar height (Linux only — 0 elsewhere) as a
   // CSS variable. Every fixed-position overlay (scrim, side panel,
   // modal, dock) reads `var(--fs-titlebar-h, 0px)` for its top inset so
@@ -544,7 +579,7 @@ export default function App() {
   // a white dropdown list on a dark page.
   document.documentElement.style.colorScheme = themeMode;
   // Global UI scale via CSS `zoom` on the root. Chosen over rem/font-size
-  // because the codebase pins pixel literals (`fontSize: 12.5`, paddings)
+  // because the codebase pins pixel literals (`fontSize: FS_MD`, paddings)
   // throughout — `zoom` scales every pixel uniformly and is supported in
   // both webview engines we ship to (WebKit on macOS, WebKitGTK on Linux).
   document.documentElement.style.zoom = String(uiScale);
@@ -736,12 +771,12 @@ export default function App() {
             zIndex: 35,
             height: 28,
             padding: "0 12px",
-            borderRadius: 999,
+            borderRadius: R_LG,
             border: `1px solid ${t.border}`,
             background: t.surface,
             color: t.text,
             fontFamily: FONT_SANS,
-            fontSize: 12,
+            fontSize: FS_MD,
             fontWeight: 500,
             fontVariantNumeric: "tabular-nums",
             cursor: "pointer",

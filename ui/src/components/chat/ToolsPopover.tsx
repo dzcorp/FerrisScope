@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { tokens, FONT_MONO, FONT_SANS, type ThemeMode } from "../../theme";
+import { useResolvedTheme } from "../../store";
+import { FF_MONO, FONT_SANS, type ThemeMode, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
 import type { ChatTool } from "../../types";
 import type { McpStatus } from "./chatStreaming";
 import { ErrorBlock } from "../ui";
@@ -26,7 +27,7 @@ export function ToolsPopover({
   error,
   onClose,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const ref = useRef<HTMLDivElement | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
@@ -143,7 +144,7 @@ export function ToolsPopover({
         maxHeight: 480,
         background: t.surface,
         border: `1px solid ${t.border}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
         boxShadow: `0 6px 20px rgba(0,0,0,0.35)`,
         zIndex: 30,
         display: "flex",
@@ -160,14 +161,14 @@ export function ToolsPopover({
           gap: 8,
         }}
       >
-        <span style={{ color: t.text, fontSize: 12, fontWeight: 600 }}>
+        <span style={{ color: t.text, fontSize: FS_MD, fontWeight: 600 }}>
           Tools
         </span>
         <span
           style={{
             color: t.textMuted,
-            fontSize: 10.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
           }}
         >
           {tools.length} available
@@ -183,10 +184,10 @@ export function ToolsPopover({
             background: t.surfaceAlt,
             color: t.text,
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 4,
+            borderRadius: R_MD,
             padding: "2px 6px",
-            fontFamily: FONT_MONO,
-            fontSize: 11,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             outline: "none",
           }}
         />
@@ -205,8 +206,8 @@ export function ToolsPopover({
       >
         <div
           style={{
-            fontSize: 10,
-            fontFamily: FONT_MONO,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
             textTransform: "uppercase",
             letterSpacing: 0.5,
             color: t.textDim,
@@ -231,7 +232,7 @@ export function ToolsPopover({
             style={{
               padding: "12px 10px",
               color: t.textMuted,
-              fontSize: 11.5,
+              fontSize: FS_SM,
             }}
           >
             Loading tools…
@@ -252,7 +253,7 @@ export function ToolsPopover({
             style={{
               padding: "12px 10px",
               color: t.textMuted,
-              fontSize: 11.5,
+              fontSize: FS_SM,
             }}
           >
             No tools available.
@@ -263,7 +264,7 @@ export function ToolsPopover({
             style={{
               padding: "12px 10px",
               color: t.textMuted,
-              fontSize: 11.5,
+              fontSize: FS_SM,
             }}
           >
             No tools match this filter.
@@ -299,8 +300,8 @@ type SourceRow = {
   message: string | null;
 };
 
-function SourceRowView({ mode, row }: { mode: ThemeMode; row: SourceRow }) {
-  const t = tokens(mode);
+function SourceRowView({ row }: { mode: ThemeMode; row: SourceRow }) {
+  const t = useResolvedTheme().tokens;
   const dot = row.available ? t.good : row.message ? t.warn : t.info;
   const status = row.available
     ? `${row.toolCount} tool${row.toolCount === 1 ? "" : "s"}`
@@ -314,7 +315,7 @@ function SourceRowView({ mode, row }: { mode: ThemeMode; row: SourceRow }) {
           display: "flex",
           alignItems: "center",
           gap: 6,
-          fontSize: 11.5,
+          fontSize: FS_SM,
           color: t.text,
         }}
       >
@@ -328,7 +329,7 @@ function SourceRowView({ mode, row }: { mode: ThemeMode; row: SourceRow }) {
           }}
         />
         <span style={{ flex: 1 }}>{row.name}</span>
-        <span style={{ color: t.textMuted, fontFamily: FONT_MONO, fontSize: 10.5 }}>
+        <span style={{ color: t.textMuted, fontFamily: FF_MONO, fontSize: FS_XS }}>
           {status}
         </span>
       </div>
@@ -337,8 +338,8 @@ function SourceRowView({ mode, row }: { mode: ThemeMode; row: SourceRow }) {
           style={{
             paddingLeft: 12,
             color: t.warn,
-            fontSize: 10.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
             wordBreak: "break-word",
           }}
         >
@@ -391,14 +392,14 @@ function SourceGroup({
   expanded: Set<string>;
   onToggle: (name: string) => void;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   return (
     <div>
       <div
         style={{
           padding: "8px 10px 2px",
-          fontSize: 10,
-          fontFamily: FONT_MONO,
+          fontSize: FS_XS,
+          fontFamily: FF_MONO,
           textTransform: "uppercase",
           letterSpacing: 0.5,
           color: t.textDim,
@@ -424,7 +425,7 @@ function SourceGroup({
 }
 
 function ToolRow({
-  mode,
+  
   tool,
   open,
   onToggle,
@@ -434,7 +435,7 @@ function ToolRow({
   open: boolean;
   onToggle: () => void;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const params = useMemo(() => extractParams(tool.input_schema), [tool.input_schema]);
   const tagColor =
     tool.category === "read"
@@ -467,8 +468,8 @@ function ToolRow({
         <span
           style={{
             color: t.textDim,
-            fontFamily: FONT_MONO,
-            fontSize: 10,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             width: 8,
             display: "inline-block",
           }}
@@ -477,8 +478,8 @@ function ToolRow({
         </span>
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             flex: 1,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -490,8 +491,8 @@ function ToolRow({
         <span
           style={{
             color: tagColor,
-            fontFamily: FONT_MONO,
-            fontSize: 9.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             textTransform: "uppercase",
             letterSpacing: 0.5,
           }}
@@ -504,7 +505,7 @@ function ToolRow({
           style={{
             padding: "0 10px 8px 26px",
             color: t.textMuted,
-            fontSize: 11,
+            fontSize: FS_SM,
             display: "flex",
             flexDirection: "column",
             gap: 4,
@@ -523,8 +524,8 @@ function ToolRow({
             <div
               style={{
                 marginTop: 2,
-                fontFamily: FONT_MONO,
-                fontSize: 10.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_XS,
                 color: t.textMuted,
               }}
             >

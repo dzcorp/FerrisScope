@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useAppStore } from "../store";
+import { useAppStore, useResolvedTheme } from "../store";
 import type { Category, PrefsRailMode, ResourceKind } from "../types";
-import { tokens, FONT_MONO, type ThemeMode, type Tokens } from "../theme";
+import { tokens, FF_MONO, type ThemeMode, type Tokens, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../theme";
 import { ErrorBlock, Icons, Tooltip, resolveKindIcon } from "./ui";
 
 const CATEGORY_ORDER: Category[] = [
@@ -29,8 +29,8 @@ type Props = {
 // operator hovers the CustomResources group, which always force-expands the
 // rail (every CRD falls back to the same icon, so the collapsed list would
 // be a stack of indistinguishable glyphs).
-export function Rail({ mode }: Props) {
-  const t = tokens(mode);
+export function Rail({}: Props) {
+  const t = useResolvedTheme().tokens;
   const {
     kinds,
     kindsStatus,
@@ -229,9 +229,9 @@ export function Rail({ mode }: Props) {
             <div
               style={{
                 padding: "10px 16px",
-                fontSize: 11,
+                fontSize: FS_SM,
                 color: t.textMuted,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
                 opacity: open ? 1 : 0,
                 transition: "opacity .15s",
               }}
@@ -260,9 +260,9 @@ export function Rail({ mode }: Props) {
                   <div
                     style={{
                       padding: "8px 16px",
-                      fontSize: 10.5,
+                      fontSize: FS_XS,
                       color: t.bad,
-                      fontFamily: FONT_MONO,
+                      fontFamily: FF_MONO,
                       wordBreak: "break-word",
                     }}
                   >
@@ -336,7 +336,7 @@ function RailFooter({
             display: "flex",
             alignItems: "stretch",
             border: `1px solid ${t.border}`,
-            borderRadius: 5,
+            borderRadius: R_MD,
             overflow: "hidden",
             height: 20,
           }}
@@ -356,8 +356,8 @@ function RailFooter({
                       i === 0 ? "none" : `1px solid ${t.border}`,
                     background: active ? t.accentSoft : "transparent",
                     color: active ? t.accent : t.textMuted,
-                    fontFamily: FONT_MONO,
-                    fontSize: 9,
+                    fontFamily: FF_MONO,
+                    fontSize: FS_XS,
                     fontWeight: 600,
                     letterSpacing: 0.3,
                     textTransform: "uppercase",
@@ -420,7 +420,7 @@ function FooterRowButton({
         justifyContent: open ? "flex-start" : "center",
         gap: open ? 11 : 0,
         padding: open ? "7px 10px" : "7px 0",
-        borderRadius: 7,
+        borderRadius: R_MD,
         border: "none",
         background: hover ? t.railHover : "transparent",
         cursor: "pointer",
@@ -448,7 +448,7 @@ function FooterRowButton({
         <span
           style={{
             flex: 1,
-            fontSize: 12.5,
+            fontSize: FS_MD,
             fontWeight: 500,
             whiteSpace: "nowrap",
             color: accent ? t.accent : t.text,
@@ -492,12 +492,12 @@ function RailGroup({
     >
       <div
         style={{
-          fontSize: 10,
+          fontSize: FS_XS,
           fontWeight: 700,
           color: t.textMuted,
           textTransform: "uppercase",
           letterSpacing: 0.6,
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
           padding: "6px 16px 4px",
           opacity: open ? 1 : 0,
           transition: "opacity .15s",
@@ -621,8 +621,8 @@ function CustomResourcesBody({
                   border: "none",
                   cursor: "pointer",
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
-                  fontSize: 10.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_XS,
                   textAlign: "left",
                   letterSpacing: 0.2,
                 }}
@@ -649,7 +649,7 @@ function CustomResourcesBody({
                 >
                   {g}
                 </span>
-                <span style={{ color: t.textDim, fontSize: 10 }}>
+                <span style={{ color: t.textDim, fontSize: FS_XS }}>
                   {groupItems.length}
                 </span>
               </button>
@@ -693,6 +693,12 @@ function RailItem({
   onClick: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  // Theme can opt out of rail icons (e.g. a label-only style). When the rail
+  // is collapsed we keep the icon regardless — collapsed mode would
+  // otherwise be a column of empty buttons. So this only takes effect once
+  // the rail is open.
+  const showIcons = useResolvedTheme().display.showRailIcons;
+  const renderIcon = showIcons || !open;
   const icon = resolveKindIcon(kind.kind, kind.group, category);
   const btn = (
     <button
@@ -705,7 +711,7 @@ function RailItem({
         alignItems: "center",
         gap: 11,
         padding: "7px 10px",
-        borderRadius: 7,
+        borderRadius: R_MD,
         border: "none",
         cursor: "pointer",
         fontFamily: "inherit",
@@ -726,26 +732,28 @@ function RailItem({
             top: 6,
             bottom: 6,
             width: 2,
-            borderRadius: 2,
+            borderRadius: R_SM,
             background: t.accent,
           }}
         />
       )}
-      <div
-        style={{
-          width: 16,
-          height: 16,
-          flexShrink: 0,
-          display: "flex",
-          color: active ? t.accent : t.textDim,
-        }}
-      >
-        {icon}
-      </div>
+      {renderIcon && (
+        <div
+          style={{
+            width: 16,
+            height: 16,
+            flexShrink: 0,
+            display: "flex",
+            color: active ? t.accent : t.textDim,
+          }}
+        >
+          {icon}
+        </div>
+      )}
       <div
         style={{
           flex: 1,
-          fontSize: 12.5,
+          fontSize: FS_MD,
           fontWeight: active ? 600 : 500,
           letterSpacing: -0.1,
           opacity: open ? 1 : 0,

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { tokens, FONT_SANS, FONT_MONO, type ThemeMode } from "../../theme";
+import { useResolvedTheme } from "../../store";
+import { tokens, FONT_SANS, FF_MONO, type ThemeMode, R_MD, FS_MD, FS_XS } from "../../theme";
 import { Btn, Toggle } from "../ui";
 import type { ApprovalMode } from "../../types";
 
@@ -48,7 +49,7 @@ const MAX_HEIGHT = 360;
 // fingers expect. Multi-line YAML / paste flows still work via
 // Shift+Enter or by pasting (newlines in pasted content survive).
 export function ChatInput({
-  mode,
+  
   disabled,
   streaming,
   approvalMode,
@@ -61,7 +62,7 @@ export function ChatInput({
   contextLimit = 0,
   usableContext = 0,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const [value, setValue] = useState("");
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const allowAllWrites = approvalMode === "allow_all_writes";
@@ -129,11 +130,11 @@ export function ChatInput({
             maxHeight: MAX_HEIGHT,
             resize: "vertical",
             fontFamily: FONT_SANS,
-            fontSize: 13,
+            fontSize: FS_MD,
             color: t.text,
             background: t.surface,
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 6,
+            borderRadius: R_MD,
             padding: "8px 10px",
             outline: "none",
             lineHeight: 1.5,
@@ -167,8 +168,8 @@ export function ChatInput({
           alignItems: "center",
           gap: 10,
           paddingLeft: 2,
-          fontSize: 10.5,
-          fontFamily: FONT_MONO,
+          fontSize: FS_XS,
+          fontFamily: FF_MONO,
           userSelect: "none",
         }}
       >
@@ -197,11 +198,11 @@ export function ChatInput({
               background: "transparent",
               color: compacting ? t.warn : t.textMuted,
               border: `1px solid ${compacting ? t.warn : "transparent"}`,
-              borderRadius: 4,
+              borderRadius: R_MD,
               padding: "1px 6px",
               cursor: compacting || disabled ? "default" : "pointer",
-              fontFamily: FONT_MONO,
-              fontSize: 10.5,
+              fontFamily: FF_MONO,
+              fontSize: FS_XS,
               opacity: compacting || disabled ? 0.7 : 1,
             }}
           >

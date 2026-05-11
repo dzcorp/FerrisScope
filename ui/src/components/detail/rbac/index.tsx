@@ -9,9 +9,10 @@
 // `meta.namespace`).
 
 import { useEffect, useRef, useState } from "react";
+import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section } from "../../ui";
 import {
   ChipWrap,
@@ -119,10 +120,10 @@ function VerbChip({ t, verb }: { t: Tokens; verb: string }) {
           display: "inline-flex",
           alignItems: "center",
           padding: "1px 7px",
-          borderRadius: 3,
-          fontSize: 11,
+          borderRadius: R_SM,
+          fontSize: FS_SM,
           fontWeight: 600,
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
           background: bg,
           color: fg,
         }}
@@ -151,9 +152,9 @@ function RulesSection({
         right={
           <span
             style={{
-              fontSize: 10.5,
+              fontSize: FS_XS,
               color: t.textMuted,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             {rules.length} total
@@ -166,7 +167,7 @@ function RulesSection({
             key={i}
             style={{
               border: `1px solid ${t.borderSoft}`,
-              borderRadius: 8,
+              borderRadius: R_LG,
               marginBottom: 10,
               background: t.surface,
               padding: "8px 12px",
@@ -227,7 +228,7 @@ function RoleRefRow({
   const targetNs = roleRef.kind === "ClusterRole" ? null : namespace;
   return (
     <DetailRow t={t} label="Role">
-      <span style={{ fontSize: 12, color: t.textDim }}>{roleRef.kind}</span>
+      <span style={{ fontSize: FS_MD, color: t.textDim }}>{roleRef.kind}</span>
       <LinkValue
         t={t}
         onClick={() => onNavigate?.(roleRef.kind, targetNs, roleRef.name)}
@@ -237,7 +238,7 @@ function RoleRefRow({
         {roleRef.name}
       </LinkValue>
       {roleRef.api_group && (
-        <span style={{ fontSize: 11, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {roleRef.api_group}
         </span>
       )}
@@ -278,8 +279,8 @@ function SubjectRow({
         <Copyable text={subject.name}>
           <span
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 12,
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
               wordBreak: "break-all",
             }}
           >
@@ -298,7 +299,7 @@ function SubjectRow({
         </LinkValue>
       )}
       {subject.api_group && subject.api_group !== "" && (
-        <span style={{ fontSize: 11, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {subject.api_group}
         </span>
       )}
@@ -325,9 +326,9 @@ function SubjectsSection({
         right={
           <span
             style={{
-              fontSize: 10.5,
+              fontSize: FS_XS,
               color: t.textMuted,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             {subjects.length} total
@@ -365,7 +366,7 @@ export function ServiceAccountSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<ServiceAccountDetail>(
@@ -398,8 +399,8 @@ export function ServiceAccountSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
           }}
@@ -407,13 +408,13 @@ export function ServiceAccountSummary(props: {
           {d.secrets.length} secret{d.secrets.length === 1 ? "" : "s"}
         </span>
         {d.image_pull_secrets.length > 0 && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {d.image_pull_secrets.length} pull secret
             {d.image_pull_secrets.length === 1 ? "" : "s"}
           </span>
         )}
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -435,7 +436,7 @@ export function ServiceAccountSummary(props: {
       <Section t={t} title="Spec" />
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Automount Token">
-          <span style={{ fontSize: 12 }}>
+          <span style={{ fontSize: FS_MD }}>
             {d.automount_service_account_token === true
               ? "true"
               : d.automount_service_account_token === false
@@ -453,9 +454,9 @@ export function ServiceAccountSummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.secrets.length} total
@@ -476,7 +477,7 @@ export function ServiceAccountSummary(props: {
                   {s.name}
                 </LinkValue>
                 {s.namespace && s.namespace !== ns && (
-                  <span style={{ fontSize: 11, color: t.textMuted }}>
+                  <span style={{ fontSize: FS_SM, color: t.textMuted }}>
                     ns {s.namespace}
                   </span>
                 )}
@@ -522,7 +523,7 @@ export function RoleSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<RoleDetail>(
@@ -554,8 +555,8 @@ export function RoleSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
           }}
@@ -563,7 +564,7 @@ export function RoleSummary(props: {
           {d.rules.length} rule{d.rules.length === 1 ? "" : "s"}
         </span>
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -594,7 +595,7 @@ export function ClusterRoleSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<ClusterRoleDetail>(
     () => api.getClusterRoleDetail(props.clusterId, props.name),
@@ -625,8 +626,8 @@ export function ClusterRoleSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
           }}
@@ -636,20 +637,20 @@ export function ClusterRoleSummary(props: {
         {aggregated && (
           <span
             style={{
-              fontSize: 11,
+              fontSize: FS_SM,
               fontWeight: 600,
               padding: "1px 7px",
-              borderRadius: 3,
+              borderRadius: R_SM,
               background: t.chip,
               color: t.textDim,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             aggregated
           </span>
         )}
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -673,7 +674,7 @@ export function ClusterRoleSummary(props: {
           <Section t={t} title="Aggregation Rule" />
           <div style={{ marginBottom: 22 }}>
             <DetailRow t={t} label="Selectors">
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.aggregation_rule.selector_count}
               </span>
             </DetailRow>
@@ -704,7 +705,7 @@ export function RoleBindingSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<RoleBindingDetail>(
@@ -737,19 +738,19 @@ export function RoleBindingSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
           }}
         >
           {d.role_ref.kind} / {d.role_ref.name}
         </span>
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           → {d.subjects.length} subject{d.subjects.length === 1 ? "" : "s"}
         </span>
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}
@@ -795,7 +796,7 @@ export function ClusterRoleBindingSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<ClusterRoleBindingDetail>(
     () => api.getClusterRoleBindingDetail(props.clusterId, props.name),
@@ -825,19 +826,19 @@ export function ClusterRoleBindingSummary(props: {
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 13,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
           }}
         >
           {d.role_ref.kind} / {d.role_ref.name}
         </span>
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           → {d.subjects.length} subject{d.subjects.length === 1 ? "" : "s"}
         </span>
         {d.meta.created_at && (
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             · {ageFromIso(d.meta.created_at)} old
           </span>
         )}

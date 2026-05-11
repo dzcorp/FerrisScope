@@ -11,8 +11,8 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
-import { useAppStore } from "../../store";
+import { FF_MONO, type ThemeMode, R_MD, R_SM, FS_SM, FS_XS } from "../../theme";
+import { useAppStore, useResolvedTheme } from "../../store";
 
 type Side = "top" | "bottom" | "left" | "right";
 
@@ -41,7 +41,7 @@ export function Tooltip({
   children,
 }: TooltipProps) {
   const themeMode = useAppStore((s) => s.themeMode);
-  const t = tokens(themeMode);
+  const t = useResolvedTheme().tokens;
   const triggerRef = useRef<HTMLElement | null>(null);
   const tipRef = useRef<HTMLDivElement | null>(null);
   const showTimer = useRef<number | null>(null);
@@ -164,12 +164,16 @@ export function Tooltip({
     left: pos.x,
     zIndex: 9999,
     pointerEvents: "none",
-    background: themeMode === "dark" ? "#0b0e12" : "#11161d",
+    // Tooltips intentionally invert the surface — dark on light themes,
+    // even darker on dark themes — for readability against any backdrop.
+    // `bulkBg` is the same near-black we use for the bulk-action bar, so
+    // tooltips read as the same "modal/floating" surface across themes.
+    background: t.bulkBg,
     color: themeMode === "dark" ? t.text : "#f4f6f9",
     border: `1px solid ${themeMode === "dark" ? t.border : "rgba(255,255,255,0.06)"}`,
-    borderRadius: 6,
+    borderRadius: R_MD,
     padding: "5px 8px",
-    fontSize: 11.5,
+    fontSize: FS_SM,
     lineHeight: 1.35,
     letterSpacing: -0.05,
     maxWidth: 320,
@@ -196,10 +200,10 @@ export function Tooltip({
             {kbd && (
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 10,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_XS,
                   padding: "1px 5px",
-                  borderRadius: 3,
+                  borderRadius: R_SM,
                   background: "rgba(255,255,255,0.10)",
                   color: "rgba(255,255,255,0.78)",
                 }}
@@ -217,7 +221,7 @@ export function Tooltip({
 // Convenience for components that already take a `mode` instead of pulling
 // from the store. Keeps the existing call sites tidy.
 export function TooltipFor({
-  mode: _mode,
+  mode: mode,
   ...rest
 }: TooltipProps & { mode?: ThemeMode }) {
   return <Tooltip {...rest} />;

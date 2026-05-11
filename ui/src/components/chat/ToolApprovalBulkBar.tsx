@@ -1,6 +1,7 @@
 import { memo, useState } from "react";
+import { useResolvedTheme } from "../../store";
 import { api } from "../../api";
-import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
+import { FF_MONO, type ThemeMode, R_MD, FS_SM } from "../../theme";
 import { Btn, ErrorBlock } from "../ui";
 import type { ApprovalDecision } from "../../types";
 import type { PendingApproval } from "./chatStreaming";
@@ -39,8 +40,8 @@ type Props = {
 //    for every call. Repeated remembers for the same name are a no-op
 //    on the backend, so this is safe even when the batch has
 //    duplicates.
-function ToolApprovalBulkBarInner({ mode, chatId, approvals }: Props) {
-  const t = tokens(mode);
+function ToolApprovalBulkBarInner({ chatId, approvals }: Props) {
+  const t = useResolvedTheme().tokens;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -90,8 +91,8 @@ function ToolApprovalBulkBarInner({ mode, chatId, approvals }: Props) {
         background: t.surfaceAlt,
         border: `1px solid ${t.warn}66`,
         borderLeft: `3px solid ${t.warn}`,
-        borderRadius: 6,
-        fontFamily: FONT_MONO,
+        borderRadius: R_MD,
+        fontFamily: FF_MONO,
         contain: "content",
       }}
     >
@@ -102,13 +103,13 @@ function ToolApprovalBulkBarInner({ mode, chatId, approvals }: Props) {
           gap: 8,
         }}
       >
-        <span style={{ color: t.warn, fontWeight: 600, fontSize: 11 }}>
+        <span style={{ color: t.warn, fontWeight: 600, fontSize: FS_SM }}>
           ⚠ {approvals.length} APPROVALS PENDING
         </span>
         <span
           style={{
             color: t.textDim,
-            fontSize: 11,
+            fontSize: FS_SM,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",

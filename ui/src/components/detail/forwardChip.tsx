@@ -17,7 +17,7 @@
 import { useState } from "react";
 import { api } from "../../api";
 import { useAppStore } from "../../store";
-import { type Tokens, FONT_MONO } from "../../theme";
+import { type Tokens, FF_MONO, R_SM, FS_SM } from "../../theme";
 import type { ForwardTarget } from "../../types";
 import { toast } from "../../lib/dialog";
 import { Icons, Tooltip } from "../ui";
@@ -95,7 +95,7 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
           style={chipButton(t, false, busy)}
         >
           <span style={{ display: "inline-flex" }}>{Icons.forward}</span>
-          <span style={{ fontFamily: FONT_MONO }}>forward</span>
+          <span style={{ fontFamily: FF_MONO }}>forward</span>
         </button>
       </Tooltip>
     );
@@ -137,7 +137,7 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
             display: "inline-block",
           }}
         />
-        <span style={{ fontFamily: FONT_MONO }}>
+        <span style={{ fontFamily: FF_MONO }}>
           :{entry.actual_local_port}
         </span>
       </button>
@@ -169,7 +169,7 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
           border: `1px solid ${t.borderSoft}`,
           background: entry.spec.autostart ? t.accentSoft : "transparent",
           color: entry.spec.autostart ? t.accent : t.textMuted,
-          borderRadius: 3,
+          borderRadius: R_SM,
           padding: "1px 4px",
           cursor: busy ? "not-allowed" : "pointer",
           display: "inline-flex",
@@ -188,7 +188,7 @@ function iconButton(t: Tokens, busy: boolean) {
     border: `1px solid ${t.borderSoft}`,
     background: "transparent",
     color: t.textMuted,
-    borderRadius: 3,
+    borderRadius: R_SM,
     padding: "1px 4px",
     cursor: busy ? "not-allowed" : "pointer",
     display: "inline-flex",
@@ -201,9 +201,9 @@ function chipButton(t: Tokens, live: boolean, busy: boolean) {
     display: "inline-flex",
     alignItems: "center",
     gap: 5,
-    fontSize: 11,
+    fontSize: FS_SM,
     padding: "1px 7px",
-    borderRadius: 3,
+    borderRadius: R_SM,
     border: `1px solid ${live ? t.accent : t.borderSoft}`,
     background: live ? t.accentSoft : "transparent",
     color: live ? t.accent : t.textDim,

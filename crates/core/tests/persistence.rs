@@ -71,7 +71,10 @@ fn kubeconfig_source_effective_group_uses_override_then_falls_back() {
 #[test]
 fn prefs_defaults_match_documented_values() {
     let p = Prefs::default();
-    assert_eq!(p.theme, ThemeMode::Dark);
+    assert_eq!(p.theme.mode, ThemeMode::Dark);
+    assert_eq!(p.theme.id, "default");
+    assert_eq!(p.theme.palette_id, "default");
+    assert!(p.theme.overrides.is_none());
     assert_eq!(p.settings.density, Density::Comfortable);
     assert!(p.settings.confirm_destructive);
     assert!(!p.settings.show_system_ns);
@@ -103,7 +106,10 @@ fn prefs_load_partial_json_and_round_trip() {
         "ui": { "rail_pinned": true }
     }"#;
     let p = ferrisscope_core::prefs::parse(raw);
-    assert_eq!(p.theme, ThemeMode::Light);
+    // Legacy bare-string theme migrates into the record with default id/palette.
+    assert_eq!(p.theme.mode, ThemeMode::Light);
+    assert_eq!(p.theme.id, "default");
+    assert_eq!(p.theme.palette_id, "default");
     assert_eq!(p.settings.density, Density::Compact);
     assert_eq!(p.settings.refresh_sec, 30);
     assert!(!p.settings.confirm_destructive);
@@ -115,7 +121,8 @@ fn prefs_load_partial_json_and_round_trip() {
 
     let back = serde_json::to_string(&p).unwrap();
     let again: Prefs = serde_json::from_str(&back).unwrap();
-    assert_eq!(again.theme, ThemeMode::Light);
+    assert_eq!(again.theme.mode, ThemeMode::Light);
+    assert_eq!(again.theme.id, "default");
     assert_eq!(again.settings.refresh_sec, 30);
     assert_eq!(again.ui.rail_mode, RailMode::Pinned);
 }

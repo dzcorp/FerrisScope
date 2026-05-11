@@ -24,6 +24,92 @@ pub enum ThemeMode {
     Dark,
 }
 
+/// Theme record persisted at `prefs.theme`. `id` selects a theme from the
+/// frontend's bundled registry (`default`, `lens`, `vscode`, `readable`);
+/// `palette_id` picks a palette within it; `mode` is the light/dark variant.
+/// `overrides` is a free-form JSON bag the Customize UI fills in — kept
+/// opaque on the backend so a future override-schema change doesn't force a
+/// migration here.
+///
+/// Legacy files wrote `prefs.theme` as a bare `"light"` / `"dark"` string;
+/// the wire enum below accepts both forms so plain `serde_json::from_str`
+/// (e.g. inside Tauri command deserialization) tolerates the old shape too.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "ThemePrefsWire")]
+pub struct ThemePrefs {
+    #[serde(default = "default_theme_id")]
+    pub id: String,
+    #[serde(default = "default_palette_id")]
+    pub palette_id: String,
+    #[serde(default)]
+    pub mode: ThemeMode,
+    #[serde(default)]
+    pub overrides: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ThemePrefsWire {
+    /// New shape — full record. All inner fields default so partial
+    /// records from a transitional frontend still load.
+    Record {
+        #[serde(default = "default_theme_id")]
+        id: String,
+        #[serde(default = "default_palette_id")]
+        palette_id: String,
+        #[serde(default)]
+        mode: ThemeMode,
+        #[serde(default)]
+        overrides: Option<serde_json::Value>,
+    },
+    /// Legacy shape — bare `"light"` / `"dark"` string written by builds
+    /// that predate the theme record.
+    BareMode(ThemeMode),
+}
+
+impl From<ThemePrefsWire> for ThemePrefs {
+    fn from(wire: ThemePrefsWire) -> Self {
+        match wire {
+            ThemePrefsWire::Record {
+                id,
+                palette_id,
+                mode,
+                overrides,
+            } => Self {
+                id,
+                palette_id,
+                mode,
+                overrides,
+            },
+            ThemePrefsWire::BareMode(mode) => Self {
+                id: default_theme_id(),
+                palette_id: default_palette_id(),
+                mode,
+                overrides: None,
+            },
+        }
+    }
+}
+
+fn default_theme_id() -> String {
+    "default".to_string()
+}
+
+fn default_palette_id() -> String {
+    "default".to_string()
+}
+
+impl Default for ThemePrefs {
+    fn default() -> Self {
+        Self {
+            id: default_theme_id(),
+            palette_id: default_palette_id(),
+            mode: ThemeMode::default(),
+            overrides: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -157,7 +243,7 @@ pub struct UiState {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Prefs {
     #[serde(default)]
-    pub theme: ThemeMode,
+    pub theme: ThemePrefs,
     #[serde(default)]
     pub settings: Settings,
     #[serde(default)]
@@ -177,6 +263,10 @@ pub fn config_path() -> Option<PathBuf> {
 /// Migrations applied:
 /// - `ui.rail_pinned: true` → `ui.rail_mode: pinned` (only when rail_mode is
 ///   at its default Auto; an explicit rail_mode always wins).
+/// - Legacy bare-string `theme: "dark"` / `"light"` → full `ThemePrefs`
+///   record. Handled by `ThemePrefs`' `serde(from = ThemePrefsWire)` so
+///   plain `serde_json::from_str` tolerates both shapes — this function
+///   doesn't need a manual rewrite.
 #[must_use]
 pub fn parse(data: &str) -> Prefs {
     let mut prefs: Prefs = serde_json::from_str(data).unwrap_or_default();
@@ -239,6 +329,45 @@ mod tests {
             prefs.update.auto_check_enabled,
             "auto_check_enabled must default to true so legacy installs opt in"
         );
+    }
+
+    #[test]
+    fn legacy_bare_string_theme_migrates_to_record() {
+        // Pre-theme-record prefs.json wrote `"theme": "dark"`. The new shape
+        // is an object; parse() must lift the bare string into the record
+        // form so the operator's mode choice survives the upgrade.
+        let legacy = r#"{ "theme": "light", "ui": {} }"#;
+        let prefs = parse(legacy);
+        assert_eq!(prefs.theme.id, "default");
+        assert_eq!(prefs.theme.palette_id, "default");
+        assert!(matches!(prefs.theme.mode, ThemeMode::Light));
+        assert!(prefs.theme.overrides.is_none());
+    }
+
+    #[test]
+    fn new_theme_record_round_trips() {
+        // A prefs.json written by the new shape comes back identical.
+        let payload = r#"{
+            "theme": {
+                "id": "lens",
+                "palette_id": "lens",
+                "mode": "dark",
+                "overrides": null
+            }
+        }"#;
+        let prefs = parse(payload);
+        assert_eq!(prefs.theme.id, "lens");
+        assert_eq!(prefs.theme.palette_id, "lens");
+        assert!(matches!(prefs.theme.mode, ThemeMode::Dark));
+    }
+
+    #[test]
+    fn missing_theme_defaults_to_default_dark() {
+        // Brand-new install: no `theme` key at all.
+        let prefs = parse("{}");
+        assert_eq!(prefs.theme.id, "default");
+        assert_eq!(prefs.theme.palette_id, "default");
+        assert!(matches!(prefs.theme.mode, ThemeMode::Dark));
     }
 
     #[test]

@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  THEMES,
   clampUiScale,
+  getPalette,
+  getTheme,
+  resolveTheme,
   statusBucket,
   statusIsTransient,
   statusDot,
@@ -101,17 +105,118 @@ describe("statusDot + statusFill use token colors", () => {
     expect(statusDot("Mystery", t)).toBe(t.unknown);
   });
 
-  it("fill returns dark-mode tints in dark", () => {
-    const f = statusFill("Running", t, "dark");
-    expect(f.bg).toMatch(/rgba\(/);
-    expect(f.fg).toMatch(/^#[0-9a-f]{6}$/i);
+  it("fill bg derives from the bucket token in both modes", () => {
+    const dark = statusFill("Running", t, "dark");
+    const lt = tokens("light");
+    const light = statusFill("Running", lt, "light");
+    // Both modes emit rgba() bg with the palette's `good` channel.
+    expect(dark.bg).toMatch(/^rgba\(16, ?185, ?129/);
+    expect(light.bg).toMatch(/^rgba\(16, ?185, ?129/);
   });
 
-  it("fill returns light-mode tints in light", () => {
+  it("dark mode fg keeps the bucket color vivid; light mode darkens it", () => {
+    const dark = statusFill("Failed", t, "dark");
     const lt = tokens("light");
-    const f = statusFill("Failed", lt, "light");
-    expect(f.bg).toBe("#ffe4e6");
-    expect(f.fg).toBe("#9f1239");
+    const light = statusFill("Failed", lt, "light");
+    // Dark passes the bucket color through unchanged.
+    expect(dark.fg).toBe(t.bad);
+    // Light mixes toward black for contrast on the tinted pill.
+    expect(light.fg).toMatch(/^rgb\(\d+, ?\d+, ?\d+\)$/);
+    expect(light.fg).not.toBe(lt.bad);
+  });
+
+  it("a palette that re-tones a bucket flows through to the pill", () => {
+    // VS Code's `bad` is #a1260d (darker red) in light mode — the pill bg
+    // should reference *that*, not the Default's #f43f5e.
+    const vscodeLight = {
+      ...tokens("light"),
+      bad: "#a1260d",
+    };
+    const f = statusFill("Failed", vscodeLight, "light");
+    expect(f.bg).toMatch(/^rgba\(161, ?38, ?13/);
+  });
+});
+
+describe("theme registry", () => {
+  it("ships the four bundled themes in stable id order", () => {
+    expect(THEMES.map((t) => t.id)).toEqual([
+      "default",
+      "lens",
+      "vscode",
+      "readable",
+    ]);
+  });
+  it("every theme has at least one palette and a valid defaultPaletteId", () => {
+    for (const th of THEMES) {
+      expect(th.palettes.length).toBeGreaterThan(0);
+      expect(th.palettes.some((p) => p.id === th.defaultPaletteId)).toBe(true);
+    }
+  });
+  it("getTheme falls back to Default for unknown ids", () => {
+    expect(getTheme("nope").id).toBe("default");
+  });
+  it("getPalette falls back to the theme's default for unknown palette ids", () => {
+    const t = getTheme("default");
+    expect(getPalette(t, "nope").id).toBe(t.defaultPaletteId);
+  });
+});
+
+describe("resolveTheme", () => {
+  it("returns the active theme's tokens for the requested mode", () => {
+    const r = resolveTheme({
+      themeId: "default",
+      paletteId: "default",
+      mode: "dark",
+    });
+    expect(r.themeId).toBe("default");
+    expect(r.paletteId).toBe("default");
+    expect(r.mode).toBe("dark");
+    expect(r.tokens.bg).toBe("#0d1014");
+  });
+  it("falls back to Default for an unknown theme id", () => {
+    const r = resolveTheme({
+      themeId: "nope",
+      paletteId: "doesnt-matter",
+      mode: "light",
+    });
+    expect(r.themeId).toBe("default");
+    // Palette also falls back to Default's only palette.
+    expect(r.paletteId).toBe("default");
+  });
+  it("typography differs across themes (the visible delta)", () => {
+    const def = resolveTheme({
+      themeId: "default",
+      paletteId: "default",
+      mode: "dark",
+    });
+    const readable = resolveTheme({
+      themeId: "readable",
+      paletteId: "warm",
+      mode: "dark",
+    });
+    expect(readable.typography.base).toBeGreaterThan(def.typography.base);
+    expect(readable.sizing.rowHeights.comfortable).toBeGreaterThan(
+      def.sizing.rowHeights.comfortable,
+    );
+  });
+  it("overrides win over the resolved theme + palette", () => {
+    const r = resolveTheme({
+      themeId: "default",
+      paletteId: "default",
+      mode: "dark",
+      overrides: {
+        tokens: { accent: "#ff00ff" },
+        typography: { base: 18, scale: { md: 18 } },
+        display: { showRailIcons: false },
+      },
+    });
+    expect(r.tokens.accent).toBe("#ff00ff");
+    expect(r.typography.base).toBe(18);
+    expect(r.typography.scale.md).toBe(18);
+    // Untouched scale steps survive the merge.
+    expect(r.typography.scale.lg).toBe(14);
+    expect(r.display.showRailIcons).toBe(false);
+    expect(r.display.showDetailIcons).toBe(true);
   });
 });
 

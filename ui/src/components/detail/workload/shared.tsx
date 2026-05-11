@@ -4,7 +4,7 @@
 // metadata + selector + pod-template chrome consistent across the family.
 
 import { useMemo, useState } from "react";
-import { FONT_MONO, type Tokens } from "../../../theme";
+import { FF_MONO, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
 import { Btn, Checkbox, Chip, Section, Select } from "../../ui";
 import { ForwardChip } from "../forwardChip";
 import {
@@ -92,7 +92,7 @@ export function MetaSection({
         <DetailRow t={t} label="Created">
           {meta.created_at ? (
             <Copyable text={meta.created_at}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {ageFromIso(meta.created_at)} ago
                 <span style={{ color: t.textMuted, marginLeft: 8 }}>
                   ({meta.created_at})
@@ -105,7 +105,7 @@ export function MetaSection({
         </DetailRow>
         <DetailRow t={t} label="Name">
           <Copyable text={meta.name}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{meta.name}</span>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{meta.name}</span>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Namespace">
@@ -127,8 +127,8 @@ export function MetaSection({
             <Copyable text={meta.uid}>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   color: t.textDim,
                   wordBreak: "break-all",
                 }}
@@ -140,7 +140,7 @@ export function MetaSection({
         )}
         {meta.controlled_by && (
           <DetailRow t={t} label="Controlled By">
-            <span style={{ fontSize: 12 }}>{meta.controlled_by.kind}</span>{" "}
+            <span style={{ fontSize: FS_MD }}>{meta.controlled_by.kind}</span>{" "}
             <LinkValue
               t={t}
               onClick={() =>
@@ -184,7 +184,7 @@ export function MetaSection({
         />
         {meta.generation != null && (
           <DetailRow t={t} label="Generation">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {meta.generation}
             </span>
           </DetailRow>
@@ -390,9 +390,9 @@ export function MetaPairsRow({
                 <div
                   style={{
                     margin: "0 0 6px",
-                    fontSize: 11,
+                    fontSize: FS_SM,
                     color: t.bad,
-                    fontFamily: FONT_MONO,
+                    fontFamily: FF_MONO,
                   }}
                 >
                   Duplicate keys: {[...dup].join(", ")}
@@ -411,7 +411,7 @@ export function MetaPairsRow({
           ) : pairs.length === 0 ? (
             <Mute t={t}>—</Mute>
           ) : collapsedAsCount && pairs.length > 4 ? (
-            <span style={{ fontSize: 12, color: t.textDim }}>
+            <span style={{ fontSize: FS_MD, color: t.textDim }}>
               {pairs.length} total
             </span>
           ) : (
@@ -454,7 +454,7 @@ export function SelectorRow({
     <DetailRow t={t} label="Selector">
       {hasLabels && <KeyValueChips t={t} pairs={selector.match_labels} />}
       {hasExpr && (
-        <span style={{ fontSize: 11.5, color: t.textDim, marginLeft: 6 }}>
+        <span style={{ fontSize: FS_SM, color: t.textDim, marginLeft: 6 }}>
           + {selector.match_expressions} matchExpression
           {selector.match_expressions === 1 ? "" : "s"}
         </span>
@@ -484,9 +484,9 @@ export function ConditionsSection({
         right={
           <span
             style={{
-              fontSize: 10.5,
+              fontSize: FS_XS,
               color: t.textMuted,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             {conditions.length} total
@@ -498,14 +498,14 @@ export function ConditionsSection({
           <DetailRow key={c.type} t={t} label={c.type}>
             <ConditionStatusChip t={t} status={c.status} />
             {c.reason && (
-              <span style={{ fontSize: 11.5, color: t.textDim }}>
+              <span style={{ fontSize: FS_SM, color: t.textDim }}>
                 {c.reason}
               </span>
             )}
             {c.message && (
               <div
                 style={{
-                  fontSize: 11.5,
+                  fontSize: FS_SM,
                   color: t.textMuted,
                   width: "100%",
                   marginTop: 2,
@@ -518,9 +518,9 @@ export function ConditionsSection({
             {c.last_transition_time && (
               <span
                 style={{
-                  fontSize: 11,
+                  fontSize: FS_SM,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                   marginLeft: "auto",
                 }}
               >
@@ -544,8 +544,8 @@ function ConditionStatusChip({ t, status }: { t: Tokens; status: string }) {
         display: "inline-flex",
         alignItems: "center",
         padding: "1px 7px",
-        borderRadius: 3,
-        fontSize: 11,
+        borderRadius: R_SM,
+        fontSize: FS_SM,
         fontWeight: 600,
         background: bg,
         color: fg,
@@ -599,7 +599,7 @@ export function PodTemplateSection({
         )}
         {template.annotations_count > 0 && (
           <DetailRow t={t} label="Pod Annotations">
-            <span style={{ fontSize: 12, color: t.textDim }}>
+            <span style={{ fontSize: FS_MD, color: t.textDim }}>
               {template.annotations_count} total
             </span>
           </DetailRow>
@@ -624,13 +624,13 @@ export function PodTemplateSection({
         )}
         {template.restart_policy && template.restart_policy !== "Always" && (
           <DetailRow t={t} label="Restart Policy">
-            <span style={{ fontSize: 12 }}>{template.restart_policy}</span>
+            <span style={{ fontSize: FS_MD }}>{template.restart_policy}</span>
           </DetailRow>
         )}
         {template.priority_class && (
           <DetailRow t={t} label="Priority Class">
             <Copyable text={template.priority_class}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {template.priority_class}
               </span>
             </Copyable>
@@ -643,7 +643,7 @@ export function PodTemplateSection({
         )}
         {template.tolerations_count > 0 && (
           <DetailRow t={t} label="Tolerations">
-            <span style={{ fontSize: 12, color: t.textDim }}>
+            <span style={{ fontSize: FS_MD, color: t.textDim }}>
               {template.tolerations_count} total
             </span>
           </DetailRow>
@@ -680,9 +680,9 @@ export function PodTemplateSection({
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {initContainers.length} total
@@ -715,9 +715,9 @@ export function PodTemplateSection({
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {mainContainers.length} total
@@ -802,7 +802,7 @@ function ContainerSummaryCard({
     <div
       style={{
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         marginBottom: 10,
         background: t.surface,
         overflow: "hidden",
@@ -821,8 +821,8 @@ function ContainerSummaryCard({
         <Copyable text={c.name}>
           <span
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 12.5,
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
               fontWeight: 600,
               flex: 1,
               minWidth: 0,
@@ -836,12 +836,12 @@ function ContainerSummaryCard({
         </Copyable>
         <span
           style={{
-            fontSize: 9.5,
+            fontSize: FS_XS,
             fontWeight: 700,
             color: t.textMuted,
             textTransform: "uppercase",
             letterSpacing: 0.4,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           {c.kind}
@@ -890,8 +890,8 @@ function ContainerSummaryCard({
                 <Copyable text={c.image}>
                   <span
                     style={{
-                      fontFamily: FONT_MONO,
-                      fontSize: 11.5,
+                      fontFamily: FF_MONO,
+                      fontSize: FS_SM,
                       wordBreak: "break-all",
                     }}
                   >
@@ -902,7 +902,7 @@ function ContainerSummaryCard({
             )}
             {c.image_pull_policy && (
               <DetailRow t={t} label="ImagePullPolicy">
-                <span style={{ fontSize: 12 }}>{c.image_pull_policy}</span>
+                <span style={{ fontSize: FS_MD }}>{c.image_pull_policy}</span>
               </DetailRow>
             )}
           </>
@@ -985,8 +985,8 @@ function ContainerSummaryCard({
           <DetailRow t={t} label="Command">
             <span
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 11.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_SM,
                 wordBreak: "break-all",
               }}
             >
@@ -998,8 +998,8 @@ function ContainerSummaryCard({
           <DetailRow t={t} label="Args">
             <span
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 11.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_SM,
                 wordBreak: "break-all",
               }}
             >
@@ -1121,8 +1121,8 @@ export function ReplicaCounts({
   return (
     <span
       style={{
-        fontFamily: FONT_MONO,
-        fontSize: 13,
+        fontFamily: FF_MONO,
+        fontSize: FS_MD,
         fontWeight: 600,
         fontVariantNumeric: "tabular-nums",
         color: ok ? t.good : ready === 0 ? t.bad : t.warn,
@@ -1194,12 +1194,12 @@ export function ReplicasEditor({
           style={{
             width: 56,
             padding: "3px 6px",
-            fontFamily: FONT_MONO,
-            fontSize: 12,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             background: t.bg,
             color: t.text,
             border: `1px solid ${invalid ? t.bad : t.borderSoft}`,
-            borderRadius: 3,
+            borderRadius: R_SM,
             outline: "none",
           }}
         />
@@ -1457,9 +1457,9 @@ export function EnvEditor({
               <div
                 style={{
                   margin: "0 0 6px",
-                  fontSize: 11,
+                  fontSize: FS_SM,
                   color: t.bad,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 Duplicate env names: {[...dupNames].join(", ")}
@@ -1723,7 +1723,7 @@ function EnvRowVariantControls({
             onClick={() => onPickRef(targetKind)}
             style={{
               justifyContent: "flex-start",
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
               color: filled ? t.text : t.textMuted,
               minWidth: 0,
               overflow: "hidden",
@@ -1737,12 +1737,12 @@ function EnvRowVariantControls({
           </Btn>
           <label
             style={{
-              fontSize: 11,
+              fontSize: FS_SM,
               color: t.textDim,
               display: "inline-flex",
               alignItems: "center",
               gap: 4,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
               cursor: "pointer",
             }}
             title="Don't fail if key is missing"
@@ -1842,7 +1842,7 @@ function EnvRefChip({
             copyText={copyText}
             enabled={!!onNavigate && refName !== ""}
           >
-            <span style={{ fontFamily: FONT_MONO }}>
+            <span style={{ fontFamily: FF_MONO }}>
               {targetKind === "ConfigMap" ? "cm" : "sec"}:{refName || "?"}.
               {from.key}
             </span>
@@ -2103,8 +2103,8 @@ function ResourcesSide({
     <div>
       <div
         style={{
-          fontSize: 10.5,
-          fontFamily: FONT_MONO,
+          fontSize: FS_XS,
+          fontFamily: FF_MONO,
           color: t.textMuted,
           textTransform: "uppercase",
           letterSpacing: 0.4,
@@ -2161,8 +2161,8 @@ function ResourcesSide({
                   })),
                 ]}
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 12,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_MD,
                   height: 28,
                   padding: "4px 28px 4px 8px",
                 }}
@@ -2284,8 +2284,8 @@ export function ImageEditor({
           <Copyable text={image}>
             <span
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 11.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_SM,
                 wordBreak: "break-all",
               }}
             >
@@ -2319,8 +2319,8 @@ export function ImageEditor({
                 label: o.label,
               }))}
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 12,
+                fontFamily: FF_MONO,
+                fontSize: FS_MD,
                 height: 28,
                 padding: "4px 28px 4px 8px",
               }}
@@ -2344,7 +2344,7 @@ export function ImageEditor({
               width: "100%",
             }}
           >
-            <span style={{ fontSize: 12 }}>
+            <span style={{ fontSize: FS_MD }}>
               {imagePullPolicy ?? <Mute t={t}>(default)</Mute>}
             </span>
             <EditModeChrome
@@ -2468,9 +2468,9 @@ export function MountsEditor({
               <div
                 style={{
                   margin: "0 0 6px",
-                  fontSize: 11,
+                  fontSize: FS_SM,
                   color: t.bad,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 Duplicate mount paths: {[...dupPaths].join(", ")}
@@ -2539,9 +2539,9 @@ export function MountsEditor({
                         display: "inline-flex",
                         alignItems: "center",
                         gap: 4,
-                        fontSize: 10.5,
+                        fontSize: FS_XS,
                         color: t.textDim,
-                        fontFamily: FONT_MONO,
+                        fontFamily: FF_MONO,
                         cursor: "pointer",
                       }}
                       title="Mount as read-only"
@@ -2756,7 +2756,7 @@ export function EnvFromEditor({
                       }
                       style={{
                         justifyContent: "flex-start",
-                        fontFamily: FONT_MONO,
+                        fontFamily: FF_MONO,
                         color: row.name !== "" ? t.text : t.textMuted,
                         minWidth: 0,
                         overflow: "hidden",
@@ -2781,9 +2781,9 @@ export function EnvFromEditor({
                         display: "inline-flex",
                         alignItems: "center",
                         gap: 4,
-                        fontSize: 10.5,
+                        fontSize: FS_XS,
                         color: t.textDim,
-                        fontFamily: FONT_MONO,
+                        fontFamily: FF_MONO,
                         cursor: "pointer",
                       }}
                       title="Don't fail if source missing"
@@ -2837,7 +2837,7 @@ export function EnvFromEditor({
                       copyText={copyText}
                       enabled={!!onNavigate && e.name !== ""}
                     >
-                      <span style={{ fontFamily: FONT_MONO }}>
+                      <span style={{ fontFamily: FF_MONO }}>
                         {tag}:{e.name || "?"}
                       </span>
                     </LinkValue>
@@ -2990,9 +2990,9 @@ export function PortsEditor({
               <div
                 style={{
                   margin: "0 0 6px",
-                  fontSize: 11,
+                  fontSize: FS_SM,
                   color: t.bad,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 Duplicate port names: {[...dupNames].join(", ")}
@@ -3373,9 +3373,9 @@ export function VolumesEditor({
             rightExtra={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {volumes.length} total
@@ -3485,7 +3485,7 @@ function VolumeReadRow({
   const navigable = !!(v.target_kind && v.source_name && onNavigate);
   return (
     <DetailRow t={t} label={v.name}>
-      <span style={{ fontSize: 12 }}>{v.kind}</span>
+      <span style={{ fontSize: FS_MD }}>{v.kind}</span>
       {v.source_name &&
         (navigable ? (
           <LinkValue
@@ -3502,8 +3502,8 @@ function VolumeReadRow({
           <Copyable text={v.source_name}>
             <span
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 12,
+                fontFamily: FF_MONO,
+                fontSize: FS_MD,
                 color: t.textDim,
                 wordBreak: "break-all",
                 marginLeft: 8,
@@ -3539,8 +3539,8 @@ function VolumesEditRow({
           gap: 8,
           opacity: 0.45,
           textDecoration: "line-through",
-          fontFamily: FONT_MONO,
-          fontSize: 11.5,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           padding: "4px 0",
         }}
       >
@@ -3597,8 +3597,8 @@ function VolumesEditRow({
       >
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 12,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             color: t.text,
             flex: 1,
             minWidth: 0,
@@ -3615,9 +3615,9 @@ function VolumesEditRow({
         </span>
         <span
           style={{
-            fontSize: 10.5,
+            fontSize: FS_XS,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           can't edit · delete + add
@@ -3661,8 +3661,8 @@ function VolumesEditRow({
         // mount that references the old name.
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 12,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             color: t.text,
             minWidth: 0,
             overflow: "hidden",
@@ -3687,8 +3687,8 @@ function VolumesEditRow({
             { value: "persistentVolumeClaim", label: "persistentVolumeClaim" },
           ]}
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 12,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             height: 28,
             padding: "4px 28px 4px 8px",
           }}
@@ -3698,8 +3698,8 @@ function VolumesEditRow({
         // different volume. Show as a label.
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             color: t.textMuted,
             paddingLeft: 4,
           }}
@@ -3737,7 +3737,7 @@ function VolumesEditRow({
             }}
             style={{
               justifyContent: "flex-start",
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
               color: sourceName !== "" ? t.text : t.textMuted,
               minWidth: 0,
               overflow: "hidden",
@@ -3759,9 +3759,9 @@ function VolumesEditRow({
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 4,
-                fontSize: 10.5,
+                fontSize: FS_XS,
                 color: t.textDim,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
                 cursor: "pointer",
               }}
               title="Mount as read-only"
@@ -3795,8 +3795,8 @@ function VolumesEditRow({
               { value: "Memory", label: "Memory" },
             ]}
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 12,
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
               height: 28,
               padding: "4px 28px 4px 8px",
             }}

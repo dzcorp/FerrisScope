@@ -11,7 +11,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { FONT_MONO, type Tokens } from "../../theme";
+import { FF_MONO, type Tokens, R_SM, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { Chip, Icons, Tooltip } from "../ui";
 
 // ── Cross-kind navigation ──────────────────────────────────────────────────
@@ -54,12 +54,12 @@ export function DetailRow({
     >
       <div
         style={{
-          fontSize: 10,
+          fontSize: FS_XS,
           fontWeight: 700,
           color: t.textMuted,
           textTransform: "uppercase",
           letterSpacing: 0.6,
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
           marginTop: 2,
         }}
       >
@@ -102,7 +102,7 @@ export function ChipWrap({ children }: { children: ReactNode }) {
 // ── Mute ───────────────────────────────────────────────────────────────────
 // Small dim text — placeholder for missing values, captions, etc.
 export function Mute({ t, children }: { t: Tokens; children: ReactNode }) {
-  return <span style={{ color: t.textMuted, fontSize: 12 }}>{children}</span>;
+  return <span style={{ color: t.textMuted, fontSize: FS_MD }}>{children}</span>;
 }
 
 // ── useCopyFlash ───────────────────────────────────────────────────────────
@@ -224,8 +224,8 @@ export function LinkValue({
         style={{
           display: "inline-flex",
           alignItems: "center",
-          fontFamily: FONT_MONO,
-          fontSize: 12,
+          fontFamily: FF_MONO,
+          fontSize: FS_MD,
           color: enabled ? t.accent : t.text,
           textDecoration: "none",
           padding: "1px 4px",
@@ -268,8 +268,8 @@ export function ConditionChip({
         display: "inline-flex",
         alignItems: "center",
         padding: "1px 7px",
-        borderRadius: 3,
-        fontSize: 11,
+        borderRadius: R_SM,
+        fontSize: FS_SM,
         fontWeight: 600,
         background: bg,
         color: fg,
@@ -319,10 +319,10 @@ export function ChipStrip({
               display: "inline-flex",
               alignItems: "center",
               padding: "1px 7px",
-              borderRadius: 3,
-              fontSize: 11,
+              borderRadius: R_SM,
+              fontSize: FS_SM,
               fontWeight: 600,
-              fontFamily: mono ? FONT_MONO : "inherit",
+              fontFamily: mono ? FF_MONO : "inherit",
               background: bg,
               color: fg,
             }}
@@ -443,7 +443,7 @@ function LongValueRow({ t, k, v }: { t: Tokens; k: string; v: string }) {
           display: "inline-flex",
           alignItems: "center",
           border: `1px solid ${t.borderSoft}`,
-          borderRadius: 3,
+          borderRadius: R_SM,
           background: t.surface,
           height: 22,
           maxWidth: "100%",
@@ -462,8 +462,8 @@ function LongValueRow({ t, k, v }: { t: Tokens; k: string; v: string }) {
             background: "transparent",
             color: t.text,
             cursor: "pointer",
-            fontFamily: FONT_MONO,
-            fontSize: 11,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             height: "100%",
             minWidth: 0,
             maxWidth: "100%",
@@ -515,9 +515,9 @@ function LongValueRow({ t, k, v }: { t: Tokens; k: string; v: string }) {
             padding: "8px 10px",
             background: t.surface,
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 3,
-            fontFamily: FONT_MONO,
-            fontSize: 11,
+            borderRadius: R_SM,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             lineHeight: 1.4,
             color: t.text,
             maxHeight: 320,
@@ -603,12 +603,12 @@ export function SubGrid({
           {g.label != null && (
             <div
               style={{
-                fontSize: 10,
+                fontSize: FS_XS,
                 fontWeight: 700,
                 color: t.textMuted,
                 textTransform: "uppercase",
                 letterSpacing: 0.5,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
                 marginBottom: 2,
               }}
             >
@@ -657,8 +657,8 @@ function SubEntryRow({
     alignItems: "baseline",
     gap: 6,
     minWidth: 0,
-    fontFamily: mono ? FONT_MONO : "inherit",
-    fontSize: 11.5,
+    fontFamily: mono ? FF_MONO : "inherit",
+    fontSize: FS_SM,
     lineHeight: 1.45,
   };
   const inner = (
@@ -699,7 +699,7 @@ function SubEntryRow({
       {entry.hint != null && (
         <div
           style={{
-            fontSize: 11,
+            fontSize: FS_SM,
             color: t.textMuted,
             paddingLeft: 2,
           }}

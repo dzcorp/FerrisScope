@@ -1,6 +1,7 @@
 import { memo, useMemo, useState } from "react";
+import { useResolvedTheme } from "../../store";
 import { api } from "../../api";
-import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
+import { FF_MONO, type ThemeMode, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { Btn, ErrorBlock } from "../ui";
 import { useCopyFlash } from "../detail/primitives";
 import type { PendingApproval } from "./chatStreaming";
@@ -22,8 +23,8 @@ type Props = {
 // memoization a visible approval card re-runs `formatArgs` (JSON parse +
 // stringify) on every reducer dispatch — enough JSON work to noticeably
 // stutter scrolling while a card is on screen.
-function ToolApprovalCardInner({ mode, chatId, approval }: Props) {
-  const t = tokens(mode);
+function ToolApprovalCardInner({ chatId, approval }: Props) {
+  const t = useResolvedTheme().tokens;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Pulse the pretty-args block after a successful clipboard write so the
@@ -76,9 +77,9 @@ function ToolApprovalCardInner({ mode, chatId, approval }: Props) {
           background: t.surfaceAlt,
           border: `1px solid ${t.warn}66`,
           borderLeft: `3px solid ${t.warn}`,
-          borderRadius: 6,
+          borderRadius: R_MD,
           padding: "10px 12px",
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
           // Paint containment isolates the card's repaints (busy state
           // toggle, error banner appearing) from the surrounding list so
           // a card visible mid-scroll doesn't force the whole transcript
@@ -94,10 +95,10 @@ function ToolApprovalCardInner({ mode, chatId, approval }: Props) {
             marginBottom: 6,
           }}
         >
-          <span style={{ color: t.warn, fontWeight: 600, fontSize: 11 }}>
+          <span style={{ color: t.warn, fontWeight: 600, fontSize: FS_SM }}>
             ⚠ APPROVAL REQUIRED
           </span>
-          <span style={{ color: t.text, fontSize: 12, flex: 1, minWidth: 0 }}>
+          <span style={{ color: t.text, fontSize: FS_MD, flex: 1, minWidth: 0 }}>
             {approval.name}
           </span>
           <button
@@ -107,10 +108,10 @@ function ToolApprovalCardInner({ mode, chatId, approval }: Props) {
             style={{
               background: "transparent",
               border: `1px solid ${t.borderSoft}`,
-              borderRadius: 4,
+              borderRadius: R_MD,
               color: t.textDim,
-              fontFamily: FONT_MONO,
-              fontSize: 10,
+              fontFamily: FF_MONO,
+              fontSize: FS_XS,
               padding: "2px 6px",
               cursor: "pointer",
               flexShrink: 0,
@@ -127,10 +128,10 @@ function ToolApprovalCardInner({ mode, chatId, approval }: Props) {
             padding: "6px 8px",
             background: t.surface,
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 4,
+            borderRadius: R_MD,
             color: t.text,
-            fontFamily: FONT_MONO,
-            fontSize: 11,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
             maxHeight: 240,

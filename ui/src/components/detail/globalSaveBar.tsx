@@ -8,7 +8,7 @@
 // a Force Takeover button, and a red strip on hard errors.
 
 import type { Tokens } from "../../theme";
-import { FONT_MONO } from "../../theme";
+import { FF_MONO, R_MD, FS_SM, FS_XS } from "../../theme";
 import { Btn, ErrorBlock } from "../ui";
 import { useEditSession } from "./editSession";
 
@@ -44,8 +44,8 @@ export function GlobalSaveBar({ t }: { t: Tokens }) {
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span
           style={{
-            fontSize: 11.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_SM,
+            fontFamily: FF_MONO,
             color: t.textDim,
           }}
         >
@@ -109,13 +109,13 @@ function ConflictRow({
         padding: "8px 10px",
         border: `1px solid ${t.warn}`,
         background: "rgba(245,158,11,0.10)",
-        borderRadius: 4,
+        borderRadius: R_MD,
       }}
     >
       <div
         style={{
-          fontSize: 11.5,
-          fontFamily: FONT_MONO,
+          fontSize: FS_SM,
+          fontFamily: FF_MONO,
           color: t.warn,
           fontWeight: 600,
         }}
@@ -128,8 +128,8 @@ function ConflictRow({
       {conflict.fields.length > 0 && (
         <div
           style={{
-            fontSize: 11,
-            fontFamily: FONT_MONO,
+            fontSize: FS_SM,
+            fontFamily: FF_MONO,
             color: t.textDim,
             wordBreak: "break-word",
           }}
@@ -139,8 +139,8 @@ function ConflictRow({
       )}
       <div
         style={{
-          fontSize: 10.5,
-          fontFamily: FONT_MONO,
+          fontSize: FS_XS,
+          fontFamily: FF_MONO,
           color: t.textMuted,
           wordBreak: "break-word",
         }}

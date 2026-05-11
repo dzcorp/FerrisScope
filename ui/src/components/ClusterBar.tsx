@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import type { ContextInfo, ClusterInfo } from "../types";
-import { tokens, FONT_MONO, type ThemeMode } from "../theme";
-import { useAppStore } from "../store";
+import { tokens, FF_MONO, type ThemeMode, R_LG, R_MD, FS_MD, FS_XS } from "../theme";
+import { useAppStore, useResolvedTheme } from "../store";
 import { Stat, StatusPill, Gauge, Icons, Kbd, Tooltip } from "./ui";
 import { makeChatTab, makeTerminalTab, makeYamlTab } from "./Dock";
 import { MOD_KEY, SHIFT_KEY } from "../lib/keyboard";
@@ -23,7 +23,7 @@ type Props = {
 // Cluster context bar — always shows where the operator is standing (P6).
 // Hosts the namespace filter button and the "+" menu (terminal / YAML).
 export function ClusterBar({ mode, context, state, style }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
 
   const selectedNamespaces = useAppStore((s) => s.selectedNamespaces);
   const openNsModal = useAppStore((s) => s.openNsModal);
@@ -133,7 +133,7 @@ export function ClusterBar({ mode, context, state, style }: Props) {
         t={t}
         label="Cluster"
         value={
-          <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+          <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
             {context.cluster}
           </span>
         }
@@ -143,7 +143,7 @@ export function ClusterBar({ mode, context, state, style }: Props) {
           t={t}
           label="User"
           value={
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {context.user}
             </span>
           }
@@ -174,7 +174,7 @@ export function ClusterBar({ mode, context, state, style }: Props) {
             color: t.text,
             width: 36,
             height: 36,
-            borderRadius: 7,
+            borderRadius: R_MD,
             cursor: "pointer",
             outline: "none",
             display: "inline-flex",
@@ -194,12 +194,12 @@ export function ClusterBar({ mode, context, state, style }: Props) {
                 minWidth: 14,
                 height: 14,
                 padding: "0 3px",
-                borderRadius: 7,
+                borderRadius: R_MD,
                 background: t.accent,
                 color: "#fff",
-                fontSize: 9,
+                fontSize: FS_XS,
                 fontWeight: 700,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -219,7 +219,7 @@ export function ClusterBar({ mode, context, state, style }: Props) {
               top: "calc(100% + 6px)",
               background: t.surface,
               border: `1px solid ${t.border}`,
-              borderRadius: 8,
+              borderRadius: R_LG,
               padding: 4,
               minWidth: 280,
               zIndex: 22,
@@ -307,8 +307,8 @@ export function ClusterBar({ mode, context, state, style }: Props) {
           background: nsAll ? t.surface : t.accentSoft,
           color: t.text,
           padding: "5px 10px 5px 9px",
-          borderRadius: 7,
-          fontSize: 12,
+          borderRadius: R_MD,
+          fontSize: FS_MD,
           fontFamily: "inherit",
           cursor: "pointer",
           outline: "none",
@@ -341,21 +341,21 @@ export function ClusterBar({ mode, context, state, style }: Props) {
         >
           <span
             style={{
-              fontSize: 9.5,
+              fontSize: FS_XS,
               color: t.textMuted,
               fontWeight: 600,
               textTransform: "uppercase",
               letterSpacing: 0.4,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             Namespace
           </span>
           <span
             style={{
-              fontSize: 12,
+              fontSize: FS_MD,
               fontWeight: 600,
-              fontFamily: nsAll || nsCount > 1 ? "inherit" : FONT_MONO,
+              fontFamily: nsAll || nsCount > 1 ? "inherit" : FF_MONO,
               color: nsAll ? t.text : t.accent,
               maxWidth: "100%",
               overflow: "hidden",
@@ -402,7 +402,7 @@ function AddMenuItem({
         gap: 10,
         width: "100%",
         padding: "8px 10px",
-        borderRadius: 5,
+        borderRadius: R_MD,
         border: "none",
         background: "transparent",
         cursor: "pointer",
@@ -415,7 +415,7 @@ function AddMenuItem({
         style={{
           width: 26,
           height: 26,
-          borderRadius: 5,
+          borderRadius: R_MD,
           flexShrink: 0,
           display: "flex",
           alignItems: "center",
@@ -434,22 +434,22 @@ function AddMenuItem({
           minWidth: 0,
         }}
       >
-        <span style={{ fontSize: 12.5, fontWeight: 600, color: t.text }}>
+        <span style={{ fontSize: FS_MD, fontWeight: 600, color: t.text }}>
           {title}
         </span>
-        <span style={{ fontSize: 10.5, color: t.textMuted, marginTop: 1 }}>
+        <span style={{ fontSize: FS_XS, color: t.textMuted, marginTop: 1 }}>
           {subtitle}
         </span>
       </span>
       {kbd && (
         <span
           style={{
-            fontSize: 10,
+            fontSize: FS_XS,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             padding: "2px 5px",
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 4,
+            borderRadius: R_MD,
             background: t.surfaceAlt,
           }}
         >
@@ -465,8 +465,8 @@ function AddMenuItem({
 // match HV2: <65% green, 65–80% amber, >80% red. Per P5 the colour means the
 // same thing everywhere — so we route through the same status palette the
 // pod table uses, not a custom gradient.
-function ClusterGauges({ mode, clusterId }: { mode: ThemeMode; clusterId: string }) {
-  const t = tokens(mode);
+function ClusterGauges({ clusterId }: { mode: ThemeMode; clusterId: string }) {
+  const t = useResolvedTheme().tokens;
   // Subscribe lazily — only while the gauges are actually mounted. Gauges
   // are part of the always-on cluster bar today, but isolating the
   // subscription here means future variants of the bar that hide the
@@ -528,23 +528,23 @@ function GaugeStat({
       <div>
         <div
           style={{
-            fontSize: 10,
+            fontSize: FS_XS,
             color: textMuted,
             fontWeight: 600,
             textTransform: "uppercase",
             letterSpacing: 0.4,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           {label}
         </div>
         <div
           style={{
-            fontSize: 12,
+            fontSize: FS_MD,
             fontVariantNumeric: "tabular-nums",
             fontWeight: 600,
             color: text,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           {Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%

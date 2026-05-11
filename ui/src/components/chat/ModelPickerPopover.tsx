@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { tokens, FONT_MONO, FONT_SANS, type ThemeMode } from "../../theme";
+import { useResolvedTheme } from "../../store";
+import { FF_MONO, FONT_SANS, type ThemeMode, R_LG, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { Btn, ErrorBlock, Icons } from "../ui";
 import type { ModelInfo, ProviderKind } from "../../types";
 
@@ -35,7 +36,7 @@ type Props = {
 // the wire level). Provider switches aren't offered here — they require
 // a fresh chat and live in Settings → AI.
 export function ModelPickerPopover({
-  mode,
+  
   models,
   loading,
   error,
@@ -47,7 +48,7 @@ export function ModelPickerPopover({
   onRetry,
   onClose,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const ref = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -128,7 +129,7 @@ export function ModelPickerPopover({
         zIndex: 50,
         background: t.surface,
         border: `1px solid ${t.border}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
         marginTop: 4,
         maxHeight: 420,
@@ -159,8 +160,8 @@ export function ModelPickerPopover({
           <div
             style={{
               color: t.textMuted,
-              fontSize: 10.5,
-              fontFamily: FONT_MONO,
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
               letterSpacing: 0.5,
               textTransform: "uppercase",
             }}
@@ -170,8 +171,8 @@ export function ModelPickerPopover({
           <div
             style={{
               color: t.textDim,
-              fontSize: 10.5,
-              fontFamily: FONT_MONO,
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -210,10 +211,10 @@ export function ModelPickerPopover({
             background: t.surfaceAlt,
             border: `1px solid ${t.borderSoft}`,
             color: t.text,
-            borderRadius: 4,
+            borderRadius: R_MD,
             padding: "5px 8px",
-            fontFamily: FONT_MONO,
-            fontSize: 12,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             outline: "none",
           }}
         />
@@ -224,7 +225,7 @@ export function ModelPickerPopover({
             style={{
               padding: 14,
               color: t.textDim,
-              fontSize: 12,
+              fontSize: FS_MD,
               textAlign: "center",
             }}
           >
@@ -257,7 +258,7 @@ export function ModelPickerPopover({
             style={{
               padding: 14,
               color: t.textDim,
-              fontSize: 12,
+              fontSize: FS_MD,
               textAlign: "center",
             }}
           >
@@ -294,7 +295,7 @@ export function ModelPickerPopover({
                   cursor: "pointer",
                   color: t.text,
                   fontFamily: FONT_SANS,
-                  fontSize: 12.5,
+                  fontSize: FS_MD,
                 }}
               >
                 <span
@@ -318,8 +319,8 @@ export function ModelPickerPopover({
                 >
                   <span
                     style={{
-                      fontFamily: FONT_MONO,
-                      fontSize: 12,
+                      fontFamily: FF_MONO,
+                      fontSize: FS_MD,
                       color: t.text,
                       overflow: "hidden",
                       textOverflow: "ellipsis",
@@ -331,7 +332,7 @@ export function ModelPickerPopover({
                   {m.name && m.name !== m.id && (
                     <span
                       style={{
-                        fontSize: 11,
+                        fontSize: FS_SM,
                         color: t.textMuted,
                         overflow: "hidden",
                         textOverflow: "ellipsis",
@@ -346,8 +347,8 @@ export function ModelPickerPopover({
                   m.context_length > 0 && (
                     <span
                       style={{
-                        fontFamily: FONT_MONO,
-                        fontSize: 10.5,
+                        fontFamily: FF_MONO,
+                        fontSize: FS_XS,
                         color: t.textDim,
                       }}
                       title="context window"

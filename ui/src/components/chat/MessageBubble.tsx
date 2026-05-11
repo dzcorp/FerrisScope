@@ -1,5 +1,6 @@
 import { memo, useMemo } from "react";
-import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
+import { useResolvedTheme } from "../../store";
+import { tokens, FF_MONO, type ThemeMode, R_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
 import type { ChatViewMessage } from "./chatStreaming";
 import { Markdown } from "./markdown";
 import { safePrefixLength } from "./safePrefix";
@@ -23,8 +24,8 @@ type Props = {
 // non-streaming message, so memoization lets unchanged bubbles skip
 // re-render (and skip re-parsing their markdown). Without this, an N-long
 // history pays an O(N) reparse on every token delta.
-function MessageBubbleInner({ mode, message }: Props) {
-  const t = tokens(mode);
+function MessageBubbleInner({ message }: Props) {
+  const t = useResolvedTheme().tokens;
 
   if (message.role === "tool") {
     // Defensive — MessageList groups tool messages into ToolGroupBubble
@@ -99,10 +100,10 @@ function MessageBubbleInner({ mode, message }: Props) {
           maxWidth: "92%",
           background: bg,
           border: `1px solid ${borderColor}`,
-          borderRadius: 10,
+          borderRadius: R_LG,
           padding: "9px 13px 10px",
           color: t.text,
-          fontSize: 13,
+          fontSize: FS_MD,
           lineHeight: 1.55,
           wordBreak: "break-word",
           boxShadow: isUser
@@ -117,8 +118,8 @@ function MessageBubbleInner({ mode, message }: Props) {
       >
         <div
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             color: labelColor,
             letterSpacing: 0.6,
             textTransform: "uppercase",
@@ -173,11 +174,11 @@ export function ThinkingIndicator({ t }: { t: ReturnType<typeof tokens> }) {
         alignItems: "center",
         gap: 8,
         color: t.textDim,
-        fontSize: 12,
+        fontSize: FS_MD,
         lineHeight: 1.55,
       }}
     >
-      <span className="fs-think-text" style={{ fontFamily: FONT_MONO }}>
+      <span className="fs-think-text" style={{ fontFamily: FF_MONO }}>
         thinking
       </span>
       <span style={{ display: "inline-flex", gap: 3 }}>
@@ -230,8 +231,8 @@ function ToolCallStrip({
         gap: 8,
         padding: "4px 8px",
         color: t.textMuted,
-        fontFamily: FONT_MONO,
-        fontSize: 11,
+        fontFamily: FF_MONO,
+        fontSize: FS_SM,
       }}
     >
       <span style={{ color: t.textDim }}>›</span>

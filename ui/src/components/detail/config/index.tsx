@@ -10,9 +10,10 @@
 // per-row without reflowing the layout.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section } from "../../ui";
 import {
   ChipWrap,
@@ -112,7 +113,7 @@ export function ConfigMapSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   // Local refetch counter — bumped after a successful save so we read the
   // post-apply state without waiting for the watcher delta to arrive.
@@ -151,7 +152,7 @@ export function ConfigMapSummary(props: {
 // fetch effect on every keystroke.
 function ConfigMapView({
   t,
-  mode: _mode,
+  mode: 
   clusterId,
   namespace,
   name,
@@ -205,7 +206,7 @@ function ConfigMapView({
           marginBottom: 18,
         }}
       >
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {d.data.length} key{d.data.length === 1 ? "" : "s"}
           {d.meta.created_at ? ` · ${ageFromIso(d.meta.created_at)} old` : ""}
           {d.immutable ? " · immutable" : ""}
@@ -235,9 +236,9 @@ function ConfigMapView({
             rightExtra={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.data.length} total
@@ -483,7 +484,7 @@ function ConfigMapEditRow({
           <Chip t={t} mono>
             base64
           </Chip>
-          <span style={{ fontSize: 11.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             (binary — clone in YAML to edit)
           </span>
           <RowDeleteButton t={t} onClick={onDelete} />
@@ -504,8 +505,8 @@ function ConfigMapEditRow({
             alignItems: "center",
             opacity: 0.45,
             textDecoration: "line-through",
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
           }}
         >
           <span>{row.originalValue || " "}</span>
@@ -561,9 +562,9 @@ function InlineError({ t, message }: { t: Tokens; message: string }) {
         padding: "8px 10px",
         background: "rgba(244,63,94,0.10)",
         border: "1px solid rgba(244,63,94,0.4)",
-        borderRadius: 3,
+        borderRadius: R_SM,
         color: t.bad,
-        fontSize: 11.5,
+        fontSize: FS_SM,
         whiteSpace: "pre-wrap",
         wordBreak: "break-word",
       }}
@@ -594,7 +595,7 @@ function SaveErrorBanner({
         padding: "8px 10px",
         background: "rgba(244,63,94,0.10)",
         border: "1px solid rgba(244,63,94,0.4)",
-        borderRadius: 3,
+        borderRadius: R_SM,
       }}
     >
       <ErrorBlock
@@ -616,9 +617,9 @@ function InlineWarn({ t, message }: { t: Tokens; message: string }) {
         padding: "8px 10px",
         background: "rgba(245,158,11,0.10)",
         border: "1px solid rgba(245,158,11,0.4)",
-        borderRadius: 3,
+        borderRadius: R_SM,
         color: t.warn,
-        fontSize: 11.5,
+        fontSize: FS_SM,
       }}
     >
       {message}
@@ -652,9 +653,9 @@ function DataValueBlock({
       >
         <span
           style={{
-            fontSize: 10.5,
+            fontSize: FS_XS,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           {formatBytes(size)}
@@ -673,8 +674,8 @@ function DataValueBlock({
             background: multiline ? t.headerAlt : "transparent",
             border: multiline ? `1px solid ${t.borderSoft}` : "none",
             borderRadius: multiline ? 3 : 0,
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             color: t.text,
             whiteSpace: multiline ? "pre-wrap" : "pre",
             wordBreak: "break-all",
@@ -699,7 +700,7 @@ export function SecretSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<SecretDetail>(
@@ -733,7 +734,7 @@ export function SecretSummary(props: {
 
 function SecretView({
   t,
-  mode: _mode,
+  mode: 
   clusterId,
   namespace,
   name,
@@ -777,7 +778,7 @@ function SecretView({
         <Chip t={t} mono>
           {d.type_}
         </Chip>
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {d.data.length} key{d.data.length === 1 ? "" : "s"}
           {d.meta.created_at ? ` · ${ageFromIso(d.meta.created_at)} old` : ""}
           {d.immutable ? " · immutable" : ""}
@@ -807,9 +808,9 @@ function SecretView({
             rightExtra={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.data.length} total
@@ -1049,8 +1050,8 @@ function SecretEditRow({
             alignItems: "center",
             opacity: 0.45,
             textDecoration: "line-through",
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
           }}
         >
           <span>{maskBase64(row.originalValueB64) || " "}</span>
@@ -1133,9 +1134,9 @@ function SecretEditRow({
         {invalidB64 && (
           <div
             style={{
-              fontSize: 10.5,
+              fontSize: FS_XS,
               color: t.bad,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
               marginTop: 2,
             }}
           >
@@ -1157,11 +1158,11 @@ function SecretEditRow({
                 : "Value is not valid utf-8 — edit base64 directly"
           }
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             padding: "2px 7px",
             height: 24,
-            borderRadius: 3,
+            borderRadius: R_SM,
             background: showPlaintext ? "rgba(245,158,11,0.16)" : t.chip,
             color: showPlaintext
               ? t.warn
@@ -1227,9 +1228,9 @@ function SecretValueRow({
       >
         <span
           style={{
-            fontSize: 10.5,
+            fontSize: FS_XS,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           {formatBytes(entry.size)}
@@ -1247,10 +1248,10 @@ function SecretValueRow({
               setRevealed((r) => !r);
             }}
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 10.5,
+              fontFamily: FF_MONO,
+              fontSize: FS_XS,
               padding: "1px 7px",
-              borderRadius: 3,
+              borderRadius: R_SM,
               background: revealed
                 ? "rgba(245,158,11,0.16)"
                 : t.chip,
@@ -1276,9 +1277,9 @@ function SecretValueRow({
               padding: "6px 8px",
               background: "rgba(245,158,11,0.08)",
               border: `1px solid ${t.borderSoft}`,
-              borderRadius: 3,
-              fontFamily: FONT_MONO,
-              fontSize: 11.5,
+              borderRadius: R_SM,
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
               color: t.text,
               whiteSpace: "pre-wrap",
               wordBreak: "break-all",
@@ -1293,8 +1294,8 @@ function SecretValueRow({
         <Copyable text={b64} block>
           <span
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 11.5,
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
               color: t.textDim,
               wordBreak: "break-all",
             }}
@@ -1337,7 +1338,7 @@ export function ResourceQuotaSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<ResourceQuotaDetail>(
@@ -1409,7 +1410,7 @@ function ResourceQuotaView({
           marginBottom: 18,
         }}
       >
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {d.entries.length} resource{d.entries.length === 1 ? "" : "s"}
           {d.meta.created_at ? ` · ${ageFromIso(d.meta.created_at)} old` : ""}
         </span>
@@ -1438,9 +1439,9 @@ function ResourceQuotaView({
             rightExtra={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.entries.length} total
@@ -1701,8 +1702,8 @@ function QuotaEditRow({
             alignItems: "center",
             opacity: 0.45,
             textDecoration: "line-through",
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
           }}
         >
           <span>{row.originalHard || "—"}</span>
@@ -1801,8 +1802,8 @@ function QuotaUsageCell({
         <span
           title={`used ${used ?? "—"} / hard ${hard ?? "—"}`}
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 12,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             color: fg,
           }}
         >
@@ -1810,7 +1811,7 @@ function QuotaUsageCell({
         </span>
       </Copyable>
       {ratio != null && (
-        <span style={{ fontSize: 11, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {(ratio * 100).toFixed(0)}%
         </span>
       )}
@@ -1828,7 +1829,7 @@ export function LimitRangeSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<LimitRangeDetail>(
@@ -1900,7 +1901,7 @@ function LimitRangeView({
           marginBottom: 18,
         }}
       >
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {d.limits.length} limit{d.limits.length === 1 ? "" : "s"}
           {d.meta.created_at ? ` · ${ageFromIso(d.meta.created_at)} old` : ""}
         </span>
@@ -1930,9 +1931,9 @@ function LimitRangeView({
               rightExtra={
                 <span
                   style={{
-                    fontSize: 10.5,
+                    fontSize: FS_XS,
                     color: t.textMuted,
-                    fontFamily: FONT_MONO,
+                    fontFamily: FF_MONO,
                   }}
                 >
                   {d.limits.length} item{d.limits.length === 1 ? "" : "s"}
@@ -2040,9 +2041,9 @@ function LimitRangeItemBlock({
         right={
           <span
             style={{
-              fontSize: 10.5,
+              fontSize: FS_XS,
               color: t.textMuted,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             {groups.length} group{groups.length === 1 ? "" : "s"}
@@ -2283,7 +2284,7 @@ function LimitRangeEditItem({
         marginBottom: 22,
         padding: "10px 12px",
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 4,
+        borderRadius: R_MD,
         opacity: item.deleted ? 0.5 : 1,
       }}
     >
@@ -2297,12 +2298,12 @@ function LimitRangeEditItem({
       >
         <span
           style={{
-            fontSize: 10.5,
+            fontSize: FS_XS,
             fontWeight: 700,
             color: t.textMuted,
             textTransform: "uppercase",
             letterSpacing: 0.6,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
           }}
         >
           Type
@@ -2327,12 +2328,12 @@ function LimitRangeEditItem({
         <div key={k} style={{ marginBottom: 10 }}>
           <div
             style={{
-              fontSize: 10.5,
+              fontSize: FS_XS,
               fontWeight: 700,
               color: t.textMuted,
               textTransform: "uppercase",
               letterSpacing: 0.5,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
               marginBottom: 4,
             }}
           >
@@ -2398,9 +2399,9 @@ function LimitRangeEditItem({
                 background: "transparent",
                 color: t.textMuted,
                 border: `1px dashed ${t.borderSoft}`,
-                borderRadius: 3,
-                fontFamily: FONT_MONO,
-                fontSize: 10.5,
+                borderRadius: R_SM,
+                fontFamily: FF_MONO,
+                fontSize: FS_XS,
                 cursor: "pointer",
               }}
             >
@@ -2435,8 +2436,8 @@ function LimitRangeGroupEditRow({
           gap: 8,
           opacity: 0.45,
           textDecoration: "line-through",
-          fontFamily: FONT_MONO,
-          fontSize: 11.5,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           padding: "2px 0",
         }}
       >
@@ -2474,7 +2475,7 @@ function LimitRangeGroupEditRow({
       />
       <RowDeleteButton t={t} onClick={onDelete} />
       {disabled && (
-        <span style={{ fontSize: 10.5, color: t.textMuted }}>(item removed)</span>
+        <span style={{ fontSize: FS_XS, color: t.textMuted }}>(item removed)</span>
       )}
     </div>
   );

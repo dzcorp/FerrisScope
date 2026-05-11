@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useAppStore } from "../store";
-import { tokens, FONT_MONO, type ThemeMode } from "../theme";
+import { useAppStore, useResolvedTheme } from "../store";
+import { FF_MONO, type ThemeMode, R_LG, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
 import { Icons, Kbd, resolveKindIcon } from "./ui";
 import { MOD_KEY } from "../lib/keyboard";
 import { api } from "../api";
@@ -33,7 +33,7 @@ type Props = {
 // Filtering the visible table is a separate concern (the inline input in
 // `AppHeader`); this palette stays purely for global jump-to.
 export function CommandPalette({ mode, onClose }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const [q, setQ] = useState("");
   const [hi, setHi] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -347,7 +347,7 @@ export function CommandPalette({ mode, onClose }: Props) {
           flexDirection: "column",
           background: t.paletteBg,
           border: `1px solid ${t.paletteBorder}`,
-          borderRadius: 12,
+          borderRadius: R_LG,
           boxShadow: "0 24px 56px rgba(0,0,0,0.25)",
           backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)",
@@ -383,7 +383,7 @@ export function CommandPalette({ mode, onClose }: Props) {
               outline: "none",
               background: "transparent",
               color: t.text,
-              fontSize: 14,
+              fontSize: FS_LG,
               fontFamily: "inherit",
             }}
           />
@@ -397,7 +397,7 @@ export function CommandPalette({ mode, onClose }: Props) {
                 padding: "32px 20px",
                 textAlign: "center",
                 color: t.textMuted,
-                fontSize: 13,
+                fontSize: FS_MD,
               }}
             >
               No matches for "<span style={{ color: t.textDim }}>{q}</span>"
@@ -407,12 +407,12 @@ export function CommandPalette({ mode, onClose }: Props) {
               <div key={groupName} style={{ marginBottom: 4 }}>
                 <div
                   style={{
-                    fontSize: 10,
+                    fontSize: FS_XS,
                     fontWeight: 700,
                     color: t.textMuted,
                     textTransform: "uppercase",
                     letterSpacing: 0.6,
-                    fontFamily: FONT_MONO,
+                    fontFamily: FF_MONO,
                     padding: "8px 18px 4px",
                   }}
                 >
@@ -459,9 +459,9 @@ export function CommandPalette({ mode, onClose }: Props) {
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div
                           style={{
-                            fontSize: 13,
+                            fontSize: FS_MD,
                             fontWeight: 500,
-                            fontFamily: it.mono ? FONT_MONO : "inherit",
+                            fontFamily: it.mono ? FF_MONO : "inherit",
                             color: t.text,
                             overflow: "hidden",
                             textOverflow: "ellipsis",
@@ -472,7 +472,7 @@ export function CommandPalette({ mode, onClose }: Props) {
                         </div>
                         <div
                           style={{
-                            fontSize: 11,
+                            fontSize: FS_SM,
                             color: t.textMuted,
                             marginTop: 1,
                             overflow: "hidden",
@@ -486,9 +486,9 @@ export function CommandPalette({ mode, onClose }: Props) {
                       {isHi && (
                         <span
                           style={{
-                            fontSize: 10,
+                            fontSize: FS_XS,
                             color: t.textMuted,
-                            fontFamily: FONT_MONO,
+                            fontFamily: FF_MONO,
                           }}
                         >
                           ↵
@@ -509,7 +509,7 @@ export function CommandPalette({ mode, onClose }: Props) {
             gap: 14,
             padding: "10px 18px",
             borderTop: `1px solid ${t.borderSoft}`,
-            fontSize: 10.5,
+            fontSize: FS_XS,
             color: t.textMuted,
           }}
         >
@@ -523,7 +523,7 @@ export function CommandPalette({ mode, onClose }: Props) {
             <Kbd t={t}>esc</Kbd> close
           </span>
           <div style={{ flex: 1 }} />
-          <span style={{ fontFamily: FONT_MONO }}>FerrisScope {MOD_KEY}K</span>
+          <span style={{ fontFamily: FF_MONO }}>FerrisScope {MOD_KEY}K</span>
         </div>
       </div>
     </>

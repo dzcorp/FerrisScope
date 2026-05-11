@@ -3,9 +3,10 @@
 // the standard primitives.
 
 import { useEffect, useRef, useState } from "react";
+import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM } from "../../../theme";
+import {  } from "../../../theme";
 import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   Copyable,
@@ -79,7 +80,7 @@ function ConditionsBlock({
       <div style={{ marginBottom: 22 }}>
         {conditions.map((c, i) => (
           <DetailRow key={i} t={t} label={c.type ?? "—"}>
-            <span style={{ fontSize: 12 }}>
+            <span style={{ fontSize: FS_MD }}>
               {c.status ?? "—"}
               {c.reason ? ` — ${c.reason}` : ""}
               {c.message ? `: ${c.message}` : ""}
@@ -101,7 +102,7 @@ export function GatewayClassSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<GatewayClassDetail>(
     () =>
@@ -145,8 +146,8 @@ export function GatewayClassSummary(props: {
             <Copyable text={d.controller}>
               <span
                 style={{
-                  fontSize: 12,
-                  fontFamily: FONT_MONO,
+                  fontSize: FS_MD,
+                  fontFamily: FF_MONO,
                   wordBreak: "break-all",
                 }}
               >
@@ -159,7 +160,7 @@ export function GatewayClassSummary(props: {
         </DetailRow>
         {d.description && (
           <DetailRow t={t} label="Description">
-            <span style={{ fontSize: 12, wordBreak: "break-word" }}>
+            <span style={{ fontSize: FS_MD, wordBreak: "break-word" }}>
               {d.description}
             </span>
           </DetailRow>
@@ -181,7 +182,7 @@ export function GatewaySummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const ns = props.namespace;
   const state = useDetail<GatewayDetail>(
@@ -251,13 +252,13 @@ export function GatewaySummary(props: {
             return (
               <DetailRow key={i} t={t} label={l.name ?? `listener-${i}`}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                  <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                     {l.protocol ?? "—"}:{l.port ?? "—"}
                     {l.hostname ? ` host=${l.hostname}` : ""}
                     {l.tls_mode ? ` tls=${l.tls_mode}` : ""}
                   </span>
                   {status?.attached_routes != null && (
-                    <span style={{ fontSize: 11, color: t.textMuted }}>
+                    <span style={{ fontSize: FS_SM, color: t.textMuted }}>
                       {status.attached_routes} attached route
                       {status.attached_routes === 1 ? "" : "s"}
                     </span>
@@ -277,7 +278,7 @@ export function GatewaySummary(props: {
               <DetailRow key={i} t={t} label={a.type ?? "Address"}>
                 {a.value ? (
                   <Copyable text={a.value}>
-                    <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+                    <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                       {a.value}
                     </span>
                   </Copyable>
@@ -307,7 +308,7 @@ export function RouteSummary(props: {
   onNavigate?: DetailNavigate;
   label: string;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const ns = props.namespace;
   const state = useDetail<RouteDetail>(
@@ -365,8 +366,8 @@ export function RouteSummary(props: {
                 <Copyable text={h}>
                   <span
                     style={{
-                      fontSize: 12,
-                      fontFamily: FONT_MONO,
+                      fontSize: FS_MD,
+                      fontFamily: FF_MONO,
                       wordBreak: "break-all",
                     }}
                   >
@@ -415,7 +416,7 @@ export function RouteSummary(props: {
           d.rules.map((r, i) => (
             <DetailRow key={i} t={t} label={`rule ${i + 1}`}>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <span style={{ fontSize: 12 }}>
+                <span style={{ fontSize: FS_MD }}>
                   {r.matches} match{r.matches === 1 ? "" : "es"} · {r.filters} filter
                   {r.filters === 1 ? "" : "s"}
                 </span>
@@ -423,8 +424,8 @@ export function RouteSummary(props: {
                   <span
                     key={bi}
                     style={{
-                      fontSize: 11.5,
-                      fontFamily: FONT_MONO,
+                      fontSize: FS_SM,
+                      fontFamily: FF_MONO,
                       color: t.textMuted,
                     }}
                   >
@@ -486,9 +487,9 @@ export function RouteSummary(props: {
                     {ps.controller && (
                       <span
                         style={{
-                          fontSize: 11,
+                          fontSize: FS_SM,
                           color: t.textMuted,
-                          fontFamily: FONT_MONO,
+                          fontFamily: FF_MONO,
                         }}
                       >
                         by {ps.controller}
@@ -516,7 +517,7 @@ export function ReferenceGrantSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const ns = props.namespace;
   const state = useDetail<ReferenceGrantDetail>(
@@ -564,7 +565,7 @@ export function ReferenceGrantSummary(props: {
         ) : (
           d.from.map((f, i) => (
             <DetailRow key={i} t={t} label={f.kind ?? "—"}>
-              <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+              <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                 {f.namespace ?? "—"}
                 {f.group ? ` (${f.group})` : ""}
               </span>
@@ -580,7 +581,7 @@ export function ReferenceGrantSummary(props: {
         ) : (
           d.to.map((to, i) => (
             <DetailRow key={i} t={t} label={to.kind ?? "—"}>
-              <span style={{ fontSize: 12, fontFamily: FONT_MONO }}>
+              <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
                 {to.name ?? "*"}
                 {to.group ? ` (${to.group})` : ""}
               </span>

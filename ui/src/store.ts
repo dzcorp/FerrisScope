@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { create } from "zustand";
 import type {
   ClusterHealthStatus,
@@ -64,8 +65,16 @@ export function selectUpdateAvailable(s: {
   if (lk === ls) return false;
   return semverGt(lk, cur);
 }
-import { UI_SCALE_DEFAULT, UI_SCALE_STEP, clampUiScale } from "./theme";
-import type { ThemeMode } from "./theme";
+import {
+  DEFAULT_PALETTE_ID,
+  DEFAULT_THEME_ID,
+  UI_SCALE_DEFAULT,
+  UI_SCALE_STEP,
+  clampUiScale,
+  getTheme,
+  resolveTheme,
+} from "./theme";
+import type { ResolvedTheme, ThemeMode, ThemeOverrides } from "./theme";
 
 type Status = "idle" | "loading" | "ready" | "error";
 
@@ -137,6 +146,17 @@ type AppState = {
   selectedKindId: string | null;
 
   themeMode: ThemeMode;
+  /// Active theme id from the bundled registry (`default`, `lens`, `vscode`,
+  /// `readable`). Unknown ids fall back to Default at resolve time, so a
+  /// theme can be removed without breaking persisted prefs.
+  themeId: string;
+  /// Palette id within the active theme. `default` for the Default theme,
+  /// theme-specific otherwise (e.g. `lens`, `dark-plus`, `warm`).
+  paletteId: string;
+  /// Per-user overrides layered on top of the resolved theme. `null` means
+  /// "use the theme as shipped". The Customize section of Settings writes
+  /// here; the resolver merges shallowly.
+  themeOverrides: ThemeOverrides | null;
   railMode: PrefsRailMode;
 
   // Empty set means "all namespaces" — matches HV2 namespace-modal semantics.
@@ -278,6 +298,17 @@ type AppState = {
   selectKind: (id: string) => void;
 
   toggleTheme: () => void;
+  /// Switch the active theme. Resets the palette to the new theme's
+  /// `defaultPaletteId` so we never land on an invalid (theme, palette)
+  /// pair, and seeds density / monoTables from the new theme's display
+  /// defaults (user toggles win afterward).
+  setTheme: (themeId: string) => void;
+  /// Switch palette inside the active theme. No-op if the palette doesn't
+  /// belong to the current theme.
+  setPalette: (paletteId: string) => void;
+  /// Merge-patch the theme overrides slot. Pass `null` to clear all
+  /// overrides ("revert to theme defaults").
+  patchThemeOverrides: (patch: ThemeOverrides | null) => void;
   setRailMode: (mode: PrefsRailMode) => void;
   cycleRailMode: () => void;
 
@@ -381,6 +412,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   selectedKindId: null,
 
   themeMode: "dark",
+  themeId: DEFAULT_THEME_ID,
+  paletteId: DEFAULT_PALETTE_ID,
+  themeOverrides: null,
   railMode: "auto",
 
   selectedNamespaces: new Set<string>(),
@@ -503,6 +537,49 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleTheme: () =>
     set((s) => ({ themeMode: s.themeMode === "dark" ? "light" : "dark" })),
+  setTheme: (themeId) =>
+    set((s) => {
+      const prev = getTheme(s.themeId);
+      const next = getTheme(themeId);
+      // Seed-once semantic: density / monoTables get the new theme's
+      // defaults only if they currently match the *previous* theme's
+      // defaults — i.e. the operator hasn't explicitly chosen anything.
+      // Once they touch a setting (it diverges from its theme's default),
+      // their choice survives every subsequent theme switch.
+      const densityUntouched =
+        s.settings.density === prev.display.densityDefault;
+      const monoUntouched =
+        s.settings.monoTables === prev.display.monoTablesDefault;
+      return {
+        themeId: next.id,
+        paletteId: next.defaultPaletteId,
+        themeOverrides: null,
+        settings: {
+          ...s.settings,
+          density: densityUntouched
+            ? next.display.densityDefault
+            : s.settings.density,
+          monoTables: monoUntouched
+            ? next.display.monoTablesDefault
+            : s.settings.monoTables,
+        },
+      };
+    }),
+  setPalette: (paletteId) =>
+    set((s) => {
+      const theme = getTheme(s.themeId);
+      // Reject palettes that don't belong to the current theme — the caller
+      // should `setTheme` first. Silent no-op rather than throwing so a
+      // stray click in the UI can't crash the panel.
+      if (!theme.palettes.some((p) => p.id === paletteId)) return {};
+      return { paletteId };
+    }),
+  patchThemeOverrides: (patch) =>
+    set((s) => {
+      if (patch === null) return { themeOverrides: null };
+      const cur = s.themeOverrides ?? {};
+      return { themeOverrides: { ...cur, ...patch } };
+    }),
   setRailMode: (mode) => set({ railMode: mode }),
   // Footer chip steps through auto → pinned → collapsed → auto. Keeps
   // a single click affordance in the rail without dedicating three
@@ -687,8 +764,39 @@ export const useAppStore = create<AppState>((set, get) => ({
   hydrateTableViews: (views) => set({ tableViews: views }),
 
   hydratePrefs: (prefs) =>
-    set((s) => ({
-      themeMode: prefs.theme,
+    set((s) => {
+      // Theme can arrive as either the new record or the legacy bare string
+      // ("dark" / "light"). The Rust side migrates the on-disk file, but
+      // transitional builds may still send the old shape — fall back to
+      // Default theme + default palette in that case.
+      const themeWire = prefs.theme as
+        | { id?: string; palette_id?: string; mode?: ThemeMode; overrides?: unknown }
+        | "light"
+        | "dark";
+      let themeMode: ThemeMode;
+      let themeId: string;
+      let paletteId: string;
+      let themeOverrides: ThemeOverrides | null;
+      if (typeof themeWire === "string") {
+        themeMode = themeWire;
+        themeId = DEFAULT_THEME_ID;
+        paletteId = DEFAULT_PALETTE_ID;
+        themeOverrides = null;
+      } else {
+        themeMode = themeWire.mode ?? "dark";
+        themeId = themeWire.id ?? DEFAULT_THEME_ID;
+        paletteId = themeWire.palette_id ?? DEFAULT_PALETTE_ID;
+        const ov = themeWire.overrides;
+        themeOverrides =
+          ov && typeof ov === "object" && !Array.isArray(ov)
+            ? (ov as ThemeOverrides)
+            : null;
+      }
+      return {
+      themeMode,
+      themeId,
+      paletteId,
+      themeOverrides,
       railMode: prefs.ui.rail_mode,
       // Honor the persisted cluster/kind selection only if it's still present
       // in whatever the contexts/kinds list currently has. If not (file moved,
@@ -730,7 +838,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         lastCheckAt: prefs.update?.last_check_at ?? 0,
         autoCheckEnabled: prefs.update?.auto_check_enabled ?? true,
       },
-    })),
+      };
+    }),
   setTableView: (clusterId, kindId, view) =>
     set((s) => {
       const key = `${clusterId}::${kindId}`;
@@ -871,3 +980,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   patchUpdateState: (patch) =>
     set((s) => ({ updateState: { ...s.updateState, ...patch } })),
 }));
+
+/// Resolve the active theme into a ready-to-use bag of tokens, typography,
+/// sizing and display flags. Components subscribe to the four theme-relevant
+/// slices and only recompute the result when one of them changes —
+/// preserving referential equality across unrelated renders so children
+/// memoised on `t` (the color tokens) don't re-render needlessly.
+export function useResolvedTheme(): ResolvedTheme {
+  const themeId = useAppStore((s) => s.themeId);
+  const paletteId = useAppStore((s) => s.paletteId);
+  const mode = useAppStore((s) => s.themeMode);
+  const overrides = useAppStore((s) => s.themeOverrides);
+  return useMemo(
+    () => resolveTheme({ themeId, paletteId, mode, overrides }),
+    [themeId, paletteId, mode, overrides],
+  );
+}

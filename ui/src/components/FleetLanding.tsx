@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, onFleetProbe, onKubeconfigChanged } from "../api";
-import { useAppStore } from "../store";
+import { useAppStore, useResolvedTheme } from "../store";
 import type { ClusterProbe, ContextInfo } from "../types";
-import { tokens, FONT_MONO, type ThemeMode } from "../theme";
+import { FF_MONO, type ThemeMode, R_LG, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XL, FS_XS } from "../theme";
 import {
   Btn,
   EmptyState,
@@ -31,7 +31,7 @@ type Props = {
 // whenever any source changes (default file edited, file in a watched
 // folder added/removed, etc.) so the fleet stays live without a reload.
 export function FleetLanding({ mode, onSelect }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const {
     contexts,
     contextsStatus,
@@ -192,7 +192,7 @@ export function FleetLanding({ mode, onSelect }: Props) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{
-              fontSize: 24,
+              fontSize: FS_XL,
               fontWeight: 700,
               letterSpacing: -0.6,
               marginBottom: 4,
@@ -201,7 +201,7 @@ export function FleetLanding({ mode, onSelect }: Props) {
           >
             Cluster fleet
           </div>
-          <div style={{ fontSize: 13.5, color: t.textDim }}>
+          <div style={{ fontSize: FS_MD, color: t.textDim }}>
             Pick a context to connect. {contexts.length} loaded across{" "}
             {orderedGroups.length} group{orderedGroups.length === 1 ? "" : "s"}.
           </div>
@@ -328,7 +328,7 @@ function FleetGroup({
   onSelect: (id: string) => void;
   onMenu: (pos: MenuPosition, ctx: ContextInfo) => void;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const header = (
     <div
       style={{
@@ -342,10 +342,10 @@ function FleetGroup({
       <div style={{ flex: 1, height: 1, background: t.border }} />
       <div
         style={{
-          fontSize: 11.5,
+          fontSize: FS_SM,
           color: t.textMuted,
           fontVariantNumeric: "tabular-nums",
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
         }}
       >
         {list.length}
@@ -360,7 +360,7 @@ function FleetGroup({
         <div
           style={{
             border: `1px solid ${t.border}`,
-            borderRadius: 10,
+            borderRadius: R_LG,
             background: t.surface,
             overflow: "hidden",
           }}
@@ -450,7 +450,7 @@ function FleetCard({
   onSelect: () => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const density = useAppStore((s) => s.settings.density);
   const cardPad =
     density === "compact" ? 9 : density === "spacious" ? 18 : 14;
@@ -493,7 +493,7 @@ function FleetCard({
       style={{
         width: "100%",
         border: `1px solid ${t.border}`,
-        borderRadius: 10,
+        borderRadius: R_LG,
         background: t.surface,
         padding: cardPad,
         textAlign: "left",
@@ -541,7 +541,7 @@ function FleetCard({
         >
           <div
             style={{
-              fontSize: 14,
+              fontSize: FS_LG,
               fontWeight: 600,
               letterSpacing: -0.3,
               overflow: "hidden",
@@ -558,10 +558,10 @@ function FleetCard({
               <span
                 style={{
                   marginLeft: 6,
-                  fontSize: 11.5,
+                  fontSize: FS_SM,
                   fontWeight: 500,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                   letterSpacing: 0,
                 }}
               >
@@ -593,12 +593,12 @@ function FleetCard({
           {context.is_current && (
             <span
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 9.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_XS,
                 color: t.accent,
                 background: t.accentSoft,
                 padding: "1px 6px",
-                borderRadius: 3,
+                borderRadius: R_SM,
                 fontWeight: 600,
                 textTransform: "uppercase",
                 letterSpacing: 0.4,
@@ -612,8 +612,8 @@ function FleetCard({
             <span
               style={{
                 marginLeft: "auto",
-                fontFamily: FONT_MONO,
-                fontSize: 10.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_XS,
                 color: t.textMuted,
                 flexShrink: 0,
                 paddingLeft: 8,
@@ -626,10 +626,10 @@ function FleetCard({
         </div>
         <div
           style={{
-            fontSize: 11.5,
+            fontSize: FS_SM,
             color: t.textMuted,
             fontVariantNumeric: "tabular-nums",
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -717,7 +717,7 @@ function summaryLine(
 }
 
 function GaugeWithLabel({
-  mode,
+  
   ratio,
   color,
   label,
@@ -727,7 +727,7 @@ function GaugeWithLabel({
   color: string;
   label: string;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const pct = ratio != null ? Math.round(Math.max(0, Math.min(1, ratio)) * 100) : null;
   return (
     <div
@@ -753,24 +753,24 @@ function GaugeWithLabel({
           flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
-          fontSize: 10.5,
+          fontSize: FS_XS,
           fontWeight: 600,
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
           fontVariantNumeric: "tabular-nums",
           color: t.text,
           letterSpacing: -0.2,
           lineHeight: 1.05,
         }}
       >
-        <div style={{ fontSize: 11 }}>
+        <div style={{ fontSize: FS_SM }}>
           {pct == null ? "—" : pct}
           {pct != null && (
-            <span style={{ fontSize: 7, opacity: 0.7 }}>%</span>
+            <span style={{ fontSize: FS_XS, opacity: 0.7 }}>%</span>
           )}
         </div>
         <div
           style={{
-            fontSize: 7.5,
+            fontSize: FS_XS,
             opacity: 0.55,
             fontWeight: 500,
             marginTop: 1,
@@ -789,7 +789,7 @@ function GaugeWithLabel({
 // gauges, no summary line. Used when the operator wants to scan a large
 // fleet without per-card load info.
 function MiniCard({
-  mode,
+  
   context,
   probe,
   onSelect,
@@ -801,7 +801,7 @@ function MiniCard({
   onSelect: () => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const dotColor =
     probe?.healthy === true
       ? t.good
@@ -822,7 +822,7 @@ function MiniCard({
         width: "100%",
         height: "100%",
         border: `1px solid ${t.border}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         background: t.surface,
         padding: "8px 10px",
         textAlign: "left",
@@ -868,7 +868,7 @@ function MiniCard({
         style={{
           flex: 1,
           minWidth: 0,
-          fontSize: 13,
+          fontSize: FS_MD,
           fontWeight: 600,
           letterSpacing: -0.2,
           color: t.text,
@@ -882,10 +882,10 @@ function MiniCard({
           <span
             style={{
               marginLeft: 6,
-              fontSize: 11,
+              fontSize: FS_SM,
               fontWeight: 500,
               color: t.textMuted,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
               letterSpacing: 0,
             }}
           >
@@ -896,12 +896,12 @@ function MiniCard({
       {context.is_current && (
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 9,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             color: t.accent,
             background: t.accentSoft,
             padding: "1px 5px",
-            borderRadius: 3,
+            borderRadius: R_SM,
             fontWeight: 600,
             textTransform: "uppercase",
             letterSpacing: 0.4,
@@ -914,8 +914,8 @@ function MiniCard({
       {probe?.server_version && (
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             color: t.textMuted,
             flexShrink: 0,
           }}
@@ -936,7 +936,7 @@ function MiniCard({
 // gauges, no card frame — meant for operators with dozens of clusters who
 // want to scan top-to-bottom.
 function FleetRow({
-  mode,
+  
   context,
   probe,
   isLast,
@@ -950,7 +950,7 @@ function FleetRow({
   onSelect: () => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const dotColor =
     probe?.healthy === true
       ? t.good
@@ -1027,7 +1027,7 @@ function FleetRow({
       >
         <span
           style={{
-            fontSize: 13.5,
+            fontSize: FS_MD,
             fontWeight: 600,
             letterSpacing: -0.2,
             color: t.text,
@@ -1043,10 +1043,10 @@ function FleetRow({
         {sub && (
           <span
             style={{
-              fontSize: 11.5,
+              fontSize: FS_SM,
               fontWeight: 500,
               color: t.textMuted,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -1060,12 +1060,12 @@ function FleetRow({
         {context.is_current && (
           <span
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 9,
+              fontFamily: FF_MONO,
+              fontSize: FS_XS,
               color: t.accent,
               background: t.accentSoft,
               padding: "1px 5px",
-              borderRadius: 3,
+              borderRadius: R_SM,
               fontWeight: 600,
               textTransform: "uppercase",
               letterSpacing: 0.4,
@@ -1078,8 +1078,8 @@ function FleetRow({
       </div>
       <div
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 11,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           color: t.textMuted,
           fontVariantNumeric: "tabular-nums",
           flexShrink: 0,
@@ -1102,8 +1102,8 @@ function FleetRow({
 
 // Three-button segmented control for the page-level fleet-view toggle.
 // Persists through `patchSettings({ fleetView })` → `prefs.json`.
-function ViewToggle({ mode }: { mode: ThemeMode }) {
-  const t = tokens(mode);
+function ViewToggle({}: { mode: ThemeMode }) {
+  const t = useResolvedTheme().tokens;
   const value = useAppStore((s) => s.settings.fleetView);
   const patch = useAppStore((s) => s.patchSettings);
   const options: { id: FleetView; label: string }[] = [
@@ -1118,7 +1118,7 @@ function ViewToggle({ mode }: { mode: ThemeMode }) {
       style={{
         display: "inline-flex",
         border: `1px solid ${t.border}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         padding: 2,
         background: t.surface,
         flexShrink: 0,
@@ -1138,11 +1138,11 @@ function ViewToggle({ mode }: { mode: ThemeMode }) {
               background: selected ? t.accentSoft : "transparent",
               color: selected ? t.accent : t.textMuted,
               fontFamily: "inherit",
-              fontSize: 11.5,
+              fontSize: FS_SM,
               fontWeight: 600,
               letterSpacing: 0.2,
               padding: "5px 12px",
-              borderRadius: 6,
+              borderRadius: R_MD,
               cursor: "pointer",
               transition: "background .12s, color .12s",
             }}

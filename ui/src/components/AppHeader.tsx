@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { ContextInfo } from "../types";
-import { tokens, FONT_MONO, type ThemeMode } from "../theme";
+import { FF_MONO, type ThemeMode, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
 import { BrandMark, IconBtn, Icons, Kbd } from "./ui";
 import { MOD_KEY } from "../lib/keyboard";
 import { HeaderToast } from "./HeaderToast";
 import { parseTableFilter } from "../lib/tableFilter";
-import { useAppStore } from "../store";
+import { useAppStore, useResolvedTheme } from "../store";
 
 type Props = {
   mode: ThemeMode;
@@ -37,7 +37,7 @@ export function AppHeader({
   onOpenSettings,
   onOpenForwards,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   // Visible-row count + active filter for the breadcrumb. Both pushed by
   // ResourceTable; both null when no kind table is mounted.
   const tableCount = useAppStore((s) => s.tableCount);
@@ -113,7 +113,7 @@ export function AppHeader({
           >
             <BrandMark size={26} />
           </div>
-          <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: -0.3 }}>
+          <div style={{ fontSize: FS_LG, fontWeight: 700, letterSpacing: -0.3 }}>
             FerrisScope
           </div>
         </button>
@@ -125,7 +125,7 @@ export function AppHeader({
             display: "flex",
             alignItems: "center",
             gap: 8,
-            fontSize: 13,
+            fontSize: FS_MD,
             fontWeight: 500,
             minWidth: 0,
           }}
@@ -139,9 +139,9 @@ export function AppHeader({
               cursor: "pointer",
               color: context ? t.textDim : t.text,
               padding: "3px 6px",
-              borderRadius: 4,
+              borderRadius: R_MD,
               fontFamily: "inherit",
-              fontSize: 13,
+              fontSize: FS_MD,
               fontWeight: 500,
             }}
           >
@@ -164,14 +164,14 @@ export function AppHeader({
               {context.namespace && (
                 <span
                   style={{
-                    fontSize: 11,
+                    fontSize: FS_SM,
                     padding: "1px 6px",
-                    borderRadius: 3,
+                    borderRadius: R_SM,
                     background: t.chip,
                     color: t.textDim,
                     fontWeight: 500,
                     marginLeft: 2,
-                    fontFamily: FONT_MONO,
+                    fontFamily: FF_MONO,
                   }}
                 >
                   ns:{context.namespace}
@@ -188,9 +188,9 @@ export function AppHeader({
                   {tableCount && (
                     <span
                       style={{
-                        fontSize: 11,
+                        fontSize: FS_SM,
                         color: t.textMuted,
-                        fontFamily: FONT_MONO,
+                        fontFamily: FF_MONO,
                         fontVariantNumeric: "tabular-nums",
                       }}
                     >
@@ -216,7 +216,7 @@ export function AppHeader({
                         gap: 4,
                         padding: "2px 6px",
                         border: `1px solid ${filterAccent}`,
-                        borderRadius: 5,
+                        borderRadius: R_MD,
                         background: t.surface,
                         height: 24,
                       }}
@@ -258,8 +258,8 @@ export function AppHeader({
                           outline: "none",
                           background: "transparent",
                           color: filterInvalid ? t.bad : t.text,
-                          fontSize: 12,
-                          fontFamily: FONT_MONO,
+                          fontSize: FS_MD,
+                          fontFamily: FF_MONO,
                           padding: 0,
                         }}
                       />
@@ -280,7 +280,7 @@ export function AppHeader({
                             alignItems: "center",
                             padding: 2,
                             border: "none",
-                            borderRadius: 3,
+                            borderRadius: R_SM,
                             background: "transparent",
                             color: t.textMuted,
                             cursor: "pointer",
@@ -302,7 +302,7 @@ export function AppHeader({
                         display: "inline-flex",
                         alignItems: "center",
                         border: `1px solid ${tableFilter ? filterAccent : t.borderSoft}`,
-                        borderRadius: 5,
+                        borderRadius: R_MD,
                         background: tableFilter
                           ? filterInvalid
                             ? t.surface
@@ -332,7 +332,7 @@ export function AppHeader({
                           color: "inherit",
                           cursor: "pointer",
                           fontFamily: "inherit",
-                          fontSize: 11,
+                          fontSize: FS_SM,
                           lineHeight: 1,
                           height: "100%",
                         }}
@@ -343,7 +343,7 @@ export function AppHeader({
                         {tableFilter && (
                           <span
                             style={{
-                              fontFamily: FONT_MONO,
+                              fontFamily: FF_MONO,
                               maxWidth: 140,
                               overflow: "hidden",
                               textOverflow: "ellipsis",
@@ -395,29 +395,44 @@ export function AppHeader({
             gap: 6,
             border: `1px solid ${t.border}`,
             background: t.surface,
-            borderRadius: 7,
+            borderRadius: R_MD,
             padding: "6px 12px",
             width: 280,
             cursor: "pointer",
             fontFamily: "inherit",
             color: "inherit",
-            height: 32,
+            // `minHeight` instead of fixed `height` so the row stays
+            // single-line and centered at any theme's base font size.
+            minHeight: 32,
+            // Hide vertical overflow that 14-px-base themes would otherwise
+            // push past the row.
+            whiteSpace: "nowrap",
           }}
         >
-          <span style={{ color: t.textMuted, display: "inline-flex" }}>
+          <span
+            style={{ color: t.textMuted, display: "inline-flex", flexShrink: 0 }}
+          >
             {Icons.search}
           </span>
           <span
             style={{
+              // `flex + minWidth: 0` lets the placeholder ellipsis-truncate
+              // instead of wrapping to a second line at larger base fonts.
               flex: 1,
+              minWidth: 0,
               color: t.textMuted,
-              fontSize: 12,
+              fontSize: FS_MD,
               textAlign: "left",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
             }}
           >
             Search clusters, pods, nodes…
           </span>
-          <Kbd t={t}>{MOD_KEY}K</Kbd>
+          <span style={{ flexShrink: 0 }}>
+            <Kbd t={t}>{MOD_KEY}K</Kbd>
+          </span>
         </button>
 
         <div style={{ position: "relative", display: "inline-flex" }}>
@@ -442,12 +457,12 @@ export function AppHeader({
                 minWidth: 14,
                 height: 14,
                 padding: "0 3px",
-                borderRadius: 7,
+                borderRadius: R_MD,
                 background: t.accent,
                 color: "#fff",
-                fontSize: 9,
+                fontSize: FS_XS,
                 fontWeight: 700,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
                 fontVariantNumeric: "tabular-nums",
                 display: "inline-flex",
                 alignItems: "center",
@@ -483,12 +498,12 @@ export function AppHeader({
                 minWidth: 14,
                 height: 14,
                 padding: "0 3px",
-                borderRadius: 7,
+                borderRadius: R_MD,
                 background: t.bad,
                 color: "#fff",
-                fontSize: 9,
+                fontSize: FS_XS,
                 fontWeight: 700,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
                 fontVariantNumeric: "tabular-nums",
                 display: "inline-flex",
                 alignItems: "center",

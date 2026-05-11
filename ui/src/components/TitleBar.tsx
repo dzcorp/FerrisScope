@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useResolvedTheme } from "../store";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // Mirrors `@tauri-apps/api/window`'s internal `ResizeDirection` (declared but
@@ -13,7 +14,7 @@ type ResizeDir =
   | "SouthWest"
   | "West"
   | "NorthWest";
-import { tokens, FONT_SANS, type ThemeMode, type Tokens } from "../theme";
+import { FONT_SANS, type ThemeMode, type Tokens, FS_SM } from "../theme";
 import { Icons } from "./ui";
 
 // Linux-only window chrome. Tauri strips GTK's client-side decorations on
@@ -37,7 +38,7 @@ const HEIGHT = 30;
 // components can compose it via inline styles or `calc()`.
 export const TITLEBAR_INSET_PX = IS_LINUX_TITLEBAR ? HEIGHT : 0;
 
-export function TitleBar({ mode }: { mode: ThemeMode }) {
+export function TitleBar({}: { mode: ThemeMode }) {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -59,7 +60,7 @@ export function TitleBar({ mode }: { mode: ThemeMode }) {
 
   if (!IS_LINUX_TITLEBAR) return null;
 
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const w = getCurrentWindow();
 
   // Explicit `startDragging()` rather than `data-tauri-drag-region`: the
@@ -99,7 +100,7 @@ export function TitleBar({ mode }: { mode: ThemeMode }) {
           display: "flex",
           alignItems: "center",
           paddingLeft: 12,
-          fontSize: 11.5,
+          fontSize: FS_SM,
           fontWeight: 600,
           letterSpacing: 0.2,
           color: t.textDim,

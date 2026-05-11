@@ -22,10 +22,10 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, onResourceDelta } from "../api";
-import { useAppStore } from "../store";
+import { useAppStore, useResolvedTheme } from "../store";
 import { formatQuantity } from "./detail";
 import type { ColumnDef, ResourceKind, ResourceRow } from "../types";
-import { tokens, FONT_MONO, type ThemeMode } from "../theme";
+import { tokens, FF_MONO, FONT_MONO, type ThemeMode, FS_MD, FS_SM, FS_XS } from "../theme";
 import { LogPanel } from "./LogPanel";
 import { DetailPanel, type DetailTarget } from "./DetailPanel";
 import { ContextMenu, type MenuPosition } from "./ContextMenu";
@@ -51,14 +51,10 @@ type LoadState =
   | { kind: "ready" }
   | { kind: "error"; message: string };
 
-// Per-density row height. The Settings panel exposes a "Density" select that
-// affects every table the operator opens. Comfortable matches the design
-// reference (HV2); compact prioritises rows-per-screen during incidents.
-const ROW_HEIGHT_BY_DENSITY = {
-  compact: 26,
-  comfortable: 34,
-  spacious: 42,
-} as const;
+// Row height now flows from the active theme's `sizing.rowHeights[density]`,
+// so a theme can shift the whole curve (e.g. Readable's spacious is taller
+// than Default's). The density preference still picks which row of the
+// curve to use.
 const SELECT_COL_ID = "__select__";
 const SELECT_COL_WIDTH = 40;
 const RESIZE_HANDLE_WIDTH = 6;
@@ -73,15 +69,20 @@ const NowContext = createContext<number>(Date.now());
 // big share of scroll cost on large tables (30 rows × 10 cells = 300
 // fresh objects per render). Stable references let React skip prop
 // diffing entirely.
+//
+// Font size and family use the theme-published CSS custom properties
+// (App.tsx publishes them on `:root`) so cells follow the active theme
+// without busting referential equality on every theme change.
+const TABLE_FS_CELL = "var(--fs-fs-sm, 11.5px)";
 const AGE_CELL_STYLE: CSSProperties = {
   fontVariantNumeric: "tabular-nums",
-  fontFamily: FONT_MONO,
-  fontSize: 11.5,
+  fontFamily: FF_MONO,
+  fontSize: TABLE_FS_CELL,
 };
 const NUM_CELL_BASE: CSSProperties = {
   fontVariantNumeric: "tabular-nums",
-  fontFamily: FONT_MONO,
-  fontSize: 11.5,
+  fontFamily: FF_MONO,
+  fontSize: TABLE_FS_CELL,
 };
 const PHASE_WRAP: CSSProperties = {
   display: "inline-flex",
@@ -128,7 +129,7 @@ type Props = {
 // spinner on re-fetch (R-01). Identifiers in mono (R-07), numbers tabular
 // (R-06), header labels uppercase mono.
 export function ResourceTable({ mode, clusterId, kind }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const [rows, setRows] = useState<ResourceRow[]>([]);
   const [load, setLoad] = useState<LoadState>({ kind: "loading" });
   // Filter is driven by the global palette (Cmd+F / `/` / breadcrumb icon).
@@ -163,7 +164,8 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
   const density = useAppStore((s) => s.settings.density);
   const monoTables = useAppStore((s) => s.settings.monoTables);
-  const ROW_HEIGHT = ROW_HEIGHT_BY_DENSITY[density];
+  const resolved = useResolvedTheme();
+  const ROW_HEIGHT = resolved.sizing.rowHeights[density];
   const addDockTab = useAppStore((s) => s.addDockTab);
   const contextLabel = useAppStore(
     (s) => s.contexts.find((c) => c.id === s.selectedContext)?.name ?? null,
@@ -867,12 +869,12 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
                   flexGrow: isStretchCol ? 1 : 0,
                   position: "relative",
                   padding: i === 1 ? "10px 12px 10px 22px" : "10px 12px",
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   fontWeight: 700,
                   color: sort ? t.text : t.textMuted,
                   textTransform: "uppercase",
                   letterSpacing: 0.5,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                   textAlign: rightAlign(header.column.id) ? "right" : "left",
                   cursor: canSort ? "pointer" : "default",
                   userSelect: "none",
@@ -1116,7 +1118,7 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
                             overflow: "hidden",
                             whiteSpace: "nowrap",
                             textOverflow: "ellipsis",
-                            fontSize: 12,
+                            fontSize: FS_MD,
                           }}
                         >
                           {flexRender(
@@ -1663,9 +1665,11 @@ function measureText(text: string, font: string): number {
   return _measureCtx.measureText(text).width;
 }
 
-// Cell font strings. Mirrors the inline styles on header (uppercase
-// FONT_MONO at fontSize 10.5, fontWeight 700) and body cells (fontSize
-// 12, mostly mono for the columns where the operator copies the value).
+// Cell font strings used by canvas measureText for column-width fitting.
+// Canvas cannot resolve CSS custom properties, so these must reference a
+// literal font family. We use the Default theme's JetBrains Mono — themes
+// that pick a different mono will have slightly off measurements, but the
+// resize handles still let the operator tune column widths interactively.
 const CELL_FONT_TEXT = "12px system-ui, -apple-system, Segoe UI, sans-serif";
 const CELL_FONT_MONO = `12px ${FONT_MONO}`;
 const HEADER_FONT = `700 10.5px ${FONT_MONO}`;
@@ -2005,8 +2009,8 @@ function renderCell(
           <span
             style={{
               fontVariantNumeric: "tabular-nums",
-              fontFamily: FONT_MONO,
-              fontSize: 11.5,
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
               color,
               fontWeight: n > 0 ? 600 : 400,
             }}
@@ -2021,8 +2025,8 @@ function renderCell(
         <span
           style={{
             fontVariantNumeric: "tabular-nums",
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             color: t.textDim,
           }}
         >
@@ -2056,7 +2060,7 @@ function renderCell(
         <span
           title={isQty && raw !== "" ? raw : undefined}
           style={{
-            fontFamily: mono ? FONT_MONO : "inherit",
+            fontFamily: mono ? FF_MONO : "inherit",
             fontSize: mono ? 11.5 : 12,
             color: c.id === "namespace" ? t.textDim : t.text,
             fontVariantNumeric: isQty ? "tabular-nums" : undefined,

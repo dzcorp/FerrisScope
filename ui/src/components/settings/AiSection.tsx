@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useResolvedTheme } from "../../store";
 import { api } from "../../api";
 import type {
   AiSettingsWire,
@@ -11,7 +12,7 @@ import type {
   ProviderStatusWire,
   ReasoningEffort,
 } from "../../types";
-import { tokens, FONT_MONO, type ThemeMode, type Tokens } from "../../theme";
+import { tokens, FF_MONO, type ThemeMode, type Tokens, R_LG, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { Btn, ErrorBlock, Field, SectionHeader, Select, Toggle } from "../ui";
 
 // AiSection — settings page tab for the cluster-aware AI agent. The
@@ -20,8 +21,8 @@ import { Btn, ErrorBlock, Field, SectionHeader, Select, Toggle } from "../ui";
 // ChatGPT" OAuth button) and, once configured, exposes a small panel
 // for base-URL override + Disconnect. The "active provider" select at
 // the top drives chat-creation defaults.
-export function AiSection({ mode }: { mode: ThemeMode }) {
-  const t = tokens(mode);
+export function AiSection({}: { mode: ThemeMode }) {
+  const t = useResolvedTheme().tokens;
   const [settings, setSettings] = useState<AiSettingsWire | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -86,7 +87,7 @@ export function AiSection({ mode }: { mode: ThemeMode }) {
             inline
           />
         ) : (
-          <div style={{ color: t.textMuted, fontSize: 12 }}>Loading…</div>
+          <div style={{ color: t.textMuted, fontSize: FS_MD }}>Loading…</div>
         )}
       </div>
     );
@@ -188,9 +189,9 @@ export function AiSection({ mode }: { mode: ThemeMode }) {
       <div style={{ marginTop: 12 }} data-fs-anchor="providers">
         <div
           style={{
-            fontSize: 11,
+            fontSize: FS_SM,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             marginBottom: 6,
           }}
         >
@@ -390,10 +391,10 @@ export function AiSection({ mode }: { mode: ThemeMode }) {
             background: t.surfaceAlt,
             border: `1px solid ${t.borderSoft}`,
             color: t.text,
-            borderRadius: 4,
+            borderRadius: R_MD,
             padding: "6px 8px",
-            fontFamily: FONT_MONO,
-            fontSize: 12,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             resize: "vertical",
             minHeight: 80,
           }}
@@ -414,7 +415,7 @@ export function AiSection({ mode }: { mode: ThemeMode }) {
             padding: "8px 10px",
             background: t.bad + "1f",
             border: `1px solid ${t.bad}66`,
-            borderRadius: 4,
+            borderRadius: R_MD,
           }}
         >
           <ErrorBlock
@@ -489,12 +490,12 @@ function ProviderRow({
   const statusChip = provider.configured ? (
     <span
       style={{
-        fontSize: 10,
-        fontFamily: FONT_MONO,
+        fontSize: FS_XS,
+        fontFamily: FF_MONO,
         color: t.good,
         background: t.good + "1a",
         padding: "1px 6px",
-        borderRadius: 999,
+        borderRadius: R_LG,
       }}
     >
       {provider.auth_mode === "oauth" ? "oauth" : "api key"}
@@ -503,8 +504,8 @@ function ProviderRow({
   ) : (
     <span
       style={{
-        fontSize: 10,
-        fontFamily: FONT_MONO,
+        fontSize: FS_XS,
+        fontFamily: FF_MONO,
         color: t.textMuted,
       }}
     >
@@ -517,7 +518,7 @@ function ProviderRow({
       style={{
         background: t.surfaceAlt,
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 4,
+        borderRadius: R_MD,
         padding: "8px 10px",
       }}
     >
@@ -532,8 +533,8 @@ function ProviderRow({
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <span
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 12,
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
               color: t.text,
             }}
           >
@@ -563,7 +564,7 @@ function ProviderRow({
           {providerBlurb(provider.kind) && (
             <div
               style={{
-                fontSize: 11,
+                fontSize: FS_SM,
                 color: t.textMuted,
                 lineHeight: 1.45,
               }}
@@ -608,9 +609,9 @@ function ProviderRow({
             >
               <div
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {provider.auth_mode === "api_key"
@@ -640,10 +641,10 @@ function ProviderRow({
                     background: t.surface,
                     border: `1px solid ${t.borderSoft}`,
                     color: t.text,
-                    borderRadius: 4,
+                    borderRadius: R_MD,
                     padding: "6px 8px",
-                    fontFamily: FONT_MONO,
-                    fontSize: 12,
+                    fontFamily: FF_MONO,
+                    fontSize: FS_MD,
                   }}
                 />
                 <Btn
@@ -672,8 +673,8 @@ function ProviderRow({
               {testResult && (
                 <div
                   style={{
-                    fontSize: 11,
-                    fontFamily: FONT_MONO,
+                    fontSize: FS_SM,
+                    fontFamily: FF_MONO,
                     color: testResult.startsWith("OK") ? t.good : t.bad,
                   }}
                 >
@@ -691,9 +692,9 @@ function ProviderRow({
           >
             <div
               style={{
-                fontSize: 10.5,
+                fontSize: FS_XS,
                 color: t.textMuted,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
               }}
             >
               Base URL (override) — leave empty for{" "}
@@ -712,10 +713,10 @@ function ProviderRow({
                 background: t.surface,
                 border: `1px solid ${t.borderSoft}`,
                 color: t.text,
-                borderRadius: 4,
+                borderRadius: R_MD,
                 padding: "6px 8px",
-                fontFamily: FONT_MONO,
-                fontSize: 12,
+                fontFamily: FF_MONO,
+                fontSize: FS_MD,
               }}
             />
           </div>
@@ -976,17 +977,17 @@ function McpServersField({
             padding: "6px 10px",
             background: t.surfaceAlt,
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 4,
+            borderRadius: R_MD,
             display: "flex",
             alignItems: "center",
             gap: 8,
-            fontSize: 11.5,
+            fontSize: FS_SM,
             color: t.textMuted,
           }}
         >
           <span style={{ flex: 1 }}>
             Legacy single-binary path:{" "}
-            <span style={{ color: t.text, fontFamily: FONT_MONO }}>
+            <span style={{ color: t.text, fontFamily: FF_MONO }}>
               {legacyPath}
             </span>
           </span>
@@ -1020,7 +1021,7 @@ function McpServersField({
         {servers.length === 0 && !legacyPath && (
           <div
             style={{
-              fontSize: 11.5,
+              fontSize: FS_SM,
               color: t.textDim,
               fontStyle: "italic",
               padding: "4px 0",
@@ -1115,7 +1116,7 @@ function McpServerRow({
       style={{
         background: t.surfaceAlt,
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 4,
+        borderRadius: R_MD,
         padding: "6px 8px",
         display: "flex",
         flexDirection: "column",
@@ -1132,8 +1133,8 @@ function McpServerRow({
             border: "none",
             color: t.textDim,
             cursor: "pointer",
-            fontFamily: FONT_MONO,
-            fontSize: 11,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             width: 16,
           }}
         >
@@ -1152,10 +1153,10 @@ function McpServerRow({
             background: t.surface,
             border: `1px solid ${t.borderSoft}`,
             color: t.text,
-            borderRadius: 4,
+            borderRadius: R_MD,
             padding: "4px 6px",
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
           }}
         />
         <input
@@ -1171,10 +1172,10 @@ function McpServerRow({
             background: t.surface,
             border: `1px solid ${t.borderSoft}`,
             color: t.text,
-            borderRadius: 4,
+            borderRadius: R_MD,
             padding: "4px 6px",
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
           }}
         />
         <Btn
@@ -1202,8 +1203,8 @@ function McpServerRow({
             border: "none",
             color: t.bad,
             cursor: "pointer",
-            fontFamily: FONT_MONO,
-            fontSize: 12,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             padding: "0 4px",
           }}
         >
@@ -1222,7 +1223,7 @@ function McpServerRow({
         >
           <label
             style={{
-              fontSize: 11,
+              fontSize: FS_SM,
               color: t.textMuted,
               alignSelf: "start",
               paddingTop: 4,
@@ -1256,17 +1257,17 @@ function McpServerRow({
               background: t.surface,
               border: `1px solid ${t.borderSoft}`,
               color: t.text,
-              borderRadius: 4,
+              borderRadius: R_MD,
               padding: "4px 6px",
-              fontFamily: FONT_MONO,
-              fontSize: 11.5,
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
               resize: "vertical",
               minHeight: 36,
             }}
           />
           <label
             style={{
-              fontSize: 11,
+              fontSize: FS_SM,
               color: t.textMuted,
               alignSelf: "start",
               paddingTop: 4,
@@ -1296,10 +1297,10 @@ function McpServerRow({
               background: t.surface,
               border: `1px solid ${t.borderSoft}`,
               color: t.text,
-              borderRadius: 4,
+              borderRadius: R_MD,
               padding: "4px 6px",
-              fontFamily: FONT_MONO,
-              fontSize: 11.5,
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
               resize: "vertical",
               minHeight: 40,
             }}
@@ -1332,10 +1333,10 @@ function McpTestResultChip({
           padding: "4px 8px",
           background: t.good + "1f",
           border: `1px solid ${t.good}66`,
-          borderRadius: 4,
+          borderRadius: R_MD,
           color: t.good,
-          fontFamily: FONT_MONO,
-          fontSize: 11,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           display: "flex",
           alignItems: "center",
           gap: 6,
@@ -1363,10 +1364,10 @@ function McpTestResultChip({
         padding: "4px 8px",
         background: t.bad + "1f",
         border: `1px solid ${t.bad}66`,
-        borderRadius: 4,
+        borderRadius: R_MD,
         color: t.bad,
-        fontFamily: FONT_MONO,
-        fontSize: 11,
+        fontFamily: FF_MONO,
+        fontSize: FS_SM,
         display: "flex",
         alignItems: "flex-start",
         gap: 6,

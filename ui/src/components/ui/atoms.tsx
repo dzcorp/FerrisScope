@@ -9,7 +9,19 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { FONT_MONO, statusDot, statusIsTransient, type Tokens } from "../../theme";
+import {
+  FF_MONO,
+  FS_LG,
+  FS_MD,
+  FS_SM,
+  FS_XL,
+  FS_XS,
+  R_MD,
+  R_SM,
+  statusDot,
+  statusIsTransient,
+  type Tokens,
+} from "../../theme";
 import { useAppStore } from "../../store";
 import { Tooltip } from "./Tooltip";
 
@@ -27,12 +39,12 @@ export function Eyebrow({
   return (
     <div
       style={{
-        fontSize: 10,
+        fontSize: FS_XS,
         fontWeight: 700,
         color: t.textMuted,
         textTransform: "uppercase",
         letterSpacing: 0.6,
-        fontFamily: FONT_MONO,
+        fontFamily: FF_MONO,
         ...style,
       }}
     >
@@ -59,7 +71,7 @@ export function Section({
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        fontSize: 11,
+        fontSize: FS_SM,
         fontWeight: 700,
         color: t.textDim,
         textTransform: "uppercase",
@@ -87,10 +99,10 @@ export function Kbd({
   return (
     <span
       style={{
-        fontFamily: FONT_MONO,
-        fontSize: 10,
+        fontFamily: FF_MONO,
+        fontSize: FS_XS,
         padding: "1px 5px",
-        borderRadius: 3,
+        borderRadius: R_SM,
         background: t.chip,
         color: t.textMuted,
         ...style,
@@ -132,13 +144,13 @@ export function Chip({
       style={{
         display: "inline-flex",
         alignItems: "center",
-        fontSize: 11,
+        fontSize: FS_SM,
         padding: "1px 6px",
-        borderRadius: 3,
+        borderRadius: R_SM,
         background: palette.bg,
         color: palette.fg,
         fontWeight: 500,
-        fontFamily: mono ? FONT_MONO : "inherit",
+        fontFamily: mono ? FF_MONO : "inherit",
         ...style,
       }}
     >
@@ -163,22 +175,22 @@ export function Stat({
     <div>
       <div
         style={{
-          fontSize: 10,
+          fontSize: FS_XS,
           color: t.textMuted,
           fontWeight: 600,
           textTransform: "uppercase",
           letterSpacing: 0.5,
           marginBottom: 2,
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
         }}
       >
         {label}
       </div>
       <div
         style={{
-          fontSize: 13,
+          fontSize: FS_MD,
           fontWeight: 600,
-          fontFamily: mono ? FONT_MONO : "inherit",
+          fontFamily: mono ? FF_MONO : "inherit",
           fontVariantNumeric: "tabular-nums",
           color: t.text,
         }}
@@ -213,7 +225,7 @@ export function Checkbox({
       style={{
         width: size,
         height: size,
-        borderRadius: 4,
+        borderRadius: R_MD,
         border: `1.5px solid ${
           checked || indeterminate ? t.accent : t.border
         }`,
@@ -457,11 +469,11 @@ export function TextInput({
         padding: "7px 10px",
         height: 32,
         border: `1px solid ${t.border}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
         background: t.surface,
         color: t.text,
-        fontSize: 12.5,
-        fontFamily: mono ? FONT_MONO : "inherit",
+        fontSize: FS_MD,
+        fontFamily: mono ? FF_MONO : "inherit",
         outline: "none",
         width: fullWidth ? "100%" : undefined,
         ...style,
@@ -710,10 +722,10 @@ export function Select<V extends string | number>({
     padding: "7px 32px 7px 10px",
     height: 32,
     border: `1px solid ${open ? t.accent : t.border}`,
-    borderRadius: 6,
+    borderRadius: R_MD,
     background: hover ? t.btnHover : t.surface,
     color: t.text,
-    fontSize: 12.5,
+    fontSize: FS_MD,
     fontFamily: "inherit",
     outline: "none",
     cursor: "pointer",
@@ -792,7 +804,7 @@ export function Select<V extends string | number>({
               flexDirection: "column",
               background: t.surface,
               border: `1px solid ${t.border}`,
-              borderRadius: 6,
+              borderRadius: R_MD,
               padding: 4,
               zIndex: 9000,
               boxShadow:
@@ -826,10 +838,10 @@ export function Select<V extends string | number>({
                     background: t.surfaceAlt,
                     border: `1px solid ${t.borderSoft}`,
                     color: t.text,
-                    borderRadius: 4,
+                    borderRadius: R_MD,
                     padding: "6px 8px",
                     fontFamily: "inherit",
-                    fontSize: 12.5,
+                    fontSize: FS_MD,
                     outline: "none",
                     boxSizing: "border-box",
                   }}
@@ -841,9 +853,9 @@ export function Select<V extends string | number>({
               <div
                 style={{
                   padding: "8px 10px",
-                  fontSize: 12,
+                  fontSize: FS_MD,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 No matches
@@ -869,7 +881,7 @@ export function Select<V extends string | number>({
                     gap: 8,
                     width: "100%",
                     padding: "6px 10px",
-                    borderRadius: 4,
+                    borderRadius: R_MD,
                     border: "none",
                     background: isActive
                       ? t.accentSoft
@@ -878,7 +890,7 @@ export function Select<V extends string | number>({
                         : "transparent",
                     color: selected ? t.accent : t.text,
                     fontFamily: "inherit",
-                    fontSize: 12.5,
+                    fontSize: FS_MD,
                     textAlign: "left",
                     cursor: "pointer",
                     minHeight: 28,
@@ -956,7 +968,7 @@ export function Field({
       <div>
         <div
           style={{
-            fontSize: 13,
+            fontSize: FS_MD,
             fontWeight: 600,
             color: t.text,
             marginBottom: 3,
@@ -965,7 +977,7 @@ export function Field({
           {label}
         </div>
         {hint && (
-          <div style={{ fontSize: 12, color: t.textDim, lineHeight: 1.5 }}>
+          <div style={{ fontSize: FS_MD, color: t.textDim, lineHeight: 1.5 }}>
             {hint}
           </div>
         )}
@@ -991,7 +1003,7 @@ export function SectionHeader({
     <div style={{ marginBottom: 4 }}>
       <div
         style={{
-          fontSize: 16,
+          fontSize: FS_XL,
           fontWeight: 600,
           letterSpacing: -0.2,
           marginBottom: 2,
@@ -1001,7 +1013,7 @@ export function SectionHeader({
         {title}
       </div>
       {sub && (
-        <div style={{ fontSize: 12.5, color: t.textDim }}>{sub}</div>
+        <div style={{ fontSize: FS_MD, color: t.textDim }}>{sub}</div>
       )}
     </div>
   );
@@ -1059,6 +1071,10 @@ export function ContainerDots({
       display: "inline-block",
     };
     if (kind === "init")
+      // Init container is intentionally a near-square "cap" to read as
+      // distinct from the round main / ringed sidecar shapes. Keep a
+      // literal small radius — theme radius scales would turn the 8×8
+      // square into a circle under Readable's 6 px radius.
       return { ...base, borderRadius: 2, background: col };
     if (kind === "sidecar")
       return {
@@ -1071,7 +1087,11 @@ export function ContainerDots({
       ...base,
       borderRadius: "50%",
       background: col,
-      boxShadow: "0 0 0 1.5px rgba(0,0,0,0.06)",
+      // INSET ring so the outline can never get clipped by an
+      // `overflow: hidden` parent (table cells truncate that way). The
+      // previous outer-spread shadow was sometimes only visible on the
+      // upper-right of the dot when the rest got cropped by the cell.
+      boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.18)",
     };
   };
 
@@ -1175,9 +1195,9 @@ export function LoadingLine({
           display: "inline-flex",
           alignItems: "center",
           gap: 10,
-          fontSize: 11,
+          fontSize: FS_SM,
           color: t.textMuted,
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
         }}
       >
         <span
@@ -1187,7 +1207,7 @@ export function LoadingLine({
             background: t.borderSoft,
             position: "relative",
             overflow: "hidden",
-            borderRadius: 1,
+            borderRadius: R_SM,
             display: "inline-block",
             flexShrink: 0,
           }}
@@ -1201,7 +1221,7 @@ export function LoadingLine({
               height: "100%",
               width: "30%",
               background: t.accent,
-              borderRadius: 1,
+              borderRadius: R_SM,
             }}
           />
         </span>
@@ -1228,7 +1248,7 @@ export function LoadingLine({
           background: t.borderSoft,
           position: "relative",
           overflow: "hidden",
-          borderRadius: 1,
+          borderRadius: R_SM,
         }}
       >
         <div
@@ -1240,16 +1260,16 @@ export function LoadingLine({
             height: "100%",
             width: "30%",
             background: t.accent,
-            borderRadius: 1,
+            borderRadius: R_SM,
           }}
         />
       </div>
       {label && (
         <div
           style={{
-            fontSize: 12,
+            fontSize: FS_MD,
             color: t.textDim,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             letterSpacing: 0.2,
           }}
         >
@@ -1283,11 +1303,11 @@ export function EmptyState({
         color: t.textDim,
       }}
     >
-      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+      <div style={{ fontSize: FS_LG, fontWeight: 600, marginBottom: 4 }}>
         {title}
       </div>
       {hint && (
-        <div style={{ fontSize: 12.5, color: t.textMuted }}>{hint}</div>
+        <div style={{ fontSize: FS_MD, color: t.textMuted }}>{hint}</div>
       )}
       {action && (
         <div
@@ -1337,8 +1357,8 @@ export function ErrorBlock({
     return (
       <span
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 11.5,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           color: t.bad,
           display: "inline-flex",
           alignItems: "baseline",
@@ -1364,10 +1384,10 @@ export function ErrorBlock({
         textAlign: "center",
       }}
     >
-      <div style={{ fontSize: 14, fontWeight: 600, color: t.bad }}>
+      <div style={{ fontSize: FS_LG, fontWeight: 600, color: t.bad }}>
         {c.title}
       </div>
-      <div style={{ fontSize: 12, color: t.textMuted, maxWidth: 460 }}>
+      <div style={{ fontSize: FS_MD, color: t.textMuted, maxWidth: 460 }}>
         {c.body}
       </div>
       <button
@@ -1378,8 +1398,8 @@ export function ErrorBlock({
           background: "none",
           border: "none",
           color: t.textMuted,
-          fontSize: 11,
-          fontFamily: FONT_MONO,
+          fontSize: FS_SM,
+          fontFamily: FF_MONO,
           cursor: "pointer",
           textDecoration: "underline",
           padding: 0,
@@ -1394,10 +1414,10 @@ export function ErrorBlock({
             padding: "10px 14px",
             background: t.surfaceAlt,
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 6,
+            borderRadius: R_MD,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
-            fontSize: 11,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
             margin: 0,

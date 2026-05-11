@@ -3,15 +3,18 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, onPrometheusChanged } from "../api";
 import type { ReleaseInfo, SettingsSectionId, UpdaterInfo } from "../types";
-import { useAppStore, selectUpdateAvailable, semverGt } from "../store";
+import { useAppStore, selectUpdateAvailable, semverGt, useResolvedTheme } from "../store";
 import {
   tokens,
-  FONT_MONO,
+  FF_MONO,
+  THEMES,
   UI_SCALE_DEFAULT,
   UI_SCALE_MAX,
   UI_SCALE_MIN,
+  getTheme,
+  resolveTheme,
   type ThemeMode,
-  type Tokens,
+  type Tokens, R_LG, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XL, FS_XS
 } from "../theme";
 import { toast } from "../lib/dialog";
 import type {
@@ -61,7 +64,7 @@ type Props = {
 // changes are persisted to the store immediately; the panel closes via the
 // title-bar X or Esc.
 export function SettingsPanel({ mode, onClose }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const [active, setActive] = useState<SectionId>(DEFAULT_SECTION);
   // Background-checker says a newer release is out and the user hasn't
   // skipped this exact version yet → light up the dot on the About entry.
@@ -180,7 +183,7 @@ export function SettingsPanel({ mode, onClose }: Props) {
         >
           <div
             style={{
-              fontSize: 15,
+              fontSize: FS_LG,
               fontWeight: 600,
               letterSpacing: -0.2,
               color: t.text,
@@ -220,12 +223,12 @@ export function SettingsPanel({ mode, onClose }: Props) {
                   }
                   style={{
                     padding: "7px 12px",
-                    borderRadius: 6,
+                    borderRadius: R_MD,
                     border: "none",
                     background: isActive ? t.surface : "transparent",
                     color: isActive ? t.text : t.textDim,
                     fontFamily: "inherit",
-                    fontSize: 12.5,
+                    fontSize: FS_MD,
                     fontWeight: isActive ? 600 : 500,
                     textAlign: "left",
                     cursor: "pointer",
@@ -244,7 +247,7 @@ export function SettingsPanel({ mode, onClose }: Props) {
                       style={{
                         width: 6,
                         height: 6,
-                        borderRadius: 3,
+                        borderRadius: R_SM,
                         background: t.accent,
                         flexShrink: 0,
                       }}
@@ -284,8 +287,8 @@ export function SettingsPanel({ mode, onClose }: Props) {
   );
 }
 
-function GeneralSection({ mode }: { mode: ThemeMode }) {
-  const t = tokens(mode);
+function GeneralSection({}: { mode: ThemeMode }) {
+  const t = useResolvedTheme().tokens;
   const settings = useAppStore((s) => s.settings);
   const patchSettings = useAppStore((s) => s.patchSettings);
   const autoCheckEnabled = useAppStore(
@@ -358,12 +361,16 @@ function GeneralSection({ mode }: { mode: ThemeMode }) {
   );
 }
 
-function AppearanceSection({ mode }: { mode: ThemeMode }) {
-  const t = tokens(mode);
+function AppearanceSection({}: { mode: ThemeMode }) {
+  const t = useResolvedTheme().tokens;
   const settings = useAppStore((s) => s.settings);
   const patchSettings = useAppStore((s) => s.patchSettings);
   const themeMode = useAppStore((s) => s.themeMode);
   const toggleTheme = useAppStore((s) => s.toggleTheme);
+  const themeId = useAppStore((s) => s.themeId);
+  const paletteId = useAppStore((s) => s.paletteId);
+  const setTheme = useAppStore((s) => s.setTheme);
+  const setPalette = useAppStore((s) => s.setPalette);
   const railMode = useAppStore((s) => s.railMode);
   const setRailMode = useAppStore((s) => s.setRailMode);
   const bumpUiScale = useAppStore((s) => s.bumpUiScale);
@@ -372,17 +379,120 @@ function AppearanceSection({ mode }: { mode: ThemeMode }) {
   const atMin = settings.uiScale <= UI_SCALE_MIN + 1e-6;
   const atMax = settings.uiScale >= UI_SCALE_MAX - 1e-6;
   const atDefault = Math.abs(settings.uiScale - UI_SCALE_DEFAULT) < 1e-6;
+  const activeTheme = getTheme(themeId);
 
   return (
     <div>
       <SectionHeader
         t={t}
         title="Appearance"
-        sub="Density and theme. Identifiers always render in mono per design rule R-07."
+        sub="Theme, palette, density. Identifiers always render in mono per design rule R-07."
       />
+      <Field t={t} label="Theme" hint="Pick a look. Palette and mode swap below.">
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(2, 1fr)",
+            gap: 8,
+          }}
+        >
+          {THEMES.map((th) => {
+            const isActive = themeId === th.id;
+            // Three-swatch preview from this theme's default palette in the
+            // current mode — surface, accent, text.
+            const preview = resolveTheme({
+              themeId: th.id,
+              paletteId: th.defaultPaletteId,
+              mode: themeMode,
+            });
+            return (
+              <button
+                key={th.id}
+                type="button"
+                title={th.description}
+                onClick={() => setTheme(th.id)}
+                style={{
+                  textAlign: "left",
+                  padding: 10,
+                  borderRadius: R_MD,
+                  border: `1px solid ${isActive ? t.accent : t.border}`,
+                  background: isActive ? t.accentSoft : t.surface,
+                  color: isActive ? t.accent : t.text,
+                  fontFamily: "inherit",
+                  cursor: "pointer",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                  minWidth: 0,
+                }}
+              >
+                {/* Row 1: name on the left, swatches on the right. */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                  }}
+                >
+                  <span
+                    style={{
+                      // `flex: 1 + minWidth: 0` lets the name ellipsis-truncate
+                      // instead of pushing the swatches off the right edge at
+                      // larger base font sizes (Readable theme).
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: FS_MD,
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {th.name}
+                  </span>
+                  <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                    <Swatch color={preview.tokens.surface} ring={t.border} />
+                    <Swatch color={preview.tokens.accent} ring={t.border} />
+                    <Swatch color={preview.tokens.text} ring={t.border} />
+                  </span>
+                </div>
+                {/* Row 2: description on a new line. */}
+                <span
+                  style={{
+                    fontSize: FS_SM,
+                    color: isActive ? t.accent : t.textDim,
+                    lineHeight: 1.35,
+                    whiteSpace: "normal",
+                    overflowWrap: "anywhere",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  {th.description}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </Field>
       <Field
         t={t}
-        label="Theme"
+        label="Palette"
+        hint="Swap colors inside the current theme without changing typography or density."
+      >
+        <Select<string>
+          t={t}
+          value={paletteId}
+          onChange={(v) => setPalette(v)}
+          options={activeTheme.palettes.map((p) => ({
+            value: p.id,
+            label: p.name,
+          }))}
+        />
+      </Field>
+      <Field
+        t={t}
+        label="Mode"
         hint="Light is calmer for daytime; dark is easier on the eyes during incidents."
       >
         <div style={{ display: "flex", gap: 6 }}>
@@ -397,14 +507,20 @@ function AppearanceSection({ mode }: { mode: ThemeMode }) {
                 }}
                 style={{
                   flex: 1,
-                  padding: "7px 0",
-                  height: 32,
-                  borderRadius: 6,
+                  // Flex centering + `minHeight` so the label stays
+                  // vertically centered at every theme's base font size
+                  // (Readable's 14px would otherwise overflow a hard 32px).
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: "6px 8px",
+                  minHeight: 32,
+                  borderRadius: R_MD,
                   border: `1px solid ${isActive ? t.accent : t.border}`,
                   background: isActive ? t.accentSoft : t.surface,
                   color: isActive ? t.accent : t.text,
                   fontFamily: "inherit",
-                  fontSize: 12,
+                  fontSize: FS_MD,
                   fontWeight: 500,
                   cursor: "pointer",
                   textTransform: "capitalize",
@@ -437,14 +553,17 @@ function AppearanceSection({ mode }: { mode: ThemeMode }) {
                 onClick={() => setRailMode(v)}
                 style={{
                   flex: 1,
-                  padding: "7px 0",
-                  height: 32,
-                  borderRadius: 6,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: "6px 8px",
+                  minHeight: 32,
+                  borderRadius: R_MD,
                   border: `1px solid ${isActive ? t.accent : t.border}`,
                   background: isActive ? t.accentSoft : t.surface,
                   color: isActive ? t.accent : t.text,
                   fontFamily: "inherit",
-                  fontSize: 12,
+                  fontSize: FS_MD,
                   fontWeight: 500,
                   cursor: "pointer",
                 }}
@@ -499,17 +618,17 @@ function AppearanceSection({ mode }: { mode: ThemeMode }) {
           <div
             style={{
               minWidth: 56,
-              padding: "0 10px",
-              height: 32,
+              padding: "4px 10px",
+              minHeight: 32,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              borderRadius: 6,
+              borderRadius: R_MD,
               border: `1px solid ${t.border}`,
               background: t.surface,
               color: t.text,
-              fontFamily: FONT_MONO,
-              fontSize: 12.5,
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
               fontVariantNumeric: "tabular-nums",
             }}
           >
@@ -528,14 +647,17 @@ function AppearanceSection({ mode }: { mode: ThemeMode }) {
             disabled={atDefault}
             style={{
               marginLeft: 6,
-              height: 32,
-              padding: "0 12px",
-              borderRadius: 6,
+              minHeight: 32,
+              padding: "6px 12px",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: R_MD,
               border: `1px solid ${t.border}`,
               background: t.surface,
               color: atDefault ? t.textMuted : t.text,
               fontFamily: "inherit",
-              fontSize: 12.5,
+              fontSize: FS_MD,
               fontWeight: 500,
               cursor: atDefault ? "default" : "pointer",
               opacity: atDefault ? 0.6 : 1,
@@ -546,6 +668,22 @@ function AppearanceSection({ mode }: { mode: ThemeMode }) {
         </div>
       </Field>
     </div>
+  );
+}
+
+function Swatch({ color, ring }: { color: string; ring: string }) {
+  return (
+    <span
+      aria-hidden
+      style={{
+        display: "inline-block",
+        width: 14,
+        height: 14,
+        borderRadius: R_MD,
+        background: color,
+        boxShadow: `inset 0 0 0 1px ${ring}`,
+      }}
+    />
   );
 }
 
@@ -571,12 +709,12 @@ function ScaleStepBtn({
       style={{
         width: 32,
         height: 32,
-        borderRadius: 6,
+        borderRadius: R_MD,
         border: `1px solid ${t.border}`,
         background: t.surface,
         color: disabled ? t.textMuted : t.text,
         fontFamily: "inherit",
-        fontSize: 14,
+        fontSize: FS_LG,
         fontWeight: 600,
         lineHeight: 1,
         cursor: disabled ? "default" : "pointer",
@@ -588,8 +726,8 @@ function ScaleStepBtn({
   );
 }
 
-function KubeconfigSection({ mode }: { mode: ThemeMode }) {
-  const t = tokens(mode);
+function KubeconfigSection({}: { mode: ThemeMode }) {
+  const t = useResolvedTheme().tokens;
   const [settings, setSettings] = useState<KubeconfigSettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [sshOpen, setSshOpen] = useState(false);
@@ -639,7 +777,7 @@ function KubeconfigSection({ mode }: { mode: ThemeMode }) {
           title="Kubeconfig"
           sub="Default kubeconfig + extra files and folders to scan."
         />
-        <div style={{ marginTop: 16, fontSize: 13, color: t.textMuted }}>
+        <div style={{ marginTop: 16, fontSize: FS_MD, color: t.textMuted }}>
           Loading…
         </div>
       </div>
@@ -679,7 +817,7 @@ function KubeconfigSection({ mode }: { mode: ThemeMode }) {
           marginTop: 16,
           padding: "12px 14px",
           border: `1px solid ${t.borderSoft}`,
-          borderRadius: 8,
+          borderRadius: R_LG,
           background: t.surfaceAlt,
         }}
       >
@@ -694,7 +832,7 @@ function KubeconfigSection({ mode }: { mode: ThemeMode }) {
           <div
             style={{
               flex: 1,
-              fontSize: 13,
+              fontSize: FS_MD,
               fontWeight: 600,
               color: t.text,
             }}
@@ -733,7 +871,7 @@ function KubeconfigSection({ mode }: { mode: ThemeMode }) {
         {settings.sources.length === 0 ? (
           <div
             style={{
-              fontSize: 12,
+              fontSize: FS_MD,
               color: t.textMuted,
               padding: "12px 4px",
             }}
@@ -866,16 +1004,16 @@ function SourceRow({
         padding: "8px 10px",
         background: t.surface,
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
         opacity: src.enabled ? 1 : 0.55,
       }}
     >
       <span
         style={{
-          fontFamily: FONT_MONO,
-          fontSize: 9.5,
+          fontFamily: FF_MONO,
+          fontSize: FS_XS,
           padding: "2px 6px",
-          borderRadius: 3,
+          borderRadius: R_SM,
           background: t.chip,
           color: t.textDim,
           textTransform: "uppercase",
@@ -900,12 +1038,12 @@ function SourceRow({
         style={{
           width: 130,
           padding: "4px 8px",
-          fontSize: 12,
+          fontSize: FS_MD,
           fontFamily: "inherit",
           background: t.bg,
           color: t.text,
           border: `1px solid ${t.border}`,
-          borderRadius: 4,
+          borderRadius: R_MD,
           outline: "none",
         }}
       />
@@ -914,8 +1052,8 @@ function SourceRow({
           style={{
             flex: 1,
             minWidth: 0,
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             color: t.textDim,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -1104,17 +1242,17 @@ function AddSshSourceModal({
 
   const inputStyle: React.CSSProperties = {
     padding: "5px 8px",
-    fontSize: 12.5,
+    fontSize: FS_MD,
     fontFamily: "inherit",
     background: t.bg,
     color: t.text,
     border: `1px solid ${t.border}`,
-    borderRadius: 4,
+    borderRadius: R_MD,
     outline: "none",
     width: "100%",
   };
   const labelStyle: React.CSSProperties = {
-    fontSize: 11.5,
+    fontSize: FS_SM,
     color: t.textDim,
     marginBottom: 3,
     display: "block",
@@ -1146,14 +1284,14 @@ function AddSshSourceModal({
           background: t.surface,
           color: t.text,
           border: `1px solid ${t.border}`,
-          borderRadius: 8,
+          borderRadius: R_LG,
           padding: 18,
           boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
         }}
       >
         <div
           style={{
-            fontSize: 14,
+            fontSize: FS_LG,
             fontWeight: 600,
             marginBottom: 4,
           }}
@@ -1162,7 +1300,7 @@ function AddSshSourceModal({
         </div>
         <div
           style={{
-            fontSize: 12,
+            fontSize: FS_MD,
             color: t.textMuted,
             marginBottom: 14,
           }}
@@ -1223,11 +1361,11 @@ function AddSshSourceModal({
                   }}
                   style={{
                     padding: "4px 10px",
-                    fontSize: 12,
+                    fontSize: FS_MD,
                     background: auth.kind === k ? t.accentSoft : t.chip,
                     color: auth.kind === k ? t.text : t.textDim,
                     border: `1px solid ${auth.kind === k ? t.accent : t.border}`,
-                    borderRadius: 4,
+                    borderRadius: R_MD,
                     cursor: "pointer",
                   }}
                 >
@@ -1283,13 +1421,13 @@ function AddSshSourceModal({
             </>
           )}
           {auth.kind === "agent" && (
-            <div style={{ fontSize: 11.5, color: t.textMuted }}>
+            <div style={{ fontSize: FS_SM, color: t.textMuted }}>
               Uses identities offered by the running ssh-agent
               ($SSH_AUTH_SOCK).
             </div>
           )}
           {auth.kind === "defaultkeys" && (
-            <div style={{ fontSize: 11.5, color: t.textMuted }}>
+            <div style={{ fontSize: FS_SM, color: t.textMuted }}>
               Tries ~/.ssh/id_ed25519, id_ecdsa, id_rsa in that order.
               Encrypted keys without a known passphrase are skipped — use
               ssh-agent or pick the key explicitly.
@@ -1330,7 +1468,7 @@ function AddSshSourceModal({
               padding: "8px 10px",
               background: "rgba(244, 63, 94, 0.12)",
               border: `1px solid ${t.bad}`,
-              borderRadius: 6,
+              borderRadius: R_MD,
             }}
           >
             <ErrorBlock
@@ -1347,16 +1485,16 @@ function AddSshSourceModal({
             style={{
               marginTop: 12,
               padding: "10px 12px",
-              fontSize: 12,
+              fontSize: FS_MD,
               background: t.surfaceAlt,
               border: `1px solid ${t.borderSoft}`,
-              borderRadius: 6,
+              borderRadius: R_MD,
             }}
           >
             <div style={{ marginBottom: 4, color: t.textDim }}>
               Detected kubeconfig:
             </div>
-            <div style={{ fontFamily: FONT_MONO, marginBottom: 8 }}>
+            <div style={{ fontFamily: FF_MONO, marginBottom: 8 }}>
               {testResult.detected}
             </div>
             <div style={{ marginBottom: 4, color: t.textDim }}>
@@ -1364,8 +1502,8 @@ function AddSshSourceModal({
             </div>
             <div
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 11.5,
+                fontFamily: FF_MONO,
+                fontSize: FS_SM,
                 marginBottom: 8,
               }}
             >
@@ -1378,7 +1516,7 @@ function AddSshSourceModal({
                 <div style={{ marginBottom: 4, color: t.textDim }}>
                   Host fingerprint (will be pinned):
                 </div>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 11.5 }}>
+                <div style={{ fontFamily: FF_MONO, fontSize: FS_SM }}>
                   {testResult.fingerprint}
                 </div>
               </>
@@ -1415,8 +1553,8 @@ function AddSshSourceModal({
   );
 }
 
-function ShortcutsSection({ mode }: { mode: ThemeMode }) {
-  const t = tokens(mode);
+function ShortcutsSection({}: { mode: ThemeMode }) {
+  const t = useResolvedTheme().tokens;
   // Each entry's chord is an array of label segments — each gets its own
   // <Kbd>. `MOD_KEY` resolves to ⌘ on macOS and "Ctrl" elsewhere; same shape
   // for ⇧/Shift and ⌥/Alt. The handlers themselves accept either modifier
@@ -1465,7 +1603,7 @@ function ShortcutsSection({ mode }: { mode: ThemeMode }) {
                 i < rows.length - 1 ? `1px solid ${t.borderSoft}` : "none",
             }}
           >
-            <span style={{ fontSize: 13, color: t.text }}>{label}</span>
+            <span style={{ fontSize: FS_MD, color: t.text }}>{label}</span>
             <span style={{ display: "flex", gap: 4 }}>
               {kbd.map((k, j) => (
                 <Kbd
@@ -1492,8 +1630,8 @@ function ShortcutsSection({ mode }: { mode: ThemeMode }) {
 // connect — this panel surfaces the cached entry, lets the operator
 // override it manually, and exposes a "Re-detect" action for the case
 // where Prometheus was redeployed under a new Service.
-function ObservabilitySection({ mode }: { mode: ThemeMode }) {
-  const t = tokens(mode);
+function ObservabilitySection({}: { mode: ThemeMode }) {
+  const t = useResolvedTheme().tokens;
   const clusterId = useAppStore((s) => s.selectedContext);
   const [entry, setEntry] = useState<PromCacheEntry | null>(null);
   const [candidates, setCandidates] = useState<PromTarget[] | null>(null);
@@ -1544,8 +1682,8 @@ function ObservabilitySection({ mode }: { mode: ThemeMode }) {
             padding: "14px 16px",
             background: t.surfaceAlt,
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 6,
-            fontSize: 12.5,
+            borderRadius: R_MD,
+            fontSize: FS_MD,
             color: t.textDim,
           }}
         >
@@ -1625,7 +1763,7 @@ function ObservabilitySection({ mode }: { mode: ThemeMode }) {
         title="Observability"
         sub={`Prometheus target for ${clusterId}`}
       />
-      <div style={{ marginTop: 16, fontSize: 12.5, color: t.textDim }}>
+      <div style={{ marginTop: 16, fontSize: FS_MD, color: t.textDim }}>
         FerrisScope reads from an existing Prometheus you point it at — it
         never deploys one. Queries are proxied through the apiserver, so
         the user's RBAC must allow <code>services/proxy</code> in the
@@ -1670,8 +1808,8 @@ function ObservabilitySection({ mode }: { mode: ThemeMode }) {
           {testResult && (
             <div
               style={{
-                fontSize: 12,
-                fontFamily: FONT_MONO,
+                fontSize: FS_MD,
+                fontFamily: FF_MONO,
                 color: testResult.startsWith("error") ? t.bad : t.good,
               }}
             >
@@ -1688,7 +1826,7 @@ function ObservabilitySection({ mode }: { mode: ThemeMode }) {
             padding: "10px 12px",
             background: "rgba(244,63,94,0.08)",
             border: `1px solid rgba(244,63,94,0.4)`,
-            borderRadius: 4,
+            borderRadius: R_MD,
           }}
         >
           <ErrorBlock
@@ -1704,7 +1842,7 @@ function ObservabilitySection({ mode }: { mode: ThemeMode }) {
         <div style={{ marginTop: 18 }}>
           <div
             style={{
-              fontSize: 12.5,
+              fontSize: FS_MD,
               fontWeight: 600,
               color: t.text,
               marginBottom: 8,
@@ -1715,7 +1853,7 @@ function ObservabilitySection({ mode }: { mode: ThemeMode }) {
           <div
             style={{
               border: `1px solid ${t.borderSoft}`,
-              borderRadius: 6,
+              borderRadius: R_MD,
               overflow: "hidden",
             }}
           >
@@ -1740,8 +1878,8 @@ function ObservabilitySection({ mode }: { mode: ThemeMode }) {
                   <div style={{ flex: 1 }}>
                     <div
                       style={{
-                        fontSize: 12.5,
-                        fontFamily: FONT_MONO,
+                        fontSize: FS_MD,
+                        fontFamily: FF_MONO,
                         color: t.text,
                       }}
                     >
@@ -1749,7 +1887,7 @@ function ObservabilitySection({ mode }: { mode: ThemeMode }) {
                     </div>
                     <div
                       style={{
-                        fontSize: 11,
+                        fontSize: FS_SM,
                         color: t.textDim,
                         marginTop: 2,
                       }}
@@ -1787,7 +1925,7 @@ function ActiveTargetHint({
   const validatedAgo = freshnessLabel(entry.last_validated_at_unix_ms);
   return (
     <span style={{ display: "inline-flex", gap: 8, flexWrap: "wrap" }}>
-      <span style={{ fontFamily: FONT_MONO, color: t.text }}>{id}</span>
+      <span style={{ fontFamily: FF_MONO, color: t.text }}>{id}</span>
       <span style={{ color: t.textDim }}>·</span>
       <span style={{ color: t.textDim }}>{sourceLabel}</span>
       <span style={{ color: t.textDim }}>·</span>
@@ -1813,8 +1951,8 @@ type UpdateState =
   | { kind: "applying"; release: ReleaseInfo }
   | { kind: "error"; message: string };
 
-function AboutSection({ mode }: { mode: ThemeMode }) {
-  const t = tokens(mode);
+function AboutSection({}: { mode: ThemeMode }) {
+  const t = useResolvedTheme().tokens;
   const [info, setInfo] = useState<UpdaterInfo | null>(null);
   const [update, setUpdate] = useState<UpdateState>({ kind: "idle" });
   const lastKnownVersion = useAppStore(
@@ -1901,7 +2039,7 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
           style={{
             width: 44,
             height: 44,
-            borderRadius: 11,
+            borderRadius: R_LG,
             background: t.accent,
             color: "white",
             display: "flex",
@@ -1914,7 +2052,7 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
         <div>
           <div
             style={{
-              fontSize: 17,
+              fontSize: FS_XL,
               fontWeight: 700,
               letterSpacing: -0.3,
               color: t.text,
@@ -1924,9 +2062,9 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
           </div>
           <div
             style={{
-              fontSize: 12.5,
+              fontSize: FS_MD,
               color: t.textDim,
-              fontFamily: FONT_MONO,
+              fontFamily: FF_MONO,
             }}
           >
             v{info?.current_version ?? "…"} · Rust-native Kubernetes desktop ·
@@ -1939,7 +2077,7 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
           display: "grid",
           gridTemplateColumns: "120px 1fr",
           gap: "10px 16px",
-          fontSize: 12.5,
+          fontSize: FS_MD,
           color: t.textDim,
           marginBottom: 18,
         }}
@@ -1949,12 +2087,12 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
         <div style={{ color: t.textMuted }}>Status</div>
         <div>beta</div>
         <div style={{ color: t.textMuted }}>Version</div>
-        <div style={{ fontFamily: FONT_MONO }}>
+        <div style={{ fontFamily: FF_MONO }}>
           {info?.current_version ?? "…"}
           {info?.target ? ` · ${info.target}` : null}
         </div>
         <div style={{ color: t.textMuted }}>Repository</div>
-        <div style={{ fontFamily: FONT_MONO }}>
+        <div style={{ fontFamily: FF_MONO }}>
           {info?.releases_url ? (
             <button
               onClick={() => {
@@ -2042,18 +2180,18 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
           !info.supported &&
           !info.update_hint &&
           info.unsupported_reason && (
-            <div style={{ fontSize: 12, color: t.textMuted }}>
+            <div style={{ fontSize: FS_MD, color: t.textMuted }}>
               {info.unsupported_reason}
             </div>
           )}
 
         {update.kind === "up_to_date" && (
-          <div style={{ fontSize: 12.5, color: t.textDim }}>
+          <div style={{ fontSize: FS_MD, color: t.textDim }}>
             You're on the latest version (v{update.latest}).
           </div>
         )}
         {update.kind === "available" && (
-          <div style={{ fontSize: 12.5, color: t.textDim }}>
+          <div style={{ fontSize: FS_MD, color: t.textDim }}>
             v{update.release.version} is available.{" "}
             <button
               onClick={() => void openUrl(update.release.html_url)}
@@ -2071,7 +2209,7 @@ function AboutSection({ mode }: { mode: ThemeMode }) {
           </div>
         )}
         {update.kind === "applying" && (
-          <div style={{ fontSize: 12.5, color: t.textDim }}>
+          <div style={{ fontSize: FS_MD, color: t.textDim }}>
             Downloading and staging v{update.release.version}. The app will
             relaunch when finished.
           </div>
@@ -2118,10 +2256,10 @@ function SystemInstallHint({
         padding: "10px 12px",
         background: t.surfaceAlt,
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
       }}
     >
-      <div style={{ fontSize: 11.5, color: t.textMuted, fontWeight: 600 }}>
+      <div style={{ fontSize: FS_SM, color: t.textMuted, fontWeight: 600 }}>
         Installed via {label} — update through it:
       </div>
       <div
@@ -2129,12 +2267,12 @@ function SystemInstallHint({
           display: "flex",
           alignItems: "center",
           gap: 8,
-          fontFamily: FONT_MONO,
-          fontSize: 12,
+          fontFamily: FF_MONO,
+          fontSize: FS_MD,
           color: t.text,
           background: t.bg,
           border: `1px solid ${t.borderSoft}`,
-          borderRadius: 4,
+          borderRadius: R_MD,
           padding: "6px 8px",
           wordBreak: "break-all",
         }}
@@ -2146,11 +2284,11 @@ function SystemInstallHint({
           style={{
             background: "transparent",
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 3,
+            borderRadius: R_SM,
             color: t.textDim,
             cursor: "pointer",
             font: "inherit",
-            fontSize: 11,
+            fontSize: FS_SM,
             padding: "2px 8px",
           }}
         >

@@ -14,7 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
-import { FONT_MONO, type Tokens } from "../../theme";
+import { FF_MONO, type Tokens, R_LG, FS_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
 import type {
   ConfigMapKeysSummary,
   PvcSummary,
@@ -278,7 +278,7 @@ export function KeyRefPicker({
           flexDirection: "column",
           background: t.paletteBg,
           border: `1px solid ${t.paletteBorder}`,
-          borderRadius: 12,
+          borderRadius: R_LG,
           boxShadow: "0 24px 56px rgba(0,0,0,0.25)",
           backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)",
@@ -312,14 +312,14 @@ export function KeyRefPicker({
               outline: 0,
               background: "transparent",
               color: t.text,
-              fontSize: 14,
-              fontFamily: FONT_MONO,
+              fontSize: FS_LG,
+              fontFamily: FF_MONO,
             }}
           />
           <span
             style={{
-              fontSize: 10.5,
-              fontFamily: FONT_MONO,
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
               color: t.textMuted,
               textTransform: "uppercase",
               letterSpacing: 0.4,
@@ -384,7 +384,7 @@ export function KeyRefPicker({
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 8,
-                fontSize: 12,
+                fontSize: FS_MD,
                 color: t.textDim,
                 cursor: "pointer",
               }}
@@ -478,10 +478,10 @@ function NamePane({
             {e.name}
           </span>
           {e.hint && (
-            <span style={{ fontSize: 10.5, opacity: 0.55 }}>{e.hint}</span>
+            <span style={{ fontSize: FS_XS, opacity: 0.55 }}>{e.hint}</span>
           )}
           {e.keys.length > 0 && (
-            <span style={{ fontSize: 10.5, opacity: 0.6 }}>
+            <span style={{ fontSize: FS_XS, opacity: 0.6 }}>
               {e.keys.length}
             </span>
           )}
@@ -568,8 +568,8 @@ function Row({
         border: 0,
         background: selected ? t.accentSoft : hover ? t.hover : "transparent",
         color: selected ? t.accent : t.text,
-        fontFamily: FONT_MONO,
-        fontSize: 12,
+        fontFamily: FF_MONO,
+        fontSize: FS_MD,
         cursor: "pointer",
         textAlign: "left",
       }}
@@ -582,8 +582,8 @@ function Row({
 function msgStyle(t: Tokens): React.CSSProperties {
   return {
     padding: "10px 14px",
-    fontSize: 11.5,
+    fontSize: FS_SM,
     color: t.textDim,
-    fontFamily: FONT_MONO,
+    fontFamily: FF_MONO,
   };
 }

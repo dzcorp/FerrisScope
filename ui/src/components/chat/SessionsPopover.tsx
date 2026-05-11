@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { tokens, FONT_MONO, FONT_SANS, type ThemeMode } from "../../theme";
+import { useResolvedTheme } from "../../store";
+import { tokens, FF_MONO, FONT_SANS, type ThemeMode, R_LG, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { Btn, Icons } from "../ui";
 import type { SessionMeta } from "../../types";
 
@@ -38,7 +39,7 @@ type Props = {
 // session histories stay scannable. Search input narrows by title or
 // model id.
 export function SessionsPopover({
-  mode,
+  
   sessions,
   currentSessionId,
   liveStates,
@@ -50,7 +51,7 @@ export function SessionsPopover({
   onDeleteAll,
   onClose,
 }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const ref = useRef<HTMLDivElement | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -115,7 +116,7 @@ export function SessionsPopover({
         zIndex: 50,
         background: t.surface,
         border: `1px solid ${t.border}`,
-        borderRadius: 8,
+        borderRadius: R_LG,
         boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
         marginTop: 4,
         maxHeight: 420,
@@ -139,8 +140,8 @@ export function SessionsPopover({
           style={{
             flex: 1,
             color: t.textMuted,
-            fontSize: 11,
-            fontFamily: FONT_MONO,
+            fontSize: FS_SM,
+            fontFamily: FF_MONO,
             letterSpacing: 0.5,
             textTransform: "uppercase",
           }}
@@ -195,12 +196,12 @@ export function SessionsPopover({
             style={{
               width: "100%",
               boxSizing: "border-box",
-              fontSize: 12,
+              fontSize: FS_MD,
               fontFamily: FONT_SANS,
               color: t.text,
               background: t.surfaceAlt,
               border: `1px solid ${t.borderSoft}`,
-              borderRadius: 4,
+              borderRadius: R_MD,
               padding: "5px 8px",
               outline: "none",
             }}
@@ -213,7 +214,7 @@ export function SessionsPopover({
             style={{
               padding: 14,
               color: t.textDim,
-              fontSize: 12,
+              fontSize: FS_MD,
               textAlign: "center",
             }}
           >
@@ -224,7 +225,7 @@ export function SessionsPopover({
             style={{
               padding: 14,
               color: t.textDim,
-              fontSize: 12,
+              fontSize: FS_MD,
               textAlign: "center",
             }}
           >
@@ -242,8 +243,8 @@ export function SessionsPopover({
                   background: t.surfaceAlt,
                   borderBottom: `1px solid ${t.borderSoft}`,
                   color: t.textMuted,
-                  fontSize: 10,
-                  fontFamily: FONT_MONO,
+                  fontSize: FS_XS,
+                  fontFamily: FF_MONO,
                   letterSpacing: 0.5,
                   textTransform: "uppercase",
                 }}
@@ -302,11 +303,11 @@ export function SessionsPopover({
                             setRenamingId(null);
                           }}
                           style={{
-                            fontSize: 12.5,
+                            fontSize: FS_MD,
                             color: t.text,
                             background: t.surface,
                             border: `1px solid ${t.borderSoft}`,
-                            borderRadius: 4,
+                            borderRadius: R_MD,
                             padding: "3px 6px",
                             outline: "none",
                             fontFamily: FONT_SANS,
@@ -316,7 +317,7 @@ export function SessionsPopover({
                         <div
                           style={{
                             color: isCurrent ? t.text : t.textMuted,
-                            fontSize: 12.5,
+                            fontSize: FS_MD,
                             fontWeight: isCurrent ? 600 : 400,
                             overflow: "hidden",
                             textOverflow: "ellipsis",
@@ -329,8 +330,8 @@ export function SessionsPopover({
                       <div
                         style={{
                           color: t.textDim,
-                          fontSize: 10,
-                          fontFamily: FONT_MONO,
+                          fontSize: FS_XS,
+                          fontFamily: FF_MONO,
                           display: "flex",
                           gap: 8,
                         }}
@@ -424,7 +425,9 @@ function StatusDot({
       style={{
         width: 8,
         height: 8,
-        borderRadius: 4,
+        // Always-round status dot — theme radius would distort under the
+        // .fs-pulse-dot scale animation.
+        borderRadius: "50%",
         flexShrink: 0,
         background: color ?? "transparent",
         border: color ? "none" : `1px solid ${t.borderSoft}`,
@@ -437,7 +440,7 @@ function iconBtn(t: ReturnType<typeof tokens>): React.CSSProperties {
   return {
     background: "transparent",
     border: `1px solid ${t.borderSoft}`,
-    borderRadius: 4,
+    borderRadius: R_MD,
     width: 24,
     height: 24,
     display: "inline-flex",

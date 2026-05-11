@@ -10,10 +10,11 @@
 // out of scope for this app for now.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useResolvedTheme } from "../../../store";
 import Editor from "@monaco-editor/react";
 import { api } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_MD, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import {  } from "../../../theme";
 import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
@@ -118,13 +119,13 @@ function MonoBlock({
         style={{
           margin: 0,
           padding: "10px 12px",
-          fontFamily: FONT_MONO,
-          fontSize: 11.5,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           lineHeight: 1.5,
           color: t.text,
           background: t.surface,
           border: `1px solid ${t.border}`,
-          borderRadius: 6,
+          borderRadius: R_MD,
           whiteSpace: "pre-wrap",
           wordBreak: "break-word",
           maxHeight,
@@ -170,6 +171,7 @@ function YamlViewer({
   emptyLabel: string;
   height: number;
 }) {
+  const monoFont = useResolvedTheme().typography.fontMono;
   const [active, setActive] = useState(false);
   const editorRef = useRef<MonacoEditor | null>(null);
   if (!text.trim()) {
@@ -187,7 +189,7 @@ function YamlViewer({
       style={{
         position: "relative",
         border: `1px solid ${active ? t.accent : t.border}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
         overflow: "hidden",
         transition: "border-color 120ms ease",
       }}
@@ -205,9 +207,9 @@ function YamlViewer({
         options={{
           readOnly: true,
           minimap: { enabled: false },
-          fontSize: 12,
-          fontFamily:
-            '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+          // Monaco wants a literal font + numeric size.
+          fontSize: 12.5,
+          fontFamily: monoFont,
           wordWrap: "on",
           scrollBeyondLastLine: false,
           renderLineHighlight: "none",
@@ -265,11 +267,12 @@ function EditableYaml({
   height: number;
   disabled?: boolean;
 }) {
+  const monoFont = useResolvedTheme().typography.fontMono;
   return (
     <div
       style={{
         border: `1px solid ${t.accent}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
         overflow: "hidden",
       }}
     >
@@ -283,9 +286,9 @@ function EditableYaml({
         options={{
           readOnly: !!disabled,
           minimap: { enabled: false },
-          fontSize: 12,
-          fontFamily:
-            '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+          // Monaco wants a literal font + numeric size.
+          fontSize: 12.5,
+          fontFamily: monoFont,
           wordWrap: "on",
           scrollBeyondLastLine: false,
           renderLineHighlight: "line",
@@ -308,7 +311,7 @@ export function HelmReleaseSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   // Hooks must run unconditionally on every render — keep both the fetch
   // and the local UI state above the conditional returns so transitions
@@ -484,7 +487,7 @@ function HelmReleaseView({
         {d.status ? (
           <StatusPill status={statusLabel(d.status)} t={t} mode="light" dense />
         ) : null}
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           revision {d.revision}
           {d.last_deployed ? ` · updated ${ageFromIso(d.last_deployed)} ago` : ""}
           {d.history.length > 1 ? ` · ${d.history.length} revisions` : ""}
@@ -501,10 +504,10 @@ function HelmReleaseView({
                 : "Refresh local helm repo cache (`helm repo update`)"
             }
             style={{
-              fontSize: 10.5,
-              fontFamily: FONT_MONO,
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
               padding: "3px 10px",
-              borderRadius: 4,
+              borderRadius: R_MD,
               border: `1px solid ${t.border}`,
               background: "transparent",
               color: t.textDim,
@@ -515,7 +518,7 @@ function HelmReleaseView({
           </button>
         ) : null}
         {repoUpdateMsg ? (
-          <span style={{ fontSize: 10.5, color: t.textMuted }}>{repoUpdateMsg}</span>
+          <span style={{ fontSize: FS_XS, color: t.textMuted }}>{repoUpdateMsg}</span>
         ) : null}
       </div>
 
@@ -524,13 +527,13 @@ function HelmReleaseView({
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Name">
           <Copyable text={d.name}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{d.name}</span>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.name}</span>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Namespace">
           {d.namespace ? (
             <Copyable text={d.namespace}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {d.namespace}
               </span>
             </Copyable>
@@ -540,13 +543,13 @@ function HelmReleaseView({
         </DetailRow>
         <DetailRow t={t} label="Revision">
           <Copyable text={String(d.revision)}>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{d.revision}</span>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.revision}</span>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Status">
           {d.status ? (
             <Copyable text={d.status}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{d.status}</span>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.status}</span>
             </Copyable>
           ) : (
             <Mute t={t}>—</Mute>
@@ -555,7 +558,7 @@ function HelmReleaseView({
         <DetailRow t={t} label="Description">
           {d.description ? (
             <Copyable text={d.description}>
-              <span style={{ fontSize: 12 }}>{d.description}</span>
+              <span style={{ fontSize: FS_MD }}>{d.description}</span>
             </Copyable>
           ) : (
             <Mute t={t}>—</Mute>
@@ -564,7 +567,7 @@ function HelmReleaseView({
         <DetailRow t={t} label="First deployed">
           {d.first_deployed ? (
             <Copyable text={d.first_deployed}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {ageFromIso(d.first_deployed)} ago
                 <span style={{ color: t.textMuted, marginLeft: 8 }}>
                   ({d.first_deployed})
@@ -578,7 +581,7 @@ function HelmReleaseView({
         <DetailRow t={t} label="Last deployed">
           {d.last_deployed ? (
             <Copyable text={d.last_deployed}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {ageFromIso(d.last_deployed)} ago
                 <span style={{ color: t.textMuted, marginLeft: 8 }}>
                   ({d.last_deployed})
@@ -592,7 +595,7 @@ function HelmReleaseView({
         {d.deleted ? (
           <DetailRow t={t} label="Deleted">
             <Copyable text={d.deleted}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {ageFromIso(d.deleted)} ago
               </span>
             </Copyable>
@@ -606,7 +609,7 @@ function HelmReleaseView({
         <DetailRow t={t} label="Reference">
           {d.chart ? (
             <Copyable text={d.chart}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{d.chart}</span>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.chart}</span>
             </Copyable>
           ) : (
             <Mute t={t}>—</Mute>
@@ -629,10 +632,10 @@ function HelmReleaseView({
                 <Copyable key={`${s}-${i}`} text={s}>
                   <span
                     style={{
-                      fontFamily: FONT_MONO,
-                      fontSize: 11.5,
+                      fontFamily: FF_MONO,
+                      fontSize: FS_SM,
                       padding: "2px 8px",
-                      borderRadius: 4,
+                      borderRadius: R_MD,
                       background: t.chip,
                       color: t.text,
                       wordBreak: "break-all",
@@ -652,10 +655,10 @@ function HelmReleaseView({
                 <span
                   key={`${k}-${i}`}
                   style={{
-                    fontFamily: FONT_MONO,
-                    fontSize: 11.5,
+                    fontFamily: FF_MONO,
+                    fontSize: FS_SM,
                     padding: "2px 8px",
-                    borderRadius: 4,
+                    borderRadius: R_MD,
                     background: t.chip,
                     color: t.textMuted,
                   }}
@@ -674,7 +677,7 @@ function HelmReleaseView({
         t={t}
         title="Notes"
         right={
-          <span style={{ fontSize: 10.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_XS, color: t.textMuted }}>
             from chart NOTES.txt
           </span>
         }
@@ -726,7 +729,7 @@ function HelmReleaseView({
               ) : (
                 <span
                   title="Install helm CLI to enable upgrade"
-                  style={{ fontSize: 10.5, color: t.textMuted }}
+                  style={{ fontSize: FS_XS, color: t.textMuted }}
                 >
                   read-only · helm CLI not found
                 </span>
@@ -800,7 +803,7 @@ function HelmReleaseView({
         title="Manifest"
         right={
           d.manifest ? (
-            <span style={{ fontSize: 10.5, color: t.textMuted }}>
+            <span style={{ fontSize: FS_XS, color: t.textMuted }}>
               {d.manifest.split("\n").length} lines
             </span>
           ) : null
@@ -839,7 +842,7 @@ function HelmReleaseView({
         t={t}
         title="History"
         right={
-          <span style={{ fontSize: 10.5, color: t.textMuted }}>
+          <span style={{ fontSize: FS_XS, color: t.textMuted }}>
             {d.history.length} revision{d.history.length === 1 ? "" : "s"}
           </span>
         }
@@ -870,10 +873,10 @@ function ValuesTabButton({
       type="button"
       onClick={onClick}
       style={{
-        fontSize: 10.5,
-        fontFamily: FONT_MONO,
+        fontSize: FS_XS,
+        fontFamily: FF_MONO,
         padding: "2px 8px",
-        borderRadius: 4,
+        borderRadius: R_MD,
         border: `1px solid ${active ? t.accent : t.border}`,
         background: active ? t.accentSoft : "transparent",
         color: active ? t.accent : t.textMuted,
@@ -899,7 +902,7 @@ function HistoryTable({
     <div
       style={{
         border: `1px solid ${t.border}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
         overflow: "hidden",
         marginBottom: 22,
       }}
@@ -910,7 +913,7 @@ function HistoryTable({
           gridTemplateColumns: "60px 110px 140px 120px 1fr",
           gap: 8,
           padding: "8px 12px",
-          fontSize: 10.5,
+          fontSize: FS_XS,
           fontWeight: 700,
           color: t.textDim,
           textTransform: "uppercase",
@@ -933,8 +936,8 @@ function HistoryTable({
             gridTemplateColumns: "60px 110px 140px 120px 1fr",
             gap: 8,
             padding: "8px 12px",
-            fontSize: 11.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_SM,
+            fontFamily: FF_MONO,
             borderTop: `1px solid ${t.border}`,
             color: t.text,
           }}
@@ -997,8 +1000,8 @@ function UpdateAvailableBanner({
         background: "rgba(59,130,246,0.10)",
         border: `1px solid rgba(59,130,246,0.45)`,
         color: t.text,
-        fontSize: 11.5,
-        borderRadius: 6,
+        fontSize: FS_SM,
+        borderRadius: R_MD,
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
@@ -1006,7 +1009,7 @@ function UpdateAvailableBanner({
         flexWrap: "wrap",
       }}
     >
-      <span style={{ fontFamily: FONT_MONO }}>
+      <span style={{ fontFamily: FF_MONO }}>
         <strong style={{ color: t.accent }}>Update available</strong>
         {" · "}
         <span>{update.version}</span>
@@ -1021,10 +1024,10 @@ function UpdateAvailableBanner({
         onClick={onUpgrade}
         title="Run helm upgrade with this version. Preserves any pending value edits."
         style={{
-          fontSize: 11,
-          fontFamily: FONT_MONO,
+          fontSize: FS_SM,
+          fontFamily: FF_MONO,
           padding: "4px 12px",
-          borderRadius: 4,
+          borderRadius: R_MD,
           border: `1px solid ${t.accent}`,
           background: t.accent,
           color: "#fff",
@@ -1054,8 +1057,8 @@ function SuccessBanner({
         background: "rgba(34,197,94,0.10)",
         border: `1px solid rgba(34,197,94,0.45)`,
         color: t.text,
-        fontSize: 11.5,
-        borderRadius: 6,
+        fontSize: FS_SM,
+        borderRadius: R_MD,
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
@@ -1067,8 +1070,8 @@ function SuccessBanner({
         type="button"
         onClick={onDismiss}
         style={{
-          fontSize: 10.5,
-          fontFamily: FONT_MONO,
+          fontSize: FS_XS,
+          fontFamily: FF_MONO,
           background: "transparent",
           border: "none",
           color: t.textMuted,
@@ -1100,8 +1103,8 @@ function ErrorBanner({
         background: "rgba(244,63,94,0.10)",
         border: `1px solid rgba(244,63,94,0.45)`,
         color: t.text,
-        fontSize: 11.5,
-        borderRadius: 6,
+        fontSize: FS_SM,
+        borderRadius: R_MD,
       }}
     >
       <div
@@ -1123,8 +1126,8 @@ function ErrorBanner({
           type="button"
           onClick={onDismiss}
           style={{
-            fontSize: 10.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
             background: "transparent",
             border: "none",
             color: t.textMuted,
@@ -1141,9 +1144,9 @@ function ErrorBanner({
             padding: "8px 10px",
             background: t.surface,
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 4,
-            fontFamily: FONT_MONO,
-            fontSize: 11,
+            borderRadius: R_MD,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             color: t.text,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",

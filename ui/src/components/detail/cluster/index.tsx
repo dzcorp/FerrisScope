@@ -3,9 +3,10 @@
 // detailVersion bumps, compose shared primitives, dispatch from DetailPanel.
 
 import { useEffect, useRef, useState } from "react";
+import { useResolvedTheme } from "../../../store";
 import { api, onResourceDelta } from "../../../api";
-import { FONT_MONO, type ThemeMode, type Tokens } from "../../../theme";
-import { tokens } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   ChipWrap,
@@ -96,7 +97,7 @@ export function NodeSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<NodeDetail>(
     () => api.getNodeDetail(props.clusterId, props.name),
@@ -145,8 +146,8 @@ export function NodeSummary(props: {
           {d.roles.length > 0 && (
             <span
               style={{
-                fontFamily: FONT_MONO,
-                fontSize: 12,
+                fontFamily: FF_MONO,
+                fontSize: FS_MD,
                 color: t.text,
               }}
             >
@@ -154,12 +155,12 @@ export function NodeSummary(props: {
             </span>
           )}
           {d.node_info?.kubelet_version && (
-            <span style={{ fontSize: 11.5, color: t.textMuted }}>
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
               kubelet {d.node_info.kubelet_version}
             </span>
           )}
           {d.meta.created_at && (
-            <span style={{ fontSize: 11.5, color: t.textMuted }}>
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
               · {ageFromIso(d.meta.created_at)} old
             </span>
           )}
@@ -196,7 +197,7 @@ export function NodeSummary(props: {
           </DetailRow>
         )}
         <DetailRow t={t} label="Schedulable">
-          <span style={{ fontSize: 12 }}>
+          <span style={{ fontSize: FS_MD }}>
             {d.unschedulable ? "false (cordoned)" : "true"}
           </span>
         </DetailRow>
@@ -205,8 +206,8 @@ export function NodeSummary(props: {
             <Copyable text={d.provider_id}>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   wordBreak: "break-all",
                 }}
               >
@@ -237,7 +238,7 @@ export function NodeSummary(props: {
             {d.addresses.map((a, i) => (
               <DetailRow key={`${a.type}-${i}`} t={t} label={a.type}>
                 <Copyable text={a.address}>
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+                  <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                     {a.address}
                   </span>
                 </Copyable>
@@ -316,9 +317,9 @@ export function NodeSummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.taints.length} total
@@ -344,8 +345,8 @@ export function NodeSummary(props: {
                   <Copyable text={canonical}>
                     <span
                       style={{
-                        fontFamily: FONT_MONO,
-                        fontSize: 12,
+                        fontFamily: FF_MONO,
+                        fontSize: FS_MD,
                         wordBreak: "break-all",
                         color: t.text,
                       }}
@@ -392,9 +393,9 @@ export function NodeSummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {pressures.length} total
@@ -435,7 +436,7 @@ function NodeInfoRow({
       <Copyable text={value}>
         <span
           style={{
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             fontSize: dim ? 11 : 12,
             color: dim ? t.textDim : t.text,
             wordBreak: "break-all",
@@ -474,8 +475,8 @@ function ResourceMatrix({
               <span
                 title={cap ?? undefined}
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 12,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_MD,
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
@@ -485,7 +486,7 @@ function ResourceMatrix({
             <span
               title={alloc ?? undefined}
               style={{
-                fontSize: 11,
+                fontSize: FS_SM,
                 color: t.textMuted,
                 marginLeft: 8,
               }}
@@ -521,8 +522,8 @@ function NodeConditionRow({
           display: "inline-flex",
           alignItems: "center",
           padding: "1px 7px",
-          borderRadius: 3,
-          fontSize: 11,
+          borderRadius: R_SM,
+          fontSize: FS_SM,
           fontWeight: 600,
           background: bg,
           color: fg,
@@ -531,12 +532,12 @@ function NodeConditionRow({
         {cond.status}
       </span>
       {cond.reason && (
-        <span style={{ fontSize: 11.5, color: t.textDim }}>{cond.reason}</span>
+        <span style={{ fontSize: FS_SM, color: t.textDim }}>{cond.reason}</span>
       )}
       {cond.message && (
         <div
           style={{
-            fontSize: 11.5,
+            fontSize: FS_SM,
             color: t.textMuted,
             width: "100%",
             marginTop: 2,
@@ -549,9 +550,9 @@ function NodeConditionRow({
       {cond.last_transition_time && (
         <span
           style={{
-            fontSize: 11,
+            fontSize: FS_SM,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             marginLeft: "auto",
           }}
         >
@@ -686,9 +687,9 @@ function PodsOnNodeSection(props: {
           state.kind === "ready" ? (
             <span
               style={{
-                fontSize: 10.5,
+                fontSize: FS_XS,
                 color: t.textMuted,
-                fontFamily: FONT_MONO,
+                fontFamily: FF_MONO,
               }}
             >
               {state.detail.length} total
@@ -764,8 +765,8 @@ function PodOnNodeRow({
       {ready && (
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             fontVariantNumeric: "tabular-nums",
             color: t.textDim,
           }}
@@ -776,8 +777,8 @@ function PodOnNodeRow({
       {restarts > 0 && (
         <span
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 11.5,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
             color: restarts > 5 ? t.warn : t.textMuted,
           }}
         >
@@ -787,9 +788,9 @@ function PodOnNodeRow({
       {created && (
         <span
           style={{
-            fontSize: 11,
+            fontSize: FS_SM,
             color: t.textMuted,
-            fontFamily: FONT_MONO,
+            fontFamily: FF_MONO,
             marginLeft: "auto",
           }}
         >
@@ -809,7 +810,7 @@ export function NamespaceSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const [refetch, setRefetch] = useState(0);
   const state = useDetail<NamespaceDetail>(
     () => api.getNamespaceDetail(props.clusterId, props.name),
@@ -848,7 +849,7 @@ export function NamespaceSummary(props: {
         >
           <StatusPill status={d.phase} t={t} mode={props.mode} />
           {d.meta.created_at && (
-            <span style={{ fontSize: 11.5, color: t.textMuted }}>
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
               {ageFromIso(d.meta.created_at)} old
             </span>
           )}
@@ -874,9 +875,9 @@ export function NamespaceSummary(props: {
             right={
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: FS_XS,
                   color: t.textMuted,
-                  fontFamily: FONT_MONO,
+                  fontFamily: FF_MONO,
                 }}
               >
                 {d.finalizers.length} total
@@ -916,7 +917,7 @@ export function EventSummary(props: {
   detailVersion: number;
   onNavigate?: DetailNavigate;
 }) {
-  const t = tokens(props.mode);
+  const t = useResolvedTheme().tokens;
   const ns = props.namespace;
   const state = useDetail<EventDetail>(
     () => api.getEventDetail(props.clusterId, ns ?? "", props.name),
@@ -949,11 +950,11 @@ export function EventSummary(props: {
       >
         <StatusPill status={d.type} t={t} mode={props.mode} />
         {d.reason && (
-          <span style={{ fontSize: 13, fontWeight: 600, color: t.text }}>
+          <span style={{ fontSize: FS_MD, fontWeight: 600, color: t.text }}>
             {d.reason}
           </span>
         )}
-        <span style={{ fontSize: 11.5, color: t.textMuted }}>
+        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
           {d.count > 1 ? `×${d.count}` : "×1"}
           {headerTs ? ` · last seen ${ageFromIso(headerTs)} ago` : ""}
         </span>
@@ -966,12 +967,12 @@ export function EventSummary(props: {
         <div
           style={{
             border: `1px solid ${t.borderSoft}`,
-            borderRadius: 8,
+            borderRadius: R_LG,
             background: t.surface,
             padding: "10px 12px",
             marginBottom: 22,
-            fontFamily: FONT_MONO,
-            fontSize: 12,
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
             color: t.text,
             wordBreak: "break-word",
             whiteSpace: "pre-wrap",
@@ -987,7 +988,7 @@ export function EventSummary(props: {
       <div style={{ marginBottom: 22 }}>
         {d.involved_object.kind && (
           <DetailRow t={t} label="Kind">
-            <span style={{ fontSize: 12 }}>{d.involved_object.kind}</span>
+            <span style={{ fontSize: FS_MD }}>{d.involved_object.kind}</span>
           </DetailRow>
         )}
         {d.involved_object.name && (
@@ -1028,7 +1029,7 @@ export function EventSummary(props: {
         )}
         {d.involved_object.api_version && (
           <DetailRow t={t} label="API Version">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 11.5 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_SM }}>
               {d.involved_object.api_version}
             </span>
           </DetailRow>
@@ -1038,8 +1039,8 @@ export function EventSummary(props: {
             <Copyable text={d.involved_object.field_path}>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   wordBreak: "break-all",
                 }}
               >
@@ -1053,8 +1054,8 @@ export function EventSummary(props: {
             <Copyable text={d.involved_object.uid}>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   color: t.textDim,
                   wordBreak: "break-all",
                 }}
@@ -1069,12 +1070,12 @@ export function EventSummary(props: {
       <Section t={t} title="Timing" />
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Count">
-          <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{d.count}</span>
+          <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.count}</span>
         </DetailRow>
         {d.first_timestamp && (
           <DetailRow t={t} label="First Seen">
             <Copyable text={d.first_timestamp}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {ageFromIso(d.first_timestamp)} ago
                 <span style={{ color: t.textMuted, marginLeft: 8 }}>
                   ({d.first_timestamp})
@@ -1086,7 +1087,7 @@ export function EventSummary(props: {
         {d.last_timestamp && (
           <DetailRow t={t} label="Last Seen">
             <Copyable text={d.last_timestamp}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {ageFromIso(d.last_timestamp)} ago
                 <span style={{ color: t.textMuted, marginLeft: 8 }}>
                   ({d.last_timestamp})
@@ -1098,7 +1099,7 @@ export function EventSummary(props: {
         {d.event_time && (
           <DetailRow t={t} label="Event Time">
             <Copyable text={d.event_time}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
                 {ageFromIso(d.event_time)} ago
                 <span style={{ color: t.textMuted, marginLeft: 8 }}>
                   ({d.event_time})
@@ -1109,7 +1110,7 @@ export function EventSummary(props: {
         )}
         {d.series && (
           <DetailRow t={t} label="Series">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.series.count ?? 0} observations
               {d.series.last_observed_time
                 ? ` · last ${ageFromIso(d.series.last_observed_time)} ago`
@@ -1123,7 +1124,7 @@ export function EventSummary(props: {
       <div style={{ marginBottom: 22 }}>
         {d.source?.component && (
           <DetailRow t={t} label="Component">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 12 }}>
+            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
               {d.source.component}
             </span>
           </DetailRow>
@@ -1142,7 +1143,7 @@ export function EventSummary(props: {
         )}
         {d.action && (
           <DetailRow t={t} label="Action">
-            <span style={{ fontSize: 12 }}>{d.action}</span>
+            <span style={{ fontSize: FS_MD }}>{d.action}</span>
           </DetailRow>
         )}
         {d.reporting_controller && (
@@ -1150,8 +1151,8 @@ export function EventSummary(props: {
             <Copyable text={d.reporting_controller}>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   wordBreak: "break-all",
                 }}
               >
@@ -1165,8 +1166,8 @@ export function EventSummary(props: {
             <Copyable text={d.reporting_instance}>
               <span
                 style={{
-                  fontFamily: FONT_MONO,
-                  fontSize: 11.5,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
                   wordBreak: "break-all",
                 }}
               >
@@ -1188,7 +1189,7 @@ export function EventSummary(props: {
           <div style={{ marginBottom: 22 }}>
             {d.related.kind && (
               <DetailRow t={t} label="Kind">
-                <span style={{ fontSize: 12 }}>{d.related.kind}</span>
+                <span style={{ fontSize: FS_MD }}>{d.related.kind}</span>
               </DetailRow>
             )}
             {d.related.name && (

@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { api } from "../api";
-import { useAppStore } from "../store";
-import { tokens, FONT_MONO, FONT_SANS, type ThemeMode, type Tokens } from "../theme";
+import { useAppStore, useResolvedTheme } from "../store";
+import { FF_MONO, FONT_SANS, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS } from "../theme";
 import type { ForwardEntry, ForwardStatus } from "../types";
 import {
   EmptyState,
@@ -19,7 +19,7 @@ type Props = { mode: ThemeMode };
 // Same chrome as NotificationsPanel: scrim + slide-from-right + Esc to close.
 // Each row offers stop, copy URL, and pin/unpin (autostart toggle).
 export function PortForwardsPanel({ mode }: Props) {
-  const t = tokens(mode);
+  const t = useResolvedTheme().tokens;
   const open = useAppStore((s) => s.forwardsOpen);
   const close = useAppStore((s) => s.closeForwardsPanel);
   const forwards = useAppStore((s) => s.forwards);
@@ -152,7 +152,7 @@ export function PortForwardsPanel({ mode }: Props) {
             <div
               style={{
                 marginTop: 2,
-                fontSize: 13.5,
+                fontSize: FS_MD,
                 fontWeight: 600,
                 color: t.text,
               }}
@@ -216,12 +216,12 @@ function ClusterGroup({
           background: t.surfaceAlt,
           borderTop: `1px solid ${t.borderSoft}`,
           borderBottom: `1px solid ${t.borderSoft}`,
-          fontSize: 10.5,
+          fontSize: FS_XS,
           fontWeight: 700,
           letterSpacing: 0.4,
           textTransform: "uppercase",
           color: t.textMuted,
-          fontFamily: FONT_MONO,
+          fontFamily: FF_MONO,
         }}
       >
         {title}
@@ -286,8 +286,8 @@ function Row({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
-            fontSize: 12.5,
-            fontFamily: FONT_MONO,
+            fontSize: FS_MD,
+            fontFamily: FF_MONO,
             color: t.text,
             wordBreak: "break-all",
           }}
@@ -299,8 +299,8 @@ function Row({
         <div
           style={{
             marginTop: 3,
-            fontSize: 11,
-            fontFamily: FONT_MONO,
+            fontSize: FS_SM,
+            fontFamily: FF_MONO,
             color: t.textDim,
           }}
         >

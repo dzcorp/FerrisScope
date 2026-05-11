@@ -1,5 +1,5 @@
 import { memo, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { FONT_MONO, type Tokens } from "../../theme";
+import { FF_MONO, type Tokens, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { api } from "../../api";
 import { useAppStore } from "../../store";
 
@@ -316,7 +316,7 @@ function TableBlock({
       <table
         style={{
           borderCollapse: "collapse",
-          fontSize: 12.5,
+          fontSize: FS_MD,
           lineHeight: 1.4,
           width: "100%",
           tableLayout: "auto",
@@ -401,7 +401,7 @@ function CodeBlock({
       style={{
         background: t.surfaceAlt,
         border: `1px solid ${t.borderSoft}`,
-        borderRadius: 6,
+        borderRadius: R_MD,
         overflow: "hidden",
       }}
     >
@@ -417,8 +417,8 @@ function CodeBlock({
       >
         <div
           style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             color: t.textDim,
             letterSpacing: 0.4,
             textTransform: "lowercase",
@@ -434,8 +434,8 @@ function CodeBlock({
             background: "transparent",
             border: "none",
             color: copied ? t.good : t.textDim,
-            fontFamily: FONT_MONO,
-            fontSize: 10,
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
             cursor: "pointer",
             letterSpacing: 0.4,
             textTransform: "uppercase",
@@ -449,8 +449,8 @@ function CodeBlock({
         style={{
           margin: 0,
           padding: "8px 10px",
-          fontFamily: FONT_MONO,
-          fontSize: 11.5,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
           color: t.text,
           background: "transparent",
           overflowX: "auto",
@@ -466,11 +466,11 @@ function CodeBlock({
 // ─── Inline render ──────────────────────────────────────────────────────────
 
 const INLINE_CODE_STYLE = (t: Tokens): CSSProperties => ({
-  fontFamily: FONT_MONO,
+  fontFamily: FF_MONO,
   fontSize: "0.92em",
   background: t.surfaceAlt,
   border: `1px solid ${t.borderSoft}`,
-  borderRadius: 3,
+  borderRadius: R_SM,
   padding: "0 4px",
 });
 
@@ -489,7 +489,7 @@ const FS_LINK_STYLE = (t: Tokens): CSSProperties => ({
   cursor: "pointer",
   background: t.surfaceAlt,
   border: `1px solid ${t.borderSoft}`,
-  borderRadius: 3,
+  borderRadius: R_SM,
   padding: "0 5px",
   fontSize: "0.95em",
   display: "inline-flex",
