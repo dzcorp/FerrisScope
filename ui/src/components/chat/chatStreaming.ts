@@ -32,10 +32,11 @@ export type ChatViewMessage = {
 // Predicate for "this message will produce visible DOM in MessageBubble".
 // Mirrors the early-return null branches in MessageBubble:
 //  - settled assistant with no text content renders null (whether it has
-//    tool_calls or not) — the matching ToolResultBubble below stands in,
-//    or it's an EmptyTurn retry phantom we don't want to surface.
+//    tool_calls or not) — the matching ToolGroupBubble stands in for the
+//    tool results, or it's an EmptyTurn retry phantom we don't want to
+//    surface.
 // MessageList filters by this before passing to the virtualizer so empty
-// turns don't leave 12 px phantom rows between tool-result strips.
+// turns don't leave 12 px phantom rows between tool groups.
 export function shouldRenderMessage(m: ChatViewMessage): boolean {
   if (m.role !== "assistant") return true;
   if (m.streaming) return true;

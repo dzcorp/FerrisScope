@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo } from "react";
 import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
 import type { ChatViewMessage } from "./chatStreaming";
 import { Markdown } from "./markdown";
@@ -9,10 +9,10 @@ type Props = {
   message: ChatViewMessage;
 };
 
-// MessageBubble — single message card. User and assistant get the same shape
-// but different background tones so the role reads at a glance. Tool result
-// messages get a distinct collapsible card with a status dot (red for
-// is_error, green otherwise).
+// MessageBubble — single user / assistant card. Tool-result messages are
+// rendered via ToolGroupBubble in MessageList (consecutive tool calls
+// collapse into one ticker card), so this component only handles the
+// user / assistant cases.
 //
 // Empty-content assistant turns (the model called a tool without any prose)
 // collapse to a thin one-liner so the chat shows real messages as bubbles
@@ -27,7 +27,10 @@ function MessageBubbleInner({ mode, message }: Props) {
   const t = tokens(mode);
 
   if (message.role === "tool") {
-    return <ToolResultBubble t={t} message={message} />;
+    // Defensive — MessageList groups tool messages into ToolGroupBubble
+    // before they reach here. Returning null avoids a duplicate render
+    // path if a tool message ever slips through.
+    return null;
   }
 
   const isUser = message.role === "user";
@@ -126,19 +129,28 @@ function MessageBubbleInner({ mode, message }: Props) {
         >
           {isUser ? "you" : "assistant"}
         </div>
-        <Markdown text={renderText} t={t} />
-        {message.streaming && (
-          <span
-            style={{
-              display: "inline-block",
-              width: 6,
-              height: 14,
-              marginLeft: 2,
-              verticalAlign: "text-bottom",
-              background: t.accent,
-              animation: "fs-blink 1.1s steps(2, start) infinite",
-            }}
-          />
+        {!isUser && message.streaming && !hasContent ? (
+          // No tokens have landed yet (the gap between AssistantStart and the
+          // first TokenDelta — model is "thinking"). Show animated dots so
+          // the bubble doesn't just sit empty with a lone caret.
+          <ThinkingIndicator t={t} />
+        ) : (
+          <>
+            <Markdown text={renderText} t={t} />
+            {message.streaming && (
+              <span
+                style={{
+                  display: "inline-block",
+                  width: 6,
+                  height: 14,
+                  marginLeft: 2,
+                  verticalAlign: "text-bottom",
+                  background: t.accent,
+                  animation: "fs-blink 1.1s steps(2, start) infinite",
+                }}
+              />
+            )}
+          </>
         )}
       </div>
     </div>
@@ -146,6 +158,58 @@ function MessageBubbleInner({ mode, message }: Props) {
 }
 
 export const MessageBubble = memo(MessageBubbleInner);
+
+// ThinkingIndicator — three bouncing dots + a soft "thinking" label,
+// shown inside an assistant bubble that's streaming but hasn't received
+// any tokens yet (and reused in MessageList's placeholder bubble so the
+// indicator stays alive across tool-execution waits). Replaces the
+// previous lone blinking caret so the pre-first-token latency reads as
+// active work, not a stalled bubble.
+export function ThinkingIndicator({ t }: { t: ReturnType<typeof tokens> }) {
+  return (
+    <div
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        color: t.textDim,
+        fontSize: 12,
+        lineHeight: 1.55,
+      }}
+    >
+      <span className="fs-think-text" style={{ fontFamily: FONT_MONO }}>
+        thinking
+      </span>
+      <span style={{ display: "inline-flex", gap: 3 }}>
+        <ThinkDot t={t} delay={0} />
+        <ThinkDot t={t} delay={160} />
+        <ThinkDot t={t} delay={320} />
+      </span>
+    </div>
+  );
+}
+
+function ThinkDot({
+  t,
+  delay,
+}: {
+  t: ReturnType<typeof tokens>;
+  delay: number;
+}) {
+  return (
+    <span
+      className="fs-think-dot"
+      style={{
+        width: 5,
+        height: 5,
+        borderRadius: "50%",
+        background: t.accent,
+        display: "inline-block",
+        animationDelay: `${delay}ms`,
+      }}
+    />
+  );
+}
 
 // ToolCallStrip — quiet one-liner shown while the assistant is in the middle
 // of emitting tool calls. Once the result lands we drop it (see the early
@@ -191,127 +255,3 @@ function ToolCallStrip({
   );
 }
 
-// ToolResultBubble — compact one-line strip (no card, no role label) that
-// expands inline on click. Matches ToolCallStrip's silhouette so a turn
-// reads `› calling X` → `› ✓ X  preview…` → assistant bubble. Clicking the
-// row reveals the full output below in a scrollable monospace block.
-function ToolResultBubble({
-  t,
-  message,
-}: {
-  t: ReturnType<typeof tokens>;
-  message: ChatViewMessage;
-}) {
-  const [open, setOpen] = useState(false);
-  const status = message.toolIsError ? t.bad : t.good;
-  const label = message.toolName ?? "tool";
-  const content = message.content ?? "";
-  // Preview + line count come pre-computed from the reducer (see
-  // chatStreaming.ts → summarizeToolContent). Splitting a multi-KB tool
-  // result string on every render — twice — was a real cost on the
-  // initial paint of a long transcript.
-  const preview = message.toolPreview ?? "";
-  const lineCount = message.toolLineCount ?? 0;
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 4,
-        // No `contentVisibility: auto` here on purpose. The collapsed strip
-        // is ~32 px but the wrapper grows to ~360 px when the operator
-        // expands it, and any intrinsic-size hint we pick is wrong for one
-        // of those states. The placeholder/real-height mismatch made
-        // scrollHeight jump while scrolling past a cluster of tool
-        // messages — the "teleport" symptom. Plain `contain: content`
-        // gives paint isolation without the size-prediction risk.
-        contain: "content",
-      }}
-    >
-      <button
-        type="button"
-        className="fs-tool-strip"
-        data-open={open ? "true" : "false"}
-        onClick={() => setOpen((v) => !v)}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "4px 8px",
-          border: `1px solid ${open ? t.borderSoft : "transparent"}`,
-          borderRadius: 6,
-          color: t.textMuted,
-          fontFamily: FONT_MONO,
-          fontSize: 11,
-          cursor: "pointer",
-          textAlign: "left",
-          width: "100%",
-          // Hover background and the expanded-state background flow through
-          // these CSS vars so .fs-tool-strip's :hover rule can drive paint
-          // without a per-frame JS style mutation during scroll.
-          ["--fs-tool-hover" as string]: t.hover,
-          ["--fs-tool-open-bg" as string]: t.surfaceAlt,
-          // Paint containment keeps the strip's repaints (hover, expand)
-          // from cascading into sibling bubbles while scrolling past.
-          contain: "content",
-        }}
-        title={open ? "Collapse" : "Expand"}
-      >
-        <span style={{ color: t.textDim, width: 8 }}>{open ? "▾" : "▸"}</span>
-        <span style={{ color: status, width: 10, fontWeight: 700 }}>
-          {message.toolIsError ? "✗" : "✓"}
-        </span>
-        <span style={{ color: t.accent, fontWeight: 600 }}>{label}</span>
-        {preview && (
-          <span
-            style={{
-              color: t.textDim,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              flex: 1,
-              minWidth: 0,
-            }}
-          >
-            {preview}
-          </span>
-        )}
-        {lineCount > 1 && (
-          <span style={{ color: t.textDim, flexShrink: 0 }}>
-            {lineCount} lines
-          </span>
-        )}
-      </button>
-      {open && (
-        <pre
-          className="fs-selectable"
-          style={{
-            margin: 0,
-            marginLeft: 22,
-            padding: "8px 10px",
-            background: t.surface,
-            border: `1px solid ${t.border}`,
-            borderLeft: `3px solid ${status}`,
-            borderRadius: 6,
-            color: t.text,
-            fontFamily: FONT_MONO,
-            fontSize: 11,
-            lineHeight: 1.55,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            maxHeight: 320,
-            overflow: "auto",
-            boxShadow: "0 1px 2px rgba(15,20,30,0.04)",
-            // `wordBreak: break-word` on a large tool result is a sneaky
-            // layout cost during scroll — explicit containment scopes that
-            // work to this element instead of cascading into the list.
-            contain: "content",
-          }}
-        >
-          {content}
-        </pre>
-      )}
-    </div>
-  );
-}

@@ -1,16 +1,29 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { tokens, FONT_MONO, type ThemeMode } from "../../theme";
 import { Eyebrow } from "../ui";
 import {
   shouldRenderMessage,
+  type ChatViewMessage,
   type ChatViewState,
-  type ExecutingToolCall,
 } from "./chatStreaming";
-import { MessageBubble } from "./MessageBubble";
+import { MessageBubble, ThinkingIndicator } from "./MessageBubble";
 import { ToolApprovalBulkBar } from "./ToolApprovalBulkBar";
 import { ToolApprovalCard } from "./ToolApprovalCard";
+import { ToolGroupBubble, type ToolGroupItem } from "./ToolGroupBubble";
 import { useStickToBottom } from "./useStickToBottom";
+
+// Virtualized row shape — either a single non-tool message, or a contiguous
+// run of tool activity (result messages plus currently-executing tools)
+// grouped into one ToolGroupBubble. Grouping turns a chain of N tool calls
+// between assistant turns into one card with an internal viewport (latest
+// few visible, older ones scroll out), and folding executing entries into
+// the same group means an in-flight tool no longer "jumps" from a bottom
+// strip into the group when its result lands — it just transitions in
+// place from `running` → ✓.
+type Row =
+  | { kind: "single"; id: string; message: ChatViewMessage }
+  | { kind: "toolGroup"; id: string; items: ToolGroupItem[] };
 
 type Props = {
   mode: ThemeMode;
@@ -30,9 +43,9 @@ const ROW_GAP = 12;
 // ResizeObserver for content-growth follow. Rows are virtualized via
 // `@tanstack/react-virtual` with `measureElement` because heights vary
 // wildly (single-line user message vs. 800 px assistant block with code/
-// tables). Footer surfaces (executing strip, pending approvals,
-// compacting bubble) sit below the virtual container — small fixed
-// count, easier than folding them into the row array.
+// tables). Footer surfaces (pending approvals, compacting bubble) sit
+// below the virtual container — small fixed count, easier than folding
+// them into the row array.
 export function MessageList({ mode, state, streaming, chatId, compacting }: Props) {
   const t = tokens(mode);
   const { scrollRef, stuck, snapToBottom } = useStickToBottom();
@@ -48,9 +61,109 @@ export function MessageList({ mode, state, streaming, chatId, compacting }: Prop
     () => state.messages.filter(shouldRenderMessage),
     [state.messages],
   );
+  // Collapse runs of consecutive tool activity (resolved results +
+  // currently-executing entries) into single rows, and float operator
+  // messages queued mid-turn AFTER the unified tool group. The "active
+  // turn" is the suffix of messages following the most recent assistant
+  // message that produced text content — within it, the FIRST user
+  // message is the turn's kickoff and any later user messages were
+  // queued via `chat_send_message` while the model was busy. Without
+  // this deferral the queued users wedge between tool groups (when
+  // some tools have resolved) or land in front of the still-running
+  // group (when nothing has resolved yet), which is what made the
+  // transcript "jump in / out". The group id is keyed off the
+  // preceding non-tool, non-queued-user message id so the bubble's
+  // expand/collapse state and scroll position survive across queueing
+  // and resolution events.
+  const rows = useMemo<Row[]>(() => {
+    // Active-turn boundary: index after the most recent assistant
+    // message with non-empty content. Everything from this index to
+    // the end is the in-flight turn (or a fresh queue that the model
+    // hasn't started answering yet).
+    let activeStart = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!;
+      if (m.role === "assistant" && (m.content ?? "").trim().length > 0) {
+        activeStart = i + 1;
+        break;
+      }
+    }
+    // Kickoff = first user message inside the active turn (if any).
+    // Everything else of role `user` inside the active turn is queued.
+    let kickoffUserId: string | null = null;
+    for (let i = activeStart; i < messages.length; i++) {
+      const m = messages[i]!;
+      if (m.role === "user") {
+        kickoffUserId = m.id;
+        break;
+      }
+    }
+
+    type ActiveTool = { parentId: string; items: ToolGroupItem[] };
+    const out: Row[] = [];
+    let activeTool: ActiveTool | null = null;
+    let deferredUsers: ChatViewMessage[] = [];
+    let lastNonToolId = "start";
+
+    const flush = () => {
+      if (activeTool) {
+        out.push({
+          kind: "toolGroup",
+          id: `group-after-${activeTool.parentId}`,
+          items: activeTool.items,
+        });
+        activeTool = null;
+      }
+      for (const u of deferredUsers) {
+        out.push({ kind: "single", id: u.id, message: u });
+      }
+      deferredUsers = [];
+    };
+
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i]!;
+      const inActive = i >= activeStart;
+      if (m.role === "tool") {
+        if (!activeTool) {
+          activeTool = { parentId: lastNonToolId, items: [] };
+        }
+        activeTool.items.push({ kind: "result", message: m });
+      } else if (m.role === "user") {
+        const isQueued = inActive && m.id !== kickoffUserId;
+        if (isQueued) {
+          // Defer — render after the active tool group (or after the
+          // executing-fold group, if no results have landed yet).
+          deferredUsers.push(m);
+        } else {
+          flush();
+          out.push({ kind: "single", id: m.id, message: m });
+          lastNonToolId = m.id;
+        }
+      } else {
+        // assistant with content (tool-only assistant turns were
+        // filtered upstream by shouldRenderMessage).
+        flush();
+        out.push({ kind: "single", id: m.id, message: m });
+        lastNonToolId = m.id;
+      }
+    }
+
+    // Fold in-flight tools into the active group (creating one if the
+    // model jumped straight to tool calls before any result landed).
+    if (state.executing.length > 0) {
+      if (!activeTool) {
+        activeTool = { parentId: lastNonToolId, items: [] };
+      }
+      for (const e of state.executing) {
+        activeTool.items.push({ kind: "executing", entry: e });
+      }
+    }
+    flush();
+    return out;
+  }, [messages, state.executing]);
 
   const virtualizer = useVirtualizer({
-    count: messages.length,
+    count: rows.length,
     getScrollElement: () => scrollRef.current,
     // Rough seed; `measureElement` refines per-row from the rendered DOM.
     estimateSize: () => 80,
@@ -76,8 +189,20 @@ export function MessageList({ mode, state, streaming, chatId, compacting }: Prop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId]);
 
-  const lastIndex = messages.length - 1;
-  const showJumpButton = !stuck && messages.length > 0;
+  const lastIndex = rows.length - 1;
+  const showJumpButton = !stuck && rows.length > 0;
+  // A streaming assistant bubble owns its own thinking/streaming UI —
+  // either the in-bubble dots while content is empty, the ToolCallStrip
+  // while tool calls are landing, or the markdown + caret once tokens
+  // flow. So a footer placeholder would double up. Only show it when no
+  // streaming bubble is live and the chat is otherwise still busy
+  // (tools executing) — covers the gap between an assistant turn ending
+  // with only tool calls and the next assistant_start firing.
+  const hasStreamingBubble = state.messages.some(
+    (m) => m.role === "assistant" && m.streaming,
+  );
+  const showThinkingPlaceholder =
+    !hasStreamingBubble && state.executing.length > 0;
 
   return (
     <>
@@ -99,7 +224,7 @@ export function MessageList({ mode, state, streaming, chatId, compacting }: Prop
           contain: "content",
         }}
       >
-        {messages.length === 0 && (
+        {rows.length === 0 && (
           <div
             style={{
               display: "flex",
@@ -120,7 +245,7 @@ export function MessageList({ mode, state, streaming, chatId, compacting }: Prop
             </div>
           </div>
         )}
-        {messages.length > 0 && (
+        {rows.length > 0 && (
           <div
             style={{
               position: "relative",
@@ -133,8 +258,8 @@ export function MessageList({ mode, state, streaming, chatId, compacting }: Prop
             }}
           >
             {virtualItems.map((vi) => {
-              const m = messages[vi.index];
-              if (!m) return null;
+              const r = rows[vi.index];
+              if (!r) return null;
               // Each row's measured height includes a 12 px gap below it,
               // so the next row sits exactly `ROW_GAP` below — except the
               // last row, where the parent's flex `gap` already handles the
@@ -142,7 +267,7 @@ export function MessageList({ mode, state, streaming, chatId, compacting }: Prop
               const isLast = vi.index === lastIndex;
               return (
                 <div
-                  key={m.id}
+                  key={r.id}
                   data-index={vi.index}
                   ref={virtualizer.measureElement}
                   style={{
@@ -154,15 +279,17 @@ export function MessageList({ mode, state, streaming, chatId, compacting }: Prop
                     paddingBottom: isLast ? 0 : ROW_GAP,
                   }}
                 >
-                  <MessageBubble mode={mode} message={m} />
+                  {r.kind === "single" ? (
+                    <MessageBubble mode={mode} message={r.message} />
+                  ) : (
+                    <ToolGroupBubble mode={mode} items={r.items} />
+                  )}
                 </div>
               );
             })}
           </div>
         )}
-        {state.executing.length > 0 && (
-          <ExecutingStrip t={t} executing={state.executing} />
-        )}
+        {showThinkingPlaceholder && <ThinkingPlaceholder t={t} />}
         {chatId &&
           state.pendingApprovals.map((p) => (
             <ToolApprovalCard
@@ -231,58 +358,53 @@ function JumpToLatestButton({
   );
 }
 
-// ExecutingStrip — silhouette mirrors the streaming `› calling X` strip but
-// fires *after* the call shape lands and the dispatch starts. Stays visible
-// until the matching tool_result lands. A second-resolution elapsed counter
-// reassures the operator that something's happening on the long ones (port-
-// forward setup, ssh handshakes, http_fetch hitting a slow target).
-function ExecutingStrip({
-  t,
-  executing,
-}: {
-  t: ReturnType<typeof tokens>;
-  executing: ExecutingToolCall[];
-}) {
-  const [, force] = useState(0);
-  useEffect(() => {
-    const id = window.setInterval(() => force((n) => n + 1), 1000);
-    return () => window.clearInterval(id);
-  }, []);
-  const now = Date.now();
+// ThinkingPlaceholder — assistant-style bubble shown while tools are
+// executing and no streaming bubble is currently live. Bridges the gap
+// from "model finished emitting tool calls" → "tools running" →
+// "model resumes" so the thinking indicator doesn't blink off and on
+// between rounds. Mirrors the assistant bubble silhouette so the swap
+// to a real bubble on the next assistant_start is visually seamless.
+function ThinkingPlaceholder({ t }: { t: ReturnType<typeof tokens> }) {
   return (
     <div
       style={{
         display: "flex",
-        alignItems: "center",
+        justifyContent: "flex-start",
         gap: 8,
-        padding: "4px 8px",
-        color: t.textMuted,
-        fontFamily: FONT_MONO,
-        fontSize: 11,
-        flexWrap: "wrap",
+        // Soft fade-in on first mount so the placeholder appears as a
+        // continuation rather than a sudden insertion.
+        animation: "fs-fade-in 200ms ease-out",
       }}
     >
-      <span style={{ color: t.textDim }}>›</span>
-      <span>running</span>
-      {executing.map((e, i) => {
-        const secs = Math.max(0, Math.floor((now - e.startedAt) / 1000));
-        return (
-          <span key={e.toolCallId} style={{ display: "inline-flex", gap: 4 }}>
-            <span style={{ color: t.accent, fontWeight: 600 }}>{e.name}</span>
-            <span style={{ color: t.textDim }}>{secs}s</span>
-            {i < executing.length - 1 && <span>,</span>}
-          </span>
-        );
-      })}
-      <span
+      <div
         style={{
-          display: "inline-block",
-          width: 6,
-          height: 10,
-          background: t.accent,
-          animation: "fs-blink 1.1s steps(2, start) infinite",
+          maxWidth: "92%",
+          background: t.surface,
+          border: `1px solid ${t.border}`,
+          borderRadius: 10,
+          padding: "9px 13px 10px",
+          color: t.text,
+          fontSize: 13,
+          lineHeight: 1.55,
+          boxShadow: "0 1px 3px rgba(15,20,30,0.05)",
         }}
-      />
+      >
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            color: t.textDim,
+            letterSpacing: 0.6,
+            textTransform: "uppercase",
+            marginBottom: 5,
+            fontWeight: 700,
+            opacity: 0.85,
+          }}
+        >
+          assistant
+        </div>
+        <ThinkingIndicator t={t} />
+      </div>
     </div>
   );
 }
