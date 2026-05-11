@@ -150,6 +150,73 @@ textarea,
     visibility: hidden;
   }
 }
+/* "Thinking…" dots — three dots that bounce in sequence while the
+   assistant is streaming but hasn't emitted any tokens yet. Replaces the
+   lone blinking caret during the model's pre-first-token latency so the
+   operator sees the system is actively working rather than stalled. */
+@keyframes fs-think-dot-kf {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+.fs-think-dot {
+  animation: fs-think-dot-kf 1.2s infinite ease-in-out;
+}
+/* Subtle text pulse on the "Thinking…" label paired with the dots — the
+   eye latches onto the moving dots; the soft opacity wash keeps the label
+   from feeling static next to them. */
+@keyframes fs-think-text-kf {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+.fs-think-text {
+  animation: fs-think-text-kf 2.2s ease-in-out infinite;
+}
+/* New tool-call row enters the group viewport from below. Combined with the
+   group's smooth scroll-to-bottom, the previously-latest row slides up out
+   of view while the fresh one rolls in. Short and quiet (R-14). */
+@keyframes fs-tool-row-enter-kf {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fs-tool-row-enter {
+  animation: fs-tool-row-enter-kf 220ms ease-out;
+}
+/* Brief soft-ring flash around the tool-group bubble when a new tool result
+   arrives — mirrors fs-anchor-pulse so the operator's eye registers "new
+   activity in this group" without the surface strobing. */
+@keyframes fs-tool-group-flash-kf {
+  0% {
+    box-shadow: 0 0 0 0 rgba(99, 179, 237, 0);
+  }
+  25% {
+    box-shadow: 0 0 0 3px rgba(99, 179, 237, 0.28);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(99, 179, 237, 0);
+  }
+}
+.fs-tool-group-flash {
+  animation: fs-tool-group-flash-kf 700ms ease-out;
+}
 /* Indeterminate horizontal "line" loader: a 30%-wide segment ping-pongs
    across the track. `alternate` flips direction each cycle so the eye reads
    it as left → right → left, exactly the indeterminate-progress idiom. */
@@ -198,6 +265,18 @@ textarea,
     animation: none;
   }
   .fs-copy-flash {
+    animation: none;
+  }
+  .fs-tool-row-enter {
+    animation: none;
+  }
+  .fs-tool-group-flash {
+    animation: none;
+  }
+  .fs-think-dot {
+    animation: none;
+  }
+  .fs-think-text {
     animation: none;
   }
 }

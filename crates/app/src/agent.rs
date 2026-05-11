@@ -2809,7 +2809,14 @@ async fn run_turn_loop(
                 .clone()
                 .or_else(|| provider_options_default.clone());
             (
-                g.messages.clone(),
+                // Fold any trailing run of consecutive User messages
+                // into one synthetic prompt. Operator-queued follow-ups
+                // (multiple Send-while-streaming presses) accumulate as
+                // separate User entries; some providers reject that
+                // shape, and the model is happier reading one combined
+                // question than three. Disk + rt.messages keep the
+                // originals — only the per-round snapshot is folded.
+                merge_trailing_user_run(g.messages.clone()),
                 schemas,
                 g.model.clone(),
                 g.approval_mode,
@@ -3071,19 +3078,31 @@ async fn run_turn_loop(
         transient_retries = 0;
 
         if finish_reason != FinishReason::ToolCalls || tool_calls.is_empty() {
-            // No tool calls — push the assistant message and decide
-            // whether the turn is truly done. The cancel-clear and the
-            // queued-user-message check live in one critical section so
-            // a concurrent `chat_send_message` either lands its message
+            // No tool calls — decide whether the turn is truly done, then
+            // place the assistant message. The check has to run BEFORE we
+            // push: if the operator queued a follow-up during streaming,
+            // their message is already at the tail of `g.messages`, and
+            // appending the assistant after it would wrongly trip the
+            // "queued user is answered" branch (last_user precedes
+            // last_assistant), abandoning the queued turn. Run the check
+            // first; if pending, splice the assistant *before* the queued
+            // user tail so the transcript reads chronologically by role
+            // (`…, asst_final, user2, user3`) rather than the wall-clock
+            // shuffled `…, user2, user3, asst_final`. Cancel-clear and
+            // the queued-message check live in one critical section so a
+            // concurrent `chat_send_message` either lands its message
             // before the check (we keep going) or after we clear cancel
             // (it spawns a fresh turn). No third option.
             let pending = {
                 let mut g = runtime.lock().await;
-                g.messages.push(assistant_msg);
                 if has_unanswered_user_message(&g.messages) {
+                    let insert_at =
+                        trailing_user_run_start(&g.messages).unwrap_or(g.messages.len());
+                    g.messages.insert(insert_at, assistant_msg);
                     round = 0;
                     true
                 } else {
+                    g.messages.push(assistant_msg);
                     g.cancel = None;
                     false
                 }
@@ -3210,6 +3229,58 @@ fn has_unanswered_user_message(messages: &[ChatMessage]) -> bool {
         Some(a) => last_user > a,
         None => true,
     }
+}
+
+/// Start index of the trailing run of consecutive `User` messages, or
+/// `None` if the tail isn't a User. Used by the no-tool-call end-of-
+/// turn handler to splice a freshly-produced assistant message in
+/// *before* operator messages that were queued mid-round, so the
+/// transcript reads `…, asst1, asst_final, user2, user3` instead of
+/// the clock-ordered `…, asst1, user2, user3, asst_final`.
+fn trailing_user_run_start(messages: &[ChatMessage]) -> Option<usize> {
+    let mut i = messages.len();
+    while i > 0 && matches!(messages[i - 1].role, MessageRole::User) {
+        i -= 1;
+    }
+    if i == messages.len() {
+        None
+    } else {
+        Some(i)
+    }
+}
+
+/// If the transcript ends with two or more consecutive `User` messages
+/// (the operator queued multiple turns while the model was streaming
+/// the previous one), fold them into a single synthetic User message
+/// for the *provider snapshot only*. The originals stay in
+/// `rt.messages` and on disk so the persisted history shows what the
+/// operator actually typed; the provider call sees one combined
+/// prompt so the model gets a coherent question rather than a
+/// "user … user … user …" run that some providers refuse outright
+/// (Anthropic rejects consecutive user-role messages with 400).
+fn merge_trailing_user_run(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let start = match trailing_user_run_start(&messages) {
+        Some(i) => i,
+        None => return messages,
+    };
+    if start + 1 >= messages.len() {
+        return messages;
+    }
+    let merged_content = messages[start..]
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    messages.truncate(start);
+    messages.push(ChatMessage {
+        role: MessageRole::User,
+        content: merged_content,
+        tool_calls: vec![],
+        tool_call_id: None,
+        name: None,
+        reasoning_content: None,
+    });
+    messages
 }
 
 enum ProviderRoundOutcome {
@@ -4687,5 +4758,121 @@ mod tests {
         // at 5 anyway, but the math has to be safe past that).
         assert_eq!(transient_retry_delay_ms(10), 30_000);
         assert_eq!(transient_retry_delay_ms(255), 30_000);
+    }
+
+    fn msg(role: MessageRole, content: &str) -> ChatMessage {
+        ChatMessage {
+            role,
+            content: content.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn trailing_user_run_none_when_tail_isnt_user() {
+        let msgs = vec![
+            msg(MessageRole::User, "hi"),
+            msg(MessageRole::Assistant, "hello"),
+        ];
+        assert_eq!(trailing_user_run_start(&msgs), None);
+    }
+
+    #[test]
+    fn trailing_user_run_finds_single_user_tail() {
+        let msgs = vec![
+            msg(MessageRole::User, "hi"),
+            msg(MessageRole::Assistant, "hello"),
+            msg(MessageRole::User, "follow-up"),
+        ];
+        assert_eq!(trailing_user_run_start(&msgs), Some(2));
+    }
+
+    #[test]
+    fn trailing_user_run_finds_multi_user_tail() {
+        let msgs = vec![
+            msg(MessageRole::User, "first"),
+            msg(MessageRole::Assistant, "ack"),
+            msg(MessageRole::User, "queued 1"),
+            msg(MessageRole::User, "queued 2"),
+            msg(MessageRole::User, "queued 3"),
+        ];
+        assert_eq!(trailing_user_run_start(&msgs), Some(2));
+    }
+
+    #[test]
+    fn trailing_user_run_handles_empty_transcript() {
+        let msgs: Vec<ChatMessage> = vec![];
+        assert_eq!(trailing_user_run_start(&msgs), None);
+    }
+
+    #[test]
+    fn merge_trailing_user_run_noop_when_no_tail() {
+        let msgs = vec![
+            msg(MessageRole::User, "hi"),
+            msg(MessageRole::Assistant, "hello"),
+        ];
+        let out = merge_trailing_user_run(msgs.clone());
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1].content, "hello");
+    }
+
+    #[test]
+    fn merge_trailing_user_run_noop_when_single_user_tail() {
+        // A single trailing user message is normal — leave it alone.
+        let msgs = vec![
+            msg(MessageRole::Assistant, "hello"),
+            msg(MessageRole::User, "follow-up"),
+        ];
+        let out = merge_trailing_user_run(msgs);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1].content, "follow-up");
+    }
+
+    #[test]
+    fn merge_trailing_user_run_combines_queue() {
+        let msgs = vec![
+            msg(MessageRole::User, "first"),
+            msg(MessageRole::Assistant, "ack"),
+            msg(MessageRole::User, "queued 1"),
+            msg(MessageRole::User, "queued 2"),
+            msg(MessageRole::User, "queued 3"),
+        ];
+        let out = merge_trailing_user_run(msgs);
+        // Three queued user messages collapse to one combined entry.
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[2].role, MessageRole::User));
+        assert_eq!(out[2].content, "queued 1\n\nqueued 2\n\nqueued 3");
+        // History before the queue is untouched.
+        assert_eq!(out[0].content, "first");
+        assert_eq!(out[1].content, "ack");
+    }
+
+    #[test]
+    fn has_unanswered_detects_queued_user_before_push() {
+        // The exact shape `run_turn_loop` checks *before* pushing the
+        // freshly-produced assistant message. user2 was queued during
+        // streaming and now sits at the tail; check must return true.
+        let msgs = vec![
+            msg(MessageRole::User, "user1"),
+            msg(MessageRole::Assistant, "asst1 (had tool calls)"),
+            msg(MessageRole::Tool, "tool result"),
+            msg(MessageRole::User, "user2 queued"),
+        ];
+        assert!(has_unanswered_user_message(&msgs));
+    }
+
+    #[test]
+    fn has_unanswered_negative_when_assistant_follows() {
+        // Same shape *after* pushing — this is the broken state the bug
+        // fix avoids; we keep the negative assertion as a regression
+        // guard for the helper's own semantics (the helper isn't wrong,
+        // the old call site was — moving it pre-push is the fix).
+        let msgs = vec![
+            msg(MessageRole::User, "user1"),
+            msg(MessageRole::Assistant, "asst1"),
+            msg(MessageRole::User, "user2"),
+            msg(MessageRole::Assistant, "asst_final"),
+        ];
+        assert!(!has_unanswered_user_message(&msgs));
     }
 }
