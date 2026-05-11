@@ -31,11 +31,8 @@ describe("parseTableFilter — mode detection", () => {
   });
 
   it("any other metachar promotes to regex", () => {
-    for (const ch of ["|", "*", "+", "?", "(", ")", "^", "$", "[", "]", "{", "}", "\\"]) {
-      const f = parseTableFilter(`x${ch}y`.replace(/[()[\]{}]/g, "")); // simpler probe
-      // Even a bare trailing `*` is regex.
-      expect(parseTableFilter("foo*").mode).toBe("regex");
-    }
+    // Bare trailing `*` is regex.
+    expect(parseTableFilter("foo*").mode).toBe("regex");
     expect(parseTableFilter("api|web").mode).toBe("regex");
     expect(parseTableFilter("^prod-").mode).toBe("regex");
     expect(parseTableFilter("worker-\\d+").mode).toBe("regex");

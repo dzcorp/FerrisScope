@@ -3,7 +3,7 @@
 // behavioural branches (copy, link navigation, condition invert, long-value
 // expansion, sub-grid grouping) on top of the existing primitives.test.tsx.
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
