@@ -2785,6 +2785,7 @@ async fn run_turn_loop(
         // before any awaiting on network/MCP IO.
         let (
             messages_so_far,
+            pre_round_msg_count,
             tool_schemas,
             model,
             approval_mode,
@@ -2817,6 +2818,17 @@ async fn run_turn_loop(
                 // question than three. Disk + rt.messages keep the
                 // originals — only the per-round snapshot is folded.
                 merge_trailing_user_run(g.messages.clone()),
+                // Pre-round message count (unmerged). The end-of-turn
+                // queued-user check compares against this: if
+                // `g.messages.len()` grew while we were streaming, a
+                // `chat_send_message` landed mid-round and the new tail
+                // user(s) are genuinely unanswered. A positional
+                // `last_user > last_assistant` check (the old logic)
+                // can't tell that apart from the steady state we just
+                // left after inserting the previous assistant before a
+                // trailing user — and would loop forever on the
+                // already-answered case.
+                g.messages.len(),
                 schemas,
                 g.model.clone(),
                 g.approval_mode,
@@ -3083,19 +3095,26 @@ async fn run_turn_loop(
             // push: if the operator queued a follow-up during streaming,
             // their message is already at the tail of `g.messages`, and
             // appending the assistant after it would wrongly trip the
-            // "queued user is answered" branch (last_user precedes
-            // last_assistant), abandoning the queued turn. Run the check
-            // first; if pending, splice the assistant *before* the queued
-            // user tail so the transcript reads chronologically by role
-            // (`…, asst_final, user2, user3`) rather than the wall-clock
-            // shuffled `…, user2, user3, asst_final`. Cancel-clear and
-            // the queued-message check live in one critical section so a
-            // concurrent `chat_send_message` either lands its message
-            // before the check (we keep going) or after we clear cancel
-            // (it spawns a fresh turn). No third option.
+            // "queued user is answered" branch, abandoning the queued
+            // turn. Run the check first; if pending, splice the assistant
+            // *before* the queued user tail so the transcript reads
+            // chronologically by role (`…, asst_final, user2, user3`)
+            // rather than the wall-clock shuffled `…, user2, user3,
+            // asst_final`. Cancel-clear and the queued-message check live
+            // in one critical section so a concurrent `chat_send_message`
+            // either lands its message before the check (we keep going)
+            // or after we clear cancel (it spawns a fresh turn). No third
+            // option.
+            //
+            // The criterion for "queued during streaming" is that
+            // `g.messages` grew past `pre_round_msg_count` *and* the tail
+            // is a User. A positional `last_user > last_assistant` check
+            // can't tell that apart from the post-insert steady state on
+            // a subsequent loop iteration — it would loop forever
+            // answering the same already-answered user.
             let pending = {
                 let mut g = runtime.lock().await;
-                if has_unanswered_user_message(&g.messages) {
+                if user_queued_during_round(&g.messages, pre_round_msg_count) {
                     let insert_at =
                         trailing_user_run_start(&g.messages).unwrap_or(g.messages.len());
                     g.messages.insert(insert_at, assistant_msg);
@@ -3212,23 +3231,24 @@ async fn run_turn_loop(
     }
 }
 
-/// True iff the most recent `User` message has no `Assistant` message
-/// after it. Used by `run_turn_loop` to detect operator messages queued
-/// via `chat_send_message` while the model was busy.
-fn has_unanswered_user_message(messages: &[ChatMessage]) -> bool {
-    let last_user = messages
-        .iter()
-        .rposition(|m| matches!(m.role, MessageRole::User));
-    let Some(last_user) = last_user else {
-        return false;
-    };
-    let last_assistant = messages
-        .iter()
-        .rposition(|m| matches!(m.role, MessageRole::Assistant));
-    match last_assistant {
-        Some(a) => last_user > a,
-        None => true,
-    }
+/// True iff a `chat_send_message` landed at the tail of `messages`
+/// between the snapshot at the start of the current round and now.
+/// `pre_round_count` is `g.messages.len()` captured under the same
+/// lock that built the snapshot; growth past that with a trailing
+/// `User` is exactly the queued-during-streaming case.
+///
+/// A positional "last_user > last_assistant" check can't be used: on
+/// the iteration that *answers* a previously-queued user, the
+/// assistant from the prior round was spliced *before* the user run
+/// (to keep the user pinned at the tail across the round-skip), so
+/// the positional test stays true forever and the loop spins. The
+/// length-delta criterion is observationally tied to the actual
+/// race (`chat_send_message` mutating `g.messages` while we awaited
+/// the provider stream) and bails as soon as the queued user is
+/// consumed.
+fn user_queued_during_round(messages: &[ChatMessage], pre_round_count: usize) -> bool {
+    messages.len() > pre_round_count
+        && matches!(messages.last().map(|m| &m.role), Some(MessageRole::User))
 }
 
 /// Start index of the trailing run of consecutive `User` messages, or
@@ -4848,31 +4868,62 @@ mod tests {
     }
 
     #[test]
-    fn has_unanswered_detects_queued_user_before_push() {
-        // The exact shape `run_turn_loop` checks *before* pushing the
-        // freshly-produced assistant message. user2 was queued during
-        // streaming and now sits at the tail; check must return true.
+    fn user_queued_during_round_detects_growth_with_user_tail() {
+        // Round started with two messages; a `chat_send_message` landed
+        // mid-stream and pushed a User to the tail. The end-of-turn
+        // check must flag this as queued so the loop runs another round.
+        let pre = 2;
+        let msgs = vec![
+            msg(MessageRole::User, "user1"),
+            msg(MessageRole::Assistant, "asst1 (had tool calls)"),
+            msg(MessageRole::User, "user2 queued"),
+        ];
+        assert!(user_queued_during_round(&msgs, pre));
+    }
+
+    #[test]
+    fn user_queued_during_round_false_when_no_growth() {
+        // No new messages arrived during the round → trailing user (if
+        // any) is the same one the model just answered. Loop must exit.
+        let msgs = vec![
+            msg(MessageRole::Assistant, "asst1"),
+            msg(MessageRole::User, "user1"),
+        ];
+        let pre = msgs.len();
+        assert!(!user_queued_during_round(&msgs, pre));
+    }
+
+    #[test]
+    fn user_queued_during_round_false_when_tail_isnt_user() {
+        // Tool result(s) landed but no new user — also not a queue.
+        let pre = 1;
         let msgs = vec![
             msg(MessageRole::User, "user1"),
             msg(MessageRole::Assistant, "asst1 (had tool calls)"),
             msg(MessageRole::Tool, "tool result"),
-            msg(MessageRole::User, "user2 queued"),
         ];
-        assert!(has_unanswered_user_message(&msgs));
+        assert!(!user_queued_during_round(&msgs, pre));
     }
 
     #[test]
-    fn has_unanswered_negative_when_assistant_follows() {
-        // Same shape *after* pushing — this is the broken state the bug
-        // fix avoids; we keep the negative assertion as a regression
-        // guard for the helper's own semantics (the helper isn't wrong,
-        // the old call site was — moving it pre-push is the fix).
-        let msgs = vec![
+    fn user_queued_during_round_breaks_post_insert_loop() {
+        // Regression for the loop bug: after iteration N inserts the
+        // assistant *before* the trailing user run (to keep the queued
+        // user at the tail), iteration N+1 sees the same User at the
+        // tail. With the old positional `last_user > last_assistant`
+        // check this loops forever; with the length-delta criterion,
+        // the next round's `pre_round_count` already includes the user,
+        // so `user_queued_during_round` returns false and the loop
+        // exits as soon as the queued user is genuinely answered.
+        let after_iter1 = vec![
             msg(MessageRole::User, "user1"),
             msg(MessageRole::Assistant, "asst1"),
-            msg(MessageRole::User, "user2"),
-            msg(MessageRole::Assistant, "asst_final"),
+            msg(MessageRole::User, "queued"),
         ];
-        assert!(!has_unanswered_user_message(&msgs));
+        // Iteration 2 captures pre_round_count from this transcript.
+        let pre_iter2 = after_iter1.len();
+        // No `chat_send_message` lands during iter 2 — messages stay
+        // the same length when the provider returns the answer.
+        assert!(!user_queued_during_round(&after_iter1, pre_iter2));
     }
 }
