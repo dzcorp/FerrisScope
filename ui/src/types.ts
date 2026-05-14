@@ -352,6 +352,9 @@ export type LogEvent =
   | { kind: "line"; text: string }
   | { kind: "batch"; lines: string[] }
   | { kind: "lagged"; dropped: number }
+  // Container not producing logs yet (PodInitializing / ContainerCreating);
+  // the backend is polling and will switch to `line`/`batch` once it starts.
+  | { kind: "waiting"; reason: string }
   | { kind: "ended"; reason: string };
 
 // Terminal sessions stream PTY output over a per-session Channel<TerminalEvent>

@@ -10,6 +10,7 @@ import {
   Tooltip,
 } from "./ui";
 import { LogView, type LogStatus, type LogViewState } from "./log/LogView";
+import { streamStatusDetail, streamStatusLabel } from "./log/status";
 
 export type LogTarget = {
   uid: string;
@@ -214,7 +215,7 @@ function StreamStatus({
           fontFamily: FF_MONO,
         }}
       >
-        paused{bufferedCount > 0 ? ` · ${bufferedCount} buffered` : ""}
+        {streamStatusLabel(status, paused, bufferedCount)}
       </span>
     );
   }
@@ -222,19 +223,23 @@ function StreamStatus({
     return <StatusPill status="Pending" t={t} mode={mode} dense />;
   if (status.kind === "streaming")
     return <StatusPill status="Running" t={t} mode={mode} dense />;
-  if (status.kind === "ended")
-    return (
-      <Tooltip label={status.reason}>
-        <span
-          style={{
-            fontSize: FS_SM,
-            color: t.textMuted,
-            fontFamily: FF_MONO,
-          }}
-        >
-          ended · {status.reason}
-        </span>
-      </Tooltip>
-    );
-  return <StatusPill status="Error" t={t} mode={mode} dense />;
+  if (status.kind === "error")
+    return <StatusPill status="Error" t={t} mode={mode} dense />;
+  // `waiting` / `ended`: keep the chrome label terse — the full reason
+  // already lives in the log body, so it's a hover tooltip here, not an
+  // inlined duplicate.
+  const detail = streamStatusDetail(status);
+  return (
+    <Tooltip label={detail ?? ""}>
+      <span
+        style={{
+          fontSize: FS_SM,
+          color: status.kind === "waiting" ? t.warn : t.textMuted,
+          fontFamily: FF_MONO,
+        }}
+      >
+        {streamStatusLabel(status, paused, bufferedCount)}
+      </span>
+    </Tooltip>
+  );
 }

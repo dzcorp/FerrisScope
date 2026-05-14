@@ -3,6 +3,7 @@ import { useResolvedTheme } from "../../store";
 import { FF_MONO, type ThemeMode, FS_SM } from "../../theme";
 import { Select } from "../ui";
 import { LogView, type LogViewState } from "../log/LogView";
+import { streamStatusDetail, streamStatusLabel } from "../log/status";
 
 // Inline Pod-logs surface for the detail-panel "Logs" tab. The actual
 // streaming + virtualization + footer toggles live in the shared
@@ -70,22 +71,24 @@ export function InlineLogTab({
 
   const onStateChange = useCallback((s: LogViewState) => setView(s), []);
 
-  const statusLabel = view.paused
-    ? `paused${view.bufferedCount > 0 ? ` · ${view.bufferedCount} buffered` : ""}`
-    : view.status.kind === "starting"
-      ? "connecting…"
-      : view.status.kind === "streaming"
-        ? "streaming"
-        : view.status.kind === "ended"
-          ? `ended · ${view.status.reason}`
-          : `error · ${view.status.message}`;
+  // Terse label — the full reason behind `ended` / `error` / `waiting`
+  // shows in the log body, so here it's only a hover `title` to avoid a
+  // visible duplicate.
+  const statusLabel = streamStatusLabel(
+    view.status,
+    view.paused,
+    view.bufferedCount,
+  );
+  const statusDetail = streamStatusDetail(view.status);
   const statusColor = view.paused
     ? t.warn
     : view.status.kind === "error"
       ? t.bad
       : view.status.kind === "streaming"
         ? t.good
-        : t.textMuted;
+        : view.status.kind === "waiting"
+          ? t.warn
+          : t.textMuted;
 
   return (
     <div
@@ -134,6 +137,7 @@ export function InlineLogTab({
           </span>
         )}
         <span
+          title={statusDetail ?? undefined}
           style={{
             fontSize: FS_SM,
             color: statusColor,

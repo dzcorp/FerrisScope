@@ -27,6 +27,9 @@ const LOG_ROW_HEIGHT = Math.round(11.5 * 1.65);
 export type LogStatus =
   | { kind: "starting" }
   | { kind: "streaming" }
+  // Backend is polling for a container that's still initializing — the
+  // stream is live, just not producing lines yet.
+  | { kind: "waiting"; reason: string }
   | { kind: "ended"; reason: string }
   | { kind: "error"; message: string };
 
@@ -199,6 +202,21 @@ export function LogView({
           container,
           (evt) => {
             if (cancelled) return;
+            // `waiting` carries no line — the container just isn't up yet.
+            // Reflect it in the status only; the backend keeps the stream
+            // live and switches to `line`/`batch` once it starts.
+            if (evt.kind === "waiting") {
+              setStatus({ kind: "waiting", reason: evt.reason });
+              return;
+            }
+            // First real output after a `waiting` (or the initial
+            // optimistic `streaming`): pin the status to streaming.
+            const markStreaming = () =>
+              setStatus((s) =>
+                s.kind === "waiting" || s.kind === "starting"
+                  ? { kind: "streaming" }
+                  : s,
+              );
             if (evt.kind === "batch") {
               for (const raw of evt.lines) {
                 const { ts, text } = splitTimestamp(raw);
@@ -214,6 +232,7 @@ export function LogView({
                   Math.min(MAX_LINES, c + evt.lines.length),
                 );
               }
+              markStreaming();
               scheduleFlush();
               return;
             }
@@ -238,8 +257,11 @@ export function LogView({
               };
             }
             ringRef.current.push(entry);
-            if (pausedRef.current && evt.kind === "line") {
-              setBufferedCount((c) => Math.min(MAX_LINES, c + 1));
+            if (evt.kind === "line") {
+              markStreaming();
+              if (pausedRef.current) {
+                setBufferedCount((c) => Math.min(MAX_LINES, c + 1));
+              }
             }
             scheduleFlush();
             if (evt.kind === "ended") {
@@ -337,6 +359,16 @@ export function LogView({
         {lines.length === 0 && status.kind === "streaming" && (
           <div style={{ color: t.textMuted, padding: "0 14px" }}>
             Waiting for output…
+          </div>
+        )}
+        {lines.length === 0 && status.kind === "waiting" && (
+          <div style={{ padding: "0 14px", color: t.textMuted }}>
+            <div style={{ color: t.warn }}>
+              Waiting for container to start…
+            </div>
+            <div style={{ marginTop: 4, wordBreak: "break-all" }}>
+              {status.reason}
+            </div>
           </div>
         )}
         {status.kind === "error" && (
