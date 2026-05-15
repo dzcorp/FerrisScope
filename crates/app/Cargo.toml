@@ -68,6 +68,11 @@ semver = "1"
 tempfile = "3"
 ureq = { version = "3", default-features = true }
 sha2 = "0.11"
+# Helm releases tarballs as gzip-compressed tar archives at get.helm.sh.
+# Used by the managed-helm installer to extract `<os>-<arch>/helm` into
+# `<config>/bin/helm`.
+flate2 = "1"
+tar = "0.4"
 
 # AEAD for the encrypted-file secret-storage backend used on unsigned macOS
 # builds, where the OS keychain ACL re-prompts on every release (the ACL is

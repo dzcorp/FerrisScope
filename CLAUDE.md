@@ -16,6 +16,17 @@ The `core` crate must stay Tauri-free so a future TUI / CLI can reuse the engine
 - **A "cluster" owns a task supervisor.** Disconnecting aborts the supervisor — no orphaned tasks, no leaked sockets.
 - **Frontend business logic budget is near zero.** View state in Zustand; everything else over Tauri commands.
 
+## Think it through before shipping
+
+When asked to build, fix, or improve something, actively look for ways it can break before reporting done. Don't stop at "the happy path compiles."
+
+- **Walk the failure modes.** Empty / missing / malformed input. Concurrency and cancellation. Who frees the resource. 403/404/409/410 from the apiserver. Long names, missing namespace, disconnected cluster, stale reflector.
+- **Fix root causes, not symptoms.** For bugs, ask *why* the bad state became reachable before patching where it surfaced. Add a regression test.
+- **Finish the loop.** Loading, empty, error, and stale states are part of the feature — a button with no disabled state during in-flight work is unfinished.
+- **Surface what you didn't cover.** Wrong assumptions, untested UI paths, related bugs you spotted — name them in the response rather than implying success.
+
+Scale the paranoia to blast radius: more for `fetch.rs` / agent loop, less for a chip-color tweak.
+
 ## Conventions
 
 - **Rust.** `rustfmt` defaults, `clippy::pedantic` opt-in per crate. Errors via `thiserror` in libraries, `anyhow` in the binary. No `unwrap()` outside tests. Tracing via `tracing` + `tracing-subscriber`, never `println!`.

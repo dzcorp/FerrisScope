@@ -369,9 +369,8 @@ pub async fn list_secrets_in_namespace(
 ///
 /// The projection includes `helm_available` so the frontend can disable
 /// the upgrade-edit affordance when the host has no `helm` CLI installed.
-/// `which::which` is cached process-wide via [`helm_available`] — flipping
-/// the result requires restarting the app, which matches operator
-/// expectations (helm is installed once per host).
+/// [`helm_available`] re-probes `$PATH` on every call so the managed-helm
+/// installer can flip the result mid-session without restarting the app.
 pub async fn get_helm_release_detail(
     client: Client,
     namespace: &str,
@@ -422,12 +421,85 @@ pub async fn get_helm_release_detail(
     Ok(value)
 }
 
-/// Cached `which helm` lookup. We don't expect the operator to install /
-/// uninstall helm mid-session, so probing once is enough.
+/// `which helm` against the process `$PATH`. Re-probes on every call: the
+/// in-app managed-helm installer (`crates/app/src/helm_install.rs`) can
+/// install helm mid-session, and we want the helm-aware UI affordances to
+/// pick that up immediately. The cost is one filesystem stat per PATH entry,
+/// which is negligible compared to the network calls in
+/// `get_helm_release_detail`.
 pub fn helm_available() -> bool {
-    use std::sync::OnceLock;
-    static AVAIL: OnceLock<bool> = OnceLock::new();
-    *AVAIL.get_or_init(|| which::which("helm").is_ok())
+    which::which("helm").is_ok()
+}
+
+/// Captured stderr + timing from a failed `helm dependency update` —
+/// shaped to map directly into `HelmUpgradeResult::Failed` /
+/// `HelmInstallResult::Failed` so the caller can surface the message in
+/// the same UI banner as a failed upgrade.
+#[derive(Debug)]
+pub struct HelmDepUpdateFailure {
+    pub message: String,
+    pub helm_stderr: String,
+    pub elapsed_ms: u64,
+}
+
+/// Run `helm dependency update <chart_dir>` to fetch declared subcharts
+/// into `<chart_dir>/charts/`. Helm release secrets serialize only the
+/// parent chart — `dependencies []*Chart` is unexported on
+/// `chart.Chart` (verified against helm v3.18 / v4.1) — so any chart
+/// whose `Chart.yaml` has a `dependencies:` block needs this pass before
+/// `helm upgrade <release> <chart_dir>` will accept it. Without it the
+/// CLI rejects with "missing in charts/ directory".
+///
+/// `--dependency-update` on `helm upgrade` is *not* a substitute: it
+/// fails to initialize the OCI registry client and errors with "missing
+/// registry client" for OCI-hosted deps (e.g. Bitnami's
+/// `oci://registry-1.docker.io/bitnamicharts/common`).
+pub async fn helm_dependency_update(
+    chart_dir: &std::path::Path,
+) -> Result<(), HelmDepUpdateFailure> {
+    use std::process::Stdio;
+    let chart_dir = chart_dir.to_path_buf();
+    let started = std::time::Instant::now();
+    let output = match tokio::task::spawn_blocking(move || {
+        std::process::Command::new("helm")
+            .arg("dependency")
+            .arg("update")
+            .arg(&chart_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    })
+    .await
+    {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err(HelmDepUpdateFailure {
+                message: format!("spawn helm dependency update: {e}"),
+                helm_stderr: String::new(),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+        Err(e) => {
+            return Err(HelmDepUpdateFailure {
+                message: format!("join helm dependency update: {e}"),
+                helm_stderr: String::new(),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+    };
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(HelmDepUpdateFailure {
+        message: format!(
+            "helm dependency update exited with status {}",
+            output.status
+        ),
+        helm_stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        elapsed_ms,
+    })
 }
 
 /// Convention used in the chart catalog `source` axis. In-cluster charts
@@ -644,6 +716,17 @@ pub async fn helm_upgrade(
         let chart_dir = tmp.path().join("chart");
         helm_releases::extract_chart_to_dir(&latest, &chart_dir)
             .map_err(|e| FetchError::Conflict(format!("chart extract: {e}")))?;
+        // Subcharts aren't bundled in the release secret — fetch them
+        // from their declared repos before invoking `helm upgrade`.
+        if helm_releases::chart_has_dependencies(&latest) {
+            if let Err(fail) = helm_dependency_update(&chart_dir).await {
+                return Ok(HelmUpgradeResult::Failed {
+                    message: fail.message,
+                    helm_stderr: fail.helm_stderr,
+                    elapsed_ms: fail.elapsed_ms,
+                });
+            }
+        }
         chart_arg = chart_dir.into_os_string();
     }
 
@@ -920,6 +1003,17 @@ pub async fn helm_install_chart(
         let chart_dir = tmp.path().join("chart");
         helm_releases::extract_chart_to_dir(&sample, &chart_dir)
             .map_err(|e| FetchError::Conflict(format!("chart extract: {e}")))?;
+        // Subcharts aren't bundled in the release secret — fetch them
+        // from their declared repos before invoking `helm install`.
+        if helm_releases::chart_has_dependencies(&sample) {
+            if let Err(fail) = helm_dependency_update(&chart_dir).await {
+                return Ok(HelmInstallResult::Failed {
+                    message: fail.message,
+                    helm_stderr: fail.helm_stderr,
+                    elapsed_ms: fail.elapsed_ms,
+                });
+            }
+        }
         chart_arg = chart_dir.into_os_string();
     } else {
         chart_arg = format!("{source}/{chart_name}").into();

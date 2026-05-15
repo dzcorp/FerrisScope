@@ -297,6 +297,14 @@ pub enum ChartExtractError {
 ///   doesn't already start with `templates/`.
 /// - `<schema_filename>` — `release.chart.schema` if present (rare).
 ///
+/// **Subcharts are not bundled.** Helm 3/4 declare `dependencies []*Chart`
+/// as an unexported field on `chart.Chart`, so the JSON in the release
+/// secret never carries subchart sources — only `metadata.dependencies`
+/// (the declarations from `Chart.yaml`) survives. Charts that declare
+/// dependencies need a `helm dependency update` pass against the extracted
+/// dir before `helm upgrade`, otherwise helm rejects with "missing in
+/// charts/ directory". See [`crate::fetch::helm_dependency_update`].
+///
 /// Helm chart files store paths relative to the chart root in their
 /// `name` field (e.g. `templates/deployment.yaml`, `files/config.json`).
 /// We honour that — *no* path normalisation that would re-route a file —
@@ -342,6 +350,20 @@ pub fn extract_chart_to_dir(release: &Release, dir: &Path) -> Result<(), ChartEx
     Ok(())
 }
 
+/// Return true if the parsed chart metadata declares any dependencies.
+/// Used by the upgrade/install path to decide whether a `helm dependency
+/// update` pass is needed before invoking `helm upgrade` (subcharts are
+/// not bundled in the release secret — see [`extract_chart_to_dir`]).
+pub fn chart_has_dependencies(release: &Release) -> bool {
+    release
+        .chart
+        .as_ref()
+        .and_then(|c| c.get("metadata"))
+        .and_then(|m| m.get("dependencies"))
+        .and_then(|d| d.as_array())
+        .is_some_and(|arr| !arr.is_empty())
+}
+
 fn write_chart_files(list: Option<&Value>, root: &Path) -> Result<(), ChartExtractError> {
     let Some(arr) = list.and_then(|v| v.as_array()) else {
         return Ok(());
@@ -373,4 +395,63 @@ fn write_chart_files(list: Option<&Value>, root: &Path) -> Result<(), ChartExtra
         fs::write(target, bytes)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn release_with_chart(chart: Value) -> Release {
+        Release {
+            name: "test".to_owned(),
+            namespace: Some("ns".to_owned()),
+            version: 1,
+            info: ReleaseInfo::default(),
+            chart: Some(chart),
+            config: None,
+            manifest: None,
+            hooks: None,
+        }
+    }
+
+    /// Regression: charts that declare `dependencies:` in `Chart.yaml`
+    /// (e.g. every Bitnami chart depending on `common`) need a `helm
+    /// dependency update` pass before `helm upgrade` because the release
+    /// secret never carries subchart sources. `chart_has_dependencies`
+    /// is what gates that pass — verify it sees the metadata array.
+    #[test]
+    fn chart_has_dependencies_detects_metadata_array() {
+        let with = release_with_chart(json!({
+            "metadata": {
+                "name": "mariadb",
+                "version": "11.5.7",
+                "dependencies": [{ "name": "common", "version": "2.x.x" }],
+            },
+        }));
+        assert!(chart_has_dependencies(&with));
+
+        let empty = release_with_chart(json!({
+            "metadata": { "name": "mariadb", "dependencies": [] },
+        }));
+        assert!(!chart_has_dependencies(&empty));
+
+        let none = release_with_chart(json!({
+            "metadata": { "name": "plain" },
+        }));
+        assert!(!chart_has_dependencies(&none));
+    }
+
+    #[test]
+    fn extract_writes_chart_yaml_and_values() {
+        let release = release_with_chart(json!({
+            "metadata": { "name": "plain", "version": "1.0.0" },
+            "values": { "key": "value" },
+        }));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        extract_chart_to_dir(&release, tmp.path()).expect("extract");
+        assert!(tmp.path().join("Chart.yaml").exists());
+        assert!(tmp.path().join("values.yaml").exists());
+        assert!(!tmp.path().join("charts").exists());
+    }
 }

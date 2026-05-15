@@ -54,10 +54,17 @@ export type ThemeMode = "light" | "dark";
 // keeps the rail + dock layout from running off screen on a 13" display.
 // The UI scale stacks on top of a theme's `typography.base` — themes pick
 // the baseline, the scale slider zooms it.
+//
+// `uiScale` is the *user-facing* multiplier (1.0 = the "100 %" the user
+// sees in Settings). The actual zoom applied to the document root is
+// `uiScale * UI_SCALE_BASELINE`, so the default rendering is already 10 %
+// larger than the raw theme baseline without confusing the operator with
+// an off-by-baseline number in the slider.
 export const UI_SCALE_MIN = 0.7;
 export const UI_SCALE_MAX = 1.5;
 export const UI_SCALE_STEP = 0.05;
 export const UI_SCALE_DEFAULT = 1.0;
+export const UI_SCALE_BASELINE = 1.1;
 
 export function clampUiScale(v: number): number {
   if (!Number.isFinite(v)) return UI_SCALE_DEFAULT;

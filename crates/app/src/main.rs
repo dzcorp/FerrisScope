@@ -6,6 +6,7 @@ mod agent_mcp;
 mod agent_native;
 mod agent_oauth;
 mod commands;
+mod helm_install;
 mod kubectl_install;
 mod secret_storage;
 mod ssh_scratch;
@@ -82,6 +83,14 @@ fn main() {
     #[cfg(target_os = "linux")]
     tracing::info!(target: "ferrisscope::startup", "{linux_render_summary}");
 
+    // macOS GUI apps launched from Finder/Dock/Spotlight inherit a minimal
+    // PATH (/usr/bin:/bin:/usr/sbin:/sbin) — not the user's shell PATH. That
+    // means Homebrew/MacPorts-installed CLIs (helm, kubectl, …) are invisible
+    // to `which::which` and `Command::new("foo")` until we paste the well-
+    // known dirs back in. Must happen before any tool-detection cache fires.
+    #[cfg(target_os = "macos")]
+    augment_macos_path();
+
     // Best-effort: drop any .fs-update-old leftovers from the previous swap.
     updater::cleanup_old_update_files();
 
@@ -103,6 +112,9 @@ fn main() {
             commands::kubectl_get_status,
             commands::kubectl_install_managed,
             commands::kubectl_uninstall_managed,
+            commands::helm_get_status,
+            commands::helm_install_managed,
+            commands::helm_uninstall_managed,
             commands::list_contexts,
             commands::connect_context,
             commands::cancel_connect,
@@ -409,4 +421,145 @@ fn configure_linux_render_env() -> String {
         applied.join(",")
     };
     format!("linux render: mode={mode} vendor={vendor} session={session} applied=[{applied_str}] (override via FERRISSCOPE_SAFE_MODE=1)")
+}
+
+/// Prepend well-known macOS tool dirs to the process `PATH`. Why: GUI apps
+/// launched outside a login shell (Finder, Dock, Spotlight, Launchpad) inherit
+/// `/usr/bin:/bin:/usr/sbin:/sbin` — none of which contain Homebrew or
+/// MacPorts. Anything we shell out to (helm install/uninstall/upgrade, an
+/// operator-installed kubectl, mcp binaries…) must still resolve via `$PATH`,
+/// so we paste the well-known dirs in once at startup. Idempotent: dirs
+/// already present in `PATH` are not duplicated.
+///
+/// We also include our own `<config>/bin` so a managed helm/kubectl install
+/// is picked up by `which::which` without a separate detection codepath.
+#[cfg(target_os = "macos")]
+fn augment_macos_path() {
+    use std::path::PathBuf;
+
+    // `(path, always_include)` — `always_include` skips the `is_dir` filter
+    // so we still cover paths that don't exist yet (notably our managed-bin
+    // dir on a fresh install: helm/kubectl land there *after* startup, and
+    // we want them resolvable without a restart).
+    let mut additions: Vec<(PathBuf, bool)> = vec![
+        // Homebrew Apple-silicon prefix.
+        (PathBuf::from("/opt/homebrew/bin"), false),
+        (PathBuf::from("/opt/homebrew/sbin"), false),
+        // Homebrew Intel prefix + traditional manual-install dir.
+        (PathBuf::from("/usr/local/bin"), false),
+        (PathBuf::from("/usr/local/sbin"), false),
+        // MacPorts.
+        (PathBuf::from("/opt/local/bin"), false),
+        (PathBuf::from("/opt/local/sbin"), false),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        additions.push((PathBuf::from(format!("{home}/.local/bin")), false));
+    }
+    if let Some(managed) = kubectl_install::managed_bin_dir() {
+        additions.push((managed, true));
+    }
+
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let existing_entries: Vec<PathBuf> = std::env::split_paths(&existing).collect();
+
+    let (new_entries, applied) = plan_path_additions(&additions, &existing_entries, |p| p.is_dir());
+
+    let summary = if applied.is_empty() {
+        "none".to_string()
+    } else {
+        applied.join(",")
+    };
+    match std::env::join_paths(&new_entries) {
+        Ok(joined) => {
+            std::env::set_var("PATH", joined);
+            tracing::info!(
+                target: "ferrisscope::startup",
+                "macos path: prepended=[{summary}]"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "ferrisscope::startup",
+                "macos path: could not join entries — leaving PATH untouched ({e})"
+            );
+        }
+    }
+}
+
+/// Pure planner for the PATH augmentation. Takes the proposed additions,
+/// the current PATH entries, and a closure that decides whether a non-
+/// always-included dir exists on disk. Returns `(new_entries, applied)`:
+/// `new_entries` is the full ordered PATH (additions first, then existing),
+/// `applied` lists what we actually prepended for the startup log.
+#[cfg(target_os = "macos")]
+fn plan_path_additions(
+    additions: &[(std::path::PathBuf, bool)],
+    existing: &[std::path::PathBuf],
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> (Vec<std::path::PathBuf>, Vec<String>) {
+    let mut new_entries: Vec<std::path::PathBuf> =
+        Vec::with_capacity(additions.len() + existing.len());
+    let mut applied: Vec<String> = Vec::new();
+    for (add, always) in additions {
+        if existing.iter().any(|e| e == add) {
+            continue;
+        }
+        if !*always && !exists(add) {
+            continue;
+        }
+        applied.push(add.display().to_string());
+        new_entries.push(add.clone());
+    }
+    new_entries.extend(existing.iter().cloned());
+    (new_entries, applied)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod path_planner_tests {
+    use super::plan_path_additions;
+    use std::path::PathBuf;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn skips_missing_unless_always() {
+        let additions = vec![(p("/opt/homebrew/bin"), false), (p("/managed/bin"), true)];
+        let existing = vec![p("/usr/bin"), p("/bin")];
+        let (new_entries, applied) =
+            plan_path_additions(&additions, &existing, |path| path == p("/opt/homebrew/bin"));
+        assert_eq!(
+            new_entries,
+            vec![
+                p("/opt/homebrew/bin"),
+                p("/managed/bin"),
+                p("/usr/bin"),
+                p("/bin")
+            ]
+        );
+        assert_eq!(applied, vec!["/opt/homebrew/bin", "/managed/bin"]);
+    }
+
+    #[test]
+    fn dedupes_against_existing() {
+        let additions = vec![(p("/usr/local/bin"), false), (p("/managed/bin"), true)];
+        let existing = vec![p("/usr/local/bin"), p("/usr/bin")];
+        let (new_entries, applied) = plan_path_additions(&additions, &existing, |_| true);
+        // /usr/local/bin is already in PATH — must not be duplicated.
+        assert_eq!(
+            new_entries,
+            vec![p("/managed/bin"), p("/usr/local/bin"), p("/usr/bin")]
+        );
+        assert_eq!(applied, vec!["/managed/bin"]);
+    }
+
+    #[test]
+    fn preserves_existing_when_no_additions_apply() {
+        let additions = vec![(p("/opt/homebrew/bin"), false)];
+        let existing = vec![p("/usr/bin")];
+        let (new_entries, applied) = plan_path_additions(&additions, &existing, |_| false);
+        assert_eq!(new_entries, vec![p("/usr/bin")]);
+        assert!(applied.is_empty());
+    }
 }

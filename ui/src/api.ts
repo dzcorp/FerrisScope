@@ -16,6 +16,8 @@ import type {
   ChatTool,
   KubectlDetection,
   KubectlInstallResult,
+  HelmDetection,
+  HelmManagedInstallResult,
   ChatEvent,
   ClusterHealthEvent,
   ClusterInfo,
@@ -979,6 +981,10 @@ export const api = {
   kubectlInstallManaged: () =>
     invoke<KubectlInstallResult>("kubectl_install_managed"),
   kubectlUninstallManaged: () => invoke<void>("kubectl_uninstall_managed"),
+  helmGetStatus: () => invoke<HelmDetection>("helm_get_status"),
+  helmInstallManaged: () =>
+    invoke<HelmManagedInstallResult>("helm_install_managed"),
+  helmUninstallManaged: () => invoke<void>("helm_uninstall_managed"),
 };
 
 // Tauri restricts event names to [A-Za-z0-9_/:-]. Cluster ids embed the

@@ -3,7 +3,13 @@ import { listen } from "@tauri-apps/api/event";
 import { api, onPortForwardStatus, onResourceDelta } from "./api";
 import { useAppStore, useResolvedTheme } from "./store";
 import type { AppInfo, ResourceKind } from "./types";
-import { FONT_SANS, UI_SCALE_DEFAULT, R_LG, FS_MD } from "./theme";
+import {
+  FONT_SANS,
+  UI_SCALE_BASELINE,
+  UI_SCALE_DEFAULT,
+  R_LG,
+  FS_MD,
+} from "./theme";
 import { AppHeader } from "./components/AppHeader";
 import { TitleBar, ResizeEdges, TITLEBAR_INSET_PX } from "./components/TitleBar";
 import { Rail } from "./components/Rail";
@@ -582,7 +588,10 @@ export default function App() {
   // because the codebase pins pixel literals (`fontSize: FS_MD`, paddings)
   // throughout — `zoom` scales every pixel uniformly and is supported in
   // both webview engines we ship to (WebKit on macOS, WebKitGTK on Linux).
-  document.documentElement.style.zoom = String(uiScale);
+  // The applied zoom is the user-facing slider value multiplied by a
+  // hidden baseline so "100 %" in Settings already renders 10 % larger
+  // than the raw theme baseline.
+  document.documentElement.style.zoom = String(uiScale * UI_SCALE_BASELINE);
 
   const leftInset = selectedContext
     ? railMode === "pinned"

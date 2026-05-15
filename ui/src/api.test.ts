@@ -735,6 +735,20 @@ describe("kubectl management", () => {
   });
 });
 
+describe("helm management", () => {
+  it("helmGetStatus / helmInstallManaged / helmUninstallManaged", async () => {
+    const cap = captureNext({});
+    await api.helmGetStatus();
+    await api.helmInstallManaged();
+    await api.helmUninstallManaged();
+    expect(cap.calls.map((c) => c.cmd)).toEqual([
+      "helm_get_status",
+      "helm_install_managed",
+      "helm_uninstall_managed",
+    ]);
+  });
+});
+
 describe("applyYaml / dev memory", () => {
   it("applyYaml forwards dryRun + force flags", async () => {
     const cap = captureNext([]);

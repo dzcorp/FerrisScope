@@ -2306,6 +2306,22 @@ export type KubectlInstallResult = {
   asset_url: string;
 };
 
+// helm install / detection wire shape. Mirrors KubectlDetection. macOS GUI
+// apps don't see Homebrew-installed helm in $PATH, so we provide a managed
+// install pathway in parallel to kubectl's. Named `…Managed…` to avoid
+// colliding with the chart-install `HelmInstallResult` shape above.
+export type HelmDetection =
+  | { kind: "configured"; path: string; exists: boolean }
+  | { kind: "managed"; path: string; version: string | null }
+  | { kind: "on_path"; path: string }
+  | { kind: "missing" };
+
+export type HelmManagedInstallResult = {
+  path: string;
+  version: string;
+  asset_url: string;
+};
+
 export type ChatEvent =
   | { type: "assistant_start"; message_id: string }
   | { type: "token_delta"; delta: string }

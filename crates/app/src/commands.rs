@@ -370,6 +370,30 @@ pub(crate) async fn kubectl_uninstall_managed() -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+// ── helm install / detection ─────────────────────────────────────────────
+
+#[tauri::command]
+pub(crate) async fn helm_get_status() -> Result<crate::helm_install::HelmDetection, String> {
+    Ok(crate::helm_install::detect())
+}
+
+#[tauri::command]
+pub(crate) async fn helm_install_managed(
+) -> Result<crate::helm_install::HelmManagedInstallResult, String> {
+    tokio::task::spawn_blocking(crate::helm_install::install_latest_blocking)
+        .await
+        .map_err(|e| format!("helm install task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn helm_uninstall_managed() -> Result<(), String> {
+    tokio::task::spawn_blocking(crate::helm_install::uninstall_managed)
+        .await
+        .map_err(|e| format!("helm uninstall task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub(crate) async fn list_contexts(state: State<'_, AppState>) -> Result<Vec<ContextInfo>, String> {
     let sources = state.sources.lock().await;
