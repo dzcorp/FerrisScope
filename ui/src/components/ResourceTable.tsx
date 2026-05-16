@@ -158,6 +158,7 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
   const pendingDetail = useAppStore((s) => s.pendingDetail);
   const consumePendingDetail = useAppStore((s) => s.consumePendingDetail);
   const navigateToDetail = useAppStore((s) => s.navigateToDetail);
+  const setSelectedNamespaces = useAppStore((s) => s.setSelectedNamespaces);
   const pushDetailEntry = useAppStore((s) => s.pushDetailEntry);
   const closeDetail = useAppStore((s) => s.closeDetail);
   const kinds = useAppStore((s) => s.kinds);
@@ -409,6 +410,12 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
   tRef.current = t;
   const monoTablesRef = useRef(monoTables);
   monoTablesRef.current = monoTables;
+  // Inline cell-link handlers flow through refs so a store change doesn't
+  // force a columns rebuild (which would invalidate TanStack's row model).
+  const navigateToDetailRef = useRef(navigateToDetail);
+  navigateToDetailRef.current = navigateToDetail;
+  const setSelectedNamespacesRef = useRef(setSelectedNamespaces);
+  setSelectedNamespacesRef.current = setSelectedNamespaces;
 
   const columns = useMemo<TanColumnDef<ResourceRow>[]>(() => {
     const cols: TanColumnDef<ResourceRow>[] = kind.columns
@@ -432,6 +439,8 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
             isPods,
             podMetricsRef.current,
             monoTablesRef.current,
+            navigateToDetailRef.current,
+            setSelectedNamespacesRef.current,
           ),
       }));
     // Selection column applies to every kind now — operators copy names off
@@ -1919,7 +1928,7 @@ function phaseRank(p: string): number {
   }
 }
 
-function renderCell(
+export function renderCell(
   c: ColumnDef,
   row: ResourceRow,
   mode: ThemeMode,
@@ -1927,6 +1936,12 @@ function renderCell(
   isPods: boolean,
   podMetrics: Record<string, { cpu_milli: number; mem_mib: number }> | null,
   monoTables: boolean,
+  navigateToDetail: (
+    kindId: string,
+    namespace: string | null,
+    name: string,
+  ) => void,
+  setSelectedNamespaces: (ns: Set<string>) => void,
 ) {
   const value = row[c.id];
 
@@ -2056,9 +2071,27 @@ function renderCell(
             c.id === "uid" ||
             c.id === "ip" ||
             c.id === "cluster_ip"));
+      // Namespace cells globally pin the namespace filter; node cells open the
+      // node's detail panel. Both stop propagation so the delegated row click
+      // (which opens *this* row's detail) doesn't also fire. Style stays as is
+      // — only a pointer cursor signals the affordance.
+      const isNsLink = c.id === "namespace" && raw !== "";
+      const isNodeLink = c.id === "node" && raw !== "";
+      const clickable = isNsLink || isNodeLink;
+      const onClick = clickable
+        ? (e: React.MouseEvent) => {
+            e.stopPropagation();
+            if (isNsLink) {
+              setSelectedNamespaces(new Set([raw]));
+            } else if (isNodeLink) {
+              navigateToDetail("nodes", null, raw);
+            }
+          }
+        : undefined;
       return (
         <span
           title={isQty && raw !== "" ? raw : undefined}
+          onClick={onClick}
           style={{
             fontFamily: mono ? FF_MONO : "inherit",
             fontSize: mono ? 11.5 : 12,
@@ -2066,6 +2099,7 @@ function renderCell(
             fontVariantNumeric: isQty ? "tabular-nums" : undefined,
             overflow: "hidden",
             textOverflow: "ellipsis",
+            cursor: clickable ? "pointer" : undefined,
           }}
         >
           {display}
