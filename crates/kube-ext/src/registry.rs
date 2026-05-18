@@ -10,14 +10,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use kube::{
-    api::DynamicObject,
-    core::{ApiResource, GroupVersionKind},
+    api::{Api, DynamicObject},
+    core::{ApiResource, ClusterResourceScope, GroupVersionKind, NamespaceResourceScope},
     Client, Resource,
 };
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::watcher::ResourceWatcher;
+use crate::watcher::{NsScope, ResourceWatcher};
 use ferrisscope_core::cluster::ListStrategy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,17 +110,49 @@ pub trait KindSpec: Send + Sync + 'static {
 }
 
 /// Boxed factory so the registry can be a flat array of kinds without each
-/// entry being a different type.
+/// entry being a different type. The factory takes a [`NsScope`] so a
+/// single-namespace selection in the UI maps onto a `namespaced` watcher
+/// (real perf + RBAC win); cluster-scoped kinds always get [`NsScope::All`]
+/// regardless of what the operator picked.
 pub struct ResourceKindEntry {
     pub meta: ResourceKind,
-    pub start: Box<dyn Fn(Client, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync>,
+    pub start: Box<dyn Fn(Client, NsScope, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync>,
 }
 
 impl ResourceKindEntry {
-    pub fn from_spec<S: KindSpec>() -> Self {
+    /// Register a namespaced typed kind. The `Resource<Scope =
+    /// NamespaceResourceScope>` bound lets the closure call
+    /// `Api::namespaced(client, ns)` when the operator has picked a single
+    /// namespace; otherwise the watcher falls back to `Api::all` (multi-
+    /// select and all-namespaces both resolve to `NsScope::All` upstream).
+    pub fn from_spec<S>() -> Self
+    where
+        S: KindSpec,
+        S::K: Resource<Scope = NamespaceResourceScope>,
+    {
         Self {
             meta: S::meta(),
-            start: Box::new(|client, strategy| {
+            start: Box::new(|client, scope, strategy| {
+                let api = match scope.namespace() {
+                    Some(ns) => Api::<S::K>::namespaced(client, ns),
+                    None => Api::all(client),
+                };
+                Arc::new(ResourceWatcher::start_with_api::<S>(api, strategy))
+            }),
+        }
+    }
+
+    /// Register a cluster-scoped typed kind. The watcher always uses
+    /// `Api::all` regardless of the operator's namespace selection — a
+    /// namespace filter is meaningless for nodes / clusterroles / etc.
+    pub fn from_cluster_spec<S>() -> Self
+    where
+        S: KindSpec,
+        S::K: Resource<Scope = ClusterResourceScope>,
+    {
+        Self {
+            meta: S::meta(),
+            start: Box::new(|client, _scope, strategy| {
                 Arc::new(ResourceWatcher::start::<S>(client, strategy))
             }),
         }
@@ -194,18 +226,21 @@ impl ResourceKindEntry {
         let namespaced = crd.namespaced;
         let log_id = id.to_owned();
         let projector = Arc::new(DynamicProjector::new(printer_columns));
-        let start: Box<dyn Fn(Client, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync> =
-            Box::new(move |client, strategy| {
-                let p = projector.clone();
-                Arc::new(ResourceWatcher::start_dynamic(
-                    client,
-                    ar.clone(),
-                    namespaced,
-                    log_id.clone(),
-                    Arc::new(move |obj: &DynamicObject| p.project(obj)),
-                    strategy,
-                ))
-            });
+        let start: Box<
+            dyn Fn(Client, NsScope, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync,
+        > = Box::new(move |client, scope, strategy| {
+            let effective = if namespaced { scope } else { NsScope::All };
+            let p = projector.clone();
+            Arc::new(ResourceWatcher::start_dynamic(
+                client,
+                ar.clone(),
+                namespaced,
+                log_id.clone(),
+                Arc::new(move |obj: &DynamicObject| p.project(obj)),
+                effective,
+                strategy,
+            ))
+        });
         Self { meta, start }
     }
 
@@ -241,17 +276,20 @@ impl ResourceKindEntry {
         let namespaced = crd.namespaced;
         let log_id = id.to_owned();
         let project_fn = wk.project;
-        let start: Box<dyn Fn(Client, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync> =
-            Box::new(move |client, strategy| {
-                Arc::new(ResourceWatcher::start_dynamic(
-                    client,
-                    ar.clone(),
-                    namespaced,
-                    log_id.clone(),
-                    Arc::new(project_fn),
-                    strategy,
-                ))
-            });
+        let start: Box<
+            dyn Fn(Client, NsScope, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync,
+        > = Box::new(move |client, scope, strategy| {
+            let effective = if namespaced { scope } else { NsScope::All };
+            Arc::new(ResourceWatcher::start_dynamic(
+                client,
+                ar.clone(),
+                namespaced,
+                log_id.clone(),
+                Arc::new(project_fn),
+                effective,
+                strategy,
+            ))
+        });
         Self { meta, start }
     }
 }
@@ -537,8 +575,10 @@ pub struct DiscoveredPrinterColumn {
 pub fn helm_releases_entry() -> ResourceKindEntry {
     ResourceKindEntry {
         meta: crate::kinds::helm_releases::meta(),
-        start: Box::new(|client, strategy| {
-            Arc::new(ResourceWatcher::start_helm_releases(client, strategy))
+        start: Box::new(|client, scope, strategy| {
+            Arc::new(ResourceWatcher::start_helm_releases(
+                client, scope, strategy,
+            ))
         }),
     }
 }
@@ -551,8 +591,15 @@ pub fn helm_releases_entry() -> ResourceKindEntry {
 pub fn helm_charts_entry() -> ResourceKindEntry {
     ResourceKindEntry {
         meta: crate::kinds::helm_charts::meta(),
-        start: Box::new(|client, strategy| {
-            Arc::new(ResourceWatcher::start_helm_charts(client, strategy))
+        // Charts is a cluster-wide aggregate by (chart_name, chart_version);
+        // scoping the underlying secret watch to one namespace would hide
+        // charts deployed elsewhere. Always `All`.
+        start: Box::new(|client, _scope, strategy| {
+            Arc::new(ResourceWatcher::start_helm_charts(
+                client,
+                NsScope::All,
+                strategy,
+            ))
         }),
     }
 }
@@ -580,43 +627,46 @@ pub fn registry() -> Vec<ResourceKindEntry> {
         ResourceKindEntry::from_spec::<crate::kinds::endpoints::EndpointsSpec>(),
         ResourceKindEntry::from_spec::<crate::kinds::endpoint_slices::EndpointSliceSpec>(),
         ResourceKindEntry::from_spec::<crate::kinds::ingresses::IngressSpec>(),
-        ResourceKindEntry::from_spec::<crate::kinds::ingress_classes::IngressClassSpec>(),
+        ResourceKindEntry::from_cluster_spec::<crate::kinds::ingress_classes::IngressClassSpec>(),
         ResourceKindEntry::from_spec::<crate::kinds::network_policies::NetworkPolicySpec>(),
         // Config
         ResourceKindEntry::from_spec::<crate::kinds::config_maps::ConfigMapSpec>(),
         ResourceKindEntry::from_spec::<crate::kinds::secrets::SecretSpec>(),
         ResourceKindEntry::from_spec::<crate::kinds::resource_quotas::ResourceQuotaSpec>(),
         ResourceKindEntry::from_spec::<crate::kinds::limit_ranges::LimitRangeSpec>(),
-        ResourceKindEntry::from_spec::<
+        ResourceKindEntry::from_cluster_spec::<
             crate::kinds::mutating_webhook_configurations::MutatingWebhookConfigurationSpec,
         >(),
-        ResourceKindEntry::from_spec::<
+        ResourceKindEntry::from_cluster_spec::<
             crate::kinds::validating_webhook_configurations::ValidatingWebhookConfigurationSpec,
         >(),
         // Storage
         ResourceKindEntry::from_spec::<
             crate::kinds::persistent_volume_claims::PersistentVolumeClaimSpec,
         >(),
-        ResourceKindEntry::from_spec::<crate::kinds::persistent_volumes::PersistentVolumeSpec>(),
-        ResourceKindEntry::from_spec::<crate::kinds::storage_classes::StorageClassSpec>(),
+        ResourceKindEntry::from_cluster_spec::<
+            crate::kinds::persistent_volumes::PersistentVolumeSpec,
+        >(),
+        ResourceKindEntry::from_cluster_spec::<crate::kinds::storage_classes::StorageClassSpec>(),
         // Access (RBAC)
         ResourceKindEntry::from_spec::<crate::kinds::service_accounts::ServiceAccountSpec>(),
         ResourceKindEntry::from_spec::<crate::kinds::roles::RoleSpec>(),
         ResourceKindEntry::from_spec::<crate::kinds::role_bindings::RoleBindingSpec>(),
-        ResourceKindEntry::from_spec::<crate::kinds::cluster_roles::ClusterRoleSpec>(),
-        ResourceKindEntry::from_spec::<crate::kinds::cluster_role_bindings::ClusterRoleBindingSpec>(
-        ),
+        ResourceKindEntry::from_cluster_spec::<crate::kinds::cluster_roles::ClusterRoleSpec>(),
+        ResourceKindEntry::from_cluster_spec::<
+            crate::kinds::cluster_role_bindings::ClusterRoleBindingSpec,
+        >(),
         // Cluster
-        ResourceKindEntry::from_spec::<crate::kinds::nodes::NodeSpec>(),
-        ResourceKindEntry::from_spec::<crate::kinds::namespaces::NamespaceSpec>(),
+        ResourceKindEntry::from_cluster_spec::<crate::kinds::nodes::NodeSpec>(),
+        ResourceKindEntry::from_cluster_spec::<crate::kinds::namespaces::NamespaceSpec>(),
         ResourceKindEntry::from_spec::<crate::kinds::events::EventSpec>(),
-        ResourceKindEntry::from_spec::<crate::kinds::priority_classes::PriorityClassSpec>(),
+        ResourceKindEntry::from_cluster_spec::<crate::kinds::priority_classes::PriorityClassSpec>(),
         ResourceKindEntry::from_spec::<crate::kinds::leases::LeaseSpec>(),
         // Apps (synthetic kinds — packaging on top of raw K8s).
         helm_releases_entry(),
         helm_charts_entry(),
         // Custom Resources
-        ResourceKindEntry::from_spec::<
+        ResourceKindEntry::from_cluster_spec::<
             crate::kinds::custom_resource_definitions::CustomResourceDefinitionSpec,
         >(),
     ]

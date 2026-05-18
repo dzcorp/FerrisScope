@@ -608,7 +608,7 @@ function PodsOnNodeSection(props: {
         // We need real-time updates so a drain visibly drains — without this
         // the panel only refreshed on the node watcher's bumps, which don't
         // fire for pod state changes.
-        const unl = await onResourceDelta(props.clusterId, "pods", (delta) => {
+        const unl = await onResourceDelta(props.clusterId, "pods", null, (delta) => {
           if (cancelled || mapRef.current !== localMap) return;
           if (delta.kind === "upsert") {
             const node =

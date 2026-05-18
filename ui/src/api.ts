@@ -126,18 +126,28 @@ export const api = {
   // unlike `listResourceKinds` this needs a connected `clusterId`.
   listCustomResourceKinds: (clusterId: string) =>
     invoke<ResourceKind[]>("list_custom_resource_kinds", { clusterId }),
+  // `namespaces` carries the operator's selected-namespace set verbatim.
+  // The backend maps it to a watcher scope: empty / multi → cross-NS
+  // `Api::all`; exactly one → `Api::namespaced(ns)` (real perf + RBAC
+  // win on big clusters). Pass `null` for cluster-scoped kinds — the
+  // backend coerces to `All` anyway, but skipping the array keeps the
+  // payload tidy.
   subscribeResource: (
     clusterId: string,
     kindId: string,
-    namespaceFilter: string | null = null,
+    namespaces: string[] | null = null,
   ) =>
     invoke<SubscribeResult>("subscribe_resource", {
       clusterId,
       kindId,
-      namespaceFilter,
+      namespaces,
     }),
-  unsubscribeResource: (clusterId: string, kindId: string) =>
-    invoke<void>("unsubscribe_resource", { clusterId, kindId }),
+  unsubscribeResource: (
+    clusterId: string,
+    kindId: string,
+    namespaces: string[] | null = null,
+  ) =>
+    invoke<void>("unsubscribe_resource", { clusterId, kindId, namespaces }),
   // Force-drop every running watcher for a cluster. Use when leaving the
   // cluster (context switch) so we don't carry idle watch streams on the
   // cluster we're no longer viewing — bypasses the per-watcher linger.
@@ -1000,12 +1010,24 @@ function sanitizeEventSegment(s: string): string {
   return out;
 }
 
+/// Mirror of `NsScope::key()` in `crates/kube-ext/src/watcher.rs`. Must
+/// stay in sync — both ends compute the resource event name and the
+/// listener wouldn't receive anything if the segments diverged.
+export function nsScopeKey(namespaces: string[] | null | undefined): string {
+  if (!namespaces || namespaces.length === 0 || namespaces.length >= 2) {
+    return "all";
+  }
+  return `ns:${namespaces[0]}`;
+}
+
 export function onResourceDelta(
   clusterId: string,
   kindId: string,
+  namespaces: string[] | null,
   handler: (delta: ResourceDelta) => void,
 ): Promise<UnlistenFn> {
-  const name = `resource://${sanitizeEventSegment(clusterId)}/${sanitizeEventSegment(kindId)}`;
+  const scope = nsScopeKey(namespaces);
+  const name = `resource://${sanitizeEventSegment(clusterId)}/${sanitizeEventSegment(kindId)}/${sanitizeEventSegment(scope)}`;
   // Backend emits batched arrays of deltas; older single-delta payloads
   // are tolerated for forward/back compat. Each entry is fed to the
   // handler in order.

@@ -24,7 +24,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, onResourceDelta } from "../api";
 import { useAppStore, useResolvedTheme } from "../store";
 import { formatQuantity } from "./detail";
-import type { ColumnDef, ResourceKind, ResourceRow } from "../types";
+import type { ColumnDef, ResourceDelta, ResourceKind, ResourceRow } from "../types";
 import { tokens, FF_MONO, FONT_MONO, type ThemeMode, FS_MD, FS_SM, FS_XS } from "../theme";
 import { LogPanel } from "./LogPanel";
 import { DetailPanel, type DetailTarget } from "./DetailPanel";
@@ -192,10 +192,43 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
 
   const rowsRef = useRef<Map<string, ResourceRow>>(new Map());
 
+  // Per-subscription namespace lists. Each entry becomes one backend
+  // subscribe call → one `Api::namespaced(ns)` watcher → one event
+  // channel. The frontend merges the per-watcher snapshots into a single
+  // row map, so the operator sees the union without paying the cross-NS
+  // `Api::all` cost on the apiserver.
+  //
+  // | Selected set       | `subscribeScopes`            |
+  // |--------------------|------------------------------|
+  // | cluster-scoped     | `[null]` (always All)        |
+  // | empty (All NS)     | `[null]`                     |
+  // | one namespace      | `[["foo"]]`                  |
+  // | multi-select 2+    | `[["foo"], ["bar"], ["baz"]]`|
+  //
+  // Each scope is independently lingered by the backend, so flipping
+  // {foo} → {foo, bar} only pays a fresh LIST for bar — foo's watcher
+  // is reused. Flipping back to {foo} drops bar after its 60 s linger.
+  const subscribeScopes: (string[] | null)[] = useMemo(() => {
+    if (!kind.namespaced) return [null];
+    const sel = Array.from(selectedNamespaces).sort();
+    if (sel.length === 0) return [null];
+    return sel.map((ns) => [ns]);
+  }, [kind.namespaced, selectedNamespaces]);
+  // Stable key for the subscribe effect's dep array. Re-runs the effect
+  // when the operator changes scope (cardinality or set membership) so
+  // we tear down + open the right backend slots.
+  const subscribeScopeKey = useMemo(() => {
+    return subscribeScopes
+      .map((s) => (s == null ? "all" : `ns:${s[0]}`))
+      .join("|");
+  }, [subscribeScopes]);
+
   useEffect(() => {
     let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    // Per-effect map. The listener closure captures THIS map, not the shared
+    // One unlisten per per-namespace listener (one entry for single-NS /
+    // cluster / All; N entries for multi-select). Cleared in the cleanup.
+    const unlistens: Array<() => void> = [];
+    // Per-effect map. The listener closures capture THIS map, not the shared
     // `rowsRef`, so a leaked listener from a prior kind/cluster can never
     // pollute the next kind's row set. (The shared ref is still updated for
     // detail/exec lookups, but only by the active effect.)
@@ -222,60 +255,77 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
       rafHandle = requestAnimationFrame(flushRows);
     };
 
+    const onDelta = (delta: ResourceDelta) => {
+      // Belt: closure-captured `cancelled` neutralises a listener whose
+      // effect has been torn down. Suspenders: the rowsRef identity check
+      // guards the case where a stale listener somehow outlives both
+      // cleanup and the next mount.
+      if (cancelled) return;
+      if (rowsRef.current !== localMap) return;
+      if (delta.kind === "upsert") {
+        localMap.set(delta.row.uid, delta.row);
+        scheduleFlush();
+        // First row counts as visual confirmation the watcher is alive
+        // even before the initial sync formally completes — drop the
+        // spinner so the table isn't fighting against rows already on
+        // screen.
+        setLoad((cur) => (cur.kind === "loading" ? { kind: "ready" } : cur));
+      } else if (delta.kind === "delete") {
+        localMap.delete(delta.uid);
+        scheduleFlush();
+      } else {
+        // init_done — watcher finished its initial sync. Safe to flip
+        // the load state to ready even if the snapshot was empty (the
+        // kind genuinely has no instances on this cluster).
+        setLoad((cur) => (cur.kind === "loading" ? { kind: "ready" } : cur));
+      }
+    };
+
     (async () => {
       try {
-        const unl = await onResourceDelta(clusterId, kind.id, (delta) => {
-          // Belt: closure-captured `cancelled` neutralises a listener whose
-          // effect has been torn down. Suspenders: the rowsRef identity check
-          // guards the case where a stale listener somehow outlives both
-          // cleanup and the next mount.
-          if (cancelled) return;
-          if (rowsRef.current !== localMap) return;
-          if (delta.kind === "upsert") {
-            localMap.set(delta.row.uid, delta.row);
-            scheduleFlush();
-            // First row counts as visual confirmation the watcher is alive
-            // even before the initial sync formally completes — drop the
-            // spinner so the table isn't fighting against rows already on
-            // screen.
-            setLoad((cur) => (cur.kind === "loading" ? { kind: "ready" } : cur));
-          } else if (delta.kind === "delete") {
-            localMap.delete(delta.uid);
-            scheduleFlush();
-          } else {
-            // init_done — watcher finished its initial sync. Safe to flip
-            // the load state to ready even if the snapshot was empty (the
-            // kind genuinely has no instances on this cluster).
-            setLoad((cur) => (cur.kind === "loading" ? { kind: "ready" } : cur));
-          }
-        });
+        // Register listeners FIRST (before subscribe) so deltas emitted
+        // during the snapshot round-trip aren't missed. Listeners run in
+        // parallel; each owns its own scope event channel.
+        const listenerHandles = await Promise.all(
+          subscribeScopes.map((scope) =>
+            onResourceDelta(clusterId, kind.id, scope, onDelta),
+          ),
+        );
         // If cleanup ran while we were awaiting registration, the cleanup
-        // saw `unlisten = null` and skipped the unsubscribe — tear down here.
+        // saw `unlistens` empty and skipped the unsubscribe — tear down here.
         if (cancelled) {
-          unl();
+          for (const u of listenerHandles) u();
           return;
         }
-        unlisten = unl;
+        unlistens.push(...listenerHandles);
 
-        const result = await api.subscribeResource(clusterId, kind.id, null);
+        // Subscribe each scope in parallel. Backend lingers each
+        // (kind, ns) slot independently, so a flip from {foo} →
+        // {foo, bar} reuses foo's warm watcher and only pays a fresh
+        // LIST for bar.
+        const results = await Promise.all(
+          subscribeScopes.map((scope) =>
+            api.subscribeResource(clusterId, kind.id, scope),
+          ),
+        );
         if (cancelled) return;
 
-        // Merge snapshot under any deltas that already landed (deltas win,
-        // they're newer). Mutate `localMap` in place so the listener keeps
-        // writing to the same map the renderer reads from.
+        // Merge each scope's snapshot under any deltas already landed
+        // (deltas win, they're newer). Snapshots can't double-count: a
+        // pod has exactly one namespace and is only emitted by that
+        // namespace's watcher.
         const merged = new Map<string, ResourceRow>();
-        for (const row of result.rows) merged.set(row.uid, row);
+        for (const result of results) {
+          for (const row of result.rows) merged.set(row.uid, row);
+        }
         for (const [uid, row] of localMap) merged.set(uid, row);
         localMap.clear();
         for (const [uid, row] of merged) localMap.set(uid, row);
         setRows(Array.from(localMap.values()));
-        // Only flip to "ready" now if the backend tells us the watcher's
-        // initial sync already finished, OR we already have rows in hand.
-        // Otherwise stay in "loading" and let the listener flip it when
-        // either the first row arrives or the `init_done` delta lands —
-        // that's what fixes the "click Pods, see momentary 'no pods'"
-        // flicker on slow apiservers.
-        if (result.init_done || localMap.size > 0) {
+        // Flip to ready when every scope has either completed its initial
+        // sync OR contributed a row (mirrors the single-scope heuristic).
+        const allInitDone = results.every((r) => r.init_done);
+        if (allInitDone || localMap.size > 0) {
           setLoad({ kind: "ready" });
         }
       } catch (e) {
@@ -289,16 +339,24 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
     return () => {
       cancelled = true;
       if (rafHandle != null) cancelAnimationFrame(rafHandle);
-      if (unlisten) unlisten();
+      for (const u of unlistens) u();
       // Drop every captured row reference so a late Tauri delta firing
       // after unsubscribe (the channel can deliver a few in-flight events
       // before the unlisten round-trip completes) can't keep 2800 row
       // payloads alive on the JS heap. Belt for the rowsRef-identity
       // suspenders we already have.
       localMap.clear();
-      api.unsubscribeResource(clusterId, kind.id).catch(() => {});
+      for (const scope of subscribeScopes) {
+        api
+          .unsubscribeResource(clusterId, kind.id, scope)
+          .catch(() => {});
+      }
     };
-  }, [clusterId, kind.id]);
+    // `subscribeScopeKey` joins scope flips with the existing
+    // (cluster, kind) churn — when the operator changes their namespace
+    // selection (size or membership), we tear down the old subscriptions
+    // and open a new fan of them against the matching backend slots.
+  }, [clusterId, kind.id, subscribeScopeKey, subscribeScopes]);
 
   // Cross-kind navigation: if the operator clicked "Controlled By: …" on
   // another kind's detail panel, the store carries the (namespace, name) here.
@@ -1161,6 +1219,16 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
           clusterId={clusterId}
           kind={kind}
           target={detailTarget}
+          // Detail's delta listener needs the channel that actually
+          // carries this row's events. With per-namespace subscriptions,
+          // the row lives in the watcher scoped to its own namespace —
+          // not the table's full selection. Cluster-scoped kinds and
+          // detail targets without a namespace fall back to All.
+          subscribeNamespaces={
+            kind.namespaced && detailTarget.namespace
+              ? [detailTarget.namespace]
+              : null
+          }
           row={
             rowsRef.current.get(detailTarget.uid) ??
             filtered.find((r) => r.uid === detailTarget.uid) ??

@@ -325,6 +325,7 @@ export default function App() {
         unlisten = await onResourceDelta(
           selectedContextName,
           "namespaces",
+          null,
           (delta) => {
             if (cancelled) return;
             if (delta.kind === "upsert") {

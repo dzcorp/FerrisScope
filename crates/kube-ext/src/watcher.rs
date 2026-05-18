@@ -8,8 +8,19 @@
 //!
 //! Each row is always `{ "uid": "...", ... }` — the watcher injects `uid`
 //! after [`KindSpec::project`] so spec implementations don't have to.
+//!
+//! The watcher → forwarder pipe is a **coalescing dirty channel**, not a
+//! bounded broadcast. The previous design used `tokio::sync::broadcast`
+//! with a 256-slot ring, which lost events under load — visible as "Pods
+//! load stalls at ~2000 of 3000+" or "Custom resources show nothing until
+//! the entire 6000-object list finishes" on big clusters. The cache
+//! stayed correct (writes happened before the broadcast send), so
+//! switching kind and back recovered the full snapshot, but real-time
+//! updates were silently dropped. The new shape can't drop: writes
+//! collapse by uid into a `HashMap` while the forwarder is busy emitting,
+//! and the drainer always sees the latest state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -24,19 +35,232 @@ use kube::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::broadcast;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::registry::KindSpec;
 
-/// Per-watcher broadcast capacity. tokio's broadcast retains the last N
-/// sends for any laggy receiver, so this is a steady-state floor on memory
-/// per active reflector (≈ rows × ~1 KB each). The forwarder consumer in
-/// `commands.rs` drains in <1 s under normal conditions, so a smaller ring
-/// is plenty; 256 keeps headroom for a brief stall (resync after 410 Gone,
-/// chatty kinds like `events`) without holding tens of MB across ~20
-/// active reflectors when the operator is idle on a tab.
-const DELTA_BUFFER: usize = 256;
+/// Namespace scope for a single [`ResourceWatcher`]. The operator's
+/// namespace selection in the UI is mapped onto one of these by the
+/// `subscribe_resource` command:
+///
+/// | Selected set | Scope used                                           |
+/// |--------------|------------------------------------------------------|
+/// | empty (All)  | [`NsScope::All`] — `Api::all`                       |
+/// | exactly one  | [`NsScope::One`] — `Api::namespaced(ns)`            |
+/// | two or more  | [`NsScope::All`] + client-side filter on the table  |
+/// | cluster kind | [`NsScope::All`] always — the registry enforces it  |
+///
+/// The slot in [`crate::registry`] is keyed by `(kind, scope)`, so each
+/// scope gets its own watcher + linger cache. Flipping between `All` and
+/// `One(ns)` within the 60 s linger window reuses warm watchers — no
+/// fresh LIST round-trip.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum NsScope {
+    All,
+    One(String),
+}
+
+impl NsScope {
+    /// `Some(ns)` for a single-namespace scope, `None` for cluster-wide.
+    pub fn namespace(&self) -> Option<&str> {
+        match self {
+            Self::All => None,
+            Self::One(ns) => Some(ns.as_str()),
+        }
+    }
+
+    /// Map an operator namespace selection onto a scope. Callers handling
+    /// cluster-scoped kinds should ignore this and use [`Self::All`].
+    pub fn from_selection(selected: &[String]) -> Self {
+        match selected {
+            [] => Self::All,
+            [one] => Self::One(one.clone()),
+            // 2+ selected stays on All-watcher; the frontend filters
+            // rows client-side against the set. See doc table above.
+            _ => Self::All,
+        }
+    }
+
+    /// Stable string used both as the slot key suffix and as the event
+    /// name segment in `resource://{cluster}/{kind}/{scope}`. Colons and
+    /// slashes are accepted by the Tauri sanitiser; namespace characters
+    /// outside `[A-Za-z0-9_-]` are unusual and the caller pipes the full
+    /// event name through `sanitize_event_segment` anyway.
+    pub fn key(&self) -> String {
+        match self {
+            Self::All => "all".to_owned(),
+            Self::One(ns) => format!("ns:{ns}"),
+        }
+    }
+}
+
+/// Coalescing channel between the watcher task and its single drain
+/// consumer. Replaces the bounded `tokio::sync::broadcast` ring that
+/// preceded it — see the module docs for the failure modes that caused.
+///
+/// Writes mutate per-uid state under a short-lived `std::sync::Mutex`
+/// (microseconds; never held across `.await`) and ping a `Notify`.
+/// While the drainer is busy emitting batch N to the webview, additional
+/// writes keep collapsing into the same uid slots; the next drain takes
+/// the coalesced result. Memory is bounded by the cluster's distinct-uid
+/// count for the kind, not by raw event volume.
+struct DirtyChannel {
+    state: Mutex<DirtyState>,
+    notify: Notify,
+}
+
+struct DirtyState {
+    /// uid → latest projected row. An `Upsert` overwrites any prior value;
+    /// a `Delete` removes the entry here and inserts the uid into `deleted`.
+    changed: HashMap<String, Value>,
+    /// uids that were deleted after their last upsert in this window. The
+    /// drain emits these as `ResourceDelta::Delete`. Kept disjoint from
+    /// `changed` so a Delete-then-Upsert sequence ends as a single Upsert
+    /// (the watcher's reflector can re-emit a row after a 410 Gone resync).
+    deleted: HashSet<String>,
+    /// `true` once the watcher has emitted `Event::InitDone` since the last
+    /// drain. Carried as a flag rather than a delta variant so it composes
+    /// cleanly with the by-uid coalescing.
+    init_done_pending: bool,
+    /// Set by [`DirtyChannel::close`] when the watcher task is aborted on
+    /// Drop. Lets [`DirtyChannel::wait_for_change`] return cleanly instead
+    /// of blocking on Notify forever, so the forwarder task exits.
+    closed: bool,
+}
+
+/// One drained snapshot from a [`DirtyChannel`]. Returned by
+/// [`ResourceDrainer::drain`].
+#[derive(Debug, Default)]
+pub struct DrainedBatch {
+    pub upserts: HashMap<String, Value>,
+    pub deletes: HashSet<String>,
+    pub init_done: bool,
+}
+
+impl DrainedBatch {
+    pub fn is_empty(&self) -> bool {
+        self.upserts.is_empty() && self.deletes.is_empty() && !self.init_done
+    }
+
+    /// Total number of `Upsert` + `Delete` entries this batch will emit.
+    /// `init_done` is a single trailing marker and is not counted here.
+    pub fn delta_count(&self) -> usize {
+        self.upserts.len() + self.deletes.len()
+    }
+}
+
+impl DirtyChannel {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(DirtyState {
+                changed: HashMap::new(),
+                deleted: HashSet::new(),
+                init_done_pending: false,
+                closed: false,
+            }),
+            notify: Notify::new(),
+        }
+    }
+
+    fn record_upsert(&self, uid: String, row: Value) {
+        let mut s = self.state.lock().expect("dirty channel poisoned");
+        if s.closed {
+            return;
+        }
+        s.deleted.remove(&uid);
+        s.changed.insert(uid, row);
+        drop(s);
+        self.notify.notify_one();
+    }
+
+    fn record_delete(&self, uid: String) {
+        let mut s = self.state.lock().expect("dirty channel poisoned");
+        if s.closed {
+            return;
+        }
+        s.changed.remove(&uid);
+        s.deleted.insert(uid);
+        drop(s);
+        self.notify.notify_one();
+    }
+
+    fn mark_init_done(&self) {
+        let mut s = self.state.lock().expect("dirty channel poisoned");
+        if s.closed {
+            return;
+        }
+        s.init_done_pending = true;
+        drop(s);
+        self.notify.notify_one();
+    }
+
+    fn close(&self) {
+        let mut s = self.state.lock().expect("dirty channel poisoned");
+        s.closed = true;
+        drop(s);
+        // `notify_waiters` wakes every parked task at once. We only ever
+        // have one drainer, but using waiters (rather than `notify_one`)
+        // guarantees the drainer wakes even if no permit was stored.
+        self.notify.notify_waiters();
+    }
+
+    /// Block until there is something to drain or the channel closes.
+    /// Returns `true` if work is pending, `false` if closed-and-empty
+    /// (the caller should exit its loop).
+    async fn wait_for_change(&self) -> bool {
+        loop {
+            // Take the notified() future before re-checking state, so a
+            // notification that fires between our state check and the
+            // await is not lost.
+            let notified = self.notify.notified();
+            {
+                let s = self.state.lock().expect("dirty channel poisoned");
+                if !s.changed.is_empty() || !s.deleted.is_empty() || s.init_done_pending {
+                    return true;
+                }
+                if s.closed {
+                    return false;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn drain(&self) -> DrainedBatch {
+        let mut s = self.state.lock().expect("dirty channel poisoned");
+        DrainedBatch {
+            upserts: std::mem::take(&mut s.changed),
+            deletes: std::mem::take(&mut s.deleted),
+            init_done: std::mem::replace(&mut s.init_done_pending, false),
+        }
+    }
+}
+
+/// Drain side of a [`ResourceWatcher`]'s delta stream. Obtain via
+/// [`ResourceWatcher::take_drainer`]. The channel is **single-consumer** —
+/// two drainers against the same watcher will race on every `drain` call;
+/// `take_drainer` panics if called twice on the same watcher to surface
+/// that mistake early.
+pub struct ResourceDrainer {
+    chan: Arc<DirtyChannel>,
+}
+
+impl ResourceDrainer {
+    /// Block until at least one upsert / delete / init_done is pending.
+    /// Returns `false` once the watcher has been dropped and the channel
+    /// is empty — the forwarder loop should `break` on `false`.
+    pub async fn wait_for_change(&self) -> bool {
+        self.chan.wait_for_change().await
+    }
+
+    /// Take everything currently pending. Cheap: a couple of `HashMap`
+    /// `take`s under a short mutex. The watcher continues writing into
+    /// fresh empty maps while the caller emits this batch.
+    pub fn drain(&self) -> DrainedBatch {
+        self.chan.drain()
+    }
+}
 
 /// Build a kube-rs watcher Config that matches the cluster's chosen
 /// strategy. Streaming uses `InitialListStrategy::StreamingList` (one watch
@@ -76,26 +300,44 @@ pub enum ResourceDelta {
     InitDone,
 }
 
-/// A live reflector + broadcast for a single (cluster, kind). Use
-/// [`start::<S>`] from [`KindSpec`] to construct one. Drop aborts the task.
+/// A live reflector + coalescing dirty channel for a single
+/// (cluster, kind). Use [`start::<S>`] from [`KindSpec`] to construct
+/// one. Drop aborts the task and closes the channel so the forwarder
+/// exits cleanly.
 pub struct ResourceWatcher {
     snapshot_fn: Box<dyn Fn() -> Vec<Value> + Send + Sync>,
-    tx: broadcast::Sender<ResourceDelta>,
+    dirty: Arc<DirtyChannel>,
+    /// Single-consumer guard for [`Self::take_drainer`]. Production code
+    /// only ever takes one drainer (the forwarder spawned in
+    /// `subscribe_resource`); the assert turns a silent multi-take into
+    /// an immediate panic in tests.
+    drainer_taken: AtomicBool,
     /// Set after kube-rs emits `Event::InitDone`. Read by `subscribe_resource`
     /// so a late subscriber (one that connects *after* init finished) still
-    /// learns the watcher is past initial sync — the broadcast channel
-    /// itself doesn't replay history, so without this flag a late subscriber
-    /// would see an unbounded-looking spinner.
+    /// learns the watcher is past initial sync — the dirty channel doesn't
+    /// replay history, so without this flag a late subscriber would see an
+    /// unbounded-looking spinner.
     init_done: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
 
 impl ResourceWatcher {
+    /// Cross-namespace typed watcher. Used by [`crate::registry::ResourceKindEntry`]
+    /// for the `NsScope::All` path and for every cluster-scoped kind
+    /// (where the scope choice is meaningless). Namespaced kinds with
+    /// `NsScope::One(ns)` go through [`Self::start_with_api`] so the
+    /// caller can construct an `Api::namespaced` against a `S::K` that
+    /// is statically known to be namespaced.
     pub fn start<S: KindSpec>(client: Client, strategy: ListStrategy) -> Self {
-        let (tx, _rx) = broadcast::channel(DELTA_BUFFER);
-        // Api::all watches across all namespaces for namespaced kinds and the
-        // whole cluster for cluster-scoped kinds.
-        let api: Api<S::K> = Api::all(client);
+        Self::start_with_api::<S>(Api::all(client), strategy)
+    }
+
+    /// Typed watcher backed by a caller-built [`Api`]. Same machinery
+    /// as [`Self::start`], parameterised over the API construction so a
+    /// namespaced caller (whose `S::K` carries `NamespaceResourceScope`)
+    /// can pass `Api::namespaced(client, ns)`.
+    pub fn start_with_api<S: KindSpec>(api: Api<S::K>, strategy: ListStrategy) -> Self {
+        let dirty = Arc::new(DirtyChannel::new());
         // Project on apply, store only the projected row. A typed reflector
         // store would keep full `Arc<S::K>` per object — on a 5000-pod
         // cluster that's 50–200 MB of typed Rust state we never read again
@@ -107,7 +349,7 @@ impl ResourceWatcher {
 
         let init_done = Arc::new(AtomicBool::new(false));
         let init_done_task = init_done.clone();
-        let tx_task = tx.clone();
+        let dirty_task = dirty.clone();
         let cache_task = cache.clone();
         let task = tokio::spawn(async move {
             // Per-task timing so the operator can pinpoint where Pods-load
@@ -149,7 +391,7 @@ impl ResourceWatcher {
                         } else {
                             cache.insert(uid.clone(), row.clone());
                             drop(cache);
-                            let _ = tx_task.send(ResourceDelta::Upsert { row });
+                            dirty_task.record_upsert(uid, row);
                         }
                         applied += 1;
                         if !first_apply_logged {
@@ -180,7 +422,7 @@ impl ResourceWatcher {
                                 .lock()
                                 .expect("watcher cache poisoned")
                                 .remove(&uid);
-                            let _ = tx_task.send(ResourceDelta::Delete { uid });
+                            dirty_task.record_delete(uid);
                         }
                     }
                     Ok(watcher::Event::Init) => {
@@ -195,7 +437,7 @@ impl ResourceWatcher {
                             suppressed,
                             "watcher: init done (initial sync complete)"
                         );
-                        let _ = tx_task.send(ResourceDelta::InitDone);
+                        dirty_task.mark_init_done();
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, kind = S::meta().id, "watcher: stream error");
@@ -222,7 +464,8 @@ impl ResourceWatcher {
 
         Self {
             snapshot_fn,
-            tx,
+            dirty,
+            drainer_taken: AtomicBool::new(false),
             init_done,
             task,
         }
@@ -241,13 +484,18 @@ impl ResourceWatcher {
         _namespaced: bool,
         log_id: String,
         project: Arc<dyn Fn(&DynamicObject) -> Value + Send + Sync>,
+        scope: NsScope,
         strategy: ListStrategy,
     ) -> Self {
-        let (tx, _rx) = broadcast::channel(DELTA_BUFFER);
-        // `Api::all_with` works for both cluster-scoped and namespaced kinds:
-        // for namespaced kinds it yields a cross-namespace stream, which is
-        // exactly what we want.
-        let api: Api<DynamicObject> = Api::all_with(client, &ar);
+        let dirty = Arc::new(DirtyChannel::new());
+        // `Api::all_with` for cluster-wide watches; `namespaced_with` for a
+        // single-namespace CRD scope. Cluster-scoped CRDs always land on
+        // `All` because the registry's `from_dynamic_crd` / `from_well_known`
+        // coerce the scope before invoking us.
+        let api: Api<DynamicObject> = match scope.namespace() {
+            Some(ns) => Api::namespaced_with(client, ns, &ar),
+            None => Api::all_with(client, &ar),
+        };
         let cache: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
 
         let cfg = watcher_config(strategy);
@@ -255,7 +503,7 @@ impl ResourceWatcher {
 
         let init_done = Arc::new(AtomicBool::new(false));
         let init_done_task = init_done.clone();
-        let tx_task = tx.clone();
+        let dirty_task = dirty.clone();
         let cache_task = cache.clone();
         let project_task = project.clone();
         let log_id_task = log_id.clone();
@@ -290,7 +538,7 @@ impl ResourceWatcher {
                         } else {
                             cache.insert(uid.clone(), row.clone());
                             drop(cache);
-                            let _ = tx_task.send(ResourceDelta::Upsert { row });
+                            dirty_task.record_upsert(uid, row);
                         }
                         applied += 1;
                         if !first_apply_logged {
@@ -316,7 +564,7 @@ impl ResourceWatcher {
                                 .lock()
                                 .expect("dynamic watcher cache poisoned")
                                 .remove(&uid);
-                            let _ = tx_task.send(ResourceDelta::Delete { uid });
+                            dirty_task.record_delete(uid);
                         }
                     }
                     Ok(watcher::Event::Init) => {
@@ -332,7 +580,7 @@ impl ResourceWatcher {
                             "dynamic watcher: init done"
                         );
                         init_done_task.store(true, Ordering::SeqCst);
-                        let _ = tx_task.send(ResourceDelta::InitDone);
+                        dirty_task.mark_init_done();
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -369,7 +617,8 @@ impl ResourceWatcher {
 
         Self {
             snapshot_fn,
-            tx,
+            dirty,
+            drainer_taken: AtomicBool::new(false),
             init_done,
             task,
         }
@@ -388,7 +637,7 @@ impl ResourceWatcher {
     /// — multiple secrets per logical row, and the row content lives inside
     /// the secret's `data.release` blob. Forcing this through `KindSpec`
     /// would require leaking an aggregator into the trait.
-    pub fn start_helm_releases(client: Client, strategy: ListStrategy) -> Self {
+    pub fn start_helm_releases(client: Client, scope: NsScope, strategy: ListStrategy) -> Self {
         use crate::kinds::helm_releases::{
             decode_release, project_row, synthetic_uid, Release, HELM_SECRET_TYPE,
         };
@@ -396,8 +645,13 @@ impl ResourceWatcher {
         use kube::ResourceExt;
         use std::collections::BTreeMap;
 
-        let (tx, _rx) = broadcast::channel(DELTA_BUFFER);
-        let api: Api<Secret> = Api::all(client);
+        let dirty = Arc::new(DirtyChannel::new());
+        // Helm release secrets are namespaced — scoping to `One(ns)`
+        // gives the operator only releases deployed there.
+        let api: Api<Secret> = match scope.namespace() {
+            Some(ns) => Api::namespaced(client, ns),
+            None => Api::all(client),
+        };
 
         // Per-release state keyed by `(namespace, name)`. Each entry holds
         // every revision we've seen, keyed by the underlying secret uid so
@@ -412,7 +666,7 @@ impl ResourceWatcher {
 
         let init_done = Arc::new(AtomicBool::new(false));
         let init_done_task = init_done.clone();
-        let tx_task = tx.clone();
+        let dirty_task = dirty.clone();
         let store_task = store.clone();
 
         let task = tokio::spawn(async move {
@@ -448,8 +702,9 @@ impl ResourceWatcher {
                         let entry = g.entry(key.clone()).or_default();
                         entry.insert(secret_uid, release);
                         if let Some(latest) = entry.values().max_by_key(|r| r.version) {
-                            let row = with_uid(synthetic_uid(&ns, &name), project_row(latest));
-                            let _ = tx_task.send(ResourceDelta::Upsert { row });
+                            let uid = synthetic_uid(&ns, &name);
+                            let row = with_uid(uid.clone(), project_row(latest));
+                            dirty_task.record_upsert(uid, row);
                         }
                         applied += 1;
                         if !first_apply_logged {
@@ -483,15 +738,14 @@ impl ResourceWatcher {
                         revs.remove(&secret_uid);
                         if revs.is_empty() {
                             g.remove(&key);
-                            let _ = tx_task.send(ResourceDelta::Delete {
-                                uid: synthetic_uid(&key.0, &key.1),
-                            });
+                            dirty_task.record_delete(synthetic_uid(&key.0, &key.1));
                         } else if let Some(latest) = revs.values().max_by_key(|r| r.version) {
                             // A non-latest revision was removed, or latest
                             // was removed and we now demote: re-emit so the
                             // table reflects the new live revision.
-                            let row = with_uid(synthetic_uid(&key.0, &key.1), project_row(latest));
-                            let _ = tx_task.send(ResourceDelta::Upsert { row });
+                            let uid = synthetic_uid(&key.0, &key.1);
+                            let row = with_uid(uid.clone(), project_row(latest));
+                            dirty_task.record_upsert(uid, row);
                         }
                     }
                     Ok(watcher::Event::Init) => {
@@ -506,7 +760,7 @@ impl ResourceWatcher {
                             decode_errors,
                             "helm watcher: init done"
                         );
-                        let _ = tx_task.send(ResourceDelta::InitDone);
+                        dirty_task.mark_init_done();
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, kind = "helm_releases", "helm watcher: stream error");
@@ -535,7 +789,8 @@ impl ResourceWatcher {
 
         Self {
             snapshot_fn,
-            tx,
+            dirty,
+            drainer_taken: AtomicBool::new(false),
             init_done,
             task,
         }
@@ -554,7 +809,7 @@ impl ResourceWatcher {
     /// the apiserver — Helm release secrets number in the hundreds even
     /// on busy clusters — and the lazy unsubscribe path means it only
     /// runs while the operator has the chart catalog open.
-    pub fn start_helm_charts(client: Client, strategy: ListStrategy) -> Self {
+    pub fn start_helm_charts(client: Client, scope: NsScope, strategy: ListStrategy) -> Self {
         use crate::fetch::{helm_search_repo, HelmRepoChart, HELM_CLUSTER_SOURCE};
         use crate::kinds::helm_charts::{project_cluster_row, project_repo_row, synthetic_uid};
         use crate::kinds::helm_releases::{decode_release, Release, HELM_SECRET_TYPE};
@@ -562,8 +817,14 @@ impl ResourceWatcher {
         use kube::ResourceExt;
         use std::collections::{BTreeMap, HashMap, HashSet};
 
-        let (tx, _rx) = broadcast::channel(DELTA_BUFFER);
-        let api: Api<Secret> = Api::all(client);
+        let dirty = Arc::new(DirtyChannel::new());
+        // Underlying secrets are namespaced; a `One(ns)` chart view shows
+        // only charts deployed there. Repo-side entries (loaded via
+        // `helm search repo` below) are independent of the cluster scope.
+        let api: Api<Secret> = match scope.namespace() {
+            Some(ns) => Api::namespaced(client, ns),
+            None => Api::all(client),
+        };
 
         // Three stores:
         //   `cluster_charts`: (name, version) → { sample release, set of
@@ -593,7 +854,7 @@ impl ResourceWatcher {
 
         let init_done = Arc::new(AtomicBool::new(false));
         let init_done_task = init_done.clone();
-        let tx_task = tx.clone();
+        let dirty_task = dirty.clone();
         let cluster_charts_task = cluster_charts.clone();
         let repo_charts_task = repo_charts.clone();
         let secret_map_task = secret_to_chart.clone();
@@ -611,7 +872,7 @@ impl ResourceWatcher {
             // bounded; emit each as Upsert with source=<repo>. We don't
             // gate InitDone on this — it can complete after.
             {
-                let tx = tx_task.clone();
+                let dirty = dirty_task.clone();
                 let store = repo_charts_task.clone();
                 tokio::spawn(async move {
                     let entries = helm_search_repo().await;
@@ -619,11 +880,9 @@ impl ResourceWatcher {
                     for rc in &entries {
                         let key: RepoKey = (rc.repo.clone(), rc.name.clone(), rc.version.clone());
                         g.insert(key.clone(), rc.clone());
-                        let row = with_uid(
-                            synthetic_uid(&rc.repo, &rc.name, &rc.version),
-                            project_repo_row(rc),
-                        );
-                        let _ = tx.send(ResourceDelta::Upsert { row });
+                        let uid = synthetic_uid(&rc.repo, &rc.name, &rc.version);
+                        let row = with_uid(uid.clone(), project_repo_row(rc));
+                        dirty.record_upsert(uid, row);
                     }
                     tracing::info!(
                         kind = "helm_charts",
@@ -675,7 +934,7 @@ impl ResourceWatcher {
                                     &cluster_charts_task,
                                     &old_key,
                                     &secret_uid,
-                                    &tx_task,
+                                    &dirty_task,
                                 );
                             }
                         }
@@ -688,11 +947,12 @@ impl ResourceWatcher {
                                 secret_uids: HashSet::new(),
                             });
                             entry.secret_uids.insert(secret_uid.clone());
+                            let uid = synthetic_uid(HELM_CLUSTER_SOURCE, &name, &version);
                             let row = with_uid(
-                                synthetic_uid(HELM_CLUSTER_SOURCE, &name, &version),
+                                uid.clone(),
                                 project_cluster_row(&entry.sample, entry.secret_uids.len()),
                             );
-                            let _ = tx_task.send(ResourceDelta::Upsert { row });
+                            dirty_task.record_upsert(uid, row);
                         }
                         secret_map_task
                             .lock()
@@ -710,7 +970,12 @@ impl ResourceWatcher {
                             .expect("helm-chart secret map poisoned")
                             .remove(&secret_uid);
                         if let Some(k) = key {
-                            demote_cluster_chart(&cluster_charts_task, &k, &secret_uid, &tx_task);
+                            demote_cluster_chart(
+                                &cluster_charts_task,
+                                &k,
+                                &secret_uid,
+                                &dirty_task,
+                            );
                         }
                     }
                     Ok(watcher::Event::Init) => {
@@ -725,7 +990,7 @@ impl ResourceWatcher {
                             decode_errors,
                             "helm-chart watcher: init done"
                         );
-                        let _ = tx_task.send(ResourceDelta::InitDone);
+                        dirty_task.mark_init_done();
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -767,7 +1032,8 @@ impl ResourceWatcher {
 
         return Self {
             snapshot_fn,
-            tx,
+            dirty,
+            drainer_taken: AtomicBool::new(false),
             init_done,
             task,
         };
@@ -779,7 +1045,7 @@ impl ResourceWatcher {
             charts: &Arc<Mutex<BTreeMap<(String, String), ChartEntry>>>,
             key: &(String, String),
             secret_uid: &str,
-            tx: &broadcast::Sender<ResourceDelta>,
+            dirty: &DirtyChannel,
         ) {
             use crate::fetch::HELM_CLUSTER_SOURCE;
             let mut g = charts.lock().expect("helm-chart map poisoned");
@@ -787,15 +1053,14 @@ impl ResourceWatcher {
             entry.secret_uids.remove(secret_uid);
             if entry.secret_uids.is_empty() {
                 g.remove(key);
-                let _ = tx.send(ResourceDelta::Delete {
-                    uid: synthetic_uid(HELM_CLUSTER_SOURCE, &key.0, &key.1),
-                });
+                dirty.record_delete(synthetic_uid(HELM_CLUSTER_SOURCE, &key.0, &key.1));
             } else {
+                let uid = synthetic_uid(HELM_CLUSTER_SOURCE, &key.0, &key.1);
                 let row = with_uid(
-                    synthetic_uid(HELM_CLUSTER_SOURCE, &key.0, &key.1),
+                    uid.clone(),
                     project_cluster_row(&entry.sample, entry.secret_uids.len()),
                 );
-                let _ = tx.send(ResourceDelta::Upsert { row });
+                dirty.record_upsert(uid, row);
             }
         }
     }
@@ -812,14 +1077,31 @@ impl ResourceWatcher {
         self.init_done.load(Ordering::SeqCst)
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<ResourceDelta> {
-        self.tx.subscribe()
+    /// Take the single drain consumer for this watcher. Panics if
+    /// called twice on the same `ResourceWatcher` — the dirty channel
+    /// is single-consumer by design (the prior multi-subscriber
+    /// `broadcast` shape was the source of the lost-event bug). Each
+    /// `Arc<ResourceWatcher>` clone shares one drainer slot; only
+    /// `spawn_resource_forwarder` should call this in production.
+    pub fn take_drainer(&self) -> ResourceDrainer {
+        assert!(
+            !self.drainer_taken.swap(true, Ordering::SeqCst),
+            "ResourceWatcher::take_drainer called twice; channel is single-consumer"
+        );
+        ResourceDrainer {
+            chan: self.dirty.clone(),
+        }
     }
 }
 
 impl Drop for ResourceWatcher {
     fn drop(&mut self) {
         self.task.abort();
+        // Wake any drainer parked on `wait_for_change` so the forwarder
+        // exits cleanly. Without this, `drop(watcher)` aborts the
+        // producer but leaves the forwarder blocked on Notify forever
+        // — small leak per cluster-switch, but accumulating.
+        self.dirty.close();
     }
 }
 
@@ -832,5 +1114,153 @@ fn with_uid(uid: String, projected: Value) -> Value {
             Value::Object(map)
         }
         other => serde_json::json!({ "uid": uid, "value": other }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Duration;
+
+    fn row(name: &str) -> Value {
+        json!({ "uid": "ignored", "name": name })
+    }
+
+    #[tokio::test]
+    async fn coalesces_repeat_upserts_for_same_uid() {
+        // The previous broadcast pipe would emit 100 events. Under the
+        // dirty-channel design, 100 writes to the same uid collapse to
+        // one drained entry — the latest row wins.
+        let chan = DirtyChannel::new();
+        for i in 0..100 {
+            chan.record_upsert("u1".to_owned(), row(&format!("v{i}")));
+        }
+        let batch = chan.drain();
+        assert_eq!(batch.upserts.len(), 1);
+        assert_eq!(batch.upserts["u1"]["name"], "v99");
+        assert!(batch.deletes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upsert_then_delete_resolves_to_delete() {
+        let chan = DirtyChannel::new();
+        chan.record_upsert("u1".to_owned(), row("a"));
+        chan.record_delete("u1".to_owned());
+        let batch = chan.drain();
+        assert!(batch.upserts.is_empty(), "delete must clear pending upsert");
+        assert!(batch.deletes.contains("u1"));
+    }
+
+    #[tokio::test]
+    async fn delete_then_upsert_resolves_to_upsert() {
+        // A reflector re-emit after 410 Gone can deliver Delete then
+        // Upsert for the same uid; the final state is "present".
+        let chan = DirtyChannel::new();
+        chan.record_delete("u1".to_owned());
+        chan.record_upsert("u1".to_owned(), row("a"));
+        let batch = chan.drain();
+        assert!(batch.deletes.is_empty(), "upsert must clear pending delete");
+        assert_eq!(batch.upserts.len(), 1);
+        assert_eq!(batch.upserts["u1"]["name"], "a");
+    }
+
+    #[tokio::test]
+    async fn no_events_lost_under_burst_during_drain() {
+        // Mirrors the production failure: while the consumer is busy
+        // emitting batch N, many more events arrive. They must all be
+        // visible in the next drain. The old broadcast pipe lost any
+        // event past the 256-slot ring; this regresses if that pattern
+        // ever returns.
+        let chan = Arc::new(DirtyChannel::new());
+        const N: usize = 5_000;
+
+        let producer = {
+            let chan = chan.clone();
+            tokio::spawn(async move {
+                for i in 0..N {
+                    chan.record_upsert(format!("u{i}"), row(&format!("name{i}")));
+                }
+            })
+        };
+
+        let mut seen = HashSet::new();
+        let consumer = {
+            let chan = chan.clone();
+            tokio::spawn(async move {
+                while seen.len() < N {
+                    if !chan.wait_for_change().await {
+                        break;
+                    }
+                    // Simulate slow emit: yield + sleep to give the
+                    // producer time to enqueue many uids per cycle.
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let batch = chan.drain();
+                    for uid in batch.upserts.keys() {
+                        seen.insert(uid.clone());
+                    }
+                }
+                seen
+            })
+        };
+
+        producer.await.unwrap();
+        // Producer is done — give the consumer one last cycle, then close so it exits.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            // Spin until drained or timeout
+            loop {
+                let drained = {
+                    let s = chan.state.lock().unwrap();
+                    s.changed.is_empty() && s.deleted.is_empty()
+                };
+                if drained {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        chan.close();
+
+        let seen = consumer.await.unwrap();
+        assert_eq!(
+            seen.len(),
+            N,
+            "every uid produced must appear in some drained batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_returns_false_after_close() {
+        let chan = Arc::new(DirtyChannel::new());
+        let chan2 = chan.clone();
+        let waiter = tokio::spawn(async move { chan2.wait_for_change().await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        chan.close();
+        let result = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter must unblock on close")
+            .unwrap();
+        assert!(!result, "wait_for_change must return false once closed");
+    }
+
+    #[tokio::test]
+    async fn pending_work_still_drains_after_close() {
+        // Closing doesn't lose unread state. The forwarder's last
+        // drain after watcher Drop still gets every Upsert it queued.
+        let chan = DirtyChannel::new();
+        chan.record_upsert("u1".to_owned(), row("a"));
+        chan.mark_init_done();
+        chan.close();
+        assert!(
+            chan.wait_for_change().await,
+            "wait must see the queued work even after close"
+        );
+        let batch = chan.drain();
+        assert_eq!(batch.upserts.len(), 1);
+        assert!(batch.init_done);
+        // Second wait sees empty + closed.
+        assert!(!chan.wait_for_change().await);
     }
 }

@@ -837,7 +837,7 @@ const WATCHER_LINGER: std::time::Duration = std::time::Duration::from_secs(60);
 pub(crate) async fn subscribe_resource(
     cluster_id: String,
     kind_id: String,
-    namespace_filter: Option<String>,
+    namespaces: Option<Vec<String>>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubscribeResult, String> {
@@ -859,14 +859,27 @@ pub(crate) async fn subscribe_resource(
             "cluster {cluster_id} is unavailable — reconnect first"
         ));
     }
+    // Derive the watcher scope from the frontend's namespace selection.
+    // Cluster-scoped kinds ignore the selection upstream (the registry
+    // coerces to `All`), so it doesn't hurt to pass the raw scope here
+    // — the registry's `from_*_spec` closures do the right thing.
+    let scope = match namespaces.as_deref() {
+        Some(list) if kind.meta.namespaced => ferrisscope_kube_ext::NsScope::from_selection(list),
+        _ => ferrisscope_kube_ext::NsScope::All,
+    };
     let after_entry = started.elapsed().as_millis() as u64;
     let mut slots = entry.kinds.lock().await;
-    let slot = slots.entry(kind_id.clone()).or_insert_with(KindSlot::empty);
+    let slot_key = (kind_id.clone(), scope.clone());
+    let slot = slots
+        .entry(slot_key.clone())
+        .or_insert_with(KindSlot::empty);
 
     // If a linger-shutdown task was scheduled (subscribers had dropped to
     // zero and the watcher was about to be torn down), abort it. The
     // existing watcher stays alive for this re-subscribe — that's the
-    // whole point of the linger window.
+    // whole point of the linger window. Distinct scopes have distinct
+    // slots, so an `All` linger doesn't shield a `ns:foo` re-subscribe
+    // from a fresh LIST (and vice-versa) — each scope warms up once.
     let mut cancelled_linger = false;
     if let Some(h) = slot.shutdown_handle.take() {
         h.abort();
@@ -885,12 +898,13 @@ pub(crate) async fn subscribe_resource(
         // per-kind cost ~30 connection pools per cluster on a
         // fully-browsed UI. The pool is the middle ground.
         let client = entry.cluster.watcher_client();
-        let w = (kind.start)(client, strategy);
+        let w = (kind.start)(client, scope.clone(), strategy);
         let search_index = state.search_index_for(&cluster_id).await;
         spawn_resource_forwarder(
             app.clone(),
             cluster_id.clone(),
             kind_id.clone(),
+            scope.clone(),
             w.clone(),
             search_index,
         );
@@ -900,14 +914,17 @@ pub(crate) async fn subscribe_resource(
     };
     slot.subscribers += 1;
 
-    let mut rows = watcher.snapshot();
-    if let Some(ns) = namespace_filter {
-        rows.retain(|row| row.get("namespace").and_then(Value::as_str) == Some(ns.as_str()));
-    }
+    // The watcher is already namespace-scoped at the apiserver when
+    // `scope = One(ns)`; no client-side filter needed. For `All` (multi-
+    // select or all-namespaces), the frontend filters rows against the
+    // selected set. We deliberately do not filter on the multi-select
+    // case here — the frontend already does it.
+    let rows = watcher.snapshot();
     let init_done = watcher.init_done();
     tracing::info!(
         cluster_id = %cluster_id,
         kind_id = %kind_id,
+        scope = %scope.key(),
         entry_ms = after_entry,
         total_ms = started.elapsed().as_millis() as u64,
         started_watcher,
@@ -931,6 +948,7 @@ pub(crate) async fn subscribe_resource(
 pub(crate) async fn unsubscribe_resource(
     cluster_id: String,
     kind_id: String,
+    namespaces: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // Non-creating lookup: if the cluster was already torn down (the
@@ -941,8 +959,18 @@ pub(crate) async fn unsubscribe_resource(
     let Some(entry) = state.get_existing(&cluster_id).await else {
         return Ok(());
     };
+    // Resolve scope the same way subscribe did, so we hit the right slot.
+    // Cluster-scoped kinds get coerced to `All` in the registry layer; we
+    // do the same here to avoid creating a phantom `ns:foo` slot that no
+    // subscribe ever matched.
+    let kind_namespaced = lookup(&kind_id).is_some_and(|k| k.meta.namespaced);
+    let scope = match namespaces.as_deref() {
+        Some(list) if kind_namespaced => ferrisscope_kube_ext::NsScope::from_selection(list),
+        _ => ferrisscope_kube_ext::NsScope::All,
+    };
+    let slot_key = (kind_id.clone(), scope.clone());
     let mut slots = entry.kinds.lock().await;
-    if let Some(slot) = slots.get_mut(&kind_id) {
+    if let Some(slot) = slots.get_mut(&slot_key) {
         slot.subscribers = slot.subscribers.saturating_sub(1);
         if slot.subscribers == 0 {
             // Replace any prior pending shutdown (shouldn't normally
@@ -951,14 +979,14 @@ pub(crate) async fn unsubscribe_resource(
                 prev.abort();
             }
             let entry_for_task = entry.clone();
-            let kind_for_task = kind_id.clone();
+            let key_for_task = slot_key.clone();
             let cluster_for_task = cluster_id.clone();
             // Use `tokio::spawn` (not `tauri::async_runtime::spawn`) so the
             // returned handle's type matches `KindSlot::shutdown_handle`.
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(WATCHER_LINGER).await;
                 let mut slots = entry_for_task.kinds.lock().await;
-                let Some(slot) = slots.get_mut(&kind_for_task) else {
+                let Some(slot) = slots.get_mut(&key_for_task) else {
                     return;
                 };
                 if slot.subscribers != 0 {
@@ -973,18 +1001,20 @@ pub(crate) async fn unsubscribe_resource(
                 }
                 tracing::info!(
                     cluster_id = %cluster_for_task,
-                    kind_id = %kind_for_task,
+                    kind_id = %key_for_task.0,
+                    scope = %key_for_task.1.key(),
                     linger_secs = WATCHER_LINGER.as_secs(),
                     "watcher: linger expired, dropping"
                 );
                 slot.watcher.take();
                 slot.shutdown_handle.take();
-                slots.remove(&kind_for_task);
+                slots.remove(&key_for_task);
             });
             slot.shutdown_handle = Some(handle);
             tracing::debug!(
                 cluster_id = %cluster_id,
                 kind_id = %kind_id,
+                scope = %scope.key(),
                 linger_secs = WATCHER_LINGER.as_secs(),
                 "watcher: subscribers=0, scheduling linger shutdown"
             );
@@ -1257,29 +1287,36 @@ fn spawn_resource_forwarder(
     app: AppHandle,
     cluster_id: String,
     kind_id: String,
+    scope: ferrisscope_kube_ext::NsScope,
     watcher: Arc<ferrisscope_kube_ext::ResourceWatcher>,
     search_index: Option<Arc<ferrisscope_core::search::SearchIndex>>,
 ) {
-    let mut rx = watcher.subscribe();
-    let event_name = resource_event_name(&cluster_id, &kind_id);
+    // Take exclusive drain access. Single-consumer by design — the
+    // previous broadcast-based pipe lost events under load and is gone.
+    let drainer = watcher.take_drainer();
+    let event_name = resource_event_name(&cluster_id, &kind_id, &scope);
     tauri::async_runtime::spawn(async move {
         // Two-phase batching:
         //
-        // - Init phase (until kube-rs `InitDone` for this watcher): tight
-        //   16 ms / 500-uid window so the table paints progressively as the
-        //   apiserver streams the first list. Optimised for first-paint.
+        // - Init phase (until the watcher signals `InitDone` for this
+        //   kind): 16 ms debounce so the table paints progressively as
+        //   the apiserver streams the first list. No per-batch cap is
+        //   needed — the dirty channel collapses repeat upserts by uid,
+        //   so each batch is bounded by distinct uids touched in the
+        //   debounce window, not by raw event volume.
         //
-        // - Steady phase (after InitDone): 1 s window, no per-batch cap, plus
-        //   uid-level coalescing — only the last `Upsert`/`Delete` per uid in
-        //   the window ships to the webview. A pod that flips status 40×/s
-        //   produces one row update per second instead of forty. Trades a
-        //   ≤ 1 s visual lag for a 1-2 order of magnitude drop in forwarder
-        //   CPU + webview JSON-decode on busy clusters.
+        // - Steady phase (after InitDone): 1 s debounce so a pod that
+        //   flips status 40×/s produces one row update per second
+        //   instead of forty. Same uid-coalescing keeps payload small.
         //
-        // `InitDone` itself has no uid; tracked separately and appended to
-        // the end of its flush so the frontend still sees it after the rows.
+        // Backpressure is natural: while we're inside `emit` for batch
+        // N, the watcher keeps writing into the dirty channel; batch
+        // N+1 sees the accumulated state in one drain. Unlike the prior
+        // 256-slot broadcast ring, nothing is dropped under load — the
+        // operator no longer sees Pods stall at ~2000 of 3000+ on big
+        // clusters, and a CRD list with 6000+ instances paints
+        // progressively instead of waiting for the whole sync to land.
         const INIT_WINDOW: Duration = Duration::from_millis(16);
-        const INIT_MAX: usize = 500;
         const STEADY_WINDOW: Duration = Duration::from_millis(1000);
 
         let started = std::time::Instant::now();
@@ -1287,201 +1324,125 @@ fn spawn_resource_forwarder(
         let mut first_forwarded = false;
         let mut steady = false;
 
-        let mut by_uid: std::collections::HashMap<String, ferrisscope_kube_ext::ResourceDelta> =
-            std::collections::HashMap::new();
-        let mut pending_init_done = false;
-
         loop {
-            // Block for the first delta; fast-path if the channel is closed.
-            let first = match rx.recv().await {
-                Ok(d) => d,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(?cluster_id, ?kind_id, n, "resource delta receiver lagged");
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    let (emitted, _) = flush_forwarder_batch(
-                        &app,
-                        &event_name,
-                        &cluster_id,
-                        &kind_id,
-                        &mut by_uid,
-                        &mut pending_init_done,
-                        search_index.as_ref(),
-                    );
-                    forwarded += emitted as u64;
-                    tracing::info!(
-                        cluster_id = %cluster_id,
-                        kind_id = %kind_id,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        forwarded,
-                        "forwarder: exiting"
-                    );
-                    return;
-                }
-            };
-            push_forwarder_delta(&mut by_uid, &mut pending_init_done, first);
+            if !drainer.wait_for_change().await {
+                tracing::info!(
+                    cluster_id = %cluster_id,
+                    kind_id = %kind_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    forwarded,
+                    "forwarder: drainer closed, exiting"
+                );
+                return;
+            }
 
             let window = if steady { STEADY_WINDOW } else { INIT_WINDOW };
-            let deadline = tokio::time::Instant::now() + window;
-            loop {
-                // INIT_MAX caps the init-phase batch at 500 unique uids; in
-                // steady phase the cap is dropped — coalescing keeps the
-                // payload bounded by the cluster's distinct-uid count for
-                // that kind, not by raw event volume.
-                if !steady && by_uid.len() >= INIT_MAX {
-                    break;
-                }
-                match tokio::time::timeout_at(deadline, rx.recv()).await {
-                    Ok(Ok(d)) => {
-                        push_forwarder_delta(&mut by_uid, &mut pending_init_done, d);
+            tokio::time::sleep(window).await;
+
+            let drained = drainer.drain();
+            if drained.is_empty() {
+                continue;
+            }
+
+            let init_done_in_batch = drained.init_done;
+            let mut batch: Vec<ferrisscope_kube_ext::ResourceDelta> =
+                Vec::with_capacity(drained.delta_count() + usize::from(init_done_in_batch));
+            for (_, row) in drained.upserts {
+                batch.push(ferrisscope_kube_ext::ResourceDelta::Upsert { row });
+            }
+            for uid in drained.deletes {
+                batch.push(ferrisscope_kube_ext::ResourceDelta::Delete { uid });
+            }
+            if init_done_in_batch {
+                batch.push(ferrisscope_kube_ext::ResourceDelta::InitDone);
+            }
+
+            // Fan every Upsert / Delete into the per-cluster search
+            // index when one is registered. The index handle is
+            // `Option`al so a cluster whose index failed to open keeps
+            // browsing without breaking. `InitDone` is bus-only.
+            if let Some(index) = search_index.as_ref() {
+                for d in &batch {
+                    match d {
+                        ferrisscope_kube_ext::ResourceDelta::Upsert { row } => {
+                            if let Some(uid) = row.get("uid").and_then(Value::as_str) {
+                                index.upsert(&kind_id, uid, row);
+                            }
+                        }
+                        ferrisscope_kube_ext::ResourceDelta::Delete { uid } => {
+                            index.delete(&kind_id, uid);
+                        }
+                        ferrisscope_kube_ext::ResourceDelta::InitDone => {}
                     }
-                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                        tracing::warn!(?cluster_id, ?kind_id, n, "resource delta receiver lagged");
-                    }
-                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
                 }
             }
 
-            let (emitted, init_done_in_batch) = flush_forwarder_batch(
-                &app,
-                &event_name,
-                &cluster_id,
-                &kind_id,
-                &mut by_uid,
-                &mut pending_init_done,
-                search_index.as_ref(),
-            );
-            if emitted > 0 {
-                forwarded += emitted as u64;
-                if !first_forwarded {
-                    first_forwarded = true;
-                    tracing::info!(
-                        cluster_id = %cluster_id,
-                        kind_id = %kind_id,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        first_batch = emitted,
-                        phase = if steady { "steady" } else { "init" },
-                        "forwarder: first batch emitted to webview"
-                    );
-                } else if forwarded.is_multiple_of(500) || forwarded < 200 {
-                    tracing::debug!(
-                        cluster_id = %cluster_id,
-                        kind_id = %kind_id,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        forwarded,
-                        last_batch = emitted,
-                        phase = if steady { "steady" } else { "init" },
-                        "forwarder: emit progress"
-                    );
-                }
-                if init_done_in_batch {
-                    tracing::info!(
-                        cluster_id = %cluster_id,
-                        kind_id = %kind_id,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        forwarded,
-                        "forwarder: init_done emitted, switching to steady-phase batching"
-                    );
-                    steady = true;
-                    // The initial-sync burst allocates a lot of transient
-                    // memory: typed `Pod`/`Deployment`/... structs from
-                    // kube-rs are deserialised, projected to `Value`,
-                    // then dropped; intermediate JSON serialisations
-                    // for IPC are emitted then freed; the broadcast
-                    // retention ring fills then drains. The allocator
-                    // (mimalloc) often holds those arena pages until
-                    // its next opportunistic collect — which can be
-                    // minutes. Force one now so the operator sees RSS
-                    // settle to the steady-state working set, not the
-                    // high-water mark of the init burst.
-                    //
-                    ferrisscope_mimalloc_ext::collect(false);
-                }
+            let n = batch.len();
+            if let Err(e) = app.emit(&event_name, &batch) {
+                tracing::warn!(error = %e, ?cluster_id, ?kind_id, "failed to emit batch");
+            }
+            forwarded += n as u64;
+
+            if !first_forwarded {
+                first_forwarded = true;
+                tracing::info!(
+                    cluster_id = %cluster_id,
+                    kind_id = %kind_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    first_batch = n,
+                    phase = if steady { "steady" } else { "init" },
+                    "forwarder: first batch emitted to webview"
+                );
+            } else if forwarded.is_multiple_of(500) || forwarded < 200 {
+                tracing::debug!(
+                    cluster_id = %cluster_id,
+                    kind_id = %kind_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    forwarded,
+                    last_batch = n,
+                    phase = if steady { "steady" } else { "init" },
+                    "forwarder: emit progress"
+                );
+            }
+
+            if init_done_in_batch {
+                tracing::info!(
+                    cluster_id = %cluster_id,
+                    kind_id = %kind_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    forwarded,
+                    "forwarder: init_done emitted, switching to steady-phase batching"
+                );
+                steady = true;
+                // Init-sync allocates a lot of transient memory: typed
+                // `Pod`/`Deployment`/… structs from kube-rs are
+                // deserialised, projected to `Value`, then dropped;
+                // intermediate JSON serialisations for IPC are emitted
+                // then freed. The allocator (mimalloc) often holds
+                // those arena pages until its next opportunistic
+                // collect — which can be minutes. Force one now so the
+                // operator sees RSS settle to the steady-state working
+                // set, not the high-water mark of the init burst.
+                ferrisscope_mimalloc_ext::collect(false);
             }
         }
     });
 }
 
-/// Coalesce a single delta into the per-uid pending map. `Upsert` and
-/// `Delete` overwrite any prior pending delta for the same uid (last-write-
-/// wins — final state is what the frontend store applies anyway). `InitDone`
-/// has no uid; flagged separately and appended to the end of its flush.
-fn push_forwarder_delta(
-    by_uid: &mut std::collections::HashMap<String, ferrisscope_kube_ext::ResourceDelta>,
-    pending_init_done: &mut bool,
-    delta: ferrisscope_kube_ext::ResourceDelta,
-) {
-    match &delta {
-        ferrisscope_kube_ext::ResourceDelta::Upsert { row } => {
-            if let Some(uid) = row.get("uid").and_then(Value::as_str) {
-                by_uid.insert(uid.to_owned(), delta);
-            }
-        }
-        ferrisscope_kube_ext::ResourceDelta::Delete { uid } => {
-            by_uid.insert(uid.clone(), delta);
-        }
-        ferrisscope_kube_ext::ResourceDelta::InitDone => {
-            *pending_init_done = true;
-        }
-    }
-}
-
-/// Drain the pending map + `InitDone` flag into a single batched event.
-/// Returns `(deltas_emitted, init_done_was_in_batch)`.
-///
-/// Also fans every Upsert / Delete in the batch into the per-cluster
-/// search index when one is registered. The index handle is `Option`al
-/// so a cluster whose index failed to open (rare; logged at connect
-/// time) keeps browsing without breaking. `InitDone` is bus-only — it's
-/// a frontend signal, not data.
-fn flush_forwarder_batch(
-    app: &AppHandle,
-    event_name: &str,
+fn resource_event_name(
     cluster_id: &str,
     kind_id: &str,
-    by_uid: &mut std::collections::HashMap<String, ferrisscope_kube_ext::ResourceDelta>,
-    pending_init_done: &mut bool,
-    search_index: Option<&Arc<ferrisscope_core::search::SearchIndex>>,
-) -> (usize, bool) {
-    if by_uid.is_empty() && !*pending_init_done {
-        return (0, false);
-    }
-    let mut batch: Vec<ferrisscope_kube_ext::ResourceDelta> =
-        by_uid.drain().map(|(_, v)| v).collect();
-    if let Some(index) = search_index {
-        for d in &batch {
-            match d {
-                ferrisscope_kube_ext::ResourceDelta::Upsert { row } => {
-                    if let Some(uid) = row.get("uid").and_then(Value::as_str) {
-                        index.upsert(kind_id, uid, row);
-                    }
-                }
-                ferrisscope_kube_ext::ResourceDelta::Delete { uid } => {
-                    index.delete(kind_id, uid);
-                }
-                ferrisscope_kube_ext::ResourceDelta::InitDone => {}
-            }
-        }
-    }
-    let init_done_in_batch = *pending_init_done;
-    if init_done_in_batch {
-        batch.push(ferrisscope_kube_ext::ResourceDelta::InitDone);
-        *pending_init_done = false;
-    }
-    let n = batch.len();
-    if let Err(e) = app.emit(event_name, &batch) {
-        tracing::warn!(error = %e, ?cluster_id, ?kind_id, "failed to emit batch");
-    }
-    (n, init_done_in_batch)
-}
-
-fn resource_event_name(cluster_id: &str, kind_id: &str) -> String {
+    scope: &ferrisscope_kube_ext::NsScope,
+) -> String {
     // Slashes are fine in Tauri event names; we already use this scheme for pods://.
+    // Scope segment lets one (cluster, kind) tuple serve multiple watchers
+    // simultaneously (e.g. ResourceTable scoped to `default` and a cluster-
+    // overview detail panel wanting all Pods).
     format!(
-        "resource://{}/{}",
+        "resource://{}/{}/{}",
         sanitize_event_segment(cluster_id),
         sanitize_event_segment(kind_id),
+        sanitize_event_segment(&scope.key()),
     )
 }
 
@@ -4333,15 +4294,33 @@ mod tests {
 
     #[test]
     fn resource_event_name_uses_canonical_scheme() {
-        // The frontend mirror in api.ts must compute the same string;
-        // changing the format here is a wire break.
+        // The frontend mirror in api.ts (`onResourceDelta` +
+        // `nsScopeKey`) must compute the same string; changing this
+        // format is a wire break — events go to a channel nobody listens
+        // on and the table never updates.
         assert_eq!(
-            resource_event_name("default::cluster", "pods"),
-            "resource://default::cluster/pods"
+            resource_event_name(
+                "default::cluster",
+                "pods",
+                &ferrisscope_kube_ext::NsScope::All
+            ),
+            "resource://default::cluster/pods/all"
         );
         assert_eq!(
-            resource_event_name("ctx@host.tld", "wkcrd:gateways|gateway.networking.k8s.io|v1|gateways|Gateway|ns"),
-            "resource://ctx_host_tld/wkcrd:gateways_gateway_networking_k8s_io_v1_gateways_Gateway_ns"
+            resource_event_name(
+                "default::cluster",
+                "pods",
+                &ferrisscope_kube_ext::NsScope::One("kube-system".to_owned()),
+            ),
+            "resource://default::cluster/pods/ns:kube-system"
+        );
+        assert_eq!(
+            resource_event_name(
+                "ctx@host.tld",
+                "wkcrd:gateways|gateway.networking.k8s.io|v1|gateways|Gateway|ns",
+                &ferrisscope_kube_ext::NsScope::All,
+            ),
+            "resource://ctx_host_tld/wkcrd:gateways_gateway_networking_k8s_io_v1_gateways_Gateway_ns/all"
         );
     }
 }

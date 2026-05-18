@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferrisscope_kube_ext::registry::lookup;
-use ferrisscope_kube_ext::watcher::ResourceDelta;
+use ferrisscope_kube_ext::watcher::{DrainedBatch, NsScope, ResourceDrainer};
 use ferrisscope_test_support::kind::{ensure_two_clusters, KindCluster};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
@@ -61,26 +61,23 @@ async fn reflector_emits_pods_for_namespace_and_clears_on_unsubscribe() {
 
     // Look up the pods kind via the registry — same path the app uses.
     let entry = lookup("pods").expect("pods kind registered");
-    let watcher = (entry.start)(client.clone(), strategy);
+    let watcher = (entry.start)(client.clone(), NsScope::All, strategy);
 
-    // Subscribe and wait for the InitDone marker. With 0 pods initially we
-    // could miss the only event, so we wait specifically for our pod.
-    let mut rx = watcher.subscribe();
-    // First the watcher emits InitDone(...) followed by Upsert(...) events
-    // for each existing pod, then live updates. Drain until we see our pod.
+    // Drain the coalescing channel until we see our pod. The dirty
+    // channel collapses by uid, so a single drain may carry many
+    // upserts; iterate the batch each tick.
+    let drainer = watcher.take_drainer();
     let saw_pod = timeout(Duration::from_secs(60), async {
         loop {
-            match rx.recv().await {
-                Ok(delta) => {
-                    if let ResourceDelta::Upsert { row, .. } = delta {
-                        if row.get("namespace").and_then(|v| v.as_str()) == Some(ns)
-                            && row.get("name").and_then(|v| v.as_str()) == Some("alpha")
-                        {
-                            return true;
-                        }
-                    }
-                }
-                Err(_) => continue,
+            if !drainer.wait_for_change().await {
+                return false;
+            }
+            let batch = drainer.drain();
+            if upsert_matches(&batch, |row| {
+                row.get("namespace").and_then(|v| v.as_str()) == Some(ns)
+                    && row.get("name").and_then(|v| v.as_str()) == Some("alpha")
+            }) {
+                return true;
             }
         }
     })
@@ -97,7 +94,7 @@ async fn reflector_emits_pods_for_namespace_and_clears_on_unsubscribe() {
         strong >= 1,
         "watcher arc must still be live while we hold it"
     );
-    drop(rx);
+    drop(drainer);
 
     // Cleanup so subsequent tests in the binary don't see the pod.
     let _ = cluster.kubectl(&["delete", "namespace", ns, "--wait=false"]);
@@ -119,26 +116,27 @@ async fn two_clusters_have_independent_reflector_state() {
     let client_a = build_client(&a).await;
     let client_b = build_client(&b).await;
     let strategy = ferrisscope_core::cluster::ListStrategy::Paged;
-    let wa = (entry.start)(client_a, strategy);
-    let wb = (entry.start)(client_b, strategy);
+    let wa = (entry.start)(client_a, NsScope::All, strategy);
+    let wb = (entry.start)(client_b, NsScope::All, strategy);
 
-    let ra = wa.subscribe();
-    let rb = wb.subscribe();
+    let ra = wa.take_drainer();
+    let rb = wb.take_drainer();
 
-    // Collect everything each watcher emits within a short window, then
-    // assert the names from each side don't bleed.
-    let collect = |mut rx: tokio::sync::broadcast::Receiver<ResourceDelta>| async move {
+    // Drain each watcher for a short window; the coalescing channel
+    // collapses repeat upserts by uid, but we only care about the set
+    // of names that ever appeared.
+    let collect = |drainer: ResourceDrainer| async move {
         let mut names = Vec::<String>::new();
         let _ = timeout(Duration::from_secs(30), async {
             loop {
-                match rx.recv().await {
-                    Ok(ResourceDelta::Upsert { row, .. }) => {
-                        if let Some(n) = row.get("name").and_then(|v| v.as_str()) {
-                            names.push(n.to_owned());
-                        }
+                if !drainer.wait_for_change().await {
+                    break;
+                }
+                let batch = drainer.drain();
+                for (_, row) in &batch.upserts {
+                    if let Some(n) = row.get("name").and_then(|v| v.as_str()) {
+                        names.push(n.to_owned());
                     }
-                    Ok(_) => {}
-                    Err(_) => continue,
                 }
             }
         })
@@ -146,9 +144,7 @@ async fn two_clusters_have_independent_reflector_state() {
         names
     };
 
-    let (names_a, names_b) = tokio::join!(collect(ra.resubscribe()), collect(rb.resubscribe()));
-    drop(ra);
-    drop(rb);
+    let (names_a, names_b) = tokio::join!(collect(ra), collect(rb));
 
     assert!(
         names_a.iter().any(|n| n == "only-a"),
@@ -169,6 +165,10 @@ async fn two_clusters_have_independent_reflector_state() {
 
     let _ = a.kubectl(&["delete", "namespace", ns_a, "--wait=false"]);
     let _ = b.kubectl(&["delete", "namespace", ns_b, "--wait=false"]);
+}
+
+fn upsert_matches(batch: &DrainedBatch, predicate: impl Fn(&serde_json::Value) -> bool) -> bool {
+    batch.upserts.values().any(predicate)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

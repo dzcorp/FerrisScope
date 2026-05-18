@@ -1989,10 +1989,12 @@ function UnavailableBanner({
 
 // Chart with axes, grid, hover crosshair and absolute-positioned tooltip.
 // Width is tracked via ResizeObserver so the SVG fills its container with
-// 1px-per-1unit-of-viewBox mapping — that keeps the hover math direct
-// (clientX − rect.left == SVG x). Three y-axis ticks (min/mid/max) and
-// three x-axis ticks (oldest / midpoint / now) are enough density for a
-// 60-min window without crowding.
+// 1px-per-1unit-of-viewBox mapping. Hover math goes through clientXToSvgX,
+// which scales the cursor by the SVG's actual rendered width — that keeps
+// the crosshair under the cursor when the UI Scale slider applies CSS
+// zoom to <html>. Three y-axis ticks (min/mid/max) and three x-axis ticks
+// (oldest / midpoint / now) are enough density for a 60-min window
+// without crowding.
 // One drawn line. Each MultiChart accepts an array of these — single-series
 // charts wrap a single ChartSeries; multi-series (e.g. Replicas: desired /
 // ready / unavailable) pass several. Series are assumed to share the same
@@ -2003,6 +2005,23 @@ type ChartSeries = {
   stroke: string;
   label: string;
 };
+
+// Map a viewport (clientX) coordinate into the SVG's user-space x.
+// getBoundingClientRect and clientX are both reported in the same visual
+// viewport CSS pixels, so the ratio across the SVG's rendered width is
+// zoom-invariant by construction — multiplying by the viewBox width
+// gives the user-space x. getScreenCTM() also works in Chrome but
+// behaves inconsistently under CSS `zoom` in WebKitGTK, which is what
+// Tauri uses on Linux. Exported for tests.
+export function clientXToSvgX(svg: SVGSVGElement, clientX: number): number {
+  const rect = svg.getBoundingClientRect();
+  if (rect.width <= 0) return clientX - rect.left;
+  const viewBoxWidth =
+    svg.viewBox.baseVal && svg.viewBox.baseVal.width > 0
+      ? svg.viewBox.baseVal.width
+      : rect.width;
+  return ((clientX - rect.left) / rect.width) * viewBoxWidth;
+}
 
 function Chart({
   t,
@@ -2117,8 +2136,8 @@ function Chart({
       ];
 
   const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
+    const svg = e.currentTarget;
+    const cx = clientXToSvgX(svg, e.clientX);
     if (cx < PAD_L || cx > PAD_L + innerW) {
       setHover(null);
       return;

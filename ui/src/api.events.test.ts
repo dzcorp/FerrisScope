@@ -31,31 +31,50 @@ beforeEach(() => {
 describe("onResourceDelta — name sanitization + payload routing", () => {
   it("sanitizes ids: '.', '@', '+' become '_'", async () => {
     const handler = vi.fn();
-    await onResourceDelta("default::ctx-prod.io", "pods", handler);
+    await onResourceDelta("default::ctx-prod.io", "pods", null, handler);
     // The Rust emitter applies the same map. Listener must be registered
-    // under the sanitised name or events never fire.
-    expect(listenerCount("resource://default::ctx-prod_io/pods")).toBe(1);
+    // under the sanitised name or events never fire. The trailing `/all`
+    // is the scope segment for cross-namespace subscriptions.
+    expect(listenerCount("resource://default::ctx-prod_io/pods/all")).toBe(1);
   });
 
   it("alphanumerics + the / : - _ allowlist pass through", async () => {
     const handler = vi.fn();
-    await onResourceDelta("a-z/0:9_+", "pods", handler);
+    await onResourceDelta("a-z/0:9_+", "pods", null, handler);
     // `+` is not in the allowlist → underscore. Others pass through.
-    expect(listenerCount("resource://a-z/0:9__/pods")).toBe(1);
+    expect(listenerCount("resource://a-z/0:9__/pods/all")).toBe(1);
+  });
+
+  it("single-namespace subscribe goes to the ns: scope channel", async () => {
+    const handler = vi.fn();
+    await onResourceDelta("ctx", "pods", ["kube-system"], handler);
+    // `:` is in the allowlist, so `ns:kube-system` survives sanitization.
+    expect(listenerCount("resource://ctx/pods/ns:kube-system")).toBe(1);
+  });
+
+  it("multi-namespace subscribe falls back to the All channel", async () => {
+    const handler = vi.fn();
+    await onResourceDelta("ctx", "pods", ["foo", "bar"], handler);
+    // 2+ selected resolves to the cross-NS watcher; frontend filters
+    // client-side. Backend `NsScope::from_selection` matches this.
+    expect(listenerCount("resource://ctx/pods/all")).toBe(1);
   });
 
   it("single-delta payload routes through unwrapped", async () => {
     const handler = vi.fn();
-    await onResourceDelta("ctx", "pods", handler);
-    emitMock("resource://ctx/pods", { kind: "Added", row: { id: "p1" } });
+    await onResourceDelta("ctx", "pods", null, handler);
+    emitMock("resource://ctx/pods/all", {
+      kind: "Added",
+      row: { id: "p1" },
+    });
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith({ kind: "Added", row: { id: "p1" } });
   });
 
   it("batched array payload fans out one call per delta in order", async () => {
     const handler = vi.fn();
-    await onResourceDelta("ctx", "pods", handler);
-    emitMock("resource://ctx/pods", [
+    await onResourceDelta("ctx", "pods", null, handler);
+    emitMock("resource://ctx/pods/all", [
       { kind: "Added", row: { id: "p1" } },
       { kind: "Modified", row: { id: "p1" } },
       { kind: "Deleted", row: { id: "p1" } },
@@ -67,11 +86,14 @@ describe("onResourceDelta — name sanitization + payload routing", () => {
 
   it("returned unlisten drops the handler so later emits are no-ops", async () => {
     const handler = vi.fn();
-    const unlisten = await onResourceDelta("ctx", "pods", handler);
+    const unlisten = await onResourceDelta("ctx", "pods", null, handler);
     unlisten();
-    emitMock("resource://ctx/pods", { kind: "Added", row: { id: "p1" } });
+    emitMock("resource://ctx/pods/all", {
+      kind: "Added",
+      row: { id: "p1" },
+    });
     expect(handler).not.toHaveBeenCalled();
-    expect(listenerCount("resource://ctx/pods")).toBe(0);
+    expect(listenerCount("resource://ctx/pods/all")).toBe(0);
   });
 });
 

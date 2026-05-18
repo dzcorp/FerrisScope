@@ -249,6 +249,12 @@ type Props = {
   // Optional: full row from the table, used for the pod summary tab so we
   // don't have to round-trip the API just to render stats.
   row?: ResourceRow | null;
+  // Watcher scope the opening view is using. The delta listener that
+  // refetches detail on row changes subscribes to the matching scope's
+  // event channel — without this, a detail opened from a namespace-scoped
+  // table (e.g. ResourceTable on ns=foo) would listen on the All channel
+  // and never get refresh triggers.
+  subscribeNamespaces?: string[] | null;
   onClose: () => void;
   onNavigate?: DetailNavigate;
   // Open `kubectl exec -it` against this pod in a Dock terminal tab.
@@ -266,6 +272,7 @@ export function DetailPanel({
   kind,
   target,
   row,
+  subscribeNamespaces = null,
   onClose,
   onNavigate,
   onOpenExec,
@@ -630,7 +637,11 @@ export function DetailPanel({
         setDetailVersion((v) => v + 1);
       }, 250);
     };
-    onResourceDelta(clusterId, kind.id, (delta) => {
+    // Listen on the same scope channel the opening view is using, so
+    // when the operator opened detail from a namespace-scoped table the
+    // refresh trigger actually reaches us. Defaults to All when the
+    // parent didn't pass a scope (e.g. cluster-overview detail panels).
+    onResourceDelta(clusterId, kind.id, subscribeNamespaces, (delta) => {
       if (cancelled) return;
       if (delta.kind === "upsert" && delta.row.uid === target.uid) {
         scheduleRefetch();
@@ -1827,7 +1838,7 @@ function ObjectEvents({
 
     (async () => {
       try {
-        unlisten = await onResourceDelta(clusterId, "events", (delta) => {
+        unlisten = await onResourceDelta(clusterId, "events", null, (delta) => {
           if (cancelled) return;
           if (delta.kind === "init_done") return;
           const next = new Map(rowsRef.current);

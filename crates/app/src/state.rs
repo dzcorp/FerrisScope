@@ -21,12 +21,21 @@ use crate::terminal::TerminalRegistry;
 
 pub(crate) type ClusterId = String;
 pub(crate) type KindId = String;
+
+/// Slot key for [`ClusterEntry::kinds`]. A given `(cluster, kind)` can be
+/// watched at multiple scopes simultaneously — typically the operator
+/// flips between `All` and a single namespace and we keep both warm in
+/// the linger window (see `WATCHER_LINGER`). Two different views looking
+/// at the same kind with different scopes (e.g. ResourceTable on Pods
+/// scoped to `default`, plus a cluster-overview detail panel wanting all
+/// Pods) each get their own slot, watcher, and forwarder.
+pub(crate) type SlotKey = (KindId, ferrisscope_kube_ext::NsScope);
 pub(crate) type StreamId = String;
 
 pub(crate) struct ClusterEntry {
     pub(crate) cluster: Arc<Cluster>,
     /// One refcounted slot per resource kind id (see `ferrisscope_kube_ext::registry`).
-    pub(crate) kinds: Mutex<HashMap<KindId, KindSlot>>,
+    pub(crate) kinds: Mutex<HashMap<SlotKey, KindSlot>>,
     /// Refcounted metrics-server poller. Lazy: started on first `subscribe_metrics`,
     /// torn down (Drop aborts the task) on the last unsubscribe.
     pub(crate) metrics: Mutex<MetricsSlot>,

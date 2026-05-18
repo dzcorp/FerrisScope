@@ -70,21 +70,27 @@ describe("contexts + connect", () => {
 });
 
 describe("subscribeResource", () => {
-  it("defaults namespaceFilter to null", async () => {
+  it("defaults namespaces to null", async () => {
     const cap = captureNext({ ok: true });
     await api.subscribeResource("ctx", "pods");
     expect(cap.calls[0]?.cmd).toBe("subscribe_resource");
     expect(cap.calls[0]?.args).toEqual({
       clusterId: "ctx",
       kindId: "pods",
-      namespaceFilter: null,
+      namespaces: null,
     });
   });
 
-  it("forwards explicit namespaceFilter", async () => {
+  it("forwards a single-namespace selection so the backend can pick Api::namespaced", async () => {
     const cap = captureNext({ ok: true });
-    await api.subscribeResource("ctx", "pods", "default");
-    expect(cap.calls[0]?.args?.namespaceFilter).toBe("default");
+    await api.subscribeResource("ctx", "pods", ["default"]);
+    expect(cap.calls[0]?.args?.namespaces).toEqual(["default"]);
+  });
+
+  it("forwards multi-namespace selection (backend resolves to All + client filter)", async () => {
+    const cap = captureNext({ ok: true });
+    await api.subscribeResource("ctx", "pods", ["foo", "bar"]);
+    expect(cap.calls[0]?.args?.namespaces).toEqual(["foo", "bar"]);
   });
 });
 
@@ -337,7 +343,11 @@ describe("resource kinds / search / index", () => {
       "unsubscribe_resource",
     ]);
     expect(cap.calls[2]?.args).toEqual({ connectId: "conn-1" });
-    expect(cap.calls[3]?.args).toEqual({ clusterId: "ctx", kindId: "pods" });
+    expect(cap.calls[3]?.args).toEqual({
+      clusterId: "ctx",
+      kindId: "pods",
+      namespaces: null,
+    });
   });
 });
 
