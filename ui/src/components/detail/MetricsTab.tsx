@@ -2016,11 +2016,46 @@ type ChartSeries = {
 export function clientXToSvgX(svg: SVGSVGElement, clientX: number): number {
   const rect = svg.getBoundingClientRect();
   if (rect.width <= 0) return clientX - rect.left;
-  const viewBoxWidth =
-    svg.viewBox.baseVal && svg.viewBox.baseVal.width > 0
-      ? svg.viewBox.baseVal.width
-      : rect.width;
-  return ((clientX - rect.left) / rect.width) * viewBoxWidth;
+
+  let viewBoxWidth = rect.width;
+  const vb = svg.getAttribute("viewBox");
+  if (vb) {
+    const parts = vb.trim().split(/[\s,]+/);
+    if (parts.length === 4) {
+      const p2 = parts[2];
+      if (p2 !== undefined) {
+        const w = Number.parseFloat(p2);
+        if (Number.isFinite(w) && w > 0) {
+          viewBoxWidth = w;
+        }
+      }
+    }
+  } else if (svg.viewBox.baseVal && svg.viewBox.baseVal.width > 0) {
+    viewBoxWidth = svg.viewBox.baseVal.width;
+  }
+
+  // Detect applied CSS zoom on document root
+  let zoom = 1.0;
+  const zoomStr = document.documentElement.style.zoom;
+  if (zoomStr) {
+    const parsed = Number.parseFloat(zoomStr);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      zoom = parsed;
+    }
+  }
+
+  // Under CSS zoom, WebKit (Tauri on macOS/Linux) reports bounding rect in
+  // unzoomed layout pixels, while clientX is in zoomed visual pixels.
+  // Blink (Chrome) reports both in zoomed visual pixels.
+  // We detect WebKit by checking if rect.width is closer to unzoomed viewBoxWidth
+  // than to the zoomed viewBoxWidth * zoom.
+  const isRectUnzoomed =
+    Math.abs(zoom - 1.0) > 1e-4 &&
+    Math.abs(rect.width - viewBoxWidth) < Math.abs(rect.width - viewBoxWidth * zoom);
+
+  const clientXAdjusted = isRectUnzoomed ? clientX / zoom : clientX;
+
+  return ((clientXAdjusted - rect.left) / rect.width) * viewBoxWidth;
 }
 
 function Chart({

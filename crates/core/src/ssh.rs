@@ -56,7 +56,7 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 /// Server inactivity timeout. Sent to russh; the SSH session disconnects on
 /// silence past this. Long enough that an idle reflector doesn't drop the
 /// tunnel between user clicks; short enough that a half-dead host gives up.
-const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60 * 5);
+const INACTIVITY_TIMEOUT: Duration = Duration::from_mins(5);
 
 #[derive(Debug, Clone)]
 pub struct ExecResult {

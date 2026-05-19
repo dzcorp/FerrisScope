@@ -52,7 +52,7 @@ const MAX_TOOL_ROUNDS: u32 = 500;
 /// like `helm install --wait`, long `kubectl rollout status`, or
 /// multi-second pod-creating debug shells need real headroom; on timeout
 /// we still surface `is_error: true` so the model can recover.
-const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
 
 const SYSTEM_PROMPT_BASELINE: &str = "\
 You are FerrisScope's Kubernetes operator assistant. You help the user \
@@ -1129,7 +1129,7 @@ const MCP_TEST_STDERR_CAP: usize = 8192;
 /// download the package on first run (frequently 20–40s). The production
 /// chat-open path has tighter budgets; we don't share them.
 const MCP_TEST_OVERALL: std::time::Duration = std::time::Duration::from_secs(90);
-const MCP_TEST_INITIALIZE: std::time::Duration = std::time::Duration::from_secs(60);
+const MCP_TEST_INITIALIZE: std::time::Duration = std::time::Duration::from_mins(1);
 const MCP_TEST_LIST_TOOLS: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[tauri::command]
@@ -3204,7 +3204,7 @@ async fn run_turn_loop(
         // per-future above; this loop is purely about the on-disk event
         // log so a session reload can rebuild the transcript.
         let now = chrono::Utc::now().timestamp_millis();
-        for ((tc, content, is_error), tool_msg) in results.into_iter().zip(tool_msgs.into_iter()) {
+        for ((tc, content, is_error), tool_msg) in results.into_iter().zip(tool_msgs) {
             let _ = store
                 .append(
                     &cluster_id,

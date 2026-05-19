@@ -90,8 +90,8 @@ impl OpenAICompatibleProvider {
                 // Generous timeouts: SSE streams can run hundreds of
                 // seconds for long completions. No automatic retries —
                 // the user re-sends.
-                .connect_timeout(std::time::Duration::from_secs(60))
-                .timeout(std::time::Duration::from_secs(600))
+                .connect_timeout(std::time::Duration::from_mins(1))
+                .timeout(std::time::Duration::from_mins(10))
                 .build()
                 .expect("reqwest client"),
             base_url: base_url_override

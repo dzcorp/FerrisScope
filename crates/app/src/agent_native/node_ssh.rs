@@ -68,7 +68,7 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// budget inside `SshSession`, but stitching together longer command
 /// lifetimes (e.g. journalctl --since=1h) is a normal use case for this
 /// fallback path, so the outer timeout is the larger of the two.
-const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(240);
+const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_mins(4);
 
 /// One open node-SSH session.
 struct Session {

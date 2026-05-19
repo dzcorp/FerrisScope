@@ -243,7 +243,7 @@ impl NativeTool for HelmHistory {
                 a.namespace, a.name
             )));
         }
-        releases.sort_by(|a, b| b.version.cmp(&a.version));
+        releases.sort_by_key(|b| std::cmp::Reverse(b.version));
         let history: Vec<Value> = releases
             .iter()
             .map(|r| {
@@ -365,7 +365,7 @@ impl NativeTool for HelmInstall {
     fn timeout(&self) -> Option<std::time::Duration> {
         // Allow up to 10 minutes — install --wait can legitimately take
         // a long time for charts that bring up databases / migrations.
-        Some(std::time::Duration::from_secs(600))
+        Some(std::time::Duration::from_mins(10))
     }
 
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {
@@ -508,7 +508,7 @@ impl NativeTool for HelmUninstall {
     }
 
     fn timeout(&self) -> Option<std::time::Duration> {
-        Some(std::time::Duration::from_secs(300))
+        Some(std::time::Duration::from_mins(5))
     }
 
     async fn call(&self, args: Value) -> Result<Value, NativeToolError> {

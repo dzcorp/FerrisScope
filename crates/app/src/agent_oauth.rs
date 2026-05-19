@@ -138,7 +138,7 @@ pub(crate) async fn login(
             Ok(r) => r,
             Err(_) => Err(OauthError::Cancelled),
         },
-        () = tokio::time::sleep(Duration::from_secs(5 * 60)) => Err(OauthError::TimedOut),
+        () = tokio::time::sleep(Duration::from_mins(5)) => Err(OauthError::TimedOut),
     };
 
     // Clean up the slot regardless of outcome.

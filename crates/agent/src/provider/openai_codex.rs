@@ -99,8 +99,8 @@ impl OpenAICodexProvider {
         };
         Self {
             client: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(60))
-                .timeout(std::time::Duration::from_secs(600))
+                .connect_timeout(std::time::Duration::from_mins(1))
+                .timeout(std::time::Duration::from_mins(10))
                 .build()
                 .expect("reqwest client"),
             oauth: Arc::new(Mutex::new(OauthState {

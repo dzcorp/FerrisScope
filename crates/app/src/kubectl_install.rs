@@ -308,7 +308,7 @@ fn http_get_text(url: &str, _json: bool) -> Result<String, KubectlInstallError> 
 
 fn http_get_reader(url: &str) -> Result<Box<dyn io::Read>, KubectlInstallError> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(60)))
+        .timeout_global(Some(Duration::from_mins(1)))
         .build()
         .into();
     let request = agent

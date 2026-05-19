@@ -389,7 +389,7 @@ pub async fn get_helm_release_detail(
             "helm release {namespace}/{name}"
         )));
     }
-    releases.sort_by(|a, b| b.version.cmp(&a.version));
+    releases.sort_by_key(|b| std::cmp::Reverse(b.version));
     let latest = releases[0].clone();
 
     // Look up "update available" against the operator's local helm repo
@@ -687,7 +687,7 @@ pub async fn helm_upgrade(
             "helm release {namespace}/{name}"
         )));
     }
-    releases.sort_by(|a, b| b.version.cmp(&a.version));
+    releases.sort_by_key(|b| std::cmp::Reverse(b.version));
     let latest = releases[0].clone();
 
     // Stage chart + values file in a temp dir. Drops at function exit;

@@ -585,7 +585,7 @@ fn prune_named(mapping: &mut serde_yaml::Mapping, list_key: &str, name: &str) {
 /// `list_contexts`. Long enough that browsing the fleet doesn't re-SSH
 /// constantly, short enough that an operator who fixed something on the
 /// remote sees the change within a sensible window.
-const SSH_LIST_TTL: Duration = Duration::from_secs(60 * 5);
+const SSH_LIST_TTL: Duration = Duration::from_mins(5);
 
 #[derive(Clone)]
 struct SshCacheEntry {

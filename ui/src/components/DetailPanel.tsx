@@ -1827,6 +1827,7 @@ function ObjectEvents({
   const [state, setState] = useState<EventState>({ kind: "loading" });
   const rowsRef = useRef<Map<string, ResourceRow>>(new Map());
   const initialDoneRef = useRef(false);
+  const watcherInitDoneRef = useRef(false);
   const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
@@ -1834,13 +1835,22 @@ function ObjectEvents({
     let unlisten: (() => void) | null = null;
     rowsRef.current = new Map();
     initialDoneRef.current = false;
+    watcherInitDoneRef.current = false;
     setState({ kind: "loading" });
 
     (async () => {
       try {
         unlisten = await onResourceDelta(clusterId, "events", null, (delta) => {
           if (cancelled) return;
-          if (delta.kind === "init_done") return;
+
+          if (delta.kind === "init_done") {
+            watcherInitDoneRef.current = true;
+            if (initialDoneRef.current) {
+              setState({ kind: "ready", rows: Array.from(rowsRef.current.values()) });
+            }
+            return;
+          }
+
           const next = new Map(rowsRef.current);
           if (delta.kind === "upsert") {
             if (delta.row.involved_uid === targetUid) {
@@ -1850,23 +1860,32 @@ function ObjectEvents({
             next.delete(delta.uid);
           }
           rowsRef.current = next;
-          // Hold the loading state until the initial snapshot has merged —
-          // otherwise an unrelated cluster-wide event delta flips us to
-          // "ready" with an empty map and the spinner never shows.
+
           if (initialDoneRef.current) {
-            setState({ kind: "ready", rows: Array.from(next.values()) });
+            // Only transition to ready if the watcher is fully synced, OR we have at least one event.
+            if (watcherInitDoneRef.current || next.size > 0) {
+              setState({ kind: "ready", rows: Array.from(next.values()) });
+            }
           }
         });
 
         const result = await api.subscribeResource(clusterId, "events", null);
         if (cancelled) return;
+
+        if (result.init_done) {
+          watcherInitDoneRef.current = true;
+        }
+
         const merged = new Map<string, ResourceRow>(rowsRef.current);
         for (const row of result.rows) {
           if (row.involved_uid === targetUid) merged.set(row.uid, row);
         }
         rowsRef.current = merged;
         initialDoneRef.current = true;
-        setState({ kind: "ready", rows: Array.from(merged.values()) });
+
+        if (watcherInitDoneRef.current || merged.size > 0) {
+          setState({ kind: "ready", rows: Array.from(merged.values()) });
+        }
       } catch (e) {
         if (!cancelled) setState({ kind: "error", message: String(e) });
       }

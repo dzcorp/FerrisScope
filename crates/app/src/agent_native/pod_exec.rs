@@ -37,7 +37,7 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// timeout error has a chance to come back instead of the outer wrapper
 /// firing first. Long-running diagnostics (`kubectl wait`, multi-second
 /// init scripts) commonly land in the 60–180s range.
-const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(240);
+const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_mins(4);
 
 #[derive(Debug, Deserialize)]
 struct Args {

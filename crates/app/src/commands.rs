@@ -588,7 +588,7 @@ fn spawn_search_bootstrap(
     /// fleet round-trips reuse what's already on disk; longer absences
     /// (after-lunch, next-morning) re-bootstrap so the inline preview in
     /// search hits stays close to the live cluster state.
-    const FRESH_WINDOW: Duration = Duration::from_secs(5 * 60);
+    const FRESH_WINDOW: Duration = Duration::from_mins(5);
 
     tauri::async_runtime::spawn(async move {
         let started = std::time::Instant::now();
@@ -831,7 +831,7 @@ pub(crate) struct SubscribeResult {
 /// deltas it has no UI consumer for. 60 s is short enough that a stray
 /// idle tab doesn't accumulate forever, long enough that normal navigation
 /// stays warm.
-const WATCHER_LINGER: std::time::Duration = std::time::Duration::from_secs(60);
+const WATCHER_LINGER: std::time::Duration = std::time::Duration::from_mins(1);
 
 #[tauri::command]
 pub(crate) async fn subscribe_resource(
@@ -1145,17 +1145,17 @@ pub(crate) fn spawn_search_index_gc(handle: AppHandle) {
     use std::time::Duration;
     /// Tick cadence — at 10 min we trade a bit of disk for not waking
     /// up an idle laptop too often.
-    const TICK: Duration = Duration::from_secs(600);
+    const TICK: Duration = Duration::from_mins(10);
     /// Tombstones older than this are hard-deleted. A flapping pod
     /// re-upserted within the window flips `deleted_at` back to NULL,
     /// so this only purges genuinely-gone rows.
-    const TOMBSTONE_AGE: Duration = Duration::from_secs(60 * 60 * 24);
+    const TOMBSTONE_AGE: Duration = Duration::from_hours(24);
     /// Rows last seen alive longer ago than this are dropped — bounds
     /// disk for kinds the operator opened once and never returned to.
-    const STALE_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 7);
+    const STALE_AGE: Duration = Duration::from_hours(168);
     /// Initial delay to keep the GC out of cold-start contention with
     /// connect / probe / bootstrap.
-    const STARTUP_DELAY: Duration = Duration::from_secs(60);
+    const STARTUP_DELAY: Duration = Duration::from_mins(1);
 
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(STARTUP_DELAY).await;
@@ -1317,7 +1317,7 @@ fn spawn_resource_forwarder(
         // clusters, and a CRD list with 6000+ instances paints
         // progressively instead of waiting for the whole sync to land.
         const INIT_WINDOW: Duration = Duration::from_millis(16);
-        const STEADY_WINDOW: Duration = Duration::from_millis(1000);
+        const STEADY_WINDOW: Duration = Duration::from_secs(1);
 
         let started = std::time::Instant::now();
         let mut forwarded = 0u64;

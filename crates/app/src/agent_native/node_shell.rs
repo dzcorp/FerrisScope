@@ -57,11 +57,11 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// Per-call exec timeout. The shell session itself lives until close; this
 /// just bounds one command. Long-running probes should be wrapped in
 /// `timeout` server-side or a tighter caller-supplied `timeout_seconds`.
-const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(240);
+const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_mins(4);
 
 /// Pod startup timeout for `open`. Includes image-pull on first use; alpine
 /// is small (~7 MB) but a fresh node still needs ~30s on a slow registry.
-const POD_READY_TIMEOUT: Duration = Duration::from_secs(120);
+const POD_READY_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Server-side TTL on the debug pod via `activeDeadlineSeconds`. The
 /// kube-apiserver terminates the pod after this many seconds regardless of

@@ -9,11 +9,18 @@ function makeSvgStub(opts: {
   viewBoxWidth: number;
   zoom: number;
   rectLeft: number;
+  viewBoxAttr?: string;
 }): SVGSVGElement {
-  const { viewBoxWidth, zoom, rectLeft } = opts;
+  const { viewBoxWidth, zoom, rectLeft, viewBoxAttr } = opts;
   const renderedWidth = viewBoxWidth * zoom;
   return {
     viewBox: { baseVal: { x: 0, y: 0, width: viewBoxWidth, height: 130 } },
+    getAttribute: (name: string) => {
+      if (name === "viewBox") {
+        return viewBoxAttr !== undefined ? viewBoxAttr : `0 0 ${viewBoxWidth} 130`;
+      }
+      return null;
+    },
     getBoundingClientRect: () => ({
       left: rectLeft,
       top: 0,
@@ -64,5 +71,44 @@ describe("clientXToSvgX", () => {
     expect(clientXToSvgX(svg, 550)).toBeCloseTo(280, 5);
     expect(clientXToSvgX(svg, 200)).toBeCloseTo(0, 5);
     expect(clientXToSvgX(svg, 900)).toBeCloseTo(560, 5);
+  });
+
+  it("uses the viewBox attribute over stale viewBox.baseVal under WebKit/Tauri", () => {
+    // Under WebKit/Tauri, viewBox.baseVal can be stale (e.g. 560) after resize,
+    // but the viewBox attribute itself gets updated (e.g. 800).
+    const svg = {
+      viewBox: { baseVal: { x: 0, y: 0, width: 560, height: 130 } },
+      getAttribute: (name: string) => (name === "viewBox" ? "0 0 800 130" : null),
+      getBoundingClientRect: () => ({
+        left: 0,
+        top: 0,
+        right: 800,
+        bottom: 130,
+        width: 800,
+        height: 130,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    } as unknown as SVGSVGElement;
+
+    // Cursor at visual midpoint (400) should map to 400 (halfway of 800).
+    // If it used stale baseVal (560), it would map to 280.
+    expect(clientXToSvgX(svg, 400)).toBeCloseTo(400, 5);
+  });
+
+  it("scales correctly under WebKit/Tauri CSS zoom behavior (unzoomed bounding rect)", () => {
+    // Under WebKit/Tauri, document.documentElement.style.zoom is set to 1.5.
+    // getBoundingClientRect reports unzoomed width (560) and left (0),
+    // but cursor clientX is reported in zoomed visual coordinates (midpoint = 420).
+    const prevZoom = document.documentElement.style.zoom;
+    document.documentElement.style.zoom = "1.5";
+    try {
+      const svg = makeSvgStub({ viewBoxWidth: 560, zoom: 1, rectLeft: 0 }); // rect.width is 560
+      expect(clientXToSvgX(svg, 420)).toBeCloseTo(280, 5);
+      expect(clientXToSvgX(svg, 840)).toBeCloseTo(560, 5);
+    } finally {
+      document.documentElement.style.zoom = prevZoom;
+    }
   });
 });
