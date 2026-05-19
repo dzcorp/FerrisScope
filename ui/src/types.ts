@@ -2252,6 +2252,32 @@ export type ChatTool = {
   source: string;
 };
 
+/// Snapshot of what the user is currently looking at in the FerrisScope
+/// UI, sent with `chat_send_message` so the assistant can resolve vague
+/// references ("fix this", "delete it") to the actual view. Every field
+/// is optional — the backend renders only what's present and tells the
+/// model to ignore the block if the request is unrelated.
+export type ChatViewContext = {
+  /// Cluster id the UI is viewing. May differ from the chat's active
+  /// cluster — the prompt block calls out the mismatch when it happens.
+  clusterId?: string;
+  /// Internal kind id (e.g. `pods`, `deployments`, `wkcrd:...`).
+  kindId?: string;
+  /// Human-readable kind label (e.g. "Deployments").
+  kindLabel?: string;
+  /// Currently filtered namespaces. Empty / omitted = all namespaces.
+  namespaces?: string[];
+  /// Multi-selected rows in the current table. Backend truncates to a
+  /// fixed cap when rendering the block.
+  selected?: ChatViewSelectedResource[];
+};
+
+export type ChatViewSelectedResource = {
+  /// Omit for cluster-scoped resources.
+  namespace?: string;
+  name: string;
+};
+
 /// Per-server status row in `mcp_status` events. Re-emitted on every
 /// status update with the full per-server snapshot — frontend treats the
 /// most recent event as authoritative.

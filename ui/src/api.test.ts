@@ -721,12 +721,39 @@ describe("AI agent + chat", () => {
       "chat_close",
       "chat_approve_tool_call",
     ]);
-    expect(cap.calls[0]?.args).toEqual({ chatId: "c-1", content: "hi" });
+    expect(cap.calls[0]?.args).toEqual({
+      chatId: "c-1",
+      content: "hi",
+      viewContext: undefined,
+    });
     expect(cap.calls[2]?.args).toEqual({ chatId: "c-1", mode: "review" });
     expect(cap.calls[8]?.args).toEqual({
       chatId: "c-1",
       toolCallId: "tc-1",
       decision: "allow",
+    });
+  });
+
+  it("chatSendMessage forwards the view-context snapshot when provided", async () => {
+    const cap = captureNext(undefined);
+    await api.chatSendMessage("c-1", "fix this", {
+      clusterId: "kind-dev",
+      kindId: "deployments",
+      kindLabel: "Deployment",
+      namespaces: ["default"],
+      selected: [{ namespace: "default", name: "api" }],
+    });
+    expect(cap.calls[0]?.cmd).toBe("chat_send_message");
+    expect(cap.calls[0]?.args).toEqual({
+      chatId: "c-1",
+      content: "fix this",
+      viewContext: {
+        clusterId: "kind-dev",
+        kindId: "deployments",
+        kindLabel: "Deployment",
+        namespaces: ["default"],
+        selected: [{ namespace: "default", name: "api" }],
+      },
     });
   });
 });

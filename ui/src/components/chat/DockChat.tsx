@@ -26,6 +26,7 @@ import {
   type ChatViewState,
   type ChatViewMessage,
 } from "./chatStreaming";
+import { snapshotViewContext } from "./viewContext";
 
 type Props = {
   mode: ThemeMode;
@@ -537,7 +538,7 @@ export function DockChat({ mode, tab, visible }: Props) {
       };
     });
     try {
-      await api.chatSendMessage(activeChatId, text);
+      await api.chatSendMessage(activeChatId, text, snapshotViewContext());
     } catch (e) {
       setStatus({ kind: "error", message: String(e) });
     }
