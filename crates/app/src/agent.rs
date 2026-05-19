@@ -1983,7 +1983,7 @@ pub(crate) async fn chat_send_message(
         // Overwrite the stored snapshot every send so autocontinue / queued
         // sends use the most recent view. `None` payload clears the slot —
         // operators can disable the feature client-side by sending nothing.
-        rt.last_view_context = view_context.clone();
+        rt.last_view_context.clone_from(&view_context);
         let queue_only = rt.cancel.is_some();
         // Capture a once-per-chat snapshot for auto-titling under the
         // same lock so concurrent sends can't both fire the task.
