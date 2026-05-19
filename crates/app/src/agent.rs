@@ -876,6 +876,11 @@ struct ChatRuntime {
     /// `run_auto_title_task` bails on load when the persisted title
     /// is no longer the default.
     auto_title_done: bool,
+    /// Most recent UI selection snapshot sent with `chat_send_message`.
+    /// Optional; only used to inject an informational block into the
+    /// system prompt. Overwritten on every send. Not persisted — a
+    /// reopened chat starts blank until the next send refreshes it.
+    last_view_context: Option<ViewContextWire>,
 }
 
 #[derive(Default)]
@@ -1689,6 +1694,7 @@ pub(crate) async fn chat_open(
         // source of truth: if it's still the placeholder when the
         // first turn finishes, we attempt auto-naming exactly once.
         auto_title_done: false,
+        last_view_context: None,
     }));
     state
         .chats
@@ -1918,6 +1924,7 @@ async fn emit_mcp_status(runtime: &Arc<Mutex<ChatRuntime>>) {
 pub(crate) async fn chat_send_message(
     chat_id: String,
     content: String,
+    view_context: Option<ViewContextWire>,
     state: State<'_, AgentState>,
     app_state: State<'_, AppState>,
 ) -> Result<(), String> {
@@ -1973,6 +1980,10 @@ pub(crate) async fn chat_send_message(
     let (cluster_id, session_id, queue_only, title_snapshot) = {
         let mut rt = runtime.lock().await;
         rt.messages.push(user_message.clone());
+        // Overwrite the stored snapshot every send so autocontinue / queued
+        // sends use the most recent view. `None` payload clears the slot —
+        // operators can disable the feature client-side by sending nothing.
+        rt.last_view_context = view_context.clone();
         let queue_only = rt.cancel.is_some();
         // Capture a once-per-chat snapshot for auto-titling under the
         // same lock so concurrent sends can't both fire the task.
@@ -2038,20 +2049,19 @@ pub(crate) async fn chat_send_message(
     // `fs_configuration_use_context` call) instead of forcing the model
     // to spend a tool round-trip on `fs_configuration_view` to know
     // where it is.
-    let cluster_ctx = runtime.lock().await.cluster.clone();
-    let cluster_block = build_cluster_context_block(&cluster_ctx, &app_state).await;
-    let system_prompt = {
-        let baseline = SYSTEM_PROMPT_BASELINE.to_string();
-        let with_ctx = if cluster_block.is_empty() {
-            baseline
-        } else {
-            format!("{baseline}\n\n{cluster_block}")
-        };
-        match p.settings.system_prompt_override.as_ref() {
-            Some(extra) if !extra.is_empty() => format!("{with_ctx}\n\n{extra}"),
-            _ => with_ctx,
-        }
+    let (cluster_ctx, view_snapshot) = {
+        let rt = runtime.lock().await;
+        (rt.cluster.clone(), rt.last_view_context.clone())
     };
+    let cluster_block = build_cluster_context_block(&cluster_ctx, &app_state).await;
+    let active_cluster = cluster_ctx.active().await;
+    let view_block =
+        build_view_context_block(view_snapshot.as_ref(), &active_cluster, &app_state).await;
+    let system_prompt = assemble_system_prompt(
+        &cluster_block,
+        &view_block,
+        p.settings.system_prompt_override.as_deref(),
+    );
 
     let runtime_clone = runtime.clone();
     let store_clone = store.clone();
@@ -2246,6 +2256,174 @@ pub(crate) struct ChatToolWire {
     pub source: String,
 }
 
+/// Snapshot of what the operator's UI is showing at the moment they hit
+/// send. Optional on every `chat_send_message` call; when present, it
+/// goes into the system prompt as informational context so the model
+/// can resolve vague references ("fix this", "delete it") without the
+/// operator having to spell out cluster / kind / namespace / target.
+///
+/// Deliberately a snapshot, not a subscription — the chat is still
+/// independent of UI state; this is just the view at send-time. The
+/// model is told it may ignore the block if the request is unrelated.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ViewContextWire {
+    /// Cluster id the UI is currently viewing. May differ from the chat's
+    /// active cluster; the prompt block calls out the mismatch when it
+    /// happens so the model knows tool calls still hit the chat cluster.
+    #[serde(default)]
+    pub cluster_id: Option<String>,
+    /// Internal kind id (e.g. `pods`, `deployments`, `wkcrd:...`) — not
+    /// the Kubernetes `Kind`. Used for navigation links if we ever want
+    /// to emit one; today we only show `kind_label` in the prompt.
+    #[serde(default)]
+    pub kind_id: Option<String>,
+    /// Human-readable kind label as the rail shows it (e.g. "Deployments").
+    /// Optional — falls back to `kind_id` in the rendered block.
+    #[serde(default)]
+    pub kind_label: Option<String>,
+    /// Currently filtered namespaces. Empty vec = "all namespaces".
+    #[serde(default)]
+    pub namespaces: Vec<String>,
+    /// Multi-selected rows from the current table. Truncated in the
+    /// rendered block to keep the prompt bounded.
+    #[serde(default)]
+    pub selected: Vec<ViewSelectedResource>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ViewSelectedResource {
+    /// `None` for cluster-scoped resources.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    pub name: String,
+}
+
+/// Cap on rendered selected rows. Above this we render a summary line so
+/// a multi-select of 500 pods doesn't blow up the system prompt.
+const VIEW_CONTEXT_SELECTED_CAP: usize = 10;
+
+/// Assemble the full system prompt: baseline + optional cluster block +
+/// optional view-context block + operator's free-form override. Each
+/// component is appended with a single blank-line separator when
+/// non-empty so empties don't leave stray whitespace.
+fn assemble_system_prompt(
+    cluster_block: &str,
+    view_block: &str,
+    override_extra: Option<&str>,
+) -> String {
+    let mut out = SYSTEM_PROMPT_BASELINE.to_string();
+    if !cluster_block.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(cluster_block);
+    }
+    if !view_block.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(view_block);
+    }
+    if let Some(extra) = override_extra.filter(|s| !s.is_empty()) {
+        out.push_str("\n\n");
+        out.push_str(extra);
+    }
+    out
+}
+
+/// Render the optional "what the operator is viewing" block. Returns ""
+/// when there's nothing useful to say (no view payload, or all fields
+/// empty). The block is informational — the LLM is told explicitly it
+/// may ignore it if the request is unrelated.
+async fn build_view_context_block(
+    view: Option<&ViewContextWire>,
+    chat_active_cluster: &str,
+    app_state: &AppState,
+) -> String {
+    use std::fmt::Write as _;
+    let Some(v) = view else {
+        return String::new();
+    };
+    let nothing = v.cluster_id.as_deref().unwrap_or("").is_empty()
+        && v.kind_id.as_deref().unwrap_or("").is_empty()
+        && v.kind_label.as_deref().unwrap_or("").is_empty()
+        && v.namespaces.is_empty()
+        && v.selected.is_empty();
+    if nothing {
+        return String::new();
+    }
+
+    let mut out = String::from("## What the operator is viewing\n\n");
+    out.push_str(
+        "Informational only. This describes the FerrisScope UI surface the operator has \
+         open right now; use it to resolve vague references like \"this\", \"here\", or \
+         \"fix this\". If the operator's request is clearly unrelated to what they're \
+         viewing, ignore this block.\n\n",
+    );
+
+    if let Some(ui_cluster) = v.cluster_id.as_deref().filter(|s| !s.is_empty()) {
+        if ui_cluster != chat_active_cluster {
+            let sources = app_state.sources.lock().await;
+            let contexts =
+                ferrisscope_core::kubeconfig::list_contexts(&sources).unwrap_or_default();
+            drop(sources);
+            let ui_name = contexts
+                .iter()
+                .find(|c| c.id == ui_cluster)
+                .map(|c| c.name.as_str())
+                .unwrap_or(ui_cluster);
+            let _ = writeln!(
+                out,
+                "**Cluster mismatch:** the UI is viewing `{ui_name}` but this chat is \
+                 bound to a different cluster. Native tool calls still target the chat's \
+                 cluster — use `fs_configuration_use_context` if the operator wants you \
+                 to act on the UI cluster instead."
+            );
+        }
+    }
+
+    let kind = v
+        .kind_label
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or(v.kind_id.as_deref().filter(|s| !s.is_empty()));
+    if let Some(k) = kind {
+        let _ = writeln!(out, "Open view: `{k}`.");
+    }
+
+    if v.namespaces.is_empty() {
+        out.push_str("Filtered namespaces: all.\n");
+    } else {
+        let mut ns: Vec<&str> = v.namespaces.iter().map(String::as_str).collect();
+        ns.sort_unstable();
+        let rendered = ns
+            .iter()
+            .map(|s| format!("`{s}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(out, "Filtered namespaces: {rendered}.");
+    }
+
+    if !v.selected.is_empty() {
+        let _ = writeln!(out, "\nSelected rows ({}):", v.selected.len());
+        for r in v.selected.iter().take(VIEW_CONTEXT_SELECTED_CAP) {
+            let ns = r
+                .namespace
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("-");
+            let _ = writeln!(out, "- `{}` / `{}`", ns, r.name);
+        }
+        if v.selected.len() > VIEW_CONTEXT_SELECTED_CAP {
+            let _ = writeln!(
+                out,
+                "- … and {} more (truncated)",
+                v.selected.len() - VIEW_CONTEXT_SELECTED_CAP
+            );
+        }
+    }
+
+    out
+}
+
 #[tauri::command]
 pub(crate) async fn chat_list_tools(
     chat_id: String,
@@ -2429,21 +2607,22 @@ async fn autocontinue_if_idle(
 
     // System prompt rebuild — the active cluster could have changed since
     // the last turn (agent may have called `fs_configuration_use_context`
-    // mid-session).
-    let cluster_ctx = runtime.lock().await.cluster.clone();
-    let cluster_block = build_cluster_context_block(&cluster_ctx, app_state).await;
-    let system_prompt = {
-        let baseline = SYSTEM_PROMPT_BASELINE.to_string();
-        let with_ctx = if cluster_block.is_empty() {
-            baseline
-        } else {
-            format!("{baseline}\n\n{cluster_block}")
-        };
-        match persisted.settings.system_prompt_override.as_ref() {
-            Some(extra) if !extra.is_empty() => format!("{with_ctx}\n\n{extra}"),
-            _ => with_ctx,
-        }
+    // mid-session). View context reuses the last snapshot from the
+    // operator's most recent send; autocontinue is synthetic so there's
+    // nothing fresher to use.
+    let (cluster_ctx, view_snapshot) = {
+        let rt = runtime.lock().await;
+        (rt.cluster.clone(), rt.last_view_context.clone())
     };
+    let cluster_block = build_cluster_context_block(&cluster_ctx, app_state).await;
+    let active_cluster = cluster_ctx.active().await;
+    let view_block =
+        build_view_context_block(view_snapshot.as_ref(), &active_cluster, app_state).await;
+    let system_prompt = assemble_system_prompt(
+        &cluster_block,
+        &view_block,
+        persisted.settings.system_prompt_override.as_deref(),
+    );
     let is_oauth = matches!(cred, Credential::OAuth { .. });
     let provider_options_default = resolve_provider_options(kind, &persisted.settings, is_oauth);
 
@@ -4925,5 +5104,102 @@ mod tests {
         // No `chat_send_message` lands during iter 2 — messages stay
         // the same length when the provider returns the answer.
         assert!(!user_queued_during_round(&after_iter1, pre_iter2));
+    }
+
+    #[test]
+    fn assemble_system_prompt_only_baseline_when_others_empty() {
+        let out = assemble_system_prompt("", "", None);
+        assert_eq!(out, SYSTEM_PROMPT_BASELINE);
+    }
+
+    #[test]
+    fn assemble_system_prompt_joins_nonempty_segments_in_order() {
+        let out = assemble_system_prompt("CB", "VB", Some("OV"));
+        // Each segment is appended separated by a blank line.
+        assert_eq!(out, format!("{SYSTEM_PROMPT_BASELINE}\n\nCB\n\nVB\n\nOV"));
+    }
+
+    #[test]
+    fn assemble_system_prompt_skips_empty_override() {
+        let out = assemble_system_prompt("CB", "", Some(""));
+        assert_eq!(out, format!("{SYSTEM_PROMPT_BASELINE}\n\nCB"));
+    }
+
+    #[tokio::test]
+    async fn view_context_block_empty_returns_empty() {
+        let state = AppState::default();
+        // No view at all.
+        assert!(build_view_context_block(None, "cluster-x", &state)
+            .await
+            .is_empty());
+        // View with all fields blank.
+        let blank = ViewContextWire::default();
+        assert!(build_view_context_block(Some(&blank), "cluster-x", &state)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn view_context_block_renders_kind_namespace_and_selection() {
+        let state = AppState::default();
+        let view = ViewContextWire {
+            cluster_id: Some("cluster-x".into()),
+            kind_id: Some("deployments".into()),
+            kind_label: Some("Deployment".into()),
+            namespaces: vec!["default".into(), "kube-system".into()],
+            selected: vec![ViewSelectedResource {
+                namespace: Some("default".into()),
+                name: "api".into(),
+            }],
+        };
+        // Same cluster ⇒ no mismatch warning.
+        let out = build_view_context_block(Some(&view), "cluster-x", &state).await;
+        assert!(out.starts_with("## What the operator is viewing"));
+        assert!(out.contains("Open view: `Deployment`"));
+        assert!(out.contains("`default`"));
+        assert!(out.contains("`kube-system`"));
+        assert!(out.contains("`default` / `api`"));
+        assert!(
+            !out.contains("Cluster mismatch"),
+            "expected no mismatch warning when UI cluster matches the chat's active cluster"
+        );
+    }
+
+    #[tokio::test]
+    async fn view_context_block_calls_out_cluster_mismatch() {
+        let state = AppState::default();
+        let view = ViewContextWire {
+            cluster_id: Some("cluster-other".into()),
+            kind_label: Some("Pod".into()),
+            ..Default::default()
+        };
+        let out = build_view_context_block(Some(&view), "cluster-x", &state).await;
+        assert!(out.contains("Cluster mismatch"));
+        // Empty sources ⇒ falls back to raw id rather than panicking.
+        assert!(out.contains("cluster-other"));
+    }
+
+    #[tokio::test]
+    async fn view_context_block_truncates_large_selections() {
+        let state = AppState::default();
+        let many: Vec<ViewSelectedResource> = (0..(VIEW_CONTEXT_SELECTED_CAP + 5))
+            .map(|i| ViewSelectedResource {
+                namespace: Some("default".into()),
+                name: format!("pod-{i}"),
+            })
+            .collect();
+        let view = ViewContextWire {
+            selected: many,
+            ..Default::default()
+        };
+        let out = build_view_context_block(Some(&view), "cluster-x", &state).await;
+        // First few rows render; the rest collapse into a single summary line.
+        assert!(out.contains("`default` / `pod-0`"));
+        assert!(out.contains("and 5 more"));
+        // Header shows the true count, not the cap.
+        assert!(out.contains(&format!(
+            "Selected rows ({}):",
+            VIEW_CONTEXT_SELECTED_CAP + 5
+        )));
     }
 }

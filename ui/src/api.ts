@@ -14,6 +14,7 @@ import type {
   ChatInitialMcp,
   ChatOpenResult,
   ChatTool,
+  ChatViewContext,
   KubectlDetection,
   KubectlInstallResult,
   HelmDetection,
@@ -959,8 +960,12 @@ export const api = {
       },
     };
   },
-  chatSendMessage: (chatId: string, content: string) =>
-    invoke<void>("chat_send_message", { chatId, content }),
+  chatSendMessage: (
+    chatId: string,
+    content: string,
+    viewContext?: ChatViewContext,
+  ) =>
+    invoke<void>("chat_send_message", { chatId, content, viewContext }),
   chatCancelStreaming: (chatId: string) =>
     invoke<void>("chat_cancel_streaming", { chatId }),
   chatSetApprovalMode: (chatId: string, mode: ApprovalMode) =>
