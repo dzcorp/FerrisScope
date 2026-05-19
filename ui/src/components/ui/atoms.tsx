@@ -1020,14 +1020,27 @@ export function SectionHeader({
 }
 
 // ── ContainerDots ──────────────────────────────────────────────────────────
-// Renders init/main/sidecar containers as a row of small shapes — square caps
-// for init, solid disc for main, ring for sidecar. Transient states pulse
-// (fs-pulse-dot) so the operator can see something is in motion. Mirrors
-// design/shared.jsx ContainerDots.
+// Renders init/sidecar/main containers as a row of small shapes — narrow
+// rounded-rectangle for init, narrow capsule for sidecar, solid disc for
+// main. Init and sidecar share footprint (thin + tall) but corners separate
+// them: init's small 2 px radius reads as "stepwise / discrete" while
+// sidecar's fully-round capsule reads as "persistent". The disc anchors the
+// row as the actual workload. Layout reads left→right in lifecycle order:
+// inits run first, sidecars start with them and persist, mains come last.
+// Separators flank the sidecar group when present so the persistent
+// (sidecar + main) and stepwise (init) regions are visually distinct.
+//
+// `ready` lets us catch the "Running but readiness-probe failing" case — a
+// solid green dot for a pod that isn't actually serving traffic is a known
+// footgun, so we downgrade those to the warn bucket. Completed init dots are
+// dimmed (they're chronological gutter, not active state).
+//
+// Transient states pulse (fs-pulse-dot) so the operator can see motion.
 export type ContainerLite = {
   name: string;
   status: string;
   kind?: "init" | "main" | "sidecar";
+  ready?: boolean;
 };
 
 export function ContainerDots({
@@ -1057,31 +1070,54 @@ export function ContainerDots({
     mains = containers.slice();
   }
 
-  const colorOf = (c: ContainerLite): string =>
-    dotColor ? dotColor(c) : statusDot(c.status, t);
+  const colorOf = (c: ContainerLite): string => {
+    if (dotColor) return dotColor(c);
+    // Running + readiness probe failing → warn, not good. A green dot for a
+    // pod the service has already cut out of the endpoint slice is the bug
+    // that prompted this whole pass.
+    if (c.status === "Running" && c.ready === false) return t.warn;
+    return statusDot(c.status, t);
+  };
 
   const dotFor = (c: ContainerLite, kind: "init" | "main" | "sidecar") => {
     const col = colorOf(c);
-    const w = kind === "main" ? size + 2 : size;
-    const h = w;
+    // Init + sidecar share a thin-and-tall footprint (size-2 × size+2); main
+    // is the largest (size+2 × size+2). Init and sidecar are distinguished
+    // by corner radius: init uses a literal 2 px (stepwise), sidecar uses a
+    // full capsule (persistent). At size=7 (table) → 5×9; at size=8 → 6×10;
+    // at size=9 (detail) → 7×11.
+    let w: number;
+    let h: number;
+    if (kind === "main") {
+      w = size + 2;
+      h = size + 2;
+    } else {
+      w = Math.max(4, size - 2);
+      h = size + 2;
+    }
     const base: CSSProperties = {
       width: w,
       height: h,
       flexShrink: 0,
       display: "inline-block",
     };
+    // Completed init dots are gutter, not active state — dim them so the
+    // currently-running init / sidecar / main stays the eye's anchor.
+    if (kind === "init" && c.status === "Completed") base.opacity = 0.45;
     if (kind === "init")
-      // Init container is intentionally a near-square "cap" to read as
-      // distinct from the round main / ringed sidecar shapes. Keep a
-      // literal small radius — theme radius scales would turn the 8×8
-      // square into a circle under Readable's 6 px radius.
+      // Literal 2 px radius (not theme radius) — theme radius scales would
+      // round Readable's 6 px radius into a near-capsule and erase the
+      // shape distinction from sidecar.
       return { ...base, borderRadius: 2, background: col };
     if (kind === "sidecar")
       return {
         ...base,
-        borderRadius: "50%",
-        background: "transparent",
-        boxShadow: `inset 0 0 0 1.5px ${col}`,
+        // borderRadius = w (≥ h/2) gives a pure capsule at any (w, h).
+        borderRadius: w,
+        background: col,
+        // Match the main dot's subtle inset ring so the capsule reads as
+        // part of the same shape family, not a flat sticker.
+        boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.18)",
       };
     return {
       ...base,
@@ -1101,6 +1137,32 @@ export function ContainerDots({
   const tip = (kind: "init" | "main" | "sidecar", c: ContainerLite) =>
     `${kind}: ${c.name} — ${c.status}`;
 
+  const sep = (key: string) => (
+    <span
+      key={key}
+      style={{
+        display: "inline-block",
+        width: 1,
+        height: size + 2,
+        background: t.border,
+        margin: `0 ${gap + 1}px`,
+        verticalAlign: "middle",
+      }}
+    />
+  );
+
+  // Layout: [init squares] | [sidecar rings] | [main discs]. Sidecars are
+  // declared in spec.initContainers (restartPolicy=Always) and start with the
+  // init group, so they belong adjacent to it — but they persist alongside
+  // main, so they sit between. Separators bracket the sidecar group when both
+  // its neighbours are present.
+  const sidecarLeftSep = showSeparator && inits.length > 0 && sidecars.length > 0;
+  const sidecarRightSep =
+    showSeparator && sidecars.length > 0 && mains.length > 0;
+  // Edge case: inits + mains but no sidecars — one separator between them.
+  const initMainSep =
+    showSeparator && inits.length > 0 && sidecars.length === 0 && mains.length > 0;
+
   return (
     <span
       style={{
@@ -1116,49 +1178,19 @@ export function ContainerDots({
           <span className={className(c)} style={dotFor(c, "init")} />
         </Tooltip>
       ))}
-      {showSeparator && inits.length > 0 && (
-        <span
-          style={{
-            display: "inline-block",
-            width: 1,
-            height: size + 2,
-            background: t.border,
-            margin: `0 ${gap + 1}px`,
-            verticalAlign: "middle",
-          }}
-        />
-      )}
-      {mains.length > 0 && (
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap,
-          }}
-        >
-          {mains.map((c, i) => (
-            <Tooltip key={`m${i}`} label={tip("main", c)}>
-              <span className={className(c)} style={dotFor(c, "main")} />
-            </Tooltip>
-          ))}
-        </span>
-      )}
-      {sidecars.length > 0 && (
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap,
-            marginLeft: 1,
-          }}
-        >
-          {sidecars.map((c, i) => (
-            <Tooltip key={`s${i}`} label={tip("sidecar", c)}>
-              <span className={className(c)} style={dotFor(c, "sidecar")} />
-            </Tooltip>
-          ))}
-        </span>
-      )}
+      {sidecarLeftSep && sep("sep-i-s")}
+      {initMainSep && sep("sep-i-m")}
+      {sidecars.map((c, i) => (
+        <Tooltip key={`s${i}`} label={tip("sidecar", c)}>
+          <span className={className(c)} style={dotFor(c, "sidecar")} />
+        </Tooltip>
+      ))}
+      {sidecarRightSep && sep("sep-s-m")}
+      {mains.map((c, i) => (
+        <Tooltip key={`m${i}`} label={tip("main", c)}>
+          <span className={className(c)} style={dotFor(c, "main")} />
+        </Tooltip>
+      ))}
     </span>
   );
 }

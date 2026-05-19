@@ -46,6 +46,15 @@ export const FS_XL = "var(--fs-fs-xl, 16px)";
 export const R_SM = "var(--fs-radius-sm, 4px)";
 export const R_MD = "var(--fs-radius-md, 6px)";
 export const R_LG = "var(--fs-radius-lg, 10px)";
+// Sentinel for pill / circle silhouettes — the value is intentionally
+// theme-independent (sharp-corner themes like VS Code still want their
+// inline-stepper pill rounded), so it isn't published as a CSS var.
+export const R_PILL = "999px";
+
+// Control height comes from the active theme's `sizing.controlHeight` —
+// App.tsx publishes it as `--fs-control-h`. The literal fallback matches
+// the Default theme so renders before App-mount stay sane.
+export const CONTROL_H = "var(--fs-control-h, 28px)";
 
 export type ThemeMode = "light" | "dark";
 
@@ -983,6 +992,35 @@ export function statusDot(status: string, t: Tokens): string {
   }
 }
 
+// Bucket for a `ready / desired` ratio (replicas, partition progress, …).
+// Kept here so every surface that renders "x / y" uses the same rules:
+// all-ready+non-zero → good, none-ready → bad, partial → warn, no signal
+// (desired === 0, ready unknown) → good (nothing to do).
+export type ReadyDesiredBucket = "good" | "warn" | "bad";
+export function readyDesiredBucket(
+  ready: number | undefined,
+  desired: number,
+): ReadyDesiredBucket {
+  if (ready === undefined) return "good";
+  if (ready === 0 && desired > 0) return "bad";
+  if (ready === desired && desired > 0) return "good";
+  return "warn";
+}
+export function readyDesiredColor(
+  ready: number | undefined,
+  desired: number,
+  t: Tokens,
+): string {
+  switch (readyDesiredBucket(ready, desired)) {
+    case "good":
+      return t.good;
+    case "warn":
+      return t.warn;
+    case "bad":
+      return t.bad;
+  }
+}
+
 // Pill background + foreground for a status — softer than the dot.
 //
 // Both `bg` and `fg` derive from the active palette's bucket color, so a
@@ -1022,8 +1060,10 @@ export function statusFill(
 /// Append an alpha channel to a hex / rgb-ish color. Tolerates `#rrggbb`,
 /// `#rgb`, and `rgb(...)` / `rgba(...)` inputs. Falls back to the input
 /// itself if the shape is unfamiliar (palette authors can paste anything
-/// reasonable and the pill stays usable).
-function hexWithAlpha(color: string, alpha: number): string {
+/// reasonable and the pill stays usable). Exported so per-component
+/// glows / shadows can ride the active palette instead of hardcoding an
+/// `${t.warn}33` string-concat that breaks for non-hex palettes.
+export function hexWithAlpha(color: string, alpha: number): string {
   const a = Math.max(0, Math.min(1, alpha));
   const rgb = toRgb(color);
   if (!rgb) return color;

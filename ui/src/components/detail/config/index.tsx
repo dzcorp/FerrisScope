@@ -147,7 +147,6 @@ export function ConfigMapSummary(props: {
     >
       <ConfigMapView
         t={t}
-        mode={props.mode}
         clusterId={props.clusterId}
         namespace={ns}
         name={props.name}
@@ -163,7 +162,6 @@ export function ConfigMapSummary(props: {
 // fetch effect on every keystroke.
 function ConfigMapView({
   t,
-  mode: 
   clusterId,
   namespace,
   name,
@@ -172,7 +170,6 @@ function ConfigMapView({
   onSaved,
 }: {
   t: Tokens;
-  mode: ThemeMode;
   clusterId: string;
   namespace: string;
   name: string;
@@ -269,7 +266,6 @@ function ConfigMapView({
           />
         }
       />
-
 
       {edit.editing && validation.duplicate.size > 0 && (
         <InlineError

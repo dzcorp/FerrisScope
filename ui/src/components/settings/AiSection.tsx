@@ -12,7 +12,18 @@ import type {
   ProviderStatusWire,
   ReasoningEffort,
 } from "../../types";
-import { tokens, FF_MONO, type ThemeMode, type Tokens, R_LG, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
+import {
+  tokens,
+  FF_MONO,
+  type ThemeMode,
+  type Tokens,
+  R_LG,
+  R_MD,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+  hexWithAlpha,
+} from "../../theme";
 import { Btn, ErrorBlock, Field, SectionHeader, Select, Toggle } from "../ui";
 
 // AiSection — settings page tab for the cluster-aware AI agent. The
@@ -413,8 +424,8 @@ export function AiSection({}: { mode: ThemeMode }) {
           style={{
             marginTop: 12,
             padding: "8px 10px",
-            background: t.bad + "1f",
-            border: `1px solid ${t.bad}66`,
+            background: hexWithAlpha(t.bad, 0.12),
+            border: `1px solid ${hexWithAlpha(t.bad, 0.4)}`,
             borderRadius: R_MD,
           }}
         >
@@ -493,7 +504,7 @@ function ProviderRow({
         fontSize: FS_XS,
         fontFamily: FF_MONO,
         color: t.good,
-        background: t.good + "1a",
+        background: hexWithAlpha(t.good, 0.1),
         padding: "1px 6px",
         borderRadius: R_LG,
       }}
@@ -1331,8 +1342,8 @@ function McpTestResultChip({
         style={{
           marginLeft: 24,
           padding: "4px 8px",
-          background: t.good + "1f",
-          border: `1px solid ${t.good}66`,
+          background: hexWithAlpha(t.good, 0.12),
+          border: `1px solid ${hexWithAlpha(t.good, 0.4)}`,
           borderRadius: R_MD,
           color: t.good,
           fontFamily: FF_MONO,
@@ -1362,8 +1373,8 @@ function McpTestResultChip({
       style={{
         marginLeft: 24,
         padding: "4px 8px",
-        background: t.bad + "1f",
-        border: `1px solid ${t.bad}66`,
+        background: hexWithAlpha(t.bad, 0.12),
+        border: `1px solid ${hexWithAlpha(t.bad, 0.4)}`,
         borderRadius: R_MD,
         color: t.bad,
         fontFamily: FF_MONO,

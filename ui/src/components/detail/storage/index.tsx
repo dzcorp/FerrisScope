@@ -7,8 +7,19 @@
 import { useEffect, useRef, useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS, R_SM } from "../../../theme";
+import {
+  FF_MONO,
+  type ThemeMode,
+  type Tokens,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+} from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
+import {
+  EditModeChrome,
+  EditableTextValue,
+} from "../edit";
 import {
   ChipWrap,
   Copyable,
@@ -19,6 +30,7 @@ import {
   LinkValue,
   Mute,
   ageFromIso,
+  parseQuantity,
   useEditField,
   type DetailNavigate,
 } from "..";
@@ -116,42 +128,40 @@ function StringChips({ t, items }: { t: Tokens; items: string[] }) {
   );
 }
 
-function PvcRequestedStorageEditor({
+// Same shape as MetaSection's labels/annotations editor — read-mode value
+// + an EditModeChrome pencil below, right-aligned. Edit-mode swaps to an
+// EditableTextValue. No bespoke pill / hover state; the global save bar
+// commits the change like every other field on the panel.
+export function PvcRequestedStorageEditor({
   t,
   requestedStorage,
 }: {
   t: Tokens;
-  pvcName: string;
-  namespace: string;
-  clusterId: string;
   requestedStorage: string | null;
 }) {
-  const [hovered, setHovered] = useState(false);
-
-  const validateQuantity = (val: string) => {
+  // K8s ResourceQuantity. `parseQuantity` is the same parser the rest of
+  // the kit uses (ResourceQuota, LimitRange) — keeping a single source of
+  // truth so "what's a valid storage size" answers the same everywhere.
+  const validateQuantity = (val: string): string | null => {
     const v = val.trim();
     if (v === "") return "storage quantity cannot be empty";
-    const valid = /^\d+(\.\d+)?(?:[KMGTPeE]i?|m)?$/.test(v);
-    if (!valid) {
-      return "invalid storage quantity format (e.g. 10Gi, 500Mi)";
-    }
-    return null;
+    return parseQuantity(v) === null
+      ? "invalid storage quantity format (e.g. 10Gi, 500Mi)"
+      : null;
   };
 
   const edit = useEditField<{ value: string }>({
     id: "pvc:requested_storage",
     initial: () => ({ value: requestedStorage ?? "" }),
-    serialize: (b) => {
-      return {
-        spec: {
-          resources: {
-            requests: {
-              storage: b.value.trim(),
-            },
+    serialize: (b) => ({
+      spec: {
+        resources: {
+          requests: {
+            storage: b.value.trim(),
           },
         },
-      };
-    },
+      },
+    }),
     dirtyCount: (b) => (b.value.trim() !== (requestedStorage ?? "") ? 1 : 0),
     validate: (b) => validateQuantity(b.value),
   });
@@ -159,87 +169,46 @@ function PvcRequestedStorageEditor({
   const isDirty = edit.dirty > 0;
   const invalid = edit.editing && validateQuantity(edit.buffer.value) !== null;
 
-  const handleStartEdit = () => {
-    edit.enter();
-  };
-
-  const handleCancel = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    edit.cancel();
-  };
-
-  if (edit.editing) {
-    return (
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <input
-          value={edit.buffer.value}
-          onChange={(e) => edit.setBuffer({ value: e.target.value })}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              e.currentTarget.blur();
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              edit.cancel();
-            }
-          }}
-          autoFocus
-          style={{
-            background: t.bg,
-            border: `1px solid ${invalid ? t.bad : isDirty ? t.warn : t.border}`,
-            borderRadius: R_SM,
-            color: t.text,
-            padding: "2px 6px",
-            fontSize: FS_MD,
-            fontFamily: FF_MONO,
-            outline: "none",
-            width: "120px",
-          }}
-        />
-        <button
-          onClick={handleCancel}
-          style={{
-            background: "none",
-            border: "none",
-            color: t.textMuted,
-            cursor: "pointer",
-            fontSize: FS_SM,
-            padding: "2px 4px",
-            display: "flex",
-            alignItems: "center",
-          }}
-          title="Revert"
-        >
-          ↺
-        </button>
-      </div>
-    );
-  }
-
   return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onClick={handleStartEdit}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        cursor: "pointer",
-        gap: 6,
-        padding: "2px 6px",
-        borderRadius: R_SM,
-        background: hovered ? t.surfaceAlt : "transparent",
-        transition: "background 0.2s ease",
-      }}
-    >
-      <span style={{ fontFamily: FF_MONO, fontSize: FS_MD, color: isDirty ? t.warn : t.text }}>
-        {isDirty ? edit.buffer.value : (requestedStorage ?? "—")}
-      </span>
-      {(hovered || isDirty) && (
-        <span style={{ fontSize: 10, color: isDirty ? t.warn : t.accent }}>
-          {isDirty ? "●" : "✎"}
+    <div style={{ width: "100%" }}>
+      {edit.editing ? (
+        <EditableTextValue
+          t={t}
+          value={edit.buffer.value}
+          onChange={(v) => edit.setBuffer({ value: v })}
+          invalid={invalid}
+          placeholder="e.g. 10Gi"
+          ariaLabel="Requested storage"
+        />
+      ) : requestedStorage ? (
+        <span
+          style={{
+            fontFamily: FF_MONO,
+            fontSize: FS_MD,
+            color: isDirty ? t.warn : t.text,
+          }}
+        >
+          {isDirty ? edit.buffer.value : requestedStorage}
         </span>
+      ) : (
+        <Mute t={t}>—</Mute>
       )}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          marginTop: edit.editing ? 6 : 4,
+        }}
+      >
+        <EditModeChrome
+          t={t}
+          editing={edit.editing}
+          dirty={edit.dirty}
+          saving={edit.saving}
+          onEnter={edit.enter}
+          onCancel={edit.cancel}
+        />
+      </div>
     </div>
   );
 }
@@ -378,9 +347,6 @@ export function PersistentVolumeClaimSummary(props: {
           <DetailRow t={t} label="Requested">
             <PvcRequestedStorageEditor
               t={t}
-              pvcName={props.name}
-              namespace={ns}
-              clusterId={props.clusterId}
               requestedStorage={d.requested_storage}
             />
           </DetailRow>

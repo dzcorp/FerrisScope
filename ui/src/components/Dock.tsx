@@ -13,7 +13,16 @@ import jsYaml from "js-yaml";
 import Editor from "@monaco-editor/react";
 import { useAppStore, type DockPlacement, type DockTab, useResolvedTheme } from "../store";
 import { DockChat } from "./chat/DockChat";
-import { FF_MONO, type ThemeMode, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../theme";
+import {
+  FF_MONO,
+  type ThemeMode,
+  R_MD,
+  R_SM,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+  hexWithAlpha,
+} from "../theme";
 import { Btn, ErrorBlock, IconBtn, Icons, Select } from "./ui";
 import { api } from "../api";
 import type { DocApplyResult } from "../types";
@@ -1006,7 +1015,7 @@ function DockTerminal({
         <div
           style={{
             padding: "6px 10px",
-            background: t.bad + "22",
+            background: hexWithAlpha(t.bad, 0.13),
             borderTop: `1px solid ${t.border}`,
           }}
         >

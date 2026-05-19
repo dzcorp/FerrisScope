@@ -1806,17 +1806,24 @@ function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
       let dotsWidth = 0;
       if (isPodRow) {
         let inits = 0;
-        let mainsAndSidecars = 0;
+        let sidecars = 0;
+        let mains = 0;
         for (const s of states) {
           if (s.kind === "init") inits++;
-          else mainsAndSidecars++;
+          else if (s.kind === "sidecar") sidecars++;
+          else mains++;
         }
-        const total = inits + mainsAndSidecars;
+        const total = inits + sidecars + mains;
         // Main dots are size+2, init/sidecar are size — average to
         // (size+1) per dot since we don't track which is which here.
         dotsWidth =
           total * (DOT_SIZE + 1) + Math.max(0, total - 1) * DOT_GAP;
-        if (inits > 0 && mainsAndSidecars > 0) dotsWidth += SEP_WIDTH;
+        // Layout: init | sep | sidecar | sep | main. Count active boundaries.
+        const sepCount =
+          (inits > 0 && sidecars > 0 ? 1 : 0) +
+          (sidecars > 0 && mains > 0 ? 1 : 0) +
+          (inits > 0 && sidecars === 0 && mains > 0 ? 1 : 0);
+        dotsWidth += sepCount * SEP_WIDTH;
       }
 
       const gap = pillWidth > 0 && dotsWidth > 0 ? PHASE_WRAP_GAP : 0;
@@ -2057,6 +2064,7 @@ export function renderCell(
             s.kind === "init" || s.kind === "sidecar" || s.kind === "main"
               ? (s.kind as "init" | "main" | "sidecar")
               : "main",
+          ready: typeof s.ready === "boolean" ? s.ready : undefined,
         }));
         const ambient = phase === "Running" || phase === "Terminating";
         return (
@@ -2065,12 +2073,7 @@ export function renderCell(
               <StatusPill status={phase} t={t} mode={mode} dense />
             )}
             {containers.length > 0 && (
-              <ContainerDots
-                containers={containers}
-                t={t}
-                size={7}
-                showSeparator={containers.some((c) => c.kind === "init")}
-              />
+              <ContainerDots containers={containers} t={t} size={7} />
             )}
           </span>
         );

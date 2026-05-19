@@ -4,7 +4,20 @@
 // metadata + selector + pod-template chrome consistent across the family.
 
 import { useMemo, useState } from "react";
-import { FF_MONO, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import {
+  FF_MONO,
+  type Tokens,
+  R_LG,
+  R_SM,
+  R_PILL,
+  CONTROL_H,
+  FS_LG,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+  hexWithAlpha,
+  readyDesiredColor,
+} from "../../../theme";
 import { Btn, Checkbox, Chip, Section, Select, Icons } from "../../ui";
 import { ForwardChip } from "../forwardChip";
 import {
@@ -1117,7 +1130,6 @@ export function ReplicaCounts({
   ready: number;
   desired: number;
 }) {
-  const ok = ready === desired && desired > 0;
   return (
     <span
       style={{
@@ -1125,12 +1137,34 @@ export function ReplicaCounts({
         fontSize: FS_MD,
         fontWeight: 600,
         fontVariantNumeric: "tabular-nums",
-        color: ok ? t.good : ready === 0 ? t.bad : t.warn,
+        color: readyDesiredColor(ready, desired, t),
       }}
     >
       {ready} / {desired}
     </span>
   );
+}
+
+// Common chrome for ReplicasEditor's `-` / `+` steppers. Kept module-level
+// so the style object isn't reallocated on every render.
+function stepperBtnStyle(t: Tokens, disabled: boolean): React.CSSProperties {
+  return {
+    background: "transparent",
+    color: disabled ? t.textDim : t.text,
+    border: "none",
+    width: 20,
+    height: 20,
+    borderRadius: R_PILL,
+    cursor: disabled ? "not-allowed" : "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontFamily: FF_MONO,
+    fontSize: FS_LG,
+    fontWeight: 700,
+    padding: 0,
+    outline: "none",
+  };
 }
 
 // ── ReplicasEditor ─────────────────────────────────────────────────────────
@@ -1181,8 +1215,7 @@ export function ReplicasEditor({
       String(parsed) !== edit.buffer.value.trim());
 
   const hasReady = ready !== undefined;
-  const ok = hasReady ? ready === desired && desired > 0 : true;
-  const statusColor = hasReady ? (ok ? t.good : ready === 0 ? t.bad : t.warn) : t.good;
+  const statusColor = readyDesiredColor(ready, desired, t);
 
   const handleDecrement = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1207,12 +1240,16 @@ export function ReplicasEditor({
         alignItems: "center",
         background: edit.editing ? t.bg : t.surfaceAlt,
         border: `1px solid ${invalid ? t.bad : isDirty ? t.warn : edit.editing ? t.border : t.borderSoft}`,
-        borderRadius: "20px",
+        borderRadius: R_PILL,
         padding: "3px 10px",
         gap: 8,
-        boxShadow: isDirty ? `0 0 8px ${t.warn}33` : edit.editing ? `0 0 6px ${t.borderSoft}` : "none",
-        transition: "all 0.2s ease-in-out",
-        height: 28,
+        boxShadow: isDirty
+          ? `0 0 8px ${hexWithAlpha(t.warn, 0.2)}`
+          : edit.editing
+            ? `0 0 6px ${t.borderSoft}`
+            : "none",
+        transition: "background .15s, border-color .15s, box-shadow .15s",
+        height: CONTROL_H,
         boxSizing: "border-box",
       }}
     >
@@ -1222,22 +1259,7 @@ export function ReplicasEditor({
             type="button"
             onClick={handleDecrement}
             disabled={edit.saving || parsed <= 0}
-            style={{
-              background: "transparent",
-              color: parsed <= 0 ? t.textDim : t.text,
-              border: "none",
-              width: 20,
-              height: 20,
-              borderRadius: "50%",
-              cursor: parsed <= 0 ? "not-allowed" : "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: "14px",
-              fontWeight: "bold",
-              padding: 0,
-              outline: "none",
-            }}
+            style={stepperBtnStyle(t, parsed <= 0)}
             title="Decrement replicas"
           >
             -
@@ -1269,6 +1291,7 @@ export function ReplicasEditor({
               fontFamily: FF_MONO,
               fontSize: FS_MD,
               fontWeight: 600,
+              fontVariantNumeric: "tabular-nums",
               background: "transparent",
               color: invalid ? t.bad : isDirty ? t.warn : t.text,
               border: "none",
@@ -1281,22 +1304,7 @@ export function ReplicasEditor({
             type="button"
             onClick={handleIncrement}
             disabled={edit.saving}
-            style={{
-              background: "transparent",
-              color: t.text,
-              border: "none",
-              width: 20,
-              height: 20,
-              borderRadius: "50%",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: "14px",
-              fontWeight: "bold",
-              padding: 0,
-              outline: "none",
-            }}
+            style={stepperBtnStyle(t, false)}
             title="Increment replicas"
           >
             +
@@ -1318,11 +1326,11 @@ export function ReplicasEditor({
                   cursor: "pointer",
                   display: "flex",
                   alignItems: "center",
-                  fontSize: 12,
+                  fontSize: FS_MD,
                   padding: 2,
                 }}
               >
-                ↺
+                {Icons.refresh}
               </button>
             )}
           </div>
@@ -1344,6 +1352,7 @@ export function ReplicasEditor({
               fontFamily: FF_MONO,
               fontSize: FS_MD,
               fontWeight: 600,
+              fontVariantNumeric: "tabular-nums",
               color: statusColor,
             }}
           >
@@ -1359,7 +1368,7 @@ export function ReplicasEditor({
               alignItems: "center",
               opacity: hovered ? 1 : 0,
               transform: hovered ? "translateX(0)" : "translateX(-2px)",
-              transition: "all 0.15s ease-in-out",
+              transition: "opacity .15s, transform .15s",
               color: t.textDim,
               marginLeft: 2,
             }}
@@ -1373,7 +1382,7 @@ export function ReplicasEditor({
               style={{
                 width: 6,
                 height: 6,
-                borderRadius: "50%",
+                borderRadius: R_PILL,
                 background: t.warn,
                 marginLeft: 2,
               }}
@@ -2469,15 +2478,17 @@ export function ImageEditor({
                 background: t.bg,
                 color: t.text,
                 border: `1px solid ${
-                  imageFocused ? (t.accent || "#10b981") : imageHovered ? t.border : t.borderSoft
+                  imageFocused ? t.accent : imageHovered ? t.border : t.borderSoft
                 }`,
                 borderRadius: R_SM,
                 fontFamily: FF_MONO,
                 fontSize: FS_MD,
                 outline: "none",
                 boxSizing: "border-box",
-                boxShadow: imageFocused ? `0 0 0 3px ${(t.accent || "#10b981")}33` : "none",
-                transition: "all 0.15s ease-in-out",
+                boxShadow: imageFocused
+                  ? `0 0 0 3px ${hexWithAlpha(t.accent, 0.2)}`
+                  : "none",
+                transition: "border-color .15s, box-shadow .15s, background .15s",
               }}
             />
           ) : image ? (
@@ -2524,7 +2535,7 @@ export function ImageEditor({
               style={{
                 fontFamily: FF_MONO,
                 fontSize: FS_MD,
-                height: 30,
+                height: CONTROL_H,
                 padding: "4px 28px 4px 8px",
                 width: "100%",
               }}
