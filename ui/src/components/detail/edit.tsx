@@ -14,17 +14,18 @@
 //     a successful apply so the read-state refreshes.
 
 import {
-  useCallback,
-  useMemo,
-  useRef,
-  useState,
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { api } from "../../api";
 import { FF_MONO, type Tokens, R_SM, FS_MD, FS_SM } from "../../theme";
 import { Icons } from "../ui";
-import type { ApplyResult } from "../../types";
+
+export type ApplyTarget = {
+  clusterId: string;
+  kindId: string;
+  namespace: string | null;
+  name: string;
+};
 
 // ── EditMode header ────────────────────────────────────────────────────────
 //
@@ -609,111 +610,6 @@ export function KvEditor({
       />
     </div>
   );
-}
-
-// ── useApply hook ──────────────────────────────────────────────────────────
-//
-// One-stop edit lifecycle: holds the buffer, dirty count, save state, and
-// conflict surface. Owners pass a `serialize` that turns the current buffer
-// into the SSA payload; the hook handles the apply call + conflict
-// branching + force re-apply.
-
-export type ApplyTarget = {
-  clusterId: string;
-  kindId: string;
-  namespace: string | null;
-  name: string;
-};
-
-type SaveState =
-  | { kind: "idle" }
-  | { kind: "saving" }
-  | { kind: "conflict"; managers: string[]; fields: string[]; message: string }
-  | { kind: "error"; message: string };
-
-export function useApply<B>(opts: {
-  target: ApplyTarget;
-  initial: () => B;
-  // Pure function. Returns a partial-object SSA payload (without
-  // apiVersion/kind/metadata.name — the backend attaches those). The hook
-  // wraps it as the `fields` arg of `apply_resource_cmd`.
-  serialize: (buffer: B) => Record<string, unknown>;
-  // Count of dirty changes, used for the Save button's "(N)" suffix. Keeps
-  // the hook independent of the buffer's internal shape.
-  dirtyCount: (buffer: B) => number;
-  // Called after a successful (non-conflict) apply. Typically the parent
-  // bumps `detailVersion` here to refetch.
-  onSaved: () => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [buffer, setBuffer] = useState<B>(opts.initial);
-  const [save, setSave] = useState<SaveState>({ kind: "idle" });
-
-  // Re-seed the buffer on every Edit click so a stale buffer from a prior
-  // edit doesn't carry over after the underlying detail changed.
-  const initialRef = useRef(opts.initial);
-  initialRef.current = opts.initial;
-
-  const enter = useCallback(() => {
-    setBuffer(initialRef.current());
-    setSave({ kind: "idle" });
-    setEditing(true);
-  }, []);
-  const cancel = useCallback(() => {
-    setEditing(false);
-    setSave({ kind: "idle" });
-  }, []);
-
-  const apply = useCallback(
-    async (force: boolean) => {
-      setSave({ kind: "saving" });
-      try {
-        const result: ApplyResult = await api.applyResource(
-          opts.target.clusterId,
-          opts.target.kindId,
-          opts.target.namespace,
-          opts.target.name,
-          opts.serialize(buffer),
-          force,
-        );
-        if (result.kind === "applied") {
-          setEditing(false);
-          setSave({ kind: "idle" });
-          opts.onSaved();
-        } else {
-          setSave({
-            kind: "conflict",
-            managers: result.managers,
-            fields: result.fields,
-            message: result.message,
-          });
-        }
-      } catch (e) {
-        setSave({ kind: "error", message: String(e) });
-      }
-    },
-    // serialize / target / onSaved are read fresh each invocation — buffer
-    // is the only value we capture.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [buffer, opts.target.clusterId, opts.target.kindId, opts.target.namespace, opts.target.name],
-  );
-
-  const dirty = useMemo(() => opts.dirtyCount(buffer), [buffer, opts]);
-
-  return {
-    editing,
-    buffer,
-    setBuffer,
-    enter,
-    cancel,
-    save: () => apply(false),
-    forceSave: () => apply(true),
-    dirty,
-    saving: save.kind === "saving",
-    conflict: save.kind === "conflict" ? save : null,
-    error: save.kind === "error" ? save.message : null,
-    dismissConflict: () => setSave({ kind: "idle" }),
-  };
 }
 
 // ── ListBuffer / ListEditor ────────────────────────────────────────────────

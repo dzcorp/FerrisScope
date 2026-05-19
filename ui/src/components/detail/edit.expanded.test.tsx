@@ -1,12 +1,10 @@
 // Additional coverage for the edit kit:
 //   • listBuffer helpers (env / ports / volumes editors)
 //   • EditModeChrome / EditableTextValue / AddRowButton / ConflictBanner render
-//   • useApply hook — save / conflict / force / error state machine
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, act, fireEvent } from "@testing-library/react";
+import { render, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { renderHook } from "@testing-library/react";
 import {
   AddRowButton,
   ConflictBanner,
@@ -21,19 +19,11 @@ import {
   listBufferReplace,
   listBufferToArray,
   listBufferToggleDelete,
-  useApply,
-  type ApplyTarget,
 } from "./edit";
 import { tokens } from "../../theme";
-import { setMockInvoke, resetMockInvoke } from "../../test/tauri-mock";
+import { resetMockInvoke } from "../../test/tauri-mock";
 
 const t = tokens("dark");
-const TARGET: ApplyTarget = {
-  clusterId: "ctx",
-  kindId: "configmaps",
-  namespace: "default",
-  name: "hello",
-};
 
 beforeEach(() => {
   resetMockInvoke();
@@ -358,146 +348,3 @@ describe("KvEditor", () => {
   });
 });
 
-// ── useApply state machine ───────────────────────────────────────────────
-
-describe("useApply", () => {
-  it("save → applied transitions through saving:true → applied, calls onSaved", async () => {
-    setMockInvoke((cmd) => {
-      expect(cmd).toBe("apply_resource_cmd");
-      return { kind: "applied", resource_version: "42" };
-    });
-    const onSaved = vi.fn();
-    const { result } = renderHook(() =>
-      useApply<{ value: string }>({
-        target: TARGET,
-        initial: () => ({ value: "" }),
-        serialize: (b) => ({ data: { K: b.value } }),
-        dirtyCount: () => 1,
-        onSaved,
-      }),
-    );
-
-    expect(result.current.saving).toBe(false);
-    await act(async () => {
-      result.current.enter();
-    });
-    await act(async () => {
-      result.current.setBuffer({ value: "new" });
-    });
-    await act(async () => {
-      await result.current.save();
-    });
-    expect(onSaved).toHaveBeenCalled();
-    expect(result.current.editing).toBe(false);
-    expect(result.current.saving).toBe(false);
-  });
-
-  it("save → conflict surfaces managers/fields/message; dismissConflict clears", async () => {
-    setMockInvoke(() => ({
-      kind: "conflict",
-      managers: ["argocd"],
-      fields: ["spec.replicas"],
-      message: "owned",
-    }));
-    const { result } = renderHook(() =>
-      useApply<unknown>({
-        target: TARGET,
-        initial: () => ({}),
-        serialize: () => ({}),
-        dirtyCount: () => 1,
-        onSaved: () => {},
-      }),
-    );
-    await act(async () => {
-      result.current.enter();
-    });
-    await act(async () => {
-      await result.current.save();
-    });
-    expect(result.current.conflict).toEqual({
-      kind: "conflict",
-      managers: ["argocd"],
-      fields: ["spec.replicas"],
-      message: "owned",
-    });
-    await act(async () => {
-      result.current.dismissConflict();
-    });
-    expect(result.current.conflict).toBeNull();
-  });
-
-  it("forceSave passes force=true to apply_resource_cmd", async () => {
-    let receivedForce: unknown = null;
-    setMockInvoke((_cmd, args) => {
-      receivedForce = args?.force;
-      return { kind: "applied" };
-    });
-    const { result } = renderHook(() =>
-      useApply<unknown>({
-        target: TARGET,
-        initial: () => ({}),
-        serialize: () => ({ data: { K: "v" } }),
-        dirtyCount: () => 1,
-        onSaved: () => {},
-      }),
-    );
-    await act(async () => {
-      result.current.enter();
-    });
-    await act(async () => {
-      await result.current.forceSave();
-    });
-    expect(receivedForce).toBe(true);
-  });
-
-  it("save → throw surfaces as error state without onSaved firing", async () => {
-    setMockInvoke(() => {
-      throw new Error("network down");
-    });
-    const onSaved = vi.fn();
-    const { result } = renderHook(() =>
-      useApply<unknown>({
-        target: TARGET,
-        initial: () => ({}),
-        serialize: () => ({}),
-        dirtyCount: () => 1,
-        onSaved,
-      }),
-    );
-    await act(async () => {
-      result.current.enter();
-    });
-    await act(async () => {
-      await result.current.save();
-    });
-    expect(result.current.error).toMatch(/network down/);
-    expect(onSaved).not.toHaveBeenCalled();
-  });
-
-  it("cancel exits edit mode and clears any error", async () => {
-    setMockInvoke(() => {
-      throw new Error("nope");
-    });
-    const { result } = renderHook(() =>
-      useApply<unknown>({
-        target: TARGET,
-        initial: () => ({}),
-        serialize: () => ({}),
-        dirtyCount: () => 0,
-        onSaved: () => {},
-      }),
-    );
-    await act(async () => {
-      result.current.enter();
-    });
-    await act(async () => {
-      await result.current.save();
-    });
-    expect(result.current.error).not.toBeNull();
-    await act(async () => {
-      result.current.cancel();
-    });
-    expect(result.current.editing).toBe(false);
-    expect(result.current.error).toBeNull();
-  });
-});

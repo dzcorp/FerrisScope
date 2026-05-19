@@ -170,12 +170,11 @@ export function DeploymentSummary(props: {
             marginBottom: 18,
           }}
         >
-          <ReplicaCounts
+          <ReplicasEditor
             t={t}
             ready={d.replicas.ready}
             desired={d.replicas.desired}
           />
-          <ReplicasEditor t={t} desired={d.replicas.desired} />
           <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {d.replicas.updated} up-to-date · {d.replicas.available} available
             {d.replicas.unavailable > 0
@@ -318,12 +317,11 @@ export function ReplicaSetSummary(props: {
             marginBottom: 18,
           }}
         >
-          <ReplicaCounts
+          <ReplicasEditor
             t={t}
             ready={d.replicas.ready}
             desired={d.replicas.desired}
           />
-          <ReplicasEditor t={t} desired={d.replicas.desired} />
           <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {d.replicas.current} current · {d.replicas.available} available
             {d.meta.created_at ? ` · ${ageFromIso(d.meta.created_at)} old` : ""}
@@ -444,12 +442,11 @@ export function StatefulSetSummary(props: {
             marginBottom: 18,
           }}
         >
-          <ReplicaCounts
+          <ReplicasEditor
             t={t}
             ready={d.replicas.ready}
             desired={d.replicas.desired}
           />
-          <ReplicasEditor t={t} desired={d.replicas.desired} />
           <span style={{ fontSize: FS_SM, color: t.textMuted }}>
             {d.replicas.current} current · {d.replicas.updated} updated ·{" "}
             {d.replicas.available} available

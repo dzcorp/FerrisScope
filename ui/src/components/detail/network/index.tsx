@@ -19,6 +19,9 @@ import {
   Mute,
   ageFromIso,
   type DetailNavigate,
+  EditSessionProvider,
+  useEditField,
+  GlobalSaveBar,
 } from "..";
 import type {
   EndpointAddress,
@@ -45,14 +48,12 @@ import type {
 import { ForwardChip } from "../forwardChip";
 import { MetaSection } from "../workload/shared";
 import {
-  ConflictBanner,
   EditModeChrome,
   EditableTextValue,
   ListEditor,
   listBufferDirty,
   listBufferFrom,
   listBufferToArray,
-  useApply,
   type ApplyTarget,
   type ListBuffer,
 } from "../edit";
@@ -255,200 +256,210 @@ export function ServiceSummary(props: {
   const isExternalName = d.type === "ExternalName";
 
   return (
-    <Frame t={t}>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 18,
-        }}
-      >
-        <StatusPill status={d.type} t={t} mode={props.mode} />
-        {isHeadless && (
-          <StatusPill status="Headless" t={t} mode={props.mode} dense />
-        )}
-        {d.meta.created_at && (
-          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-            {ageFromIso(d.meta.created_at)} old
-          </span>
-        )}
-        {d.ports.length > 0 && (
-          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-            · {d.ports.length} port{d.ports.length === 1 ? "" : "s"}
-          </span>
-        )}
-      </div>
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "services",
+        namespace: ns,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 18,
+          }}
+        >
+          <StatusPill status={d.type} t={t} mode={props.mode} />
+          {isHeadless && (
+            <StatusPill status="Headless" t={t} mode={props.mode} dense />
+          )}
+          {d.meta.created_at && (
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+              {ageFromIso(d.meta.created_at)} old
+            </span>
+          )}
+          {d.ports.length > 0 && (
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+              · {d.ports.length} port{d.ports.length === 1 ? "" : "s"}
+            </span>
+          )}
+        </div>
 
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "services",
-          namespace: ns,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "services",
+            namespace: ns,
+            name: props.name,
+          }}
+          onSaved={() => setRefetch((r) => r + 1)}
+        />
 
-      <Section t={t} title="Spec" />
-      <div style={{ marginBottom: 22 }}>
-        <DetailRow t={t} label="Type">
-          <span style={{ fontSize: FS_MD }}>{d.type}</span>
-        </DetailRow>
-        {isExternalName ? (
-          d.external_name && (
-            <DetailRow t={t} label="External Name">
-              <Copyable text={d.external_name}>
-                <span
-                  style={{
-                    fontFamily: FF_MONO,
-                    fontSize: FS_MD,
-                    wordBreak: "break-all",
-                  }}
-                >
-                  {d.external_name}
-                </span>
-              </Copyable>
-            </DetailRow>
-          )
-        ) : (
-          <>
-            {d.cluster_ip && (
-              <DetailRow t={t} label="Cluster IP">
-                <Copyable text={d.cluster_ip}>
-                  <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
-                    {d.cluster_ip}
+        <Section t={t} title="Spec" />
+        <div style={{ marginBottom: 22 }}>
+          <DetailRow t={t} label="Type">
+            <span style={{ fontSize: FS_MD }}>{d.type}</span>
+          </DetailRow>
+          {isExternalName ? (
+            d.external_name && (
+              <DetailRow t={t} label="External Name">
+                <Copyable text={d.external_name}>
+                  <span
+                    style={{
+                      fontFamily: FF_MONO,
+                      fontSize: FS_MD,
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    {d.external_name}
                   </span>
                 </Copyable>
               </DetailRow>
-            )}
-            {d.cluster_ips.length > 1 && (
-              <DetailRow t={t} label="Cluster IPs">
-                <ChipWrap>
-                  {d.cluster_ips.map((ip) => (
-                    <Copyable key={ip} text={ip}>
-                      <Chip t={t} mono>
-                        {ip}
-                      </Chip>
-                    </Copyable>
-                  ))}
-                </ChipWrap>
-              </DetailRow>
-            )}
-            {d.external_ips.length > 0 && (
-              <DetailRow t={t} label="External IPs">
-                <ChipWrap>
-                  {d.external_ips.map((ip) => (
-                    <Copyable key={ip} text={ip}>
-                      <Chip t={t} mono>
-                        {ip}
-                      </Chip>
-                    </Copyable>
-                  ))}
-                </ChipWrap>
-              </DetailRow>
-            )}
-          </>
-        )}
-        {d.session_affinity && d.session_affinity !== "None" && (
-          <DetailRow t={t} label="Session Affinity">
-            <span style={{ fontSize: FS_MD }}>{d.session_affinity}</span>
-          </DetailRow>
-        )}
-        {d.internal_traffic_policy && (
-          <DetailRow t={t} label="Internal Traffic Policy">
-            <span style={{ fontSize: FS_MD }}>{d.internal_traffic_policy}</span>
-          </DetailRow>
-        )}
-        {d.external_traffic_policy && (
-          <DetailRow t={t} label="External Traffic Policy">
-            <span style={{ fontSize: FS_MD }}>{d.external_traffic_policy}</span>
-          </DetailRow>
-        )}
-        {d.ip_families.length > 0 && (
-          <DetailRow t={t} label="IP Families">
-            <ChipWrap>
-              {d.ip_families.map((f) => (
-                <Chip key={f} t={t} mono>
-                  {f}
-                </Chip>
-              ))}
-            </ChipWrap>
-            {d.ip_family_policy && (
-              <span style={{ fontSize: FS_SM, color: t.textDim, marginLeft: 8 }}>
-                {d.ip_family_policy}
-              </span>
-            )}
-          </DetailRow>
-        )}
-        {d.load_balancer_class && (
-          <DetailRow t={t} label="LB Class">
-            <Copyable text={d.load_balancer_class}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_SM }}>
-                {d.load_balancer_class}
-              </span>
-            </Copyable>
-          </DetailRow>
-        )}
-        {d.load_balancer_source_ranges.length > 0 && (
-          <DetailRow t={t} label="LB Source Ranges">
-            <ChipWrap>
-              {d.load_balancer_source_ranges.map((c) => (
-                <Copyable key={c} text={c}>
-                  <Chip t={t} mono>
-                    {c}
-                  </Chip>
-                </Copyable>
-              ))}
-            </ChipWrap>
-          </DetailRow>
-        )}
-        {d.health_check_node_port != null && (
-          <DetailRow t={t} label="Health Check NodePort">
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
-              {d.health_check_node_port}
-            </span>
-          </DetailRow>
-        )}
-        {d.publish_not_ready_addresses && (
-          <DetailRow t={t} label="Publish Not Ready">
-            <span style={{ fontSize: FS_MD }}>true</span>
-          </DetailRow>
-        )}
-        {d.allocate_load_balancer_node_ports === false && (
-          <DetailRow t={t} label="Allocate NodePorts">
-            <span style={{ fontSize: FS_MD }}>false</span>
-          </DetailRow>
-        )}
-        <DetailRow t={t} label="Selector">
-          {d.selector.length > 0 ? (
-            <KeyValueChips t={t} pairs={d.selector} />
-          ) : isExternalName ? (
-            <Mute t={t}>(external name — no selector)</Mute>
+            )
           ) : (
-            <Mute t={t}>(no selector — endpoints managed externally)</Mute>
+            <>
+              {d.cluster_ip && (
+                <DetailRow t={t} label="Cluster IP">
+                  <Copyable text={d.cluster_ip}>
+                    <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                      {d.cluster_ip}
+                    </span>
+                  </Copyable>
+                </DetailRow>
+              )}
+              {d.cluster_ips.length > 1 && (
+                <DetailRow t={t} label="Cluster IPs">
+                  <ChipWrap>
+                    {d.cluster_ips.map((ip) => (
+                      <Copyable key={ip} text={ip}>
+                        <Chip t={t} mono>
+                          {ip}
+                        </Chip>
+                      </Copyable>
+                    ))}
+                  </ChipWrap>
+                </DetailRow>
+              )}
+              {d.external_ips.length > 0 && (
+                <DetailRow t={t} label="External IPs">
+                  <ChipWrap>
+                    {d.external_ips.map((ip) => (
+                      <Copyable key={ip} text={ip}>
+                        <Chip t={t} mono>
+                          {ip}
+                        </Chip>
+                      </Copyable>
+                    ))}
+                  </ChipWrap>
+                </DetailRow>
+              )}
+            </>
           )}
-        </DetailRow>
-      </div>
+          {d.session_affinity && d.session_affinity !== "None" && (
+            <DetailRow t={t} label="Session Affinity">
+              <span style={{ fontSize: FS_MD }}>{d.session_affinity}</span>
+            </DetailRow>
+          )}
+          {d.internal_traffic_policy && (
+            <DetailRow t={t} label="Internal Traffic Policy">
+              <span style={{ fontSize: FS_MD }}>{d.internal_traffic_policy}</span>
+            </DetailRow>
+          )}
+          {d.external_traffic_policy && (
+            <DetailRow t={t} label="External Traffic Policy">
+              <span style={{ fontSize: FS_MD }}>{d.external_traffic_policy}</span>
+            </DetailRow>
+          )}
+          {d.ip_families.length > 0 && (
+            <DetailRow t={t} label="IP Families">
+              <ChipWrap>
+                {d.ip_families.map((f) => (
+                  <Chip key={f} t={t} mono>
+                    {f}
+                  </Chip>
+                ))}
+              </ChipWrap>
+              {d.ip_family_policy && (
+                <span style={{ fontSize: FS_SM, color: t.textDim, marginLeft: 8 }}>
+                  {d.ip_family_policy}
+                </span>
+              )}
+            </DetailRow>
+          )}
+          {d.load_balancer_class && (
+            <DetailRow t={t} label="LB Class">
+              <Copyable text={d.load_balancer_class}>
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_SM }}>
+                  {d.load_balancer_class}
+                </span>
+              </Copyable>
+            </DetailRow>
+          )}
+          {d.load_balancer_source_ranges.length > 0 && (
+            <DetailRow t={t} label="LB Source Ranges">
+              <ChipWrap>
+                {d.load_balancer_source_ranges.map((c) => (
+                  <Copyable key={c} text={c}>
+                    <Chip t={t} mono>
+                      {c}
+                    </Chip>
+                  </Copyable>
+                ))}
+              </ChipWrap>
+            </DetailRow>
+          )}
+          {d.health_check_node_port != null && (
+            <DetailRow t={t} label="Health Check NodePort">
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                {d.health_check_node_port}
+              </span>
+            </DetailRow>
+          )}
+          {d.publish_not_ready_addresses && (
+            <DetailRow t={t} label="Publish Not Ready">
+              <span style={{ fontSize: FS_MD }}>true</span>
+            </DetailRow>
+          )}
+          {d.allocate_load_balancer_node_ports === false && (
+            <DetailRow t={t} label="Allocate NodePorts">
+              <span style={{ fontSize: FS_MD }}>false</span>
+            </DetailRow>
+          )}
+          <DetailRow t={t} label="Selector">
+            {d.selector.length > 0 ? (
+              <KeyValueChips t={t} pairs={d.selector} />
+            ) : isExternalName ? (
+              <Mute t={t}>(external name — no selector)</Mute>
+            ) : (
+              <Mute t={t}>(no selector — endpoints managed externally)</Mute>
+            )}
+          </DetailRow>
+        </div>
 
-      <ServicePortsEditor
-        t={t}
-        ports={d.ports}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "services",
-          namespace: ns,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
+        <ServicePortsEditor
+          t={t}
+          ports={d.ports}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "services",
+            namespace: ns,
+            name: props.name,
+          }}
+        />
 
-      <LoadBalancerSection t={t} ingress={d.load_balancer_ingress} />
-    </Frame>
+        <LoadBalancerSection t={t} ingress={d.load_balancer_ingress} />
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -519,15 +530,13 @@ function ServicePortsEditor({
   t,
   ports,
   editTarget,
-  onSaved,
 }: {
   t: Tokens;
   ports: ServicePort[];
   editTarget: ApplyTarget;
-  onSaved: () => void;
 }) {
-  const edit = useApply<ListBuffer<ServicePortRowFields>>({
-    target: editTarget,
+  const edit = useEditField<ListBuffer<ServicePortRowFields>>({
+    id: "serviceports",
     initial: () => servicePortsBufferFrom(ports),
     serialize: (b) => ({
       spec: {
@@ -535,7 +544,23 @@ function ServicePortsEditor({
       },
     }),
     dirtyCount: servicePortsDirtyCount,
-    onSaved,
+    validate: (b) => {
+      const counts = new Map<string, number>();
+      for (const r of b.rows) {
+        if (r.deleted) continue;
+        if (r.name === "") continue;
+        counts.set(r.name, (counts.get(r.name) ?? 0) + 1);
+        if (r.port !== "" && Number.isNaN(Number.parseInt(r.port, 10))) {
+          return `invalid port number in: ${r.name || "unnamed port"}`;
+        }
+      }
+      for (const [k, n] of counts) {
+        if (n > 1) {
+          return `duplicate port names are not allowed: ${k}`;
+        }
+      }
+      return null;
+    },
   });
 
   const dupNames = useMemo(() => {
@@ -564,7 +589,6 @@ function ServicePortsEditor({
             saving={edit.saving}
             onEnter={edit.enter}
             onCancel={edit.cancel}
-            onSave={edit.save}
             rightExtra={
               <span
                 style={{
@@ -580,34 +604,6 @@ function ServicePortsEditor({
         }
       />
       <div style={{ marginBottom: 22 }}>
-        {edit.conflict && (
-          <ConflictBanner
-            t={t}
-            conflict={edit.conflict}
-            saving={edit.saving}
-            onForce={edit.forceSave}
-            onDismiss={edit.dismissConflict}
-          />
-        )}
-        {edit.error && (
-          <div
-            style={{
-              margin: "0 0 8px",
-              padding: "6px 8px",
-              background: "rgba(244,63,94,0.10)",
-              border: "1px solid rgba(244,63,94,0.4)",
-              borderRadius: R_SM,
-            }}
-          >
-            <ErrorBlock
-              t={t}
-              message={edit.error}
-              kindLabel="service"
-              verb="save"
-              inline
-            />
-          </div>
-        )}
         {edit.editing && dupNames.size > 0 && (
           <div
             style={{

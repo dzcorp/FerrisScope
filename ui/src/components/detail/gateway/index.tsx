@@ -11,6 +11,8 @@ import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   Copyable,
   DetailRow,
+  EditSessionProvider,
+  GlobalSaveBar,
   LinkValue,
   Mute,
   type DetailNavigate,
@@ -126,48 +128,58 @@ export function GatewayClassSummary(props: {
 
   const d = state.detail;
   return (
-    <Frame t={t}>
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: props.kindId,
-          namespace: null,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
-      <Section t={t} title="Spec" />
-      <div style={{ marginBottom: 22 }}>
-        <DetailRow t={t} label="Controller">
-          {d.controller ? (
-            <Copyable text={d.controller}>
-              <span
-                style={{
-                  fontSize: FS_MD,
-                  fontFamily: FF_MONO,
-                  wordBreak: "break-all",
-                }}
-              >
-                {d.controller}
-              </span>
-            </Copyable>
-          ) : (
-            <Mute t={t}>—</Mute>
-          )}
-        </DetailRow>
-        {d.description && (
-          <DetailRow t={t} label="Description">
-            <span style={{ fontSize: FS_MD, wordBreak: "break-word" }}>
-              {d.description}
-            </span>
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: props.kindId,
+        namespace: null,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: props.kindId,
+            namespace: null,
+            name: props.name,
+          }}
+        />
+        <Section t={t} title="Spec" />
+        <div style={{ marginBottom: 22 }}>
+          <DetailRow t={t} label="Controller">
+            {d.controller ? (
+              <Copyable text={d.controller}>
+                <span
+                  style={{
+                    fontSize: FS_MD,
+                    fontFamily: FF_MONO,
+                    wordBreak: "break-all",
+                  }}
+                >
+                  {d.controller}
+                </span>
+              </Copyable>
+            ) : (
+              <Mute t={t}>—</Mute>
+            )}
           </DetailRow>
-        )}
-      </div>
-      <ConditionsBlock t={t} conditions={d.conditions} />
-    </Frame>
+          {d.description && (
+            <DetailRow t={t} label="Description">
+              <span style={{ fontSize: FS_MD, wordBreak: "break-word" }}>
+                {d.description}
+              </span>
+            </DetailRow>
+          )}
+        </div>
+        <ConditionsBlock t={t} conditions={d.conditions} />
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -209,90 +221,100 @@ export function GatewaySummary(props: {
 
   const d = state.detail;
   return (
-    <Frame t={t}>
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: props.kindId,
-          namespace: ns,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
-      <Section t={t} title="Spec" />
-      <div style={{ marginBottom: 22 }}>
-        <DetailRow t={t} label="Class">
-          {d.gateway_class_name ? (
-            <LinkValue
-              t={t}
-              onClick={() =>
-                props.onNavigate?.("GatewayClass", null, d.gateway_class_name!)
-              }
-              copyText={d.gateway_class_name}
-              enabled={!!props.onNavigate}
-            >
-              {d.gateway_class_name}
-            </LinkValue>
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: props.kindId,
+        namespace: ns,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: props.kindId,
+            namespace: ns,
+            name: props.name,
+          }}
+        />
+        <Section t={t} title="Spec" />
+        <div style={{ marginBottom: 22 }}>
+          <DetailRow t={t} label="Class">
+            {d.gateway_class_name ? (
+              <LinkValue
+                t={t}
+                onClick={() =>
+                  props.onNavigate?.("GatewayClass", null, d.gateway_class_name!)
+                }
+                copyText={d.gateway_class_name}
+                enabled={!!props.onNavigate}
+              >
+                {d.gateway_class_name}
+              </LinkValue>
+            ) : (
+              <Mute t={t}>—</Mute>
+            )}
+          </DetailRow>
+        </div>
+
+        <Section t={t} title="Listeners" right={`${d.listeners.length} total`} />
+        <div style={{ marginBottom: 22 }}>
+          {d.listeners.length === 0 ? (
+            <Mute t={t}>No listeners.</Mute>
           ) : (
-            <Mute t={t}>—</Mute>
-          )}
-        </DetailRow>
-      </div>
-
-      <Section t={t} title="Listeners" right={`${d.listeners.length} total`} />
-      <div style={{ marginBottom: 22 }}>
-        {d.listeners.length === 0 ? (
-          <Mute t={t}>No listeners.</Mute>
-        ) : (
-          d.listeners.map((l, i) => {
-            const status = d.listener_status.find((s) => s.name === l.name);
-            return (
-              <DetailRow key={i} t={t} label={l.name ?? `listener-${i}`}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                    {l.protocol ?? "—"}:{l.port ?? "—"}
-                    {l.hostname ? ` host=${l.hostname}` : ""}
-                    {l.tls_mode ? ` tls=${l.tls_mode}` : ""}
-                  </span>
-                  {status?.attached_routes != null && (
-                    <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-                      {status.attached_routes} attached route
-                      {status.attached_routes === 1 ? "" : "s"}
-                    </span>
-                  )}
-                </div>
-              </DetailRow>
-            );
-          })
-        )}
-      </div>
-
-      {d.addresses.length > 0 && (
-        <>
-          <Section t={t} title="Addresses" />
-          <div style={{ marginBottom: 22 }}>
-            {d.addresses.map((a, i) => (
-              <DetailRow key={i} t={t} label={a.type ?? "Address"}>
-                {a.value ? (
-                  <Copyable text={a.value}>
+            d.listeners.map((l, i) => {
+              const status = d.listener_status.find((s) => s.name === l.name);
+              return (
+                <DetailRow key={i} t={t} label={l.name ?? `listener-${i}`}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                     <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                      {a.value}
+                      {l.protocol ?? "—"}:{l.port ?? "—"}
+                      {l.hostname ? ` host=${l.hostname}` : ""}
+                      {l.tls_mode ? ` tls=${l.tls_mode}` : ""}
                     </span>
-                  </Copyable>
-                ) : (
-                  <Mute t={t}>—</Mute>
-                )}
-              </DetailRow>
-            ))}
-          </div>
-        </>
-      )}
+                    {status?.attached_routes != null && (
+                      <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+                        {status.attached_routes} attached route
+                        {status.attached_routes === 1 ? "" : "s"}
+                      </span>
+                    )}
+                  </div>
+                </DetailRow>
+              );
+            })
+          )}
+        </div>
 
-      <ConditionsBlock t={t} conditions={d.conditions} />
-    </Frame>
+        {d.addresses.length > 0 && (
+          <>
+            <Section t={t} title="Addresses" />
+            <div style={{ marginBottom: 22 }}>
+              {d.addresses.map((a, i) => (
+                <DetailRow key={i} t={t} label={a.type ?? "Address"}>
+                  {a.value ? (
+                    <Copyable text={a.value}>
+                      <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
+                        {a.value}
+                      </span>
+                    </Copyable>
+                  ) : (
+                    <Mute t={t}>—</Mute>
+                  )}
+                </DetailRow>
+              ))}
+            </div>
+          </>
+        )}
+
+        <ConditionsBlock t={t} conditions={d.conditions} />
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -343,166 +365,176 @@ export function RouteSummary(props: {
 
   const d = state.detail;
   return (
-    <Frame t={t}>
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: props.kindId,
-          namespace: ns,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: props.kindId,
+        namespace: ns,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: props.kindId,
+            namespace: ns,
+            name: props.name,
+          }}
+        />
 
-      {d.hostnames.length > 0 && (
-        <>
-          <Section t={t} title="Hostnames" right={`${d.hostnames.length} total`} />
-          <div style={{ marginBottom: 22 }}>
-            {d.hostnames.map((h, i) => (
-              <DetailRow key={i} t={t} label="">
-                <Copyable text={h}>
-                  <span
-                    style={{
-                      fontSize: FS_MD,
-                      fontFamily: FF_MONO,
-                      wordBreak: "break-all",
-                    }}
-                  >
-                    {h}
-                  </span>
-                </Copyable>
-              </DetailRow>
-            ))}
-          </div>
-        </>
-      )}
-
-      <Section t={t} title="Parents" right={`${d.parent_refs.length} total`} />
-      <div style={{ marginBottom: 22 }}>
-        {d.parent_refs.length === 0 ? (
-          <Mute t={t}>No parent refs.</Mute>
-        ) : (
-          d.parent_refs.map((p, i) => (
-            <DetailRow key={i} t={t} label={p.kind ?? "Gateway"}>
-              {p.name ? (
-                <LinkValue
-                  t={t}
-                  onClick={() =>
-                    props.onNavigate?.(p.kind ?? "Gateway", p.namespace ?? ns, p.name!)
-                  }
-                  copyText={p.name}
-                  enabled={!!props.onNavigate}
-                >
-                  {p.namespace ? `${p.namespace}/${p.name}` : p.name}
-                  {p.section_name ? `:${p.section_name}` : ""}
-                  {p.port != null ? ` :${p.port}` : ""}
-                </LinkValue>
-              ) : (
-                <Mute t={t}>—</Mute>
-              )}
-            </DetailRow>
-          ))
-        )}
-      </div>
-
-      <Section t={t} title="Rules" right={`${d.rules.length} total`} />
-      <div style={{ marginBottom: 22 }}>
-        {d.rules.length === 0 ? (
-          <Mute t={t}>No rules.</Mute>
-        ) : (
-          d.rules.map((r, i) => (
-            <DetailRow key={i} t={t} label={`rule ${i + 1}`}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <span style={{ fontSize: FS_MD }}>
-                  {r.matches} match{r.matches === 1 ? "" : "es"} · {r.filters} filter
-                  {r.filters === 1 ? "" : "s"}
-                </span>
-                {r.backends.map((b, bi) => (
-                  <span
-                    key={bi}
-                    style={{
-                      fontSize: FS_SM,
-                      fontFamily: FF_MONO,
-                      color: t.textMuted,
-                    }}
-                  >
-                    → {b.namespace ? `${b.namespace}/` : ""}
-                    {b.name}
-                    {b.port != null ? `:${b.port}` : ""}
-                    {b.weight != null ? ` w=${b.weight}` : ""}
-                  </span>
-                ))}
-              </div>
-            </DetailRow>
-          ))
-        )}
-      </div>
-
-      {d.parent_status.length > 0 && (
-        <>
-          <Section
-            t={t}
-            title="Parent Status"
-            right={`${d.parent_status.length} total`}
-          />
-          <div style={{ marginBottom: 22 }}>
-            {d.parent_status.map((ps, i) => {
-              const accepted = ps.conditions.find((c) => c.type === "Accepted");
-              const refsResolved = ps.conditions.find(
-                (c) => c.type === "ResolvedRefs",
-              );
-              return (
-                <DetailRow
-                  key={i}
-                  t={t}
-                  label={ps.parent?.name ?? `parent-${i}`}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: 6,
-                      alignItems: "center",
-                    }}
-                  >
-                    {accepted && (
-                      <StatusPill
-                        status={`Accepted=${accepted.status}`}
-                        t={t}
-                        mode={props.mode}
-                        dense
-                      />
-                    )}
-                    {refsResolved && (
-                      <StatusPill
-                        status={`ResolvedRefs=${refsResolved.status}`}
-                        t={t}
-                        mode={props.mode}
-                        dense
-                      />
-                    )}
-                    {ps.controller && (
-                      <span
-                        style={{
-                          fontSize: FS_SM,
-                          color: t.textMuted,
-                          fontFamily: FF_MONO,
-                        }}
-                      >
-                        by {ps.controller}
-                      </span>
-                    )}
-                  </div>
+        {d.hostnames.length > 0 && (
+          <>
+            <Section t={t} title="Hostnames" right={`${d.hostnames.length} total`} />
+            <div style={{ marginBottom: 22 }}>
+              {d.hostnames.map((h, i) => (
+                <DetailRow key={i} t={t} label="">
+                  <Copyable text={h}>
+                    <span
+                      style={{
+                        fontSize: FS_MD,
+                        fontFamily: FF_MONO,
+                        wordBreak: "break-all",
+                      }}
+                    >
+                      {h}
+                    </span>
+                  </Copyable>
                 </DetailRow>
-              );
-            })}
-          </div>
-        </>
-      )}
-    </Frame>
+              ))}
+            </div>
+          </>
+        )}
+
+        <Section t={t} title="Parents" right={`${d.parent_refs.length} total`} />
+        <div style={{ marginBottom: 22 }}>
+          {d.parent_refs.length === 0 ? (
+            <Mute t={t}>No parent refs.</Mute>
+          ) : (
+            d.parent_refs.map((p, i) => (
+              <DetailRow key={i} t={t} label={p.kind ?? "Gateway"}>
+                {p.name ? (
+                  <LinkValue
+                    t={t}
+                    onClick={() =>
+                      props.onNavigate?.(p.kind ?? "Gateway", p.namespace ?? ns, p.name!)
+                    }
+                    copyText={p.name}
+                    enabled={!!props.onNavigate}
+                  >
+                    {p.namespace ? `${p.namespace}/${p.name}` : p.name}
+                    {p.section_name ? `:${p.section_name}` : ""}
+                    {p.port != null ? ` :${p.port}` : ""}
+                  </LinkValue>
+                ) : (
+                  <Mute t={t}>—</Mute>
+                )}
+              </DetailRow>
+            ))
+          )}
+        </div>
+
+        <Section t={t} title="Rules" right={`${d.rules.length} total`} />
+        <div style={{ marginBottom: 22 }}>
+          {d.rules.length === 0 ? (
+            <Mute t={t}>No rules.</Mute>
+          ) : (
+            d.rules.map((r, i) => (
+              <DetailRow key={i} t={t} label={`rule ${i + 1}`}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontSize: FS_MD }}>
+                    {r.matches} match{r.matches === 1 ? "" : "es"} · {r.filters} filter
+                    {r.filters === 1 ? "" : "s"}
+                  </span>
+                  {r.backends.map((b, bi) => (
+                    <span
+                      key={bi}
+                      style={{
+                        fontSize: FS_SM,
+                        fontFamily: FF_MONO,
+                        color: t.textMuted,
+                      }}
+                    >
+                      → {b.namespace ? `${b.namespace}/` : ""}
+                      {b.name}
+                      {b.port != null ? `:${b.port}` : ""}
+                      {b.weight != null ? ` w=${b.weight}` : ""}
+                    </span>
+                  ))}
+                </div>
+              </DetailRow>
+            ))
+          )}
+        </div>
+
+        {d.parent_status.length > 0 && (
+          <>
+            <Section
+              t={t}
+              title="Parent Status"
+              right={`${d.parent_status.length} total`}
+            />
+            <div style={{ marginBottom: 22 }}>
+              {d.parent_status.map((ps, i) => {
+                const accepted = ps.conditions.find((c) => c.type === "Accepted");
+                const refsResolved = ps.conditions.find(
+                  (c) => c.type === "ResolvedRefs",
+                );
+                return (
+                  <DetailRow
+                    key={i}
+                    t={t}
+                    label={ps.parent?.name ?? `parent-${i}`}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: 6,
+                        alignItems: "center",
+                      }}
+                    >
+                      {accepted && (
+                        <StatusPill
+                          status={`Accepted=${accepted.status}`}
+                          t={t}
+                          mode={props.mode}
+                          dense
+                        />
+                      )}
+                      {refsResolved && (
+                        <StatusPill
+                          status={`ResolvedRefs=${refsResolved.status}`}
+                          t={t}
+                          mode={props.mode}
+                          dense
+                        />
+                      )}
+                      {ps.controller && (
+                        <span
+                          style={{
+                            fontSize: FS_SM,
+                            color: t.textMuted,
+                            fontFamily: FF_MONO,
+                          }}
+                        >
+                          by {ps.controller}
+                        </span>
+                      )}
+                    </div>
+                  </DetailRow>
+                );
+              })}
+            </div>
+          </>
+        )}
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -544,51 +576,61 @@ export function ReferenceGrantSummary(props: {
 
   const d = state.detail;
   return (
-    <Frame t={t}>
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: props.kindId,
-          namespace: ns,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: props.kindId,
+        namespace: ns,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: props.kindId,
+            namespace: ns,
+            name: props.name,
+          }}
+        />
 
-      <Section t={t} title="From" right={`${d.from.length} total`} />
-      <div style={{ marginBottom: 22 }}>
-        {d.from.length === 0 ? (
-          <Mute t={t}>—</Mute>
-        ) : (
-          d.from.map((f, i) => (
-            <DetailRow key={i} t={t} label={f.kind ?? "—"}>
-              <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                {f.namespace ?? "—"}
-                {f.group ? ` (${f.group})` : ""}
-              </span>
-            </DetailRow>
-          ))
-        )}
-      </div>
+        <Section t={t} title="From" right={`${d.from.length} total`} />
+        <div style={{ marginBottom: 22 }}>
+          {d.from.length === 0 ? (
+            <Mute t={t}>—</Mute>
+          ) : (
+            d.from.map((f, i) => (
+              <DetailRow key={i} t={t} label={f.kind ?? "—"}>
+                <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
+                  {f.namespace ?? "—"}
+                  {f.group ? ` (${f.group})` : ""}
+                </span>
+              </DetailRow>
+            ))
+          )}
+        </div>
 
-      <Section t={t} title="To" right={`${d.to.length} total`} />
-      <div style={{ marginBottom: 22 }}>
-        {d.to.length === 0 ? (
-          <Mute t={t}>—</Mute>
-        ) : (
-          d.to.map((to, i) => (
-            <DetailRow key={i} t={t} label={to.kind ?? "—"}>
-              <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                {to.name ?? "*"}
-                {to.group ? ` (${to.group})` : ""}
-              </span>
-            </DetailRow>
-          ))
-        )}
-      </div>
-    </Frame>
+        <Section t={t} title="To" right={`${d.to.length} total`} />
+        <div style={{ marginBottom: 22 }}>
+          {d.to.length === 0 ? (
+            <Mute t={t}>—</Mute>
+          ) : (
+            d.to.map((to, i) => (
+              <DetailRow key={i} t={t} label={to.kind ?? "—"}>
+                <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
+                  {to.name ?? "*"}
+                  {to.group ? ` (${to.group})` : ""}
+                </span>
+              </DetailRow>
+            ))
+          )}
+        </div>
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }

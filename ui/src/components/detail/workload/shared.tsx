@@ -5,7 +5,7 @@
 
 import { useMemo, useState } from "react";
 import { FF_MONO, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
-import { Btn, Checkbox, Chip, Section, Select } from "../../ui";
+import { Btn, Checkbox, Chip, Section, Select, Icons } from "../../ui";
 import { ForwardChip } from "../forwardChip";
 import {
   KeyRefPicker,
@@ -1145,11 +1145,14 @@ export function ReplicaCounts({
 // Use it next to `ReplicaCounts` in each kind's header row.
 export function ReplicasEditor({
   t,
+  ready,
   desired,
 }: {
   t: Tokens;
+  ready?: number;
   desired: number;
 }) {
+  const [hovered, setHovered] = useState(false);
   const edit = useEditField<{ value: string }>({
     id: "replicas",
     initial: () => ({ value: String(desired) }),
@@ -1168,6 +1171,7 @@ export function ReplicasEditor({
         : null;
     },
   });
+
   const parsed = Number.parseInt(edit.buffer.value, 10);
   const invalid =
     edit.editing &&
@@ -1176,43 +1180,208 @@ export function ReplicasEditor({
       parsed < 0 ||
       String(parsed) !== edit.buffer.value.trim());
 
+  const hasReady = ready !== undefined;
+  const ok = hasReady ? ready === desired && desired > 0 : true;
+  const statusColor = hasReady ? (ok ? t.good : ready === 0 ? t.bad : t.warn) : t.good;
+
+  const handleDecrement = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const current = Number.isFinite(parsed) ? parsed : desired;
+    edit.setBuffer({ value: String(Math.max(0, current - 1)) });
+  };
+
+  const handleIncrement = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const current = Number.isFinite(parsed) ? parsed : desired;
+    edit.setBuffer({ value: String(current + 1) });
+  };
+
+  const isDirty = edit.dirty > 0;
+
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      {edit.editing && (
-        <input
-          type="number"
-          min={0}
-          value={edit.buffer.value}
-          onChange={(e) => edit.setBuffer({ value: e.target.value })}
-          autoFocus
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              e.preventDefault();
-              edit.cancel();
-            }
-          }}
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        background: edit.editing ? t.bg : t.surfaceAlt,
+        border: `1px solid ${invalid ? t.bad : isDirty ? t.warn : edit.editing ? t.border : t.borderSoft}`,
+        borderRadius: "20px",
+        padding: "3px 10px",
+        gap: 8,
+        boxShadow: isDirty ? `0 0 8px ${t.warn}33` : edit.editing ? `0 0 6px ${t.borderSoft}` : "none",
+        transition: "all 0.2s ease-in-out",
+        height: 28,
+        boxSizing: "border-box",
+      }}
+    >
+      {edit.editing ? (
+        <>
+          <button
+            type="button"
+            onClick={handleDecrement}
+            disabled={edit.saving || parsed <= 0}
+            style={{
+              background: "transparent",
+              color: parsed <= 0 ? t.textDim : t.text,
+              border: "none",
+              width: 20,
+              height: 20,
+              borderRadius: "50%",
+              cursor: parsed <= 0 ? "not-allowed" : "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: "14px",
+              fontWeight: "bold",
+              padding: 0,
+              outline: "none",
+            }}
+            title="Decrement replicas"
+          >
+            -
+          </button>
+
+          <input
+            type="text"
+            pattern="[0-9]*"
+            value={edit.buffer.value}
+            onChange={(e) => {
+              if (/^\d*$/.test(e.target.value)) {
+                edit.setBuffer({ value: e.target.value });
+              }
+            }}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                edit.cancel();
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                e.currentTarget.blur();
+              }
+            }}
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 32,
+              textAlign: "center",
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
+              fontWeight: 600,
+              background: "transparent",
+              color: invalid ? t.bad : isDirty ? t.warn : t.text,
+              border: "none",
+              outline: "none",
+              padding: 0,
+            }}
+          />
+
+          <button
+            type="button"
+            onClick={handleIncrement}
+            disabled={edit.saving}
+            style={{
+              background: "transparent",
+              color: t.text,
+              border: "none",
+              width: 20,
+              height: 20,
+              borderRadius: "50%",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: "14px",
+              fontWeight: "bold",
+              padding: 0,
+              outline: "none",
+            }}
+            title="Increment replicas"
+          >
+            +
+          </button>
+
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 4 }}
+          >
+            {isDirty && (
+              <button
+                type="button"
+                onClick={() => edit.setBuffer({ value: String(desired) })}
+                title="Revert to original count"
+                style={{
+                  background: "transparent",
+                  color: t.warn,
+                  border: "none",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  fontSize: 12,
+                  padding: 2,
+                }}
+              >
+                ↺
+              </button>
+            )}
+          </div>
+        </>
+      ) : (
+        <div
+          onClick={() => edit.enter()}
           style={{
-            width: 56,
-            padding: "3px 6px",
-            fontFamily: FF_MONO,
-            fontSize: FS_MD,
-            background: t.bg,
-            color: t.text,
-            border: `1px solid ${invalid ? t.bad : t.borderSoft}`,
-            borderRadius: R_SM,
-            outline: "none",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            cursor: "pointer",
+            userSelect: "none",
+            width: "100%",
           }}
-        />
+        >
+          <span
+            style={{
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
+              fontWeight: 600,
+              color: statusColor,
+            }}
+          >
+            {hasReady ? `${ready} / ${desired}` : desired}
+          </span>
+          <span style={{ fontSize: FS_XS, color: t.textMuted }}>
+            replicas
+          </span>
+
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              opacity: hovered ? 1 : 0,
+              transform: hovered ? "translateX(0)" : "translateX(-2px)",
+              transition: "all 0.15s ease-in-out",
+              color: t.textDim,
+              marginLeft: 2,
+            }}
+          >
+            {Icons.pencil}
+          </span>
+
+          {isDirty && (
+            <span
+              title="Pending unsaved replicas change"
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: t.warn,
+                marginLeft: 2,
+              }}
+            />
+          )}
+        </div>
       )}
-      <EditModeChrome
-        t={t}
-        editing={edit.editing}
-        dirty={edit.dirty}
-        saving={edit.saving}
-        onEnter={edit.enter}
-        onCancel={edit.cancel}
-      />
-    </span>
+    </div>
   );
 }
 
@@ -2192,36 +2361,13 @@ function ResourcesSide({
 // policy is bundled because the two read together. Pod's apiserver allows
 // image mutation on running Pods (the kubelet picks it up on the next
 // restart); other containers fields stay immutable on Pod.
-//
-// The two fields render in one DetailRow each in read mode (preserving the
-// existing layout) and share a single edit-mode chrome so the operator
-// commits both in one save.
+// The two fields render in one DetailRow each in read mode.
 
-type ImageFields = { image: string; image_pull_policy: string };
-
-const PULL_POLICY_OPTIONS = [
-  { value: "", label: "(default)" },
+export const PULL_POLICY_OPTIONS = [
   { value: "Always", label: "Always" },
   { value: "IfNotPresent", label: "IfNotPresent" },
   { value: "Never", label: "Never" },
-] as const;
-
-function imageBufferFrom(c: {
-  image: string | null;
-  image_pull_policy: string | null;
-}): ImageFields {
-  return {
-    image: c.image ?? "",
-    image_pull_policy: c.image_pull_policy ?? "",
-  };
-}
-
-function imageDirtyCount(b: ImageFields, orig: ImageFields): number {
-  let n = 0;
-  if (b.image !== orig.image) n += 1;
-  if (b.image_pull_policy !== orig.image_pull_policy) n += 1;
-  return n;
-}
+];
 
 export function ImageEditor({
   t,
@@ -2243,77 +2389,134 @@ export function ImageEditor({
     isInit: boolean;
   }) => Record<string, unknown>;
 }) {
-  const original = useMemo<ImageFields>(
-    () => imageBufferFrom({ image, image_pull_policy: imagePullPolicy }),
-    [image, imagePullPolicy],
-  );
-  const edit = useEditField<ImageFields>({
+  const session = useEditSession();
+
+  const originalImage = image ?? "";
+  const editImage = useEditField<{ value: string }>({
     id: `image:${containerName}`,
-    initial: () => original,
+    initial: () => ({ value: originalImage }),
     serialize: (b) => {
-      const co: {
-        name: string;
-        image?: string;
-        imagePullPolicy?: string;
-        isInit: boolean;
-      } = { name: containerName, isInit: containerKind === "init" || containerKind === "sidecar" };
-      // Only include fields the operator actually changed — keeps SSA
-      // ownership minimal.
-      if (b.image !== original.image) co.image = b.image;
-      if (b.image_pull_policy !== original.image_pull_policy) {
-        if (b.image_pull_policy !== "") co.imagePullPolicy = b.image_pull_policy;
-      }
+      const co = {
+        name: containerName,
+        image: b.value,
+        isInit: containerKind === "init" || containerKind === "sidecar",
+      };
       return serializeFor(co);
     },
-    dirtyCount: (b) => imageDirtyCount(b, original),
+    dirtyCount: (b) => (b.value !== originalImage ? 1 : 0),
   });
+
+  const originalPolicy = imagePullPolicy ?? "";
+  const editPolicy = useEditField<{ value: string }>({
+    id: `pull-policy:${containerName}`,
+    initial: () => ({ value: originalPolicy }),
+    serialize: (b) => {
+      const co = {
+        name: containerName,
+        imagePullPolicy: b.value,
+        isInit: containerKind === "init" || containerKind === "sidecar",
+      };
+      return serializeFor(co);
+    },
+    dirtyCount: (b) => (b.value !== originalPolicy ? 1 : 0),
+  });
+
+  const [imageHovered, setImageHovered] = useState(false);
+  const [imageFocused, setImageFocused] = useState(false);
+
+  const isImageEditable = !!session;
+  const isPolicyEditable = !!session;
+
+  const imageRight = isImageEditable ? (
+    <EditModeChrome
+      t={t}
+      editing={editImage.editing}
+      dirty={editImage.dirty}
+      saving={editImage.saving}
+      onEnter={editImage.enter}
+      onCancel={editImage.cancel}
+    />
+  ) : null;
+
+  const policyRight = isPolicyEditable ? (
+    <EditModeChrome
+      t={t}
+      editing={editPolicy.editing}
+      dirty={editPolicy.dirty}
+      saving={editPolicy.saving}
+      onEnter={editPolicy.enter}
+      onCancel={editPolicy.cancel}
+    />
+  ) : null;
 
   return (
     <>
       <DetailRow t={t} label="Image">
-        {edit.editing ? (
-          <div style={{ width: "100%" }}>
-            <EditableTextValue
-              t={t}
-              value={edit.buffer.image}
-              onChange={(v) => edit.setBuffer({ ...edit.buffer, image: v })}
-              placeholder="repo/image:tag"
-            />
-          </div>
-        ) : image ? (
-          <Copyable text={image}>
-            <span
+        <div style={{ width: "100%" }}>
+          {editImage.editing ? (
+            <input
+              type="text"
+              value={editImage.buffer.value}
+              onChange={(e) => editImage.setBuffer({ value: e.target.value })}
+              placeholder="e.g. nginx:latest"
+              onFocus={() => setImageFocused(true)}
+              onBlur={() => setImageFocused(false)}
+              onMouseEnter={() => setImageHovered(true)}
+              onMouseLeave={() => setImageHovered(false)}
               style={{
+                width: "100%",
+                padding: "5px 10px",
+                background: t.bg,
+                color: t.text,
+                border: `1px solid ${
+                  imageFocused ? (t.accent || "#10b981") : imageHovered ? t.border : t.borderSoft
+                }`,
+                borderRadius: R_SM,
                 fontFamily: FF_MONO,
-                fontSize: FS_SM,
-                wordBreak: "break-all",
+                fontSize: FS_MD,
+                outline: "none",
+                boxSizing: "border-box",
+                boxShadow: imageFocused ? `0 0 0 3px ${(t.accent || "#10b981")}33` : "none",
+                transition: "all 0.15s ease-in-out",
+              }}
+            />
+          ) : image ? (
+            <Copyable text={editImage.buffer.value}>
+              <span
+                style={{
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
+                  wordBreak: "break-all",
+                  color: editImage.dirty > 0 ? t.warn : t.text,
+                }}
+              >
+                {editImage.buffer.value}
+              </span>
+            </Copyable>
+          ) : (
+            <Mute t={t}>—</Mute>
+          )}
+          {imageRight && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-end",
+                marginTop: editImage.editing ? 6 : 4,
               }}
             >
-              {image}
-            </span>
-          </Copyable>
-        ) : (
-          <Mute t={t}>—</Mute>
-        )}
+              {imageRight}
+            </div>
+          )}
+        </div>
       </DetailRow>
+
       <DetailRow t={t} label="ImagePullPolicy">
-        {edit.editing ? (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
-              width: "100%",
-            }}
-          >
+        <div style={{ width: "100%" }}>
+          {editPolicy.editing ? (
             <Select<string>
               t={t}
-              fullWidth={false}
-              value={edit.buffer.image_pull_policy}
-              onChange={(v) =>
-                edit.setBuffer({ ...edit.buffer, image_pull_policy: v })
-              }
+              value={editPolicy.buffer.value}
+              onChange={(v) => editPolicy.setBuffer({ value: v })}
               options={PULL_POLICY_OPTIONS.map((o) => ({
                 value: o.value,
                 label: o.label,
@@ -2321,42 +2524,33 @@ export function ImageEditor({
               style={{
                 fontFamily: FF_MONO,
                 fontSize: FS_MD,
-                height: 28,
+                height: 30,
                 padding: "4px 28px 4px 8px",
+                width: "100%",
               }}
             />
-            <EditModeChrome
-              t={t}
-              editing={edit.editing}
-              dirty={edit.dirty}
-              saving={edit.saving}
-              onEnter={edit.enter}
-              onCancel={edit.cancel}
-              />
-          </div>
-        ) : (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
-              width: "100%",
-            }}
-          >
-            <span style={{ fontSize: FS_MD }}>
-              {imagePullPolicy ?? <Mute t={t}>(default)</Mute>}
+          ) : (
+            <span
+              style={{
+                fontSize: FS_MD,
+                color: editPolicy.dirty > 0 ? t.warn : t.text,
+              }}
+            >
+              {editPolicy.buffer.value || <Mute t={t}>(default)</Mute>}
             </span>
-            <EditModeChrome
-              t={t}
-              editing={edit.editing}
-              dirty={edit.dirty}
-              saving={edit.saving}
-              onEnter={edit.enter}
-              onCancel={edit.cancel}
-              />
-          </div>
-        )}
+          )}
+          {policyRight && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-end",
+                marginTop: editPolicy.editing ? 6 : 4,
+              }}
+            >
+              {policyRight}
+            </div>
+          )}
+        </div>
       </DetailRow>
     </>
   );

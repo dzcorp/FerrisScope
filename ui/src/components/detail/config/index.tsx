@@ -25,6 +25,9 @@ import {
   formatQuantity,
   parseQuantity,
   type DetailNavigate,
+  EditSessionProvider,
+  useEditField,
+  GlobalSaveBar,
 } from "..";
 import type {
   ConfigMapDetail,
@@ -35,11 +38,9 @@ import type {
 import { MetaSection } from "../workload/shared";
 import {
   AddRowButton,
-  ConflictBanner,
   EditModeChrome,
   EditableTextValue,
   RowDeleteButton,
-  useApply,
 } from "../edit";
 
 // ── Local fetch + chrome (mirrors cluster/index.tsx) ───────────────────────
@@ -135,16 +136,26 @@ export function ConfigMapSummary(props: {
 
   const d = state.detail;
   return (
-    <ConfigMapView
-      t={t}
-      mode={props.mode}
-      clusterId={props.clusterId}
-      namespace={ns}
-      name={props.name}
-      detail={d}
-      onNavigate={props.onNavigate}
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "configmaps",
+        namespace: ns,
+        name: props.name,
+      }}
       onSaved={() => setRefetch((r) => r + 1)}
-    />
+    >
+      <ConfigMapView
+        t={t}
+        mode={props.mode}
+        clusterId={props.clusterId}
+        namespace={ns}
+        name={props.name}
+        detail={d}
+        onNavigate={props.onNavigate}
+        onSaved={() => setRefetch((r) => r + 1)}
+      />
+    </EditSessionProvider>
   );
 }
 
@@ -169,12 +180,24 @@ function ConfigMapView({
   onNavigate?: DetailNavigate;
   onSaved: () => void;
 }) {
-  const edit = useApply<ConfigMapBuffer>({
-    target: { clusterId, kindId: "configmaps", namespace, name },
+  const edit = useEditField<ConfigMapBuffer>({
+    id: "configmap",
     initial: () => bufferFromConfigMap(d),
     serialize: serializeConfigMapBuffer,
     dirtyCount: configMapDirtyCount,
-    onSaved,
+    validate: (b) => {
+      const v = validateConfigMapBuffer(b);
+      if (v.duplicate.size > 0) {
+        return `duplicate keys are not allowed: ${Array.from(v.duplicate).join(", ")}`;
+      }
+      for (const r of b.rows) {
+        if (r.deleted) continue;
+        if (!isValidConfigKey(r.key)) {
+          return `invalid key name: "${r.key}"`;
+        }
+      }
+      return null;
+    },
   });
 
   // Re-seed the buffer if the underlying detail changes while we're editing
@@ -232,7 +255,6 @@ function ConfigMapView({
             saving={edit.saving}
             onEnter={edit.enter}
             onCancel={edit.cancel}
-            onSave={edit.save}
             rightExtra={
               <span
                 style={{
@@ -248,18 +270,7 @@ function ConfigMapView({
         }
       />
 
-      {edit.conflict && (
-        <ConflictBanner
-          t={t}
-          conflict={edit.conflict}
-          saving={edit.saving}
-          onForce={edit.forceSave}
-          onDismiss={edit.dismissConflict}
-        />
-      )}
-      {edit.error && (
-        <SaveErrorBanner t={t} message={edit.error} kindLabel="configmap" />
-      )}
+
       {edit.editing && validation.duplicate.size > 0 && (
         <InlineError
           t={t}
@@ -324,6 +335,7 @@ function ConfigMapView({
           />
         )}
       </div>
+      <GlobalSaveBar t={t} />
     </Frame>
   );
 }
@@ -574,41 +586,6 @@ function InlineError({ t, message }: { t: Tokens; message: string }) {
   );
 }
 
-// Save-error banner — same chrome as InlineError but renders the message
-// through the shared `ErrorBlock` classifier so a 403 from SSA reads
-// "Access denied" instead of `kube error: <noun> is forbidden: ...`. Use
-// for `edit.error` (API-shaped) sites; keep `InlineError` for validation
-// strings the editor produces itself.
-function SaveErrorBanner({
-  t,
-  message,
-  kindLabel,
-}: {
-  t: Tokens;
-  message: string;
-  kindLabel: string;
-}) {
-  return (
-    <div
-      style={{
-        margin: "0 0 12px",
-        padding: "8px 10px",
-        background: "rgba(244,63,94,0.10)",
-        border: "1px solid rgba(244,63,94,0.4)",
-        borderRadius: R_SM,
-      }}
-    >
-      <ErrorBlock
-        t={t}
-        message={message}
-        kindLabel={kindLabel}
-        verb="save"
-        inline
-      />
-    </div>
-  );
-}
-
 function InlineWarn({ t, message }: { t: Tokens; message: string }) {
   return (
     <div
@@ -718,23 +695,32 @@ export function SecretSummary(props: {
   if (state.kind === "error")
     return <ErrorBlock t={t} message={state.message} kindLabel="secret" />;
 
+  const d = state.detail;
   return (
-    <SecretView
-      t={t}
-      mode={props.mode}
-      clusterId={props.clusterId}
-      namespace={ns}
-      name={props.name}
-      detail={state.detail}
-      onNavigate={props.onNavigate}
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "secrets",
+        namespace: ns,
+        name: props.name,
+      }}
       onSaved={() => setRefetch((r) => r + 1)}
-    />
+    >
+      <SecretView
+        t={t}
+        clusterId={props.clusterId}
+        namespace={ns}
+        name={props.name}
+        detail={d}
+        onNavigate={props.onNavigate}
+        onSaved={() => setRefetch((r) => r + 1)}
+      />
+    </EditSessionProvider>
   );
 }
 
 function SecretView({
   t,
-  mode: 
   clusterId,
   namespace,
   name,
@@ -743,7 +729,6 @@ function SecretView({
   onSaved,
 }: {
   t: Tokens;
-  mode: ThemeMode;
   clusterId: string;
   namespace: string;
   name: string;
@@ -751,12 +736,27 @@ function SecretView({
   onNavigate?: DetailNavigate;
   onSaved: () => void;
 }) {
-  const edit = useApply<SecretBuffer>({
-    target: { clusterId, kindId: "secrets", namespace, name },
+  const edit = useEditField<SecretBuffer>({
+    id: "secret",
     initial: () => bufferFromSecret(d),
     serialize: serializeSecretBuffer,
     dirtyCount: secretDirtyCount,
-    onSaved,
+    validate: (b) => {
+      const v = validateSecretBuffer(b);
+      if (v.duplicate.size > 0) {
+        return `duplicate keys are not allowed: ${Array.from(v.duplicate).join(", ")}`;
+      }
+      if (v.invalidRows.length > 0) {
+        return `invalid base64 in: ${v.invalidRows.join(", ")}`;
+      }
+      for (const r of b.rows) {
+        if (r.deleted) continue;
+        if (!isValidConfigKey(r.key)) {
+          return `invalid key name: "${r.key}"`;
+        }
+      }
+      return null;
+    },
   });
 
   const validation = useMemo(
@@ -804,7 +804,6 @@ function SecretView({
             saving={edit.saving}
             onEnter={edit.enter}
             onCancel={edit.cancel}
-            onSave={edit.save}
             rightExtra={
               <span
                 style={{
@@ -820,18 +819,6 @@ function SecretView({
         }
       />
 
-      {edit.conflict && (
-        <ConflictBanner
-          t={t}
-          conflict={edit.conflict}
-          saving={edit.saving}
-          onForce={edit.forceSave}
-          onDismiss={edit.dismissConflict}
-        />
-      )}
-      {edit.error && (
-        <SaveErrorBanner t={t} message={edit.error} kindLabel="secret" />
-      )}
       {edit.editing && validation.duplicate.size > 0 && (
         <InlineError
           t={t}
@@ -897,6 +884,7 @@ function SecretView({
           />
         )}
       </div>
+      <GlobalSaveBar t={t} />
     </Frame>
   );
 }
@@ -1356,16 +1344,27 @@ export function ResourceQuotaSummary(props: {
   if (state.kind === "error")
     return <ErrorBlock t={t} message={state.message} kindLabel="resource quota" />;
 
+  const d = state.detail;
   return (
-    <ResourceQuotaView
-      t={t}
-      clusterId={props.clusterId}
-      namespace={ns}
-      name={props.name}
-      detail={state.detail}
-      onNavigate={props.onNavigate}
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "resourcequotas",
+        namespace: ns,
+        name: props.name,
+      }}
       onSaved={() => setRefetch((r) => r + 1)}
-    />
+    >
+      <ResourceQuotaView
+        t={t}
+        clusterId={props.clusterId}
+        namespace={ns}
+        name={props.name}
+        detail={d}
+        onNavigate={props.onNavigate}
+        onSaved={() => setRefetch((r) => r + 1)}
+      />
+    </EditSessionProvider>
   );
 }
 
@@ -1386,12 +1385,27 @@ function ResourceQuotaView({
   onNavigate?: DetailNavigate;
   onSaved: () => void;
 }) {
-  const edit = useApply<QuotaBuffer>({
-    target: { clusterId, kindId: "resourcequotas", namespace, name },
+  const edit = useEditField<QuotaBuffer>({
+    id: "resourcequota",
     initial: () => bufferFromQuota(d),
     serialize: serializeQuotaBuffer,
     dirtyCount: quotaDirtyCount,
-    onSaved,
+    validate: (b) => {
+      const v = validateQuotaBuffer(b);
+      if (v.duplicate.size > 0) {
+        return `duplicate resources are not allowed: ${Array.from(v.duplicate).join(", ")}`;
+      }
+      if (v.invalidRows.length > 0) {
+        return `invalid quantity in: ${v.invalidRows.join(", ")}`;
+      }
+      for (const r of b.rows) {
+        if (r.deleted) continue;
+        if (r.name !== "" && !isValidQuotaResource(r.name)) {
+          return `invalid resource name: "${r.name}"`;
+        }
+      }
+      return null;
+    },
   });
 
   const validation = useMemo(
@@ -1435,7 +1449,6 @@ function ResourceQuotaView({
             saving={edit.saving}
             onEnter={edit.enter}
             onCancel={edit.cancel}
-            onSave={edit.save}
             rightExtra={
               <span
                 style={{
@@ -1451,18 +1464,6 @@ function ResourceQuotaView({
         }
       />
 
-      {edit.conflict && (
-        <ConflictBanner
-          t={t}
-          conflict={edit.conflict}
-          saving={edit.saving}
-          onForce={edit.forceSave}
-          onDismiss={edit.dismissConflict}
-        />
-      )}
-      {edit.error && (
-        <SaveErrorBanner t={t} message={edit.error} kindLabel="resource quota" />
-      )}
       {edit.editing && validation.duplicate.size > 0 && (
         <InlineError
           t={t}
@@ -1560,6 +1561,7 @@ function ResourceQuotaView({
           </div>
         </>
       )}
+      <GlobalSaveBar t={t} />
     </Frame>
   );
 }
@@ -1847,16 +1849,27 @@ export function LimitRangeSummary(props: {
   if (state.kind === "error")
     return <ErrorBlock t={t} message={state.message} kindLabel="limit range" />;
 
+  const d = state.detail;
   return (
-    <LimitRangeView
-      t={t}
-      clusterId={props.clusterId}
-      namespace={ns}
-      name={props.name}
-      detail={state.detail}
-      onNavigate={props.onNavigate}
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "limitranges",
+        namespace: ns,
+        name: props.name,
+      }}
       onSaved={() => setRefetch((r) => r + 1)}
-    />
+    >
+      <LimitRangeView
+        t={t}
+        clusterId={props.clusterId}
+        namespace={ns}
+        name={props.name}
+        detail={d}
+        onNavigate={props.onNavigate}
+        onSaved={() => setRefetch((r) => r + 1)}
+      />
+    </EditSessionProvider>
   );
 }
 
@@ -1877,12 +1890,18 @@ function LimitRangeView({
   onNavigate?: DetailNavigate;
   onSaved: () => void;
 }) {
-  const edit = useApply<LimitRangeBuffer>({
-    target: { clusterId, kindId: "limitranges", namespace, name },
+  const edit = useEditField<LimitRangeBuffer>({
+    id: "limitrange",
     initial: () => bufferFromLimitRange(d),
     serialize: serializeLimitRangeBuffer,
     dirtyCount: limitRangeDirtyCount,
-    onSaved,
+    validate: (b) => {
+      const v = validateLimitRangeBuffer(b);
+      if (v.invalidCells.length > 0) {
+        return `invalid quantity in: ${v.invalidCells.join(", ")}`;
+      }
+      return null;
+    },
   });
 
   const validation = useMemo(
@@ -1927,7 +1946,6 @@ function LimitRangeView({
               saving={edit.saving}
               onEnter={edit.enter}
               onCancel={edit.cancel}
-              onSave={edit.save}
               rightExtra={
                 <span
                   style={{
@@ -1944,18 +1962,6 @@ function LimitRangeView({
         />
       </div>
 
-      {edit.conflict && (
-        <ConflictBanner
-          t={t}
-          conflict={edit.conflict}
-          saving={edit.saving}
-          onForce={edit.forceSave}
-          onDismiss={edit.dismissConflict}
-        />
-      )}
-      {edit.error && (
-        <SaveErrorBanner t={t} message={edit.error} kindLabel="limit range" />
-      )}
       {edit.editing && validation.invalidCells.length > 0 && (
         <InlineError
           t={t}
@@ -2014,6 +2020,7 @@ function LimitRangeView({
           <LimitRangeItemBlock key={`${item.type_}-${idx}`} t={t} item={item} />
         ))
       )}
+      <GlobalSaveBar t={t} />
     </Frame>
   );
 }
