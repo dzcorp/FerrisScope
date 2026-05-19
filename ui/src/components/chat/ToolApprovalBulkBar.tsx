@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { useResolvedTheme } from "../../store";
 import { api } from "../../api";
-import { FF_MONO, type ThemeMode, R_MD, FS_SM } from "../../theme";
+import { FF_MONO, type ThemeMode, R_MD, FS_SM, hexWithAlpha } from "../../theme";
 import { Btn, ErrorBlock } from "../ui";
 import type { ApprovalDecision } from "../../types";
 import type { PendingApproval } from "./chatStreaming";
@@ -89,7 +89,7 @@ function ToolApprovalBulkBarInner({ chatId, approvals }: Props) {
         gap: 8,
         padding: "10px 12px",
         background: t.surfaceAlt,
-        border: `1px solid ${t.warn}66`,
+        border: `1px solid ${hexWithAlpha(t.warn, 0.4)}`,
         borderLeft: `3px solid ${t.warn}`,
         borderRadius: R_MD,
         fontFamily: FF_MONO,

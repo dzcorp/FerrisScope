@@ -2118,6 +2118,7 @@ function PodSummary({
     name: c.name,
     status: c.state,
     kind: c.kind,
+    ready: c.ready,
   }));
   const initContainers = d.containers.filter((c) => c.kind === "init");
   const mainContainers = d.containers.filter((c) => c.kind !== "init");
@@ -2903,7 +2904,9 @@ function ContainerCard({
         }}
       >
         <ContainerDots
-          containers={[{ name: c.name, status: c.state, kind: c.kind }]}
+          containers={[
+            { name: c.name, status: c.state, kind: c.kind, ready: c.ready },
+          ]}
           t={t}
           showSeparator={false}
         />

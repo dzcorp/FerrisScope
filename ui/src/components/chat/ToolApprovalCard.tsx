@@ -1,7 +1,15 @@
 import { memo, useMemo, useState } from "react";
 import { useResolvedTheme } from "../../store";
 import { api } from "../../api";
-import { FF_MONO, type ThemeMode, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
+import {
+  FF_MONO,
+  type ThemeMode,
+  R_MD,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+  hexWithAlpha,
+} from "../../theme";
 import { Btn, ErrorBlock } from "../ui";
 import { useCopyFlash } from "../detail/primitives";
 import type { PendingApproval } from "./chatStreaming";
@@ -75,7 +83,7 @@ function ToolApprovalCardInner({ chatId, approval }: Props) {
           maxWidth: "92%",
           flex: 1,
           background: t.surfaceAlt,
-          border: `1px solid ${t.warn}66`,
+          border: `1px solid ${hexWithAlpha(t.warn, 0.4)}`,
           borderLeft: `3px solid ${t.warn}`,
           borderRadius: R_MD,
           padding: "10px 12px",

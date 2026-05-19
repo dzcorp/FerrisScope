@@ -77,7 +77,7 @@ export function useEditSession(): SessionApi | null {
 // the underlying resource so the session resets when the operator
 // switches to a different object.
 export function EditSessionProvider({
-  target,
+  target: targetProp,
   onSaved,
   children,
 }: {
@@ -87,6 +87,20 @@ export function EditSessionProvider({
   onSaved: () => void;
   children: ReactNode;
 }) {
+  // Callers usually pass `target={{...}}` inline — that object's identity
+  // changes every render, which would propagate into the context value and
+  // re-run every editor's `useEffect([session, …])`. Normalize by primitive
+  // so the target ref is stable across renders that don't actually retarget.
+  const target = useMemo<ApplyTarget>(
+    () => ({
+      clusterId: targetProp.clusterId,
+      kindId: targetProp.kindId,
+      namespace: targetProp.namespace,
+      name: targetProp.name,
+    }),
+    [targetProp.clusterId, targetProp.kindId, targetProp.namespace, targetProp.name],
+  );
+
   // Mutable callback registry — editors stash fresh closures here every
   // render so the session always sees the latest serialize / reset /
   // validate. Mutating a ref doesn't trigger renders, which is exactly
@@ -152,6 +166,13 @@ export function EditSessionProvider({
   const dirtyMapRef = useRef(dirtyMap);
   dirtyMapRef.current = dirtyMap;
 
+  // Same trick for onSaved — callers commonly pass `onSaved={() => …}`
+  // inline so the prop is a fresh closure every render. Stashing it in a
+  // ref keeps `saveAll`'s identity stable, which is what stops the
+  // context value memo from churning.
+  const onSavedRef = useRef(onSaved);
+  onSavedRef.current = onSaved;
+
   const saveAll = useCallback(
     async (force = false) => {
       const dirtyIds = Object.entries(dirtyMapRef.current)
@@ -205,7 +226,7 @@ export function EditSessionProvider({
           setEditingMap({});
           setDirtyMap({});
           setState({ saving: false, conflict: null, error: null });
-          onSaved();
+          onSavedRef.current();
         } else {
           setState({
             saving: false,
@@ -221,7 +242,7 @@ export function EditSessionProvider({
         setState({ saving: false, conflict: null, error: String(e) });
       }
     },
-    [target.clusterId, target.kindId, target.namespace, target.name, onSaved],
+    [target.clusterId, target.kindId, target.namespace, target.name],
   );
 
   const cancelAll = useCallback(() => {
@@ -235,20 +256,41 @@ export function EditSessionProvider({
     setState((s) => ({ ...s, conflict: null }));
   }, []);
 
-  const value: SessionApi = {
-    target,
-    register,
-    setDirty,
-    dirty,
-    isEditing,
-    setEditing,
-    saving: state.saving,
-    conflict: state.conflict,
-    error: state.error,
-    saveAll,
-    cancelAll,
-    dismissConflict,
-  };
+  // Memoised so consumers' `useEffect([session, ...])` doesn't re-run on
+  // every Provider render. Without this, the cleanup of `useEditField`'s
+  // register-effect calls `setDirtyMap(delete id)`, the setDirty-effect
+  // re-adds it, the Provider re-renders, the session ref changes again —
+  // an infinite loop the moment any editor goes dirty.
+  const value = useMemo<SessionApi>(
+    () => ({
+      target,
+      register,
+      setDirty,
+      dirty,
+      isEditing,
+      setEditing,
+      saving: state.saving,
+      conflict: state.conflict,
+      error: state.error,
+      saveAll,
+      cancelAll,
+      dismissConflict,
+    }),
+    [
+      target,
+      register,
+      setDirty,
+      dirty,
+      isEditing,
+      setEditing,
+      state.saving,
+      state.conflict,
+      state.error,
+      saveAll,
+      cancelAll,
+      dismissConflict,
+    ],
+  );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

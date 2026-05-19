@@ -265,6 +265,119 @@ describe("ContainerDots", () => {
     );
     expect(dotColor).toHaveBeenCalled();
   });
+
+  it("Running + ready=false recolors the dot to warn (not good)", () => {
+    // We assert on background — the main shape is a solid disc, so the
+    // status colour shows up there. t.good vs t.warn are distinct hex.
+    const { container, rerender } = render(
+      <ContainerDots
+        t={t}
+        containers={[{ name: "m", status: "Running", kind: "main", ready: true }]}
+      />,
+    );
+    const goodDot = container.querySelector(
+      "span[style*='border-radius: 50%']",
+    ) as HTMLElement;
+    const goodBg = goodDot.style.background;
+
+    rerender(
+      <ContainerDots
+        t={t}
+        containers={[
+          { name: "m", status: "Running", kind: "main", ready: false },
+        ]}
+      />,
+    );
+    const warnDot = container.querySelector(
+      "span[style*='border-radius: 50%']",
+    ) as HTMLElement;
+    expect(warnDot.style.background).not.toBe(goodBg);
+    // Warn bucket pins to t.warn — jsdom normalises hex to rgb() so we
+    // convert the token before comparing.
+    const hex = t.warn.replace("#", "");
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    expect(warnDot.style.background).toBe(`rgb(${r}, ${g}, ${b})`);
+  });
+
+  it("layout order is init → sidecar → main with separators between groups", () => {
+    const { container } = render(
+      <ContainerDots
+        t={t}
+        containers={[
+          { name: "i", status: "Completed", kind: "init" },
+          { name: "s", status: "Running", kind: "sidecar" },
+          { name: "m", status: "Running", kind: "main" },
+        ]}
+      />,
+    );
+    // Children of the outer wrapper in order: init dot, sep, sidecar dot,
+    // sep, main dot. Tooltips wrap each dot in a span; separators are bare
+    // spans. We assert positional ordering via getBoundingClientRect's left.
+    const root = container.firstElementChild as HTMLElement;
+    const children = Array.from(root.children) as HTMLElement[];
+    // 3 dots + 2 separators = 5 immediate children. Tooltip wraps a Slot
+    // around the dot so the dot becomes the immediate child either way.
+    expect(children.length).toBe(5);
+    // The two 1-px separators have width:1px on their style attribute.
+    expect(children[1]!.style.width).toBe("1px");
+    expect(children[3]!.style.width).toBe("1px");
+  });
+
+  it("completed init dot is dimmed (opacity ~0.45)", () => {
+    const { container } = render(
+      <ContainerDots
+        t={t}
+        containers={[
+          { name: "i1", status: "Completed", kind: "init" },
+          { name: "i2", status: "Running", kind: "init" },
+        ]}
+      />,
+    );
+    // Init shape uses borderRadius: 2 — find both, the Completed one carries
+    // opacity 0.45, the Running one does not.
+    const initDots = Array.from(
+      container.querySelectorAll("span[style*='border-radius: 2px']"),
+    ) as HTMLElement[];
+    expect(initDots.length).toBe(2);
+    const opacities = initDots.map((el) => el.style.opacity);
+    expect(opacities).toContain("0.45");
+    expect(opacities).toContain("");
+  });
+
+  it("init and sidecar share thin geometry; radius separates them", () => {
+    const { container } = render(
+      <ContainerDots
+        t={t}
+        // size defaults to 8 → init and sidecar are both 6×10; main is 10×10.
+        containers={[
+          { name: "i", status: "Running", kind: "init" },
+          { name: "s", status: "Running", kind: "sidecar" },
+          { name: "m", status: "Running", kind: "main" },
+        ]}
+      />,
+    );
+    const dots = (
+      Array.from(
+        container.querySelectorAll("span[style*='display: inline-block']"),
+      ) as HTMLElement[]
+    ).filter((el) => el.style.width && el.style.width !== "1px"); // drop separators
+    expect(dots.length).toBe(3);
+    const [initDot, sidecarDot, mainDot] = dots;
+    // Init: 6×10, 2 px radius (square corners).
+    expect(initDot!.style.width).toBe("6px");
+    expect(initDot!.style.height).toBe("10px");
+    expect(initDot!.style.borderRadius).toBe("2px");
+    // Sidecar: 6×10, 6 px radius (full capsule).
+    expect(sidecarDot!.style.width).toBe("6px");
+    expect(sidecarDot!.style.height).toBe("10px");
+    expect(sidecarDot!.style.borderRadius).toBe("6px");
+    // Main: 10×10, 50% radius (disc).
+    expect(mainDot!.style.width).toBe("10px");
+    expect(mainDot!.style.height).toBe("10px");
+    expect(mainDot!.style.borderRadius).toBe("50%");
+  });
 });
 
 describe("LoadingLine", () => {

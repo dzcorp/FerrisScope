@@ -11,6 +11,8 @@ import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   Copyable,
   DetailRow,
+  EditSessionProvider,
+  GlobalSaveBar,
   KeyValueChips,
   LinkValue,
   Mute,
@@ -114,130 +116,140 @@ export function HorizontalPodAutoscalerSummary(props: {
       ) : state.kind === "error" ? (
         <ErrorBlock t={t} message={state.message} kindLabel="hpa" />
       ) : (
-        <Frame t={t}>
-          <MetaSection
-            t={t}
-            meta={state.detail.meta}
-            onNavigate={props.onNavigate}
-            editTarget={{
-              clusterId: props.clusterId,
-              kindId: "horizontalpodautoscalers",
-              namespace: ns,
-              name: props.name,
-            }}
-            onSaved={() => setRefetch((r) => r + 1)}
-          />
-          <Section t={t} title="Scale Target" />
-          <div style={{ marginBottom: 22 }}>
-            {state.detail.scale_target_ref ? (
-              <>
-                <DetailRow t={t} label="Kind">
-                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                    {state.detail.scale_target_ref.kind}
-                  </span>
-                </DetailRow>
-                <DetailRow t={t} label="Name">
-                  <LinkValue
-                    t={t}
-                    onClick={() =>
-                      props.onNavigate?.(
-                        state.detail.scale_target_ref!.kind,
-                        ns,
-                        state.detail.scale_target_ref!.name,
-                      )
-                    }
-                    copyText={state.detail.scale_target_ref.name}
-                    enabled={!!props.onNavigate}
-                  >
-                    {state.detail.scale_target_ref.name}
-                  </LinkValue>
-                </DetailRow>
-                {state.detail.scale_target_ref.api_version && (
-                  <DetailRow t={t} label="API Version">
+        <EditSessionProvider
+          target={{
+            clusterId: props.clusterId,
+            kindId: "horizontalpodautoscalers",
+            namespace: ns,
+            name: props.name,
+          }}
+          onSaved={() => setRefetch((r) => r + 1)}
+        >
+          <Frame t={t}>
+            <MetaSection
+              t={t}
+              meta={state.detail.meta}
+              onNavigate={props.onNavigate}
+              editTarget={{
+                clusterId: props.clusterId,
+                kindId: "horizontalpodautoscalers",
+                namespace: ns,
+                name: props.name,
+              }}
+            />
+            <Section t={t} title="Scale Target" />
+            <div style={{ marginBottom: 22 }}>
+              {state.detail.scale_target_ref ? (
+                <>
+                  <DetailRow t={t} label="Kind">
                     <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                      {state.detail.scale_target_ref.api_version}
+                      {state.detail.scale_target_ref.kind}
                     </span>
                   </DetailRow>
-                )}
-              </>
-            ) : (
-              <Mute t={t}>—</Mute>
-            )}
-          </div>
+                  <DetailRow t={t} label="Name">
+                    <LinkValue
+                      t={t}
+                      onClick={() =>
+                        props.onNavigate?.(
+                          state.detail.scale_target_ref!.kind,
+                          ns,
+                          state.detail.scale_target_ref!.name,
+                        )
+                      }
+                      copyText={state.detail.scale_target_ref.name}
+                      enabled={!!props.onNavigate}
+                    >
+                      {state.detail.scale_target_ref.name}
+                    </LinkValue>
+                  </DetailRow>
+                  {state.detail.scale_target_ref.api_version && (
+                    <DetailRow t={t} label="API Version">
+                      <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
+                        {state.detail.scale_target_ref.api_version}
+                      </span>
+                    </DetailRow>
+                  )}
+                </>
+              ) : (
+                <Mute t={t}>—</Mute>
+              )}
+            </div>
 
-          <Section t={t} title="Replicas" />
-          <div style={{ marginBottom: 22 }}>
-            <DetailRow t={t} label="Min">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.min_replicas ?? <Mute t={t}>—</Mute>}
-              </span>
-            </DetailRow>
-            <DetailRow t={t} label="Max">
-              <span style={{ fontSize: FS_MD }}>{state.detail.max_replicas}</span>
-            </DetailRow>
-            <DetailRow t={t} label="Current">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.current_replicas ?? <Mute t={t}>—</Mute>}
-              </span>
-            </DetailRow>
-            <DetailRow t={t} label="Desired">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.desired_replicas ?? <Mute t={t}>—</Mute>}
-              </span>
-            </DetailRow>
-            {state.detail.last_scale_time && (
-              <DetailRow t={t} label="Last Scaled">
-                <Copyable text={state.detail.last_scale_time}>
-                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                    {ageFromIso(state.detail.last_scale_time)} ago
-                  </span>
-                </Copyable>
+            <Section t={t} title="Replicas" />
+            <div style={{ marginBottom: 22 }}>
+              <DetailRow t={t} label="Min">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.min_replicas ?? <Mute t={t}>—</Mute>}
+                </span>
               </DetailRow>
-            )}
-          </div>
-
-          {state.detail.metrics.length > 0 && (
-            <>
-              <Section
-                t={t}
-                title="Metrics"
-                right={`${state.detail.metrics.length} total`}
-              />
-              <div style={{ marginBottom: 22 }}>
-                {state.detail.metrics.map((m, i) => (
-                  <DetailRow key={i} t={t} label={m.type}>
+              <DetailRow t={t} label="Max">
+                <span style={{ fontSize: FS_MD }}>{state.detail.max_replicas}</span>
+              </DetailRow>
+              <DetailRow t={t} label="Current">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.current_replicas ?? <Mute t={t}>—</Mute>}
+                </span>
+              </DetailRow>
+              <DetailRow t={t} label="Desired">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.desired_replicas ?? <Mute t={t}>—</Mute>}
+                </span>
+              </DetailRow>
+              {state.detail.last_scale_time && (
+                <DetailRow t={t} label="Last Scaled">
+                  <Copyable text={state.detail.last_scale_time}>
                     <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                      {m.name ?? m.metric_name ?? "—"}
-                      {m.target?.average_utilization != null
-                        ? ` @ ${m.target.average_utilization}%`
-                        : m.target?.average_value
-                          ? ` @ avg ${m.target.average_value}`
-                          : m.target?.value
-                            ? ` @ ${m.target.value}`
-                            : ""}
+                      {ageFromIso(state.detail.last_scale_time)} ago
                     </span>
-                  </DetailRow>
-                ))}
-              </div>
-            </>
-          )}
+                  </Copyable>
+                </DetailRow>
+              )}
+            </div>
 
-          {state.detail.conditions.length > 0 && (
-            <>
-              <Section t={t} title="Conditions" />
-              <div style={{ marginBottom: 22 }}>
-                {state.detail.conditions.map((c, i) => (
-                  <DetailRow key={i} t={t} label={c.type}>
-                    <span style={{ fontSize: FS_MD }}>
-                      {c.status}
-                      {c.reason ? ` — ${c.reason}` : ""}
-                    </span>
-                  </DetailRow>
-                ))}
-              </div>
-            </>
-          )}
-        </Frame>
+            {state.detail.metrics.length > 0 && (
+              <>
+                <Section
+                  t={t}
+                  title="Metrics"
+                  right={`${state.detail.metrics.length} total`}
+                />
+                <div style={{ marginBottom: 22 }}>
+                  {state.detail.metrics.map((m, i) => (
+                    <DetailRow key={i} t={t} label={m.type}>
+                      <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
+                        {m.name ?? m.metric_name ?? "—"}
+                        {m.target?.average_utilization != null
+                          ? ` @ ${m.target.average_utilization}%`
+                          : m.target?.average_value
+                            ? ` @ avg ${m.target.average_value}`
+                            : m.target?.value
+                              ? ` @ ${m.target.value}`
+                              : ""}
+                      </span>
+                    </DetailRow>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {state.detail.conditions.length > 0 && (
+              <>
+                <Section t={t} title="Conditions" />
+                <div style={{ marginBottom: 22 }}>
+                  {state.detail.conditions.map((c, i) => (
+                    <DetailRow key={i} t={t} label={c.type}>
+                      <span style={{ fontSize: FS_MD }}>
+                        {c.status}
+                        {c.reason ? ` — ${c.reason}` : ""}
+                      </span>
+                    </DetailRow>
+                  ))}
+                </div>
+              </>
+            )}
+            <GlobalSaveBar t={t} />
+          </Frame>
+        </EditSessionProvider>
       )}
     </NamespaceGuard>
   );
@@ -270,81 +282,91 @@ export function PodDisruptionBudgetSummary(props: {
       ) : state.kind === "error" ? (
         <ErrorBlock t={t} message={state.message} kindLabel="pdb" />
       ) : (
-        <Frame t={t}>
-          <MetaSection
-            t={t}
-            meta={state.detail.meta}
-            onNavigate={props.onNavigate}
-            editTarget={{
-              clusterId: props.clusterId,
-              kindId: "poddisruptionbudgets",
-              namespace: ns,
-              name: props.name,
-            }}
-            onSaved={() => setRefetch((r) => r + 1)}
-          />
-          <Section t={t} title="Spec" />
-          <div style={{ marginBottom: 22 }}>
-            <DetailRow t={t} label="Min Available">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.min_available ?? <Mute t={t}>—</Mute>}
-              </span>
-            </DetailRow>
-            <DetailRow t={t} label="Max Unavailable">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.max_unavailable ?? <Mute t={t}>—</Mute>}
-              </span>
-            </DetailRow>
-            {state.detail.unhealthy_pod_eviction_policy && (
-              <DetailRow t={t} label="Eviction Policy">
+        <EditSessionProvider
+          target={{
+            clusterId: props.clusterId,
+            kindId: "poddisruptionbudgets",
+            namespace: ns,
+            name: props.name,
+          }}
+          onSaved={() => setRefetch((r) => r + 1)}
+        >
+          <Frame t={t}>
+            <MetaSection
+              t={t}
+              meta={state.detail.meta}
+              onNavigate={props.onNavigate}
+              editTarget={{
+                clusterId: props.clusterId,
+                kindId: "poddisruptionbudgets",
+                namespace: ns,
+                name: props.name,
+              }}
+            />
+            <Section t={t} title="Spec" />
+            <div style={{ marginBottom: 22 }}>
+              <DetailRow t={t} label="Min Available">
                 <span style={{ fontSize: FS_MD }}>
-                  {state.detail.unhealthy_pod_eviction_policy}
+                  {state.detail.min_available ?? <Mute t={t}>—</Mute>}
                 </span>
               </DetailRow>
-            )}
-            {state.detail.selector && (
-              <DetailRow t={t} label="Selector">
-                {state.detail.selector.match_labels.length > 0 ? (
-                  <KeyValueChips t={t} pairs={state.detail.selector.match_labels} />
-                ) : (
-                  <Mute t={t}>—</Mute>
-                )}
+              <DetailRow t={t} label="Max Unavailable">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.max_unavailable ?? <Mute t={t}>—</Mute>}
+                </span>
               </DetailRow>
+              {state.detail.unhealthy_pod_eviction_policy && (
+                <DetailRow t={t} label="Eviction Policy">
+                  <span style={{ fontSize: FS_MD }}>
+                    {state.detail.unhealthy_pod_eviction_policy}
+                  </span>
+                </DetailRow>
+              )}
+              {state.detail.selector && (
+                <DetailRow t={t} label="Selector">
+                  {state.detail.selector.match_labels.length > 0 ? (
+                    <KeyValueChips t={t} pairs={state.detail.selector.match_labels} />
+                  ) : (
+                    <Mute t={t}>—</Mute>
+                  )}
+                </DetailRow>
+              )}
+            </div>
+
+            <Section t={t} title="Status" />
+            <div style={{ marginBottom: 22 }}>
+              <DetailRow t={t} label="Current Healthy">
+                <span style={{ fontSize: FS_MD }}>{state.detail.current_healthy}</span>
+              </DetailRow>
+              <DetailRow t={t} label="Desired Healthy">
+                <span style={{ fontSize: FS_MD }}>{state.detail.desired_healthy}</span>
+              </DetailRow>
+              <DetailRow t={t} label="Expected Pods">
+                <span style={{ fontSize: FS_MD }}>{state.detail.expected_pods}</span>
+              </DetailRow>
+              <DetailRow t={t} label="Disruptions Allowed">
+                <span style={{ fontSize: FS_MD }}>{state.detail.disruptions_allowed}</span>
+              </DetailRow>
+            </div>
+
+            {state.detail.conditions.length > 0 && (
+              <>
+                <Section t={t} title="Conditions" />
+                <div style={{ marginBottom: 22 }}>
+                  {state.detail.conditions.map((c, i) => (
+                    <DetailRow key={i} t={t} label={c.type}>
+                      <span style={{ fontSize: FS_MD }}>
+                        {c.status}
+                        {c.reason ? ` — ${c.reason}` : ""}
+                      </span>
+                    </DetailRow>
+                  ))}
+                </div>
+              </>
             )}
-          </div>
-
-          <Section t={t} title="Status" />
-          <div style={{ marginBottom: 22 }}>
-            <DetailRow t={t} label="Current Healthy">
-              <span style={{ fontSize: FS_MD }}>{state.detail.current_healthy}</span>
-            </DetailRow>
-            <DetailRow t={t} label="Desired Healthy">
-              <span style={{ fontSize: FS_MD }}>{state.detail.desired_healthy}</span>
-            </DetailRow>
-            <DetailRow t={t} label="Expected Pods">
-              <span style={{ fontSize: FS_MD }}>{state.detail.expected_pods}</span>
-            </DetailRow>
-            <DetailRow t={t} label="Disruptions Allowed">
-              <span style={{ fontSize: FS_MD }}>{state.detail.disruptions_allowed}</span>
-            </DetailRow>
-          </div>
-
-          {state.detail.conditions.length > 0 && (
-            <>
-              <Section t={t} title="Conditions" />
-              <div style={{ marginBottom: 22 }}>
-                {state.detail.conditions.map((c, i) => (
-                  <DetailRow key={i} t={t} label={c.type}>
-                    <span style={{ fontSize: FS_MD }}>
-                      {c.status}
-                      {c.reason ? ` — ${c.reason}` : ""}
-                    </span>
-                  </DetailRow>
-                ))}
-              </div>
-            </>
-          )}
-        </Frame>
+            <GlobalSaveBar t={t} />
+          </Frame>
+        </EditSessionProvider>
       )}
     </NamespaceGuard>
   );
@@ -377,68 +399,78 @@ export function PriorityClassSummary(props: {
 
   const d = state.detail;
   return (
-    <Frame t={t}>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 18,
-        }}
-      >
-        <span
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "priorityclasses",
+        namespace: null,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <div
           style={{
-            fontFamily: FF_MONO,
-            fontSize: FS_MD,
-            fontWeight: 600,
-            color: t.text,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 18,
           }}
         >
-          value {d.value}
-        </span>
-        {d.global_default && (
-          <StatusPill status="Global Default" t={t} mode={props.mode} dense />
-        )}
-      </div>
-
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "priorityclasses",
-          namespace: null,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
-
-      <Section t={t} title="Spec" />
-      <div style={{ marginBottom: 22 }}>
-        <DetailRow t={t} label="Value">
-          <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>{d.value}</span>
-        </DetailRow>
-        <DetailRow t={t} label="Global Default">
-          <span style={{ fontSize: FS_MD }}>{d.global_default ? "true" : "false"}</span>
-        </DetailRow>
-        <DetailRow t={t} label="Preemption">
-          <span style={{ fontSize: FS_MD }}>
-            {d.preemption_policy ?? <Mute t={t}>—</Mute>}
+          <span
+            style={{
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
+              fontWeight: 600,
+              color: t.text,
+            }}
+          >
+            value {d.value}
           </span>
-        </DetailRow>
-        {d.description && (
-          <DetailRow t={t} label="Description">
-            <Copyable text={d.description}>
-              <span style={{ fontSize: FS_MD, wordBreak: "break-word" }}>
-                {d.description}
-              </span>
-            </Copyable>
+          {d.global_default && (
+            <StatusPill status="Global Default" t={t} mode={props.mode} dense />
+          )}
+        </div>
+
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "priorityclasses",
+            namespace: null,
+            name: props.name,
+          }}
+        />
+
+        <Section t={t} title="Spec" />
+        <div style={{ marginBottom: 22 }}>
+          <DetailRow t={t} label="Value">
+            <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>{d.value}</span>
           </DetailRow>
-        )}
-      </div>
-    </Frame>
+          <DetailRow t={t} label="Global Default">
+            <span style={{ fontSize: FS_MD }}>{d.global_default ? "true" : "false"}</span>
+          </DetailRow>
+          <DetailRow t={t} label="Preemption">
+            <span style={{ fontSize: FS_MD }}>
+              {d.preemption_policy ?? <Mute t={t}>—</Mute>}
+            </span>
+          </DetailRow>
+          {d.description && (
+            <DetailRow t={t} label="Description">
+              <Copyable text={d.description}>
+                <span style={{ fontSize: FS_MD, wordBreak: "break-word" }}>
+                  {d.description}
+                </span>
+              </Copyable>
+            </DetailRow>
+          )}
+        </div>
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -469,83 +501,93 @@ export function ReplicationControllerSummary(props: {
       ) : state.kind === "error" ? (
         <ErrorBlock t={t} message={state.message} kindLabel="replication controller" />
       ) : (
-        <Frame t={t}>
-          <MetaSection
-            t={t}
-            meta={state.detail.meta}
-            onNavigate={props.onNavigate}
-            editTarget={{
-              clusterId: props.clusterId,
-              kindId: "replicationcontrollers",
-              namespace: ns,
-              name: props.name,
-            }}
-            onSaved={() => setRefetch((r) => r + 1)}
-          />
-          <Section t={t} title="Spec" />
-          <div style={{ marginBottom: 22 }}>
-            <DetailRow t={t} label="Replicas">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.replicas ?? <Mute t={t}>—</Mute>}
-              </span>
-            </DetailRow>
-            <DetailRow t={t} label="Min Ready">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.min_ready_seconds ?? 0}s
-              </span>
-            </DetailRow>
-            <DetailRow t={t} label="Selector">
-              {state.detail.selector.length > 0 ? (
-                <KeyValueChips t={t} pairs={state.detail.selector} />
-              ) : (
-                <Mute t={t}>—</Mute>
-              )}
-            </DetailRow>
-          </div>
+        <EditSessionProvider
+          target={{
+            clusterId: props.clusterId,
+            kindId: "replicationcontrollers",
+            namespace: ns,
+            name: props.name,
+          }}
+          onSaved={() => setRefetch((r) => r + 1)}
+        >
+          <Frame t={t}>
+            <MetaSection
+              t={t}
+              meta={state.detail.meta}
+              onNavigate={props.onNavigate}
+              editTarget={{
+                clusterId: props.clusterId,
+                kindId: "replicationcontrollers",
+                namespace: ns,
+                name: props.name,
+              }}
+            />
+            <Section t={t} title="Spec" />
+            <div style={{ marginBottom: 22 }}>
+              <DetailRow t={t} label="Replicas">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.replicas ?? <Mute t={t}>—</Mute>}
+                </span>
+              </DetailRow>
+              <DetailRow t={t} label="Min Ready">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.min_ready_seconds ?? 0}s
+                </span>
+              </DetailRow>
+              <DetailRow t={t} label="Selector">
+                {state.detail.selector.length > 0 ? (
+                  <KeyValueChips t={t} pairs={state.detail.selector} />
+                ) : (
+                  <Mute t={t}>—</Mute>
+                )}
+              </DetailRow>
+            </div>
 
-          <Section t={t} title="Status" />
-          <div style={{ marginBottom: 22 }}>
-            <DetailRow t={t} label="Current">
-              <span style={{ fontSize: FS_MD }}>{state.detail.current}</span>
-            </DetailRow>
-            <DetailRow t={t} label="Ready">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.ready ?? <Mute t={t}>—</Mute>}
-              </span>
-            </DetailRow>
-            <DetailRow t={t} label="Available">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.available ?? <Mute t={t}>—</Mute>}
-              </span>
-            </DetailRow>
-            <DetailRow t={t} label="Fully Labeled">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.fully_labeled ?? <Mute t={t}>—</Mute>}
-              </span>
-            </DetailRow>
-            <DetailRow t={t} label="Observed Generation">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.observed_generation ?? <Mute t={t}>—</Mute>}
-              </span>
-            </DetailRow>
-          </div>
+            <Section t={t} title="Status" />
+            <div style={{ marginBottom: 22 }}>
+              <DetailRow t={t} label="Current">
+                <span style={{ fontSize: FS_MD }}>{state.detail.current}</span>
+              </DetailRow>
+              <DetailRow t={t} label="Ready">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.ready ?? <Mute t={t}>—</Mute>}
+                </span>
+              </DetailRow>
+              <DetailRow t={t} label="Available">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.available ?? <Mute t={t}>—</Mute>}
+                </span>
+              </DetailRow>
+              <DetailRow t={t} label="Fully Labeled">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.fully_labeled ?? <Mute t={t}>—</Mute>}
+                </span>
+              </DetailRow>
+              <DetailRow t={t} label="Observed Generation">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.observed_generation ?? <Mute t={t}>—</Mute>}
+                </span>
+              </DetailRow>
+            </div>
 
-          {state.detail.conditions.length > 0 && (
-            <>
-              <Section t={t} title="Conditions" />
-              <div style={{ marginBottom: 22 }}>
-                {state.detail.conditions.map((c, i) => (
-                  <DetailRow key={i} t={t} label={c.type}>
-                    <span style={{ fontSize: FS_MD }}>
-                      {c.status}
-                      {c.reason ? ` — ${c.reason}` : ""}
-                    </span>
-                  </DetailRow>
-                ))}
-              </div>
-            </>
-          )}
-        </Frame>
+            {state.detail.conditions.length > 0 && (
+              <>
+                <Section t={t} title="Conditions" />
+                <div style={{ marginBottom: 22 }}>
+                  {state.detail.conditions.map((c, i) => (
+                    <DetailRow key={i} t={t} label={c.type}>
+                      <span style={{ fontSize: FS_MD }}>
+                        {c.status}
+                        {c.reason ? ` — ${c.reason}` : ""}
+                      </span>
+                    </DetailRow>
+                  ))}
+                </div>
+              </>
+            )}
+            <GlobalSaveBar t={t} />
+          </Frame>
+        </EditSessionProvider>
       )}
     </NamespaceGuard>
   );
@@ -578,67 +620,77 @@ export function LeaseSummary(props: {
       ) : state.kind === "error" ? (
         <ErrorBlock t={t} message={state.message} kindLabel="lease" />
       ) : (
-        <Frame t={t}>
-          <MetaSection
-            t={t}
-            meta={state.detail.meta}
-            onNavigate={props.onNavigate}
-            editTarget={{
-              clusterId: props.clusterId,
-              kindId: "leases",
-              namespace: ns,
-              name: props.name,
-            }}
-            onSaved={() => setRefetch((r) => r + 1)}
-          />
-          <Section t={t} title="Spec" />
-          <div style={{ marginBottom: 22 }}>
-            <DetailRow t={t} label="Holder Identity">
-              {state.detail.holder_identity ? (
-                <Copyable text={state.detail.holder_identity}>
-                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO, wordBreak: "break-all" }}>
-                    {state.detail.holder_identity}
-                  </span>
-                </Copyable>
-              ) : (
-                <Mute t={t}>—</Mute>
-              )}
-            </DetailRow>
-            <DetailRow t={t} label="Duration">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.lease_duration_seconds ?? <Mute t={t}>—</Mute>}
-                {state.detail.lease_duration_seconds != null ? "s" : ""}
-              </span>
-            </DetailRow>
-            <DetailRow t={t} label="Transitions">
-              <span style={{ fontSize: FS_MD }}>
-                {state.detail.lease_transitions ?? 0}
-              </span>
-            </DetailRow>
-            <DetailRow t={t} label="Acquired">
-              {state.detail.acquire_time ? (
-                <Copyable text={state.detail.acquire_time}>
-                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                    {ageFromIso(state.detail.acquire_time)} ago
-                  </span>
-                </Copyable>
-              ) : (
-                <Mute t={t}>—</Mute>
-              )}
-            </DetailRow>
-            <DetailRow t={t} label="Renewed">
-              {state.detail.renew_time ? (
-                <Copyable text={state.detail.renew_time}>
-                  <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                    {ageFromIso(state.detail.renew_time)} ago
-                  </span>
-                </Copyable>
-              ) : (
-                <Mute t={t}>—</Mute>
-              )}
-            </DetailRow>
-          </div>
-        </Frame>
+        <EditSessionProvider
+          target={{
+            clusterId: props.clusterId,
+            kindId: "leases",
+            namespace: ns,
+            name: props.name,
+          }}
+          onSaved={() => setRefetch((r) => r + 1)}
+        >
+          <Frame t={t}>
+            <MetaSection
+              t={t}
+              meta={state.detail.meta}
+              onNavigate={props.onNavigate}
+              editTarget={{
+                clusterId: props.clusterId,
+                kindId: "leases",
+                namespace: ns,
+                name: props.name,
+              }}
+            />
+            <Section t={t} title="Spec" />
+            <div style={{ marginBottom: 22 }}>
+              <DetailRow t={t} label="Holder Identity">
+                {state.detail.holder_identity ? (
+                  <Copyable text={state.detail.holder_identity}>
+                    <span style={{ fontSize: FS_MD, fontFamily: FF_MONO, wordBreak: "break-all" }}>
+                      {state.detail.holder_identity}
+                    </span>
+                  </Copyable>
+                ) : (
+                  <Mute t={t}>—</Mute>
+                )}
+              </DetailRow>
+              <DetailRow t={t} label="Duration">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.lease_duration_seconds ?? <Mute t={t}>—</Mute>}
+                  {state.detail.lease_duration_seconds != null ? "s" : ""}
+                </span>
+              </DetailRow>
+              <DetailRow t={t} label="Transitions">
+                <span style={{ fontSize: FS_MD }}>
+                  {state.detail.lease_transitions ?? 0}
+                </span>
+              </DetailRow>
+              <DetailRow t={t} label="Acquired">
+                {state.detail.acquire_time ? (
+                  <Copyable text={state.detail.acquire_time}>
+                    <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
+                      {ageFromIso(state.detail.acquire_time)} ago
+                    </span>
+                  </Copyable>
+                ) : (
+                  <Mute t={t}>—</Mute>
+                )}
+              </DetailRow>
+              <DetailRow t={t} label="Renewed">
+                {state.detail.renew_time ? (
+                  <Copyable text={state.detail.renew_time}>
+                    <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
+                      {ageFromIso(state.detail.renew_time)} ago
+                    </span>
+                  </Copyable>
+                ) : (
+                  <Mute t={t}>—</Mute>
+                )}
+              </DetailRow>
+            </div>
+            <GlobalSaveBar t={t} />
+          </Frame>
+        </EditSessionProvider>
       )}
     </NamespaceGuard>
   );
@@ -784,26 +836,36 @@ export function MutatingWebhookConfigurationSummary(props: {
     return <ErrorBlock t={t} message={state.message} kindLabel="mutating webhook configuration" />;
 
   return (
-    <Frame t={t}>
-      <MetaSection
-        t={t}
-        meta={state.detail.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "mutatingwebhookconfigurations",
-          namespace: null,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
-      <WebhookList
-        t={t}
-        webhooks={state.detail.webhooks}
-        mode={props.mode}
-        showReinvocation
-      />
-    </Frame>
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "mutatingwebhookconfigurations",
+        namespace: null,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <MetaSection
+          t={t}
+          meta={state.detail.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "mutatingwebhookconfigurations",
+            namespace: null,
+            name: props.name,
+          }}
+        />
+        <WebhookList
+          t={t}
+          webhooks={state.detail.webhooks}
+          mode={props.mode}
+          showReinvocation
+        />
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -831,25 +893,35 @@ export function ValidatingWebhookConfigurationSummary(props: {
     return <ErrorBlock t={t} message={state.message} kindLabel="validating webhook configuration" />;
 
   return (
-    <Frame t={t}>
-      <MetaSection
-        t={t}
-        meta={state.detail.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "validatingwebhookconfigurations",
-          namespace: null,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((r) => r + 1)}
-      />
-      <WebhookList
-        t={t}
-        webhooks={state.detail.webhooks}
-        mode={props.mode}
-        showReinvocation={false}
-      />
-    </Frame>
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "validatingwebhookconfigurations",
+        namespace: null,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <MetaSection
+          t={t}
+          meta={state.detail.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "validatingwebhookconfigurations",
+            namespace: null,
+            name: props.name,
+          }}
+        />
+        <WebhookList
+          t={t}
+          webhooks={state.detail.webhooks}
+          mode={props.mode}
+          showReinvocation={false}
+        />
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }

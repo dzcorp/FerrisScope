@@ -18,6 +18,8 @@ import {
   ChipWrap,
   Copyable,
   DetailRow,
+  EditSessionProvider,
+  GlobalSaveBar,
   KeyValueChips,
   LinkValue,
   Mute,
@@ -387,129 +389,139 @@ export function ServiceAccountSummary(props: {
 
   const d = state.detail;
   return (
-    <Frame t={t}>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 18,
-        }}
-      >
-        <span
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "serviceaccounts",
+        namespace: ns,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <div
           style={{
-            fontFamily: FF_MONO,
-            fontSize: FS_MD,
-            fontWeight: 600,
-            color: t.text,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 18,
           }}
         >
-          {d.secrets.length} secret{d.secrets.length === 1 ? "" : "s"}
-        </span>
-        {d.image_pull_secrets.length > 0 && (
-          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-            · {d.image_pull_secrets.length} pull secret
-            {d.image_pull_secrets.length === 1 ? "" : "s"}
+          <span
+            style={{
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
+              fontWeight: 600,
+              color: t.text,
+            }}
+          >
+            {d.secrets.length} secret{d.secrets.length === 1 ? "" : "s"}
           </span>
-        )}
-        {d.meta.created_at && (
-          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-            · {ageFromIso(d.meta.created_at)} old
-          </span>
-        )}
-      </div>
+          {d.image_pull_secrets.length > 0 && (
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+              · {d.image_pull_secrets.length} pull secret
+              {d.image_pull_secrets.length === 1 ? "" : "s"}
+            </span>
+          )}
+          {d.meta.created_at && (
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+              · {ageFromIso(d.meta.created_at)} old
+            </span>
+          )}
+        </div>
 
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "serviceaccounts",
-          namespace: ns,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((n) => n + 1)}
-      />
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "serviceaccounts",
+            namespace: ns,
+            name: props.name,
+          }}
+        />
 
-      <Section t={t} title="Spec" />
-      <div style={{ marginBottom: 22 }}>
-        <DetailRow t={t} label="Automount Token">
-          <span style={{ fontSize: FS_MD }}>
-            {d.automount_service_account_token === true
-              ? "true"
-              : d.automount_service_account_token === false
-                ? "false"
-                : "(default — true)"}
-          </span>
-        </DetailRow>
-      </div>
+        <Section t={t} title="Spec" />
+        <div style={{ marginBottom: 22 }}>
+          <DetailRow t={t} label="Automount Token">
+            <span style={{ fontSize: FS_MD }}>
+              {d.automount_service_account_token === true
+                ? "true"
+                : d.automount_service_account_token === false
+                  ? "false"
+                  : "(default — true)"}
+            </span>
+          </DetailRow>
+        </div>
 
-      {d.secrets.length > 0 && (
-        <>
-          <Section
-            t={t}
-            title="Secrets"
-            right={
-              <span
-                style={{
-                  fontSize: FS_XS,
-                  color: t.textMuted,
-                  fontFamily: FF_MONO,
-                }}
-              >
-                {d.secrets.length} total
-              </span>
-            }
-          />
-          <div style={{ marginBottom: 22 }}>
-            {d.secrets.map((s) => (
-              <DetailRow key={s.name} t={t} label={s.kind}>
-                <LinkValue
-                  t={t}
-                  onClick={() =>
-                    props.onNavigate?.(s.kind, s.namespace ?? ns, s.name)
-                  }
-                  copyText={s.name}
-                  enabled={!!props.onNavigate}
+        {d.secrets.length > 0 && (
+          <>
+            <Section
+              t={t}
+              title="Secrets"
+              right={
+                <span
+                  style={{
+                    fontSize: FS_XS,
+                    color: t.textMuted,
+                    fontFamily: FF_MONO,
+                  }}
                 >
-                  {s.name}
-                </LinkValue>
-                {s.namespace && s.namespace !== ns && (
-                  <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-                    ns {s.namespace}
-                  </span>
-                )}
-              </DetailRow>
-            ))}
-          </div>
-        </>
-      )}
-
-      {d.image_pull_secrets.length > 0 && (
-        <>
-          <Section t={t} title="Image Pull Secrets" />
-          <div style={{ marginBottom: 22 }}>
-            <DetailRow t={t} label="Pull Secrets">
-              <ChipWrap>
-                {d.image_pull_secrets.map((name) => (
+                  {d.secrets.length} total
+                </span>
+              }
+            />
+            <div style={{ marginBottom: 22 }}>
+              {d.secrets.map((s) => (
+                <DetailRow key={s.name} t={t} label={s.kind}>
                   <LinkValue
-                    key={name}
                     t={t}
-                    onClick={() => props.onNavigate?.("Secret", ns, name)}
-                    copyText={name}
+                    onClick={() =>
+                      props.onNavigate?.(s.kind, s.namespace ?? ns, s.name)
+                    }
+                    copyText={s.name}
                     enabled={!!props.onNavigate}
                   >
-                    {name}
+                    {s.name}
                   </LinkValue>
-                ))}
-              </ChipWrap>
-            </DetailRow>
-          </div>
-        </>
-      )}
-    </Frame>
+                  {s.namespace && s.namespace !== ns && (
+                    <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+                      ns {s.namespace}
+                    </span>
+                  )}
+                </DetailRow>
+              ))}
+            </div>
+          </>
+        )}
+
+        {d.image_pull_secrets.length > 0 && (
+          <>
+            <Section t={t} title="Image Pull Secrets" />
+            <div style={{ marginBottom: 22 }}>
+              <DetailRow t={t} label="Pull Secrets">
+                <ChipWrap>
+                  {d.image_pull_secrets.map((name) => (
+                    <LinkValue
+                      key={name}
+                      t={t}
+                      onClick={() => props.onNavigate?.("Secret", ns, name)}
+                      copyText={name}
+                      enabled={!!props.onNavigate}
+                    >
+                      {name}
+                    </LinkValue>
+                  ))}
+                </ChipWrap>
+              </DetailRow>
+            </div>
+          </>
+        )}
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -543,48 +555,58 @@ export function RoleSummary(props: {
 
   const d = state.detail;
   return (
-    <Frame t={t}>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 18,
-        }}
-      >
-        <span
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "roles",
+        namespace: ns,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <div
           style={{
-            fontFamily: FF_MONO,
-            fontSize: FS_MD,
-            fontWeight: 600,
-            color: t.text,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 18,
           }}
         >
-          {d.rules.length} rule{d.rules.length === 1 ? "" : "s"}
-        </span>
-        {d.meta.created_at && (
-          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-            · {ageFromIso(d.meta.created_at)} old
+          <span
+            style={{
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
+              fontWeight: 600,
+              color: t.text,
+            }}
+          >
+            {d.rules.length} rule{d.rules.length === 1 ? "" : "s"}
           </span>
-        )}
-      </div>
+          {d.meta.created_at && (
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+              · {ageFromIso(d.meta.created_at)} old
+            </span>
+          )}
+        </div>
 
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "roles",
-          namespace: ns,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((n) => n + 1)}
-      />
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "roles",
+            namespace: ns,
+            name: props.name,
+          }}
+        />
 
-      <RulesSection t={t} rules={d.rules} />
-    </Frame>
+        <RulesSection t={t} rules={d.rules} />
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -614,84 +636,94 @@ export function ClusterRoleSummary(props: {
   const d = state.detail;
   const aggregated = !!d.aggregation_rule;
   return (
-    <Frame t={t}>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 18,
-        }}
-      >
-        <span
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "clusterroles",
+        namespace: null,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <div
           style={{
-            fontFamily: FF_MONO,
-            fontSize: FS_MD,
-            fontWeight: 600,
-            color: t.text,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 18,
           }}
         >
-          {d.rules.length} rule{d.rules.length === 1 ? "" : "s"}
-        </span>
-        {aggregated && (
           <span
             style={{
-              fontSize: FS_SM,
-              fontWeight: 600,
-              padding: "1px 7px",
-              borderRadius: R_SM,
-              background: t.chip,
-              color: t.textDim,
               fontFamily: FF_MONO,
+              fontSize: FS_MD,
+              fontWeight: 600,
+              color: t.text,
             }}
           >
-            aggregated
+            {d.rules.length} rule{d.rules.length === 1 ? "" : "s"}
           </span>
-        )}
-        {d.meta.created_at && (
-          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-            · {ageFromIso(d.meta.created_at)} old
-          </span>
-        )}
-      </div>
+          {aggregated && (
+            <span
+              style={{
+                fontSize: FS_SM,
+                fontWeight: 600,
+                padding: "1px 7px",
+                borderRadius: R_SM,
+                background: t.chip,
+                color: t.textDim,
+                fontFamily: FF_MONO,
+              }}
+            >
+              aggregated
+            </span>
+          )}
+          {d.meta.created_at && (
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+              · {ageFromIso(d.meta.created_at)} old
+            </span>
+          )}
+        </div>
 
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "clusterroles",
-          namespace: null,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((n) => n + 1)}
-      />
+        <MetaSection
+          t={t}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "clusterroles",
+            namespace: null,
+            name: props.name,
+          }}
+        />
 
-      {aggregated && d.aggregation_rule && (
-        <>
-          <Section t={t} title="Aggregation Rule" />
-          <div style={{ marginBottom: 22 }}>
-            <DetailRow t={t} label="Selectors">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
-                {d.aggregation_rule.selector_count}
-              </span>
-            </DetailRow>
-            {d.aggregation_rule.match_labels.length > 0 && (
-              <DetailRow t={t} label="Match Labels">
-                <KeyValueChips
-                  t={t}
-                  pairs={d.aggregation_rule.match_labels}
-                />
+        {aggregated && d.aggregation_rule && (
+          <>
+            <Section t={t} title="Aggregation Rule" />
+            <div style={{ marginBottom: 22 }}>
+              <DetailRow t={t} label="Selectors">
+                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                  {d.aggregation_rule.selector_count}
+                </span>
               </DetailRow>
-            )}
-          </div>
-        </>
-      )}
+              {d.aggregation_rule.match_labels.length > 0 && (
+                <DetailRow t={t} label="Match Labels">
+                  <KeyValueChips
+                    t={t}
+                    pairs={d.aggregation_rule.match_labels}
+                  />
+                </DetailRow>
+              )}
+            </div>
+          </>
+        )}
 
-      <RulesSection t={t} rules={d.rules} />
-    </Frame>
+        <RulesSection t={t} rules={d.rules} />
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -726,66 +758,76 @@ export function RoleBindingSummary(props: {
 
   const d = state.detail;
   return (
-    <Frame t={t}>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 18,
-        }}
-      >
-        <span
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "rolebindings",
+        namespace: ns,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <div
           style={{
-            fontFamily: FF_MONO,
-            fontSize: FS_MD,
-            fontWeight: 600,
-            color: t.text,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 18,
           }}
         >
-          {d.role_ref.kind} / {d.role_ref.name}
-        </span>
-        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-          → {d.subjects.length} subject{d.subjects.length === 1 ? "" : "s"}
-        </span>
-        {d.meta.created_at && (
-          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-            · {ageFromIso(d.meta.created_at)} old
+          <span
+            style={{
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
+              fontWeight: 600,
+              color: t.text,
+            }}
+          >
+            {d.role_ref.kind} / {d.role_ref.name}
           </span>
-        )}
-      </div>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+            → {d.subjects.length} subject{d.subjects.length === 1 ? "" : "s"}
+          </span>
+          {d.meta.created_at && (
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+              · {ageFromIso(d.meta.created_at)} old
+            </span>
+          )}
+        </div>
 
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "rolebindings",
-          namespace: ns,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((n) => n + 1)}
-      />
-
-      <Section t={t} title="Role Reference" />
-      <div style={{ marginBottom: 22 }}>
-        <RoleRefRow
+        <MetaSection
           t={t}
-          roleRef={d.role_ref}
-          namespace={ns}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "rolebindings",
+            namespace: ns,
+            name: props.name,
+          }}
+        />
+
+        <Section t={t} title="Role Reference" />
+        <div style={{ marginBottom: 22 }}>
+          <RoleRefRow
+            t={t}
+            roleRef={d.role_ref}
+            namespace={ns}
+            onNavigate={props.onNavigate}
+          />
+        </div>
+
+        <SubjectsSection
+          t={t}
+          subjects={d.subjects}
+          bindingNamespace={ns}
           onNavigate={props.onNavigate}
         />
-      </div>
-
-      <SubjectsSection
-        t={t}
-        subjects={d.subjects}
-        bindingNamespace={ns}
-        onNavigate={props.onNavigate}
-      />
-    </Frame>
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
 
@@ -814,65 +856,75 @@ export function ClusterRoleBindingSummary(props: {
 
   const d = state.detail;
   return (
-    <Frame t={t}>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 18,
-        }}
-      >
-        <span
+    <EditSessionProvider
+      target={{
+        clusterId: props.clusterId,
+        kindId: "clusterrolebindings",
+        namespace: null,
+        name: props.name,
+      }}
+      onSaved={() => setRefetch((r) => r + 1)}
+    >
+      <Frame t={t}>
+        <div
           style={{
-            fontFamily: FF_MONO,
-            fontSize: FS_MD,
-            fontWeight: 600,
-            color: t.text,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 18,
           }}
         >
-          {d.role_ref.kind} / {d.role_ref.name}
-        </span>
-        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-          → {d.subjects.length} subject{d.subjects.length === 1 ? "" : "s"}
-        </span>
-        {d.meta.created_at && (
-          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-            · {ageFromIso(d.meta.created_at)} old
+          <span
+            style={{
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
+              fontWeight: 600,
+              color: t.text,
+            }}
+          >
+            {d.role_ref.kind} / {d.role_ref.name}
           </span>
-        )}
-      </div>
+          <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+            → {d.subjects.length} subject{d.subjects.length === 1 ? "" : "s"}
+          </span>
+          {d.meta.created_at && (
+            <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+              · {ageFromIso(d.meta.created_at)} old
+            </span>
+          )}
+        </div>
 
-      <MetaSection
-        t={t}
-        meta={d.meta}
-        onNavigate={props.onNavigate}
-        editTarget={{
-          clusterId: props.clusterId,
-          kindId: "clusterrolebindings",
-          namespace: null,
-          name: props.name,
-        }}
-        onSaved={() => setRefetch((n) => n + 1)}
-      />
-
-      <Section t={t} title="Role Reference" />
-      <div style={{ marginBottom: 22 }}>
-        <RoleRefRow
+        <MetaSection
           t={t}
-          roleRef={d.role_ref}
-          namespace={null}
+          meta={d.meta}
+          onNavigate={props.onNavigate}
+          editTarget={{
+            clusterId: props.clusterId,
+            kindId: "clusterrolebindings",
+            namespace: null,
+            name: props.name,
+          }}
+        />
+
+        <Section t={t} title="Role Reference" />
+        <div style={{ marginBottom: 22 }}>
+          <RoleRefRow
+            t={t}
+            roleRef={d.role_ref}
+            namespace={null}
+            onNavigate={props.onNavigate}
+          />
+        </div>
+
+        <SubjectsSection
+          t={t}
+          subjects={d.subjects}
+          bindingNamespace={null}
           onNavigate={props.onNavigate}
         />
-      </div>
-
-      <SubjectsSection
-        t={t}
-        subjects={d.subjects}
-        bindingNamespace={null}
-        onNavigate={props.onNavigate}
-      />
-    </Frame>
+        <GlobalSaveBar t={t} />
+      </Frame>
+    </EditSessionProvider>
   );
 }
