@@ -2097,14 +2097,31 @@ export type ReasoningSettings = {
 /// One operator-configured external MCP server. Each entry produces one
 /// child process per chat; the JSON shape mirrors `mcpServers` in
 /// Claude Desktop / Cursor so configs copy-paste between tools.
+/// How FerrisScope connects to an MCP server. Mirrors the `type` field in
+/// Claude Desktop / Cursor configs. `stdio` spawns a subprocess; `sse` / `http`
+/// connect to a `url`.
+export type McpTransport = "stdio" | "sse" | "http";
+
 export type McpServerConfig = {
   /// Stable id from the backend. Used as the React key and as the address
   /// for per-server status updates over the chat event stream.
   id: string;
   name: string;
+  /// Connection type. Defaults to `stdio`.
+  transport: McpTransport;
+  /// Executable path (`stdio` only).
   command: string;
+  /// Endpoint URL (`sse` / `http` only).
+  url: string | null;
+  /// CLI args (`stdio` only).
   args: string[];
+  /// Extra env vars (`stdio` only).
   env: Record<string, string>;
+  /// Extra HTTP headers, e.g. Authorization (`sse` / `http` only).
+  headers: Record<string, string>;
+  /// Treat every tool from this server as a read — auto-run, no approval
+  /// prompt. Operator opt-in trust decision per server.
+  trust_as_read: boolean;
   enabled: boolean;
 };
 
