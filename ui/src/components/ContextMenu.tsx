@@ -6,6 +6,7 @@ import {
   type CSSProperties,
 } from "react";
 import { tokens, FF_MONO, type ThemeMode, R_LG, FS_MD, FS_XS } from "../theme";
+import { placeMenuAtCursor, rootZoom } from "../lib/zoom";
 
 import { useResolvedTheme } from "../store";
 export type MenuItem =
@@ -39,11 +40,16 @@ export function ContextMenu({ mode, position, items, onClose, rowName }: Props) 
     const el = ref.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    let { x, y } = position;
-    if (x + r.width > window.innerWidth - 4) x = window.innerWidth - r.width - 4;
-    if (y + r.height > window.innerHeight - 4)
-      y = window.innerHeight - r.height - 4;
-    setAdjusted({ x: Math.max(4, x), y: Math.max(4, y) });
+    // cursor, menu rect and viewport are all visual px; placeMenuAtCursor
+    // clamps in that space and divides the result by zoom for the fixed style.
+    setAdjusted(
+      placeMenuAtCursor(
+        position,
+        { width: r.width, height: r.height },
+        { width: window.innerWidth, height: window.innerHeight },
+        rootZoom(),
+      ),
+    );
   }, [position]);
 
   useEffect(() => {

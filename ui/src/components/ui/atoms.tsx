@@ -23,6 +23,7 @@ import {
   type Tokens,
 } from "../../theme";
 import { useAppStore } from "../../store";
+import { placeSelectPopover, fixedRectScale } from "../../lib/zoom";
 import { Tooltip } from "./Tooltip";
 
 // ── Eyebrow ────────────────────────────────────────────────────────────────
@@ -558,26 +559,18 @@ export function Select<V extends string | number>({
     const trig = triggerRef.current;
     if (!trig) return;
     const r = trig.getBoundingClientRect();
-    const margin = 8;
-    const gap = 4;
-    const below = window.innerHeight - r.bottom - margin;
-    const above = r.top - margin;
-    const flipUp = below < 200 && above > below;
-    const maxH = Math.max(120, Math.min(360, flipUp ? above - gap : below - gap));
-    const desiredW = Math.max(r.width, popoverMinWidth ?? 0);
-    const maxW = window.innerWidth - margin * 2;
-    const w = Math.min(desiredW, maxW);
-    let x = r.left;
-    if (x + w > window.innerWidth - margin) {
-      x = Math.max(margin, window.innerWidth - margin - w);
-    }
-    // Up: anchor by viewport-from-bottom so the popover bottom hugs the
-    // trigger top no matter how tall it actually renders. Down: top-anchor
-    // just below the trigger.
-    const y = flipUp
-      ? window.innerHeight - r.top + gap
-      : r.bottom + gap;
-    setPop({ x, y, w, maxH, flipUp });
+    // r/innerWidth and the fixed popover share whatever space the engine
+    // reports rects in; fixedRectScale() measures the rect→fixed conversion so
+    // the popover lands on the trigger after the root repaints it × zoom —
+    // correct whether the engine reports rects in visual or unzoomed px.
+    setPop(
+      placeSelectPopover(
+        r,
+        { width: window.innerWidth, height: window.innerHeight },
+        { popoverMinWidth },
+        fixedRectScale(),
+      ),
+    );
   }, [popoverMinWidth]);
 
   useLayoutEffect(() => {
