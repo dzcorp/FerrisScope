@@ -27,9 +27,12 @@ use crate::state::AppState;
 /// `fs_logs_tail::DEFAULT_TOTAL_BYTES` so the model gets predictable
 /// budget across the two log paths.
 const DEFAULT_LOG_BYTES: usize = 256 * 1024;
-/// Hard ceiling — same 4 MiB as `fs_logs_tail`, kept consistent so the
-/// model only has to remember one number when bumping `byte_cap`.
-const MAX_LOG_BYTES_HARD: usize = 4 * 1024 * 1024;
+/// Hard ceiling — same 16 MiB as `fs_logs_tail`, kept consistent so the model
+/// only has to remember one number when bumping `byte_cap`. The transcript is
+/// protected by the spill (oversized results are saved to disk and clipped to
+/// `MAX_TOOL_RESULT_BYTES`), so this bounds memory / apiserver load only; the
+/// full captured log stays searchable via `fs_tool_output_grep` / `_read`.
+const MAX_LOG_BYTES_HARD: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct LogArgs {
@@ -82,8 +85,11 @@ impl NativeTool for NodesLog {
                 (alpha in 1.27, GA in 1.30). On older clusters the kubelet ignores `?query=` \
                 and returns the directory index; we surface that with a `note` so you can pick \
                 a file path from `entries` and retry, or fall back to a node shell.\n\n\
-                File output is capped at `byte_cap` (default 256 KiB, max 4 MiB); tighten with \
-                `tail_lines` or bump `byte_cap` if you hit the cap. Requires `nodes/proxy` RBAC."
+                File output is capped at `byte_cap` (default 256 KiB, max 16 MiB); tighten with \
+                `tail_lines` or bump `byte_cap` if you hit the cap. Large results are saved \
+                automatically — search the full captured log with `fs_tool_output_grep` / \
+                `fs_tool_output_read` using the handle in the truncation notice. Requires \
+                `nodes/proxy` RBAC."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -97,8 +103,8 @@ impl NativeTool for NodesLog {
                     "byte_cap": {
                         "type": "integer",
                         "minimum": 1024,
-                        "maximum": 4_194_304,
-                        "description": "Total-bytes cap. Default 262144 (256 KiB), max 4194304 (4 MiB)."
+                        "maximum": MAX_LOG_BYTES_HARD,
+                        "description": "Total-bytes cap. Default 262144 (256 KiB), max 16777216 (16 MiB). The full captured result stays searchable via fs_tool_output_grep."
                     }
                 },
                 "required": ["name", "query"],

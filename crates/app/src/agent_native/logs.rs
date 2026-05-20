@@ -27,12 +27,14 @@ const MAX_TAIL_LINES: i64 = 5_000;
 /// `MAX_TOTAL_BYTES_HARD` via the `byte_cap` arg when it actually needs
 /// a deep read.
 const DEFAULT_TOTAL_BYTES: usize = 256 * 1024;
-/// Hard ceiling on how high `byte_cap` can go. 4 MiB is enough for a
-/// thorough investigation across a fleet of pods without letting one
-/// tool call swamp a chat's context window — at ~4 chars/token that's
-/// roughly 1M tokens, which exceeds the input budget on most models
-/// and would force compaction immediately. Keep below that.
-const MAX_TOTAL_BYTES_HARD: usize = 4 * 1024 * 1024;
+/// Hard ceiling on how high `byte_cap` can go. The transcript is protected
+/// independently now — an oversized result is spilled to disk and clipped to
+/// `MAX_TOOL_RESULT_BYTES` before it reaches the model — so this cap bounds
+/// transient memory + apiserver load, not the context window (the old 4 MiB
+/// limit was sized for the latter, which no longer applies). 16 MiB across a
+/// fleet of pods is plenty for a deep investigation, and the full captured
+/// logs stay searchable via `fs_tool_output_grep` / `fs_tool_output_read`.
+const MAX_TOTAL_BYTES_HARD: usize = 16 * 1024 * 1024;
 const MAX_PODS_PER_SELECTOR: usize = 10;
 
 #[derive(Debug, Deserialize)]
@@ -78,10 +80,13 @@ impl NativeTool for LogsTail {
             description: "One-shot pod log tail (no follow). Pass `pod` for a single pod, or \
                 `label_selector` to fan out across matching pods (capped at 10). Returns the most \
                 recent lines bounded by `tail_lines` (default 200, max 5000) AND a total-bytes \
-                cap (default 256 KiB, max 4 MiB via `byte_cap`). Set `previous: true` to read \
+                cap (default 256 KiB, max 16 MiB via `byte_cap`). Set `previous: true` to read \
                 logs from the previously-terminated container instance (useful right after a \
-                crash). When the response comes back with `truncated: true` and you need the \
-                fuller picture, retry with a larger `byte_cap` (e.g. 1048576 for 1 MiB)."
+                crash). When the response comes back with `truncated: true`, output beyond \
+                `byte_cap` was dropped — retry with a larger `byte_cap` (e.g. 4194304 for 4 MiB). \
+                Large results are saved automatically: search the full captured logs with \
+                `fs_tool_output_grep` / `fs_tool_output_read` using the handle shown in the \
+                truncation notice rather than re-fetching."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -99,8 +104,8 @@ impl NativeTool for LogsTail {
                     "byte_cap": {
                         "type": "integer",
                         "minimum": 1024,
-                        "maximum": 4_194_304,
-                        "description": "Total-bytes cap across all pods. Default 262144 (256 KiB), max 4194304 (4 MiB). Bump higher when investigating verbose / repeated-error logs."
+                        "maximum": MAX_TOTAL_BYTES_HARD,
+                        "description": "Total-bytes cap across all pods. Default 262144 (256 KiB), max 16777216 (16 MiB). Bump higher when investigating verbose / repeated-error logs; the full captured result stays searchable via fs_tool_output_grep."
                     }
                 },
                 "required": ["namespace"],

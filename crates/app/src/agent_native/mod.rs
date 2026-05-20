@@ -36,6 +36,7 @@ pub(crate) mod portforward;
 pub(crate) mod prom;
 pub(crate) mod resources;
 pub(crate) mod rollout;
+pub(crate) mod tool_output;
 pub(crate) mod workload;
 
 /// Per-chat cluster context shared across every native tool.
@@ -161,7 +162,11 @@ where
 /// clone, internally ref-counted) and a shared `ChatClusterRef`; AppState is
 /// fetched per-call via `app.state::<AppState>()` so we don't need to thread
 /// an `Arc<AppState>` through the system.
-pub(crate) fn build_registry(app: AppHandle, cluster: ChatClusterRef) -> NativeRegistry {
+pub(crate) fn build_registry(
+    app: AppHandle,
+    cluster: ChatClusterRef,
+    spool: tool_output::ToolSpool,
+) -> NativeRegistry {
     let mut reg = NativeRegistry::new();
 
     // Node shell family — privileged, three-tool session lifecycle.
@@ -332,6 +337,12 @@ pub(crate) fn build_registry(app: AppHandle, cluster: ChatClusterRef) -> NativeR
 
     // Pod exec — kubectl-exec equivalent against an existing pod.
     reg.register(Arc::new(pod_exec::PodExec::new(app, cluster)));
+
+    // Tool-output recovery — read/grep the full payload of a result that was
+    // truncated before it entered the transcript. Read-only; serve from the
+    // per-chat spool directory.
+    reg.register(Arc::new(tool_output::ToolOutputRead::new(spool.clone())));
+    reg.register(Arc::new(tool_output::ToolOutputGrep::new(spool)));
 
     reg
 }

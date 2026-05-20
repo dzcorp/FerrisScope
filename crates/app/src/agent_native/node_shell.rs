@@ -49,10 +49,13 @@ const DEFAULT_DEBUG_IMAGE: &str = "alpine:3.20";
 /// call via the `namespace` arg.
 const DEFAULT_DEBUG_NAMESPACE: &str = "default";
 
-/// Cap on captured stdout/stderr. Keeps the LLM transcript bounded when the
-/// model asks for `cat /var/log/foo` against a 50MB file. Caller can chunk
-/// with `head` / `tail` if they want more.
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+/// Cap on captured stdout/stderr. Bounds memory when the model runs
+/// `cat /var/log/foo` against a 50MB file. Raised from 64 KiB now that the
+/// transcript is protected separately by the spill (oversized results are
+/// saved to disk and clipped to `MAX_TOOL_RESULT_BYTES`): the full captured
+/// output stays searchable via `fs_tool_output_grep` / `fs_tool_output_read`,
+/// and the caller can still chunk with `head` / `tail` for more than 1 MiB.
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Per-call exec timeout. The shell session itself lives until close; this
 /// just bounds one command. Long-running probes should be wrapped in
@@ -318,7 +321,9 @@ impl NativeTool for NodeShellExec {
         ToolSchema {
             name: "fs_node_shell_exec".into(),
             description: "Run a command in an open node-shell session (`chroot /host sh -c \
-                '<cmd>'` — paths are host-side). Output capped at 64KiB."
+                '<cmd>'` — paths are host-side). Output capped at 1 MiB; large output is saved \
+                automatically — search it with `fs_tool_output_grep` / `fs_tool_output_read` \
+                using the handle in the truncation notice."
                 .into(),
             parameters: json!({
                 "type": "object",
