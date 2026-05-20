@@ -10,6 +10,7 @@
     "frontendDist": "../../ui/dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "FerrisScope",
@@ -17,7 +18,9 @@
         "height": 900,
         "minWidth": 900,
         "minHeight": 600,
-        "decorations": true
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

@@ -22,9 +22,12 @@ import { Icons } from "./ui";
 // supplies the replacement: drag region + min/max/close, themed via
 // `theme.ts` tokens so it tracks the rest of the app's chrome.
 //
-// macOS / Windows keep native decorations because the system titlebar is
-// well-themed and gives us blur for free; on those platforms this
-// component renders nothing and `TITLEBAR_INSET_PX` is 0.
+// macOS keeps its native decorations but runs an integrated, transparent
+// title bar (titleBarStyle: "Overlay" + hiddenTitle in tauri.conf.json): the
+// real OS traffic lights float over <AppHeader/>, which reserves the left
+// inset and provides the drag region (see lib/macChrome.ts). Windows keeps
+// the standard native bar. On both, this component renders nothing and
+// `TITLEBAR_INSET_PX` is 0.
 export const IS_LINUX_TITLEBAR = /linux/i.test(
   typeof navigator === "undefined" ? "" : navigator.userAgent,
 );

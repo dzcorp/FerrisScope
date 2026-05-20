@@ -10,10 +10,37 @@ import {
   statusDot,
   statusFill,
   tokens,
+  vibrantSurface,
+  vibrancyAlpha,
+  MAC_VIBRANCY_ALPHA_DARK,
+  MAC_VIBRANCY_ALPHA_LIGHT,
   UI_SCALE_DEFAULT,
   UI_SCALE_MAX,
   UI_SCALE_MIN,
 } from "./theme";
+
+describe("vibrantSurface / vibrancyAlpha", () => {
+  it("uses the darker, more translucent alpha in dark mode", () => {
+    expect(vibrancyAlpha("dark")).toBe(MAC_VIBRANCY_ALPHA_DARK);
+    expect(vibrantSurface("#11141a", "dark")).toBe(
+      `rgba(17, 20, 26, ${MAC_VIBRANCY_ALPHA_DARK})`,
+    );
+  });
+
+  it("keeps a subtle (mostly opaque) frost in light mode", () => {
+    expect(vibrancyAlpha("light")).toBe(MAC_VIBRANCY_ALPHA_LIGHT);
+    expect(vibrantSurface("#ffffff", "light")).toBe(
+      `rgba(255, 255, 255, ${MAC_VIBRANCY_ALPHA_LIGHT})`,
+    );
+  });
+
+  it("frosts both modes — translucent, with light subtler (more opaque) than dark", () => {
+    expect(MAC_VIBRANCY_ALPHA_DARK).toBeGreaterThan(0);
+    expect(MAC_VIBRANCY_ALPHA_DARK).toBeLessThan(1);
+    expect(MAC_VIBRANCY_ALPHA_LIGHT).toBeGreaterThan(MAC_VIBRANCY_ALPHA_DARK);
+    expect(MAC_VIBRANCY_ALPHA_LIGHT).toBeLessThan(1);
+  });
+});
 
 describe("clampUiScale", () => {
   it("returns default for non-finite input", () => {

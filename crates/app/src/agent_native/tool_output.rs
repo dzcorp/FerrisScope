@@ -36,6 +36,11 @@ use crate::agent::char_boundary_floor;
 /// How long a spilled output lingers before the sweep reaps it. Matches
 /// opencode's retention. The cache dir is OS-reapable anyway; this bounds our
 /// own footprint without cutting off an operator who comes back the next day.
+// clippy's `duration_suboptimal_units` (pedantic, 1.95+) wants a larger-unit
+// constructor here, but `Duration::from_days`/`from_hours` aren't stable as
+// const fns, so `from_secs` is required. `unknown_lints` keeps the allow
+// harmless on older clippy toolchains that don't know the lint yet.
+#[allow(unknown_lints, clippy::duration_suboptimal_units)]
 const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Default + max bytes one `fs_tool_output_read` window returns. Capped at the

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, onPortForwardStatus, onResourceDelta } from "./api";
 import { useAppStore, useResolvedTheme } from "./store";
 import type { AppInfo, ResourceKind } from "./types";
@@ -11,7 +12,11 @@ import {
   FS_MD,
 } from "./theme";
 import { AppHeader } from "./components/AppHeader";
-import { TitleBar, ResizeEdges, TITLEBAR_INSET_PX } from "./components/TitleBar";
+import {
+  TitleBar,
+  ResizeEdges,
+  TITLEBAR_INSET_PX,
+} from "./components/TitleBar";
 import { Rail } from "./components/Rail";
 import { ClusterPanel } from "./components/ClusterPanel";
 import { FleetLanding } from "./components/FleetLanding";
@@ -24,7 +29,7 @@ import { ModalHost } from "./components/ModalHost";
 import { NotificationsPanel } from "./components/NotificationsPanel";
 import { PortForwardsPanel } from "./components/PortForwardsPanel";
 import { confirm, toast } from "./lib/dialog";
-import { latinLetter } from "./lib/keyboard";
+import { latinLetter, IS_MAC } from "./lib/keyboard";
 import { Icons } from "./components/ui";
 
 const RAIL_COLLAPSED_W = 56;
@@ -113,6 +118,16 @@ export default function App() {
   // Set once after the initial prefs load — gates the persist effect so the
   // hydration write doesn't immediately echo defaults back to disk.
   const [prefsLoaded, setPrefsLoaded] = useState(false);
+
+  // macOS: keep the native window appearance in lockstep with the app theme so
+  // the title-bar vibrancy material (and traffic-light rendering) matches —
+  // light theme → light frost, dark theme → dark frost. No-op elsewhere.
+  useEffect(() => {
+    if (!IS_MAC) return;
+    getCurrentWindow()
+      .setTheme(themeMode)
+      .catch(() => {});
+  }, [themeMode]);
 
   useEffect(() => {
     api
@@ -385,7 +400,12 @@ export default function App() {
     if (import.meta.env.DEV) return;
     const onCtx = (e: MouseEvent) => {
       const tgt = e.target as HTMLElement | null;
-      if (tgt && tgt.closest("input, textarea, [contenteditable=''], [contenteditable='true']")) {
+      if (
+        tgt &&
+        tgt.closest(
+          "input, textarea, [contenteditable=''], [contenteditable='true']",
+        )
+      ) {
         return;
       }
       e.preventDefault();
@@ -447,7 +467,7 @@ export default function App() {
         openNsModal();
         return;
       }
-      if (meta && e.key === "," ) {
+      if (meta && e.key === ",") {
         e.preventDefault();
         openSettings();
         return;
@@ -555,6 +575,11 @@ export default function App() {
   // ResolvedTheme directly.
   document.body.style.fontFamily = resolved.typography.fontSans;
   document.body.style.fontSize = `${resolved.typography.base}px`;
+  // macOS vibrancy: the window is transparent and an NSVisualEffectView sits
+  // behind the webview (tauri.macos.conf.json). The page background must be
+  // clear for that material to show through; the opaque content area repaints
+  // t.bg itself. No-op (and reverts to the stylesheet) off macOS.
+  document.body.style.background = IS_MAC ? "transparent" : "";
   // Publish the typography + sizing scale as CSS custom properties so
   // components can read `var(--fs-fs-sm)` etc. without each one threading
   // ResolvedTheme through props. Incremental migration: components keep
@@ -607,7 +632,9 @@ export default function App() {
         width: "100vw",
         display: "flex",
         flexDirection: "column",
-        background: t.bg,
+        // Transparent on macOS so the chrome (header + rail) can let the
+        // vibrancy material show through; the <main> content repaints t.bg.
+        background: IS_MAC ? "transparent" : t.bg,
         color: t.text,
         fontFamily: FONT_SANS,
         overflow: "hidden",
@@ -647,6 +674,9 @@ export default function App() {
                 minHeight: 0,
                 display: "flex",
                 flexDirection: "column",
+                // Opaque so the dense table stays readable; macOS vibrancy is
+                // confined to the chrome (header + rail) around it.
+                background: t.bg,
               }}
             >
               <ClusterPanel mode={themeMode} context={selectedContext} />
@@ -660,6 +690,7 @@ export default function App() {
               minHeight: 0,
               display: "flex",
               flexDirection: "column",
+              background: t.bg,
             }}
           >
             <FleetLanding mode={themeMode} onSelect={selectContext} />
@@ -691,21 +722,19 @@ export default function App() {
 
       {/* Bulk action bar — shows when rows are selected. Per-kind action sets
           (pods today, nodes for cordon/drain/delete). Shape per R-03. */}
-      {selectedKind?.id === "pods" &&
-        selectedContext &&
-        selection.size > 0 && (
-          <BulkBar
-            mode={themeMode}
-            count={selection.size}
-            onClear={clearSelection}
-            actions={buildPodBulkActions(
-              selectedContext.id,
-              selection,
-              confirmDestructive,
-              clearSelection,
-            )}
-          />
-        )}
+      {selectedKind?.id === "pods" && selectedContext && selection.size > 0 && (
+        <BulkBar
+          mode={themeMode}
+          count={selection.size}
+          onClear={clearSelection}
+          actions={buildPodBulkActions(
+            selectedContext.id,
+            selection,
+            confirmDestructive,
+            clearSelection,
+          )}
+        />
+      )}
       {selectedKind?.id === "nodes" &&
         selectedContext &&
         selection.size > 0 && (
@@ -840,7 +869,9 @@ function buildPodBulkActions(
       toast.bad(
         `${label} failed for ${failures.length} of ${count}:\n${failures
           .slice(0, 8)
-          .join("\n")}${failures.length > 8 ? `\n…and ${failures.length - 8} more` : ""}`,
+          .join(
+            "\n",
+          )}${failures.length > 8 ? `\n…and ${failures.length - 8} more` : ""}`,
       );
     } else {
       toast.ok(`${label}: ${count} pod${count === 1 ? "" : "s"}.`);
@@ -879,9 +910,7 @@ function buildPodBulkActions(
               )
               .join("\n");
             const failureLines = [
-              ...(noNs > 0
-                ? [`${noNs} selected pod(s) had no namespace`]
-                : []),
+              ...(noNs > 0 ? [`${noNs} selected pod(s) had no namespace`] : []),
               ...report.failures.map(
                 (f) => `${f.namespace}/${f.pod}: ${f.error}`,
               ),
@@ -907,9 +936,7 @@ function buildPodBulkActions(
       label: "Copy names",
       onClick: () => {
         const text = entries
-          .map(([, m]) =>
-            m.namespace ? `${m.namespace}/${m.name}` : m.name,
-          )
+          .map(([, m]) => (m.namespace ? `${m.namespace}/${m.name}` : m.name))
           .join("\n");
         navigator.clipboard
           .writeText(text)
@@ -980,7 +1007,9 @@ function buildNodeBulkActions(
       toast.bad(
         `${label} failed for ${failures.length} of ${count}:\n${failures
           .slice(0, 8)
-          .join("\n")}${failures.length > 8 ? `\n…and ${failures.length - 8} more` : ""}`,
+          .join(
+            "\n",
+          )}${failures.length > 8 ? `\n…and ${failures.length - 8} more` : ""}`,
       );
     } else {
       toast.ok(`${label}: ${count} node${count === 1 ? "" : "s"}.`);
@@ -1165,7 +1194,9 @@ function buildGenericBulkActions(
           );
           const lines = [
             ...(noNs > 0
-              ? [`${noNs} selected ${noNs === 1 ? kindLabel : plural} had no namespace`]
+              ? [
+                  `${noNs} selected ${noNs === 1 ? kindLabel : plural} had no namespace`,
+                ]
               : []),
             ...failures,
           ];
@@ -1174,7 +1205,9 @@ function buildGenericBulkActions(
               `Restart failed for ${lines.length} of ${count}:\n${lines.slice(0, 8).join("\n")}${lines.length > 8 ? `\n…and ${lines.length - 8} more` : ""}`,
             );
           } else {
-            toast.ok(`Rollout restart triggered on ${count} ${count === 1 ? kindLabel : plural}.`);
+            toast.ok(
+              `Rollout restart triggered on ${count} ${count === 1 ? kindLabel : plural}.`,
+            );
           }
           clearSelection();
         })();
@@ -1188,9 +1221,7 @@ function buildGenericBulkActions(
       label: "Copy names",
       onClick: () => {
         const text = entries
-          .map(([, m]) =>
-            m.namespace ? `${m.namespace}/${m.name}` : m.name,
-          )
+          .map(([, m]) => (m.namespace ? `${m.namespace}/${m.name}` : m.name))
           .join("\n");
         navigator.clipboard
           .writeText(text)
@@ -1240,12 +1271,12 @@ function buildGenericBulkActions(
             toast.bad(
               `Delete failed for ${failures.length} of ${count}:\n${failures
                 .slice(0, 8)
-                .join("\n")}${failures.length > 8 ? `\n…and ${failures.length - 8} more` : ""}`,
+                .join(
+                  "\n",
+                )}${failures.length > 8 ? `\n…and ${failures.length - 8} more` : ""}`,
             );
           } else {
-            toast.ok(
-              `Deleted ${count} ${count === 1 ? kindLabel : plural}.`,
-            );
+            toast.ok(`Deleted ${count} ${count === 1 ? kindLabel : plural}.`);
           }
           clearSelection();
         })();

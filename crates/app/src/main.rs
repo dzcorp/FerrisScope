@@ -257,12 +257,21 @@ fn main() {
             // Wayland headerbar is oversized and themed via Adwaita,
             // which clashes with KDE/Plasma chrome — see the custom
             // `<TitleBar/>` in ui/src/components/TitleBar.tsx for the
-            // replacement. macOS keeps native decorations because the
-            // system titlebar is well-themed and gives us blur for free.
+            // replacement. macOS keeps its *native* decorations but runs an
+            // integrated, transparent title bar (`titleBarStyle: "Overlay"` +
+            // `hiddenTitle` in tauri.conf.json): the webview fills the window
+            // and the real OS traffic lights float over our own `<AppHeader/>`,
+            // which reserves the left inset and acts as the drag region (see
+            // ui/src/lib/macChrome.ts). Windows keeps the standard native bar.
             #[cfg(target_os = "linux")]
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_decorations(false);
             }
+
+            // macOS window appearance is kept in lockstep with the app theme
+            // from the frontend (App.tsx → getCurrentWindow().setTheme), so the
+            // title-bar vibrancy material and traffic-light rendering match the
+            // active theme: light theme → light frost, dark theme → dark frost.
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
