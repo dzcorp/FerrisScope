@@ -14,8 +14,8 @@ pub mod session;
 pub mod types;
 
 pub use config::{
-    AgentSettings, ApprovalMode, Credential, ProviderConfig, ProviderKind, ReasoningEffort,
-    ReasoningSettings,
+    AgentSettings, ApprovalMode, Credential, McpServerConfig, McpTransport, ProviderConfig,
+    ProviderKind, ReasoningEffort, ReasoningSettings,
 };
 pub use mcp::{classify as classify_tool, McpClient, McpError, McpTool, ToolCategory};
 pub use native::{NativeRegistry, NativeTool, NativeToolError};

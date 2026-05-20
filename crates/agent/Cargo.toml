@@ -13,6 +13,10 @@ workspace = true
 [dev-dependencies]
 tokio-test.workspace = true
 pretty_assertions.workspace = true
+# Transport tests build a reqwest client, which needs a process-global rustls
+# crypto provider installed (the binary does this in main.rs). Tests install
+# `ring` themselves via this dev-dep.
+rustls.workspace = true
 
 [dependencies]
 tokio.workspace = true
