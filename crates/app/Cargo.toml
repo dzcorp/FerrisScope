@@ -37,7 +37,11 @@ uuid.workspace = true
 # `keyring-core` + per-backend crates. The upstream README explicitly tells v3
 # users not to upgrade. Staying on v3 until we choose to port to keyring-core.
 keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored", "apple-native", "windows-native"] }
-tauri = { version = "2.11", features = [] }
+# macos-private-api: required for the translucent window + NSVisualEffectView
+# vibrancy behind the integrated title bar / sidebar (macOS only; ignored on
+# other platforms). Enabled explicitly even though `macOSPrivateApi: true` in
+# tauri.macos.conf.json would auto-add it at build time.
+tauri = { version = "2.11", features = ["macos-private-api"] }
 tauri-plugin-fs = "2.5"
 tauri-plugin-dialog = "2.4"
 tauri-plugin-opener = "2.5"

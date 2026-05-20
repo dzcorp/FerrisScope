@@ -3,7 +3,7 @@
 // hints shown to the user need to know the difference. macOS gets ⌘/⇧/⌥
 // glyphs; everyone else gets the spelled-out modifier name.
 
-const IS_MAC = (() => {
+export const IS_MAC = (() => {
   if (typeof navigator === "undefined") return false;
   // navigator.platform is the most reliable signal on desktop browsers and is
   // what Tauri's WebView surfaces. UA fallback covers the rare case where it's

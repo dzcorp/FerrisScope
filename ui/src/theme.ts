@@ -1070,6 +1070,28 @@ export function hexWithAlpha(color: string, alpha: number): string {
   return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${a})`;
 }
 
+// macOS vibrancy: opacity applied to chrome surfaces (header, rail) so the
+// NSVisualEffectView material behind the transparent webview shows through.
+// Mode-dependent because the trade differs. Dark chrome stays legible quite
+// translucent. Light/white chrome muddies and loses text contrast if pushed too
+// far, so light keeps a *subtle* frost (mostly white) — enough to read as
+// vibrant and give the inactive traffic lights some backdrop, without dropping
+// to an obvious gray. The window appearance follows the theme (App.tsx) so the
+// light material stays light. Tunable knobs; lives here, not inline in
+// components, per the no-hardcoded-alpha rule. Lower light → more frost / more
+// button contrast / less white; raise → whiter / fainter buttons.
+export const MAC_VIBRANCY_ALPHA_DARK = 0.5;
+export const MAC_VIBRANCY_ALPHA_LIGHT = 0.7;
+
+export function vibrancyAlpha(mode: ThemeMode): number {
+  return mode === "dark" ? MAC_VIBRANCY_ALPHA_DARK : MAC_VIBRANCY_ALPHA_LIGHT;
+}
+
+// Translucent variant of a chrome surface colour for macOS vibrancy.
+export function vibrantSurface(color: string, mode: ThemeMode): string {
+  return hexWithAlpha(color, vibrancyAlpha(mode));
+}
+
 /// Mix a color toward black by `amount` (0 = original, 1 = black). Used
 /// for the light-mode pill foreground so the bucket color stays vivid on
 /// dark themes but darkens on light ones for contrast.
@@ -1097,9 +1119,7 @@ function toRgb(color: string): { r: number; g: number; b: number } | null {
     if ([r, g, b].some((v) => Number.isNaN(v))) return null;
     return { r, g, b };
   }
-  const m = color.match(
-    /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i,
-  );
+  const m = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
   if (m && m[1] && m[2] && m[3])
     return {
       r: parseInt(m[1], 10),

@@ -2,7 +2,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useAppStore, useResolvedTheme } from "../store";
 import type { Category, PrefsRailMode, ResourceKind } from "../types";
-import { tokens, FF_MONO, type ThemeMode, type Tokens, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../theme";
+import {
+  tokens,
+  FF_MONO,
+  type ThemeMode,
+  type Tokens,
+  R_MD,
+  R_SM,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+  vibrantSurface,
+} from "../theme";
+import { IS_MAC } from "../lib/keyboard";
 import { ErrorBlock, Icons, Tooltip, resolveKindIcon } from "./ui";
 
 const CATEGORY_ORDER: Category[] = [
@@ -30,7 +42,9 @@ type Props = {
 // rail (every CRD falls back to the same icon, so the collapsed list would
 // be a stack of indistinguishable glyphs).
 export function Rail({}: Props) {
-  const t = useResolvedTheme().tokens;
+  const resolved = useResolvedTheme();
+  const t = resolved.tokens;
+  const themeMode = resolved.mode;
   const {
     kinds,
     kindsStatus,
@@ -191,7 +205,9 @@ export function Rail({}: Props) {
           bottom: 0,
           left: 0,
           width: open ? W_OPEN : W_COLLAPSED,
-          background: t.rail,
+          // Translucent on macOS so the vibrancy material shows through the
+          // sidebar; opaque elsewhere. The <main> content stays opaque.
+          background: IS_MAC ? vibrantSurface(t.rail, themeMode) : t.rail,
           borderRight: `1px solid ${t.border}`,
           boxShadow:
             open && !isPinned ? "4px 0 16px rgba(15,20,30,0.08)" : "none",
@@ -352,8 +368,7 @@ function RailFooter({
                     flex: 1,
                     padding: 0,
                     border: "none",
-                    borderLeft:
-                      i === 0 ? "none" : `1px solid ${t.border}`,
+                    borderLeft: i === 0 ? "none" : `1px solid ${t.border}`,
                     background: active ? t.accentSoft : "transparent",
                     color: active ? t.accent : t.textMuted,
                     fontFamily: FF_MONO,
@@ -459,7 +474,13 @@ function FooterRowButton({
       )}
     </button>
   );
-  return open ? btn : <Tooltip label={title} side="right">{btn}</Tooltip>;
+  return open ? (
+    btn
+  ) : (
+    <Tooltip label={title} side="right">
+      {btn}
+    </Tooltip>
+  );
 }
 
 function RailGroup({
@@ -577,8 +598,7 @@ function CustomResourcesBody({
   // 30+ CRDs across many vendors, so showing all of them by default makes
   // the rail unscannable. Auto-expand the group that contains the active
   // selection so the user always sees where they are.
-  const activeGroup =
-    dynamic.find((k) => k.id === selectedId)?.group ?? null;
+  const activeGroup = dynamic.find((k) => k.id === selectedId)?.group ?? null;
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const toggle = (g: string) =>
     setExpanded((prev) => {
@@ -607,52 +627,54 @@ function CustomResourcesBody({
         return (
           <div key={g} style={{ marginTop: 4 }}>
             {open && (
-              <Tooltip label={`${g} — ${groupItems.length} kind${groupItems.length === 1 ? "" : "s"}`}>
-              <button
-                type="button"
-                onClick={() => toggle(g)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  width: "100%",
-                  padding: "4px 8px",
-                  background: "transparent",
-                  border: "none",
-                  cursor: "pointer",
-                  color: t.textMuted,
-                  fontFamily: FF_MONO,
-                  fontSize: FS_XS,
-                  textAlign: "left",
-                  letterSpacing: 0.2,
-                }}
+              <Tooltip
+                label={`${g} — ${groupItems.length} kind${groupItems.length === 1 ? "" : "s"}`}
               >
-                <span
+                <button
+                  type="button"
+                  onClick={() => toggle(g)}
                   style={{
-                    display: "inline-block",
-                    width: 8,
-                    transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)",
-                    transition: "transform .12s",
-                    color: t.textDim,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    width: "100%",
+                    padding: "4px 8px",
+                    background: "transparent",
+                    border: "none",
+                    cursor: "pointer",
+                    color: t.textMuted,
+                    fontFamily: FF_MONO,
+                    fontSize: FS_XS,
+                    textAlign: "left",
+                    letterSpacing: 0.2,
                   }}
                 >
-                  ▾
-                </span>
-                <span
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {g}
-                </span>
-                <span style={{ color: t.textDim, fontSize: FS_XS }}>
-                  {groupItems.length}
-                </span>
-              </button>
+                  <span
+                    style={{
+                      display: "inline-block",
+                      width: 8,
+                      transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)",
+                      transition: "transform .12s",
+                      color: t.textDim,
+                    }}
+                  >
+                    ▾
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {g}
+                  </span>
+                  <span style={{ color: t.textDim, fontSize: FS_XS }}>
+                    {groupItems.length}
+                  </span>
+                </button>
               </Tooltip>
             )}
             {isOpen && (
