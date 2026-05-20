@@ -37,10 +37,12 @@ uuid.workspace = true
 # `keyring-core` + per-backend crates. The upstream README explicitly tells v3
 # users not to upgrade. Staying on v3 until we choose to port to keyring-core.
 keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored", "apple-native", "windows-native"] }
-# macos-private-api: required for the translucent window + NSVisualEffectView
-# vibrancy behind the integrated title bar / sidebar (macOS only; ignored on
-# other platforms). Enabled explicitly even though `macOSPrivateApi: true` in
-# tauri.macos.conf.json would auto-add it at build time.
+# macos-private-api: enables the translucent window + NSVisualEffectView
+# vibrancy used on macOS (integrated title bar / sidebar). Tauri's build script
+# validates this Cargo feature against `macOSPrivateApi` in tauri.conf.json, and
+# Cargo features aren't per-platform — so the flag lives in the *base* config
+# (a no-op on Linux/Windows) to keep feature and allowlist in sync on every
+# target. Without that, Linux/Windows builds fail the allowlist check.
 tauri = { version = "2.11", features = ["macos-private-api"] }
 tauri-plugin-fs = "2.5"
 tauri-plugin-dialog = "2.4"
