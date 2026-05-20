@@ -13,8 +13,7 @@ import {
 import { createPortal } from "react-dom";
 import { FF_MONO, type ThemeMode, R_MD, R_SM, FS_SM, FS_XS } from "../../theme";
 import { useAppStore, useResolvedTheme } from "../../store";
-
-type Side = "top" | "bottom" | "left" | "right";
+import { placeTooltip, fixedRectScale, type Side } from "../../lib/zoom";
 
 type TooltipProps = {
   label: ReactNode;
@@ -66,39 +65,19 @@ export function Tooltip({
     if (!trig || !tip) return;
     const tr = trig.getBoundingClientRect();
     const r = tip.getBoundingClientRect();
-    const gap = 8;
-    const margin = 6;
-
-    const placements: Record<Side, { x: number; y: number }> = {
-      top: { x: tr.left + tr.width / 2 - r.width / 2, y: tr.top - r.height - gap },
-      bottom: {
-        x: tr.left + tr.width / 2 - r.width / 2,
-        y: tr.bottom + gap,
-      },
-      left: { x: tr.left - r.width - gap, y: tr.top + tr.height / 2 - r.height / 2 },
-      right: { x: tr.right + gap, y: tr.top + tr.height / 2 - r.height / 2 },
-    };
-
-    const fits = (s: Side) => {
-      const p = placements[s];
-      return (
-        p.x >= margin &&
-        p.y >= margin &&
-        p.x + r.width <= window.innerWidth - margin &&
-        p.y + r.height <= window.innerHeight - margin
-      );
-    };
-    const flipMap: Record<Side, Side> = {
-      top: "bottom",
-      bottom: "top",
-      left: "right",
-      right: "left",
-    };
-    const chosen: Side = fits(side) ? side : fits(flipMap[side]) ? flipMap[side] : side;
-    let { x, y } = placements[chosen];
-    x = Math.max(margin, Math.min(x, window.innerWidth - r.width - margin));
-    y = Math.max(margin, Math.min(y, window.innerHeight - r.height - margin));
-    setPos({ x, y, placedSide: chosen });
+    // tr/r/innerWidth and the fixed tip share whatever space the engine reports
+    // rects in; fixedRectScale() measures the rect→fixed conversion so the tip
+    // lands on the trigger after the root repaints it × zoom — correct whether
+    // the engine reports rects in visual or unzoomed px.
+    setPos(
+      placeTooltip(
+        tr,
+        { width: r.width, height: r.height },
+        side,
+        { width: window.innerWidth, height: window.innerHeight },
+        fixedRectScale(),
+      ),
+    );
   }, [side]);
 
   useLayoutEffect(() => {
