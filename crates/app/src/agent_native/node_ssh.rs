@@ -57,11 +57,13 @@ use crate::state::AppState;
 const DEFAULT_SSH_PORT: u16 = 22;
 
 /// Cap on captured stdout/stderr per `_exec` call. Mirrors the node-shell
-/// 64 KiB budget so the agent's tool-result accounting stays consistent
-/// across the two fallback paths. The underlying `SshSession::exec` already
-/// caps each stream at 8 MiB to defend the heap; this is the further
-/// LLM-transcript cap on top.
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+/// Output budget, consistent with `fs_pod_exec` / `fs_node_shell_exec`. Raised
+/// from 64 KiB now that the transcript is protected by the spill (oversized
+/// results are saved to disk and clipped to `MAX_TOOL_RESULT_BYTES`); the full
+/// captured output stays searchable via `fs_tool_output_grep` / `_read`. The
+/// underlying `SshSession::exec` still caps each stream at 8 MiB to defend the
+/// heap, so this 1 MiB cap sits comfortably under that.
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Fallback per-call exec timeout. The operator can pass `timeout_seconds`
 /// to bound a specific command tighter; SSH itself has its own 10s exec
@@ -317,7 +319,9 @@ impl NativeTool for NodeSshExec {
         ToolSchema {
             name: "fs_node_ssh_exec".into(),
             description: "Run a command over an open node-SSH session (like `ssh user@host \
-                '<cmd>'`). No /host chroot. Output capped at 64KiB."
+                '<cmd>'`). No /host chroot. Output capped at 1 MiB; large output is saved \
+                automatically — search it with `fs_tool_output_grep` / `fs_tool_output_read` \
+                using the handle in the truncation notice."
                 .into(),
             parameters: json!({
                 "type": "object",

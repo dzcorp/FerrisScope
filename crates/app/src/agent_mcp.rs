@@ -24,15 +24,19 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferrisscope_agent::config::McpServerConfig;
+use ferrisscope_agent::config::{McpServerConfig, McpTransport};
+use ferrisscope_agent::mcp::{HttpTransport, SseTransport};
 use ferrisscope_agent::McpClient;
 use tokio::process::{Child, Command};
 
 #[derive(Debug)]
 pub(crate) enum McpProcessError {
     BinaryNotConfigured,
+    UrlNotConfigured,
     Spawn(std::io::Error),
     NoPipes,
+    /// Failed to establish a network transport (`sse` / `http`).
+    Connect(ferrisscope_agent::McpError),
     Initialize(ferrisscope_agent::McpError),
     ScratchKubeconfig(String),
 }
@@ -43,8 +47,12 @@ impl std::fmt::Display for McpProcessError {
             Self::BinaryNotConfigured => {
                 f.write_str("MCP server binary not configured (no `command` set on this entry)")
             }
+            Self::UrlNotConfigured => {
+                f.write_str("MCP server URL not configured (no `url` set on this entry)")
+            }
             Self::Spawn(e) => write!(f, "failed to spawn MCP server: {e}"),
             Self::NoPipes => f.write_str("MCP server stdin/stdout not piped"),
+            Self::Connect(e) => write!(f, "MCP connect failed: {e}"),
             Self::Initialize(e) => write!(f, "MCP initialize failed: {e}"),
             Self::ScratchKubeconfig(s) => write!(f, "scratch kubeconfig: {s}"),
         }
@@ -55,7 +63,7 @@ impl std::error::Error for McpProcessError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Spawn(e) => Some(e),
-            Self::Initialize(e) => Some(e),
+            Self::Connect(e) | Self::Initialize(e) => Some(e),
             _ => None,
         }
     }
@@ -74,6 +82,71 @@ pub(crate) struct McpProcess {
 }
 
 impl McpProcess {
+    /// Connect to the configured server (by `transport`) and run the MCP
+    /// `initialize` handshake, returning a ready client. `stdio` spawns the
+    /// `command` subprocess; `sse` / `http` connect to `url`. The kubeconfig /
+    /// context / scratch args pin the context for `stdio` children only —
+    /// remote servers run elsewhere and aren't ours to point at a context.
+    pub(crate) async fn spawn(
+        config: &McpServerConfig,
+        kubeconfig_path: Option<&PathBuf>,
+        context_name: Option<&str>,
+        external_scratch: Option<&Path>,
+    ) -> Result<Self, McpProcessError> {
+        match config.transport {
+            McpTransport::Stdio => {
+                Self::spawn_stdio(config, kubeconfig_path, context_name, external_scratch).await
+            }
+            McpTransport::Sse | McpTransport::Http => Self::connect_remote(config).await,
+        }
+    }
+
+    /// Connect to a remote MCP server over `sse` / `http`. No child process and
+    /// no kubeconfig pinning — the server runs wherever the operator hosts it.
+    /// Operator `headers` (e.g. `Authorization`) are sent on every request.
+    async fn connect_remote(config: &McpServerConfig) -> Result<Self, McpProcessError> {
+        let url = config
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .ok_or(McpProcessError::UrlNotConfigured)?;
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = match config.transport {
+            McpTransport::Http => {
+                let t = HttpTransport::connect(url, &config.headers, tx)
+                    .map_err(McpProcessError::Connect)?;
+                McpClient::from_transport(t, rx)
+            }
+            McpTransport::Sse => {
+                let t = SseTransport::connect(url, &config.headers, tx)
+                    .await
+                    .map_err(McpProcessError::Connect)?;
+                McpClient::from_transport(t, rx)
+            }
+            // Dispatcher only routes remote transports here.
+            McpTransport::Stdio => return Err(McpProcessError::UrlNotConfigured),
+        };
+
+        match tokio::time::timeout(
+            Duration::from_secs(20),
+            client.initialize("ferrisscope", env!("CARGO_PKG_VERSION")),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(Self {
+                client,
+                child: None,
+                scratch_kubeconfig: None,
+            }),
+            Ok(Err(e)) => Err(McpProcessError::Initialize(e)),
+            Err(_) => Err(McpProcessError::Initialize(
+                ferrisscope_agent::McpError::InvalidResponse("MCP initialize timed out".into()),
+            )),
+        }
+    }
+
     /// Spawn the configured binary, do the MCP `initialize` handshake, and
     /// return a ready client.
     ///
@@ -98,7 +171,7 @@ impl McpProcess {
     /// is the sole `KUBECONFIG` value. The scratch is borrowed; the caller
     /// (`ChatRuntime`) owns its lifetime so multiple MCP servers in the same
     /// chat can share it without racing on cleanup.
-    pub(crate) async fn spawn(
+    async fn spawn_stdio(
         config: &McpServerConfig,
         kubeconfig_path: Option<&PathBuf>,
         context_name: Option<&str>,

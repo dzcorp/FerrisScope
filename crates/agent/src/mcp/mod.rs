@@ -16,8 +16,16 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{oneshot, Mutex};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{mpsc, oneshot, Mutex};
+
+pub mod http;
+pub mod sse;
+pub mod transport;
+
+pub use http::HttpTransport;
+pub use sse::SseTransport;
+pub use transport::{StdioTransport, Transport};
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
@@ -31,6 +39,10 @@ pub enum McpError {
     Closed,
     #[error("invalid response: {0}")]
     InvalidResponse(String),
+    /// Transport-level failure for the network transports (`sse` / `http`):
+    /// connection refused, non-2xx status, malformed SSE framing, etc.
+    #[error("transport: {0}")]
+    Transport(String),
 }
 
 /// MCP protocol version we advertise during `initialize`. Servers either
@@ -152,67 +164,34 @@ struct JsonRpcErrorObj {
     message: String,
 }
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, McpError>>>>>;
+pub(crate) type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, McpError>>>>>;
 
-/// One MCP client. Holds the writer; the reader task is detached and
-/// notifies pending requests via the shared `pending` map.
+/// One MCP client over an arbitrary [`Transport`]. The transport owns the
+/// wire (subprocess pipes, HTTP, SSE) and pushes every incoming JSON-RPC
+/// message into a channel; the client correlates responses to outstanding
+/// requests by id through the shared `pending` map.
 pub struct McpClient {
     next_id: AtomicU64,
-    writer: Mutex<Box<dyn AsyncWrite + Unpin + Send>>,
+    transport: Arc<dyn Transport>,
     pending: Pending,
 }
 
 impl McpClient {
-    /// Wraps an already-opened `(reader, writer)` pair. Spawns a detached
-    /// reader task. The caller (typically the app crate's subprocess
-    /// supervisor) owns the underlying child; dropping the writer here
-    /// closes the request side without killing the child by itself.
-    pub fn new<W, R>(writer: W, reader: R) -> Arc<Self>
-    where
-        W: AsyncWrite + Unpin + Send + 'static,
-        R: AsyncRead + Unpin + Send + 'static,
-    {
+    /// Build a client from a ready transport plus the receiver end of the
+    /// transport's incoming-message channel. Spawns a detached task that
+    /// resolves pending requests as messages arrive; when the channel closes
+    /// (transport hung up) every outstanding request fails with
+    /// [`McpError::Closed`] so callers unblock instead of hanging.
+    pub fn from_transport(
+        transport: Arc<dyn Transport>,
+        mut incoming: mpsc::UnboundedReceiver<Value>,
+    ) -> Arc<Self> {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let pending_for_reader = pending.clone();
         tokio::spawn(async move {
-            let mut buf = BufReader::new(reader);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match buf.read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let resp: JsonRpcResponse = match serde_json::from_str(trimmed) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!(error = %e, line = %trimmed, "mcp: bad json line");
-                        continue;
-                    }
-                };
-                let Some(id) = resp.id.as_ref().and_then(Value::as_u64) else {
-                    // Notifications and malformed ids — ignore.
-                    continue;
-                };
-                let mut g = pending_for_reader.lock().await;
-                if let Some(tx) = g.remove(&id) {
-                    let payload = if let Some(err) = resp.error {
-                        Err(McpError::Server {
-                            code: err.code,
-                            message: err.message,
-                        })
-                    } else {
-                        Ok(resp.result.unwrap_or(Value::Null))
-                    };
-                    let _ = tx.send(payload);
-                }
+            while let Some(value) = incoming.recv().await {
+                Self::dispatch_incoming(&pending_for_reader, value).await;
             }
-            // Reader closed: fail every outstanding request so callers
-            // unblock instead of hanging on a dead child.
             let mut g = pending_for_reader.lock().await;
             for (_, tx) in g.drain() {
                 let _ = tx.send(Err(McpError::Closed));
@@ -220,17 +199,51 @@ impl McpClient {
         });
         Arc::new(Self {
             next_id: AtomicU64::new(1),
-            writer: Mutex::new(Box::new(writer)),
+            transport,
             pending,
         })
     }
 
-    async fn write_line(&self, bytes: &[u8]) -> Result<(), McpError> {
-        let mut w = self.writer.lock().await;
-        w.write_all(bytes).await?;
-        w.write_all(b"\n").await?;
-        w.flush().await?;
-        Ok(())
+    /// Convenience constructor for the `stdio` transport: wraps an
+    /// already-opened `(writer, reader)` pair (subprocess pipes). The caller
+    /// owns the underlying child; dropping the transport closes the request
+    /// side without killing the child by itself.
+    pub fn new<W, R>(writer: W, reader: R) -> Arc<Self>
+    where
+        W: AsyncWrite + Unpin + Send + 'static,
+        R: AsyncRead + Unpin + Send + 'static,
+    {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let transport = StdioTransport::new(writer, reader, tx);
+        Self::from_transport(transport, rx)
+    }
+
+    /// Route one incoming JSON-RPC message to its waiting request. Server
+    /// notifications and server→client requests (no matching pending id) are
+    /// ignored — we don't expose server-initiated calls to the agent.
+    async fn dispatch_incoming(pending: &Pending, value: Value) {
+        let resp: JsonRpcResponse = match serde_json::from_value(value) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "mcp: bad json-rpc message");
+                return;
+            }
+        };
+        let Some(id) = resp.id.as_ref().and_then(Value::as_u64) else {
+            return;
+        };
+        let mut g = pending.lock().await;
+        if let Some(tx) = g.remove(&id) {
+            let payload = if let Some(err) = resp.error {
+                Err(McpError::Server {
+                    code: err.code,
+                    message: err.message,
+                })
+            } else {
+                Ok(resp.result.unwrap_or(Value::Null))
+            };
+            let _ = tx.send(payload);
+        }
     }
 
     async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
@@ -243,9 +256,9 @@ impl McpClient {
             method,
             params,
         };
-        let bytes = serde_json::to_vec(&req)?;
-        if let Err(e) = self.write_line(&bytes).await {
-            // Failed to write — clear the pending slot so we don't leak.
+        let msg = serde_json::to_value(&req)?;
+        if let Err(e) = self.transport.send(msg).await {
+            // Failed to send — clear the pending slot so we don't leak.
             self.pending.lock().await.remove(&id);
             return Err(e);
         }
@@ -261,8 +274,8 @@ impl McpClient {
             method,
             params,
         };
-        let bytes = serde_json::to_vec(&n)?;
-        self.write_line(&bytes).await
+        let msg = serde_json::to_value(&n)?;
+        self.transport.send(msg).await
     }
 
     /// MCP `initialize` handshake. Returns the server's reply verbatim so

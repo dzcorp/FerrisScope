@@ -54,6 +54,20 @@ const MAX_TOOL_ROUNDS: u32 = 500;
 /// we still surface `is_error: true` so the model can recover.
 const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
 
+/// Hard ceiling, in bytes, on a single tool result before it enters the
+/// transcript. Oversized output — a Prometheus query that returns every
+/// `up` series, `kubectl get … -o json` across a busy namespace — otherwise
+/// (a) bloats *every* subsequent request because the result rides along on
+/// each following round, and (b) can tip the request past the model's
+/// context window or, worse, make some OpenAI models return an *empty*
+/// completion. The loop then retries that empty turn against the same
+/// oversized transcript until it gives up ("no output after N attempts"),
+/// and because the giant result is now pinned in the transcript the chat
+/// stays wedged. Capping at the source keeps the transcript bounded and the
+/// chat recoverable. ~30k bytes ≈ 7-8k tokens — enough for the model to see
+/// the shape of a large result and decide to narrow its query.
+const MAX_TOOL_RESULT_BYTES: usize = 30_000;
+
 const SYSTEM_PROMPT_BASELINE: &str = "\
 You are FerrisScope's Kubernetes operator assistant. You help the user \
 understand and operate their Kubernetes cluster. Prefer Server-Side Apply \
@@ -784,6 +798,11 @@ struct McpServerHandle {
     /// schema enumeration and the dispatch lookup (we walk this list to
     /// route a tool name back to the owning client).
     tools: Vec<McpTool>,
+    /// Operator opted to treat every tool from this server as a read
+    /// (auto-run, no approval). Carried from `McpServerConfig::trust_as_read`
+    /// so the approval gate and the tools inspector can override the name
+    /// heuristic without re-reading settings.
+    trust_as_read: bool,
     /// Failure message. `None` on success.
     message: Option<String>,
 }
@@ -859,6 +878,11 @@ struct ChatRuntime {
     /// Held here so the per-turn system prompt can describe the *active* cluster
     /// (not just the origin) without going through tool-call round trips.
     cluster: agent_native::ChatClusterRef,
+    /// Per-chat disk spool for oversized tool output. The agent loop writes the
+    /// full payload here when a result exceeds `MAX_TOOL_RESULT_BYTES`; the
+    /// `fs_tool_output_read` / `fs_tool_output_grep` tools (built over the same
+    /// directory) read it back. Cloned into each tool-call future. Cheap clone.
+    tool_spool: agent_native::tool_output::ToolSpool,
     /// In-flight approval requests, keyed by tool call id. The agent loop
     /// awaits each receiver while the UI surfaces the approval card; the
     /// `chat_approve_tool_call` command sends the operator's decision.
@@ -1018,15 +1042,20 @@ pub(crate) async fn ai_set_settings(
         p.settings.mcp_binary_path = if path.is_empty() { None } else { Some(path) };
     }
     if let Some(servers) = patch.mcp_servers {
-        // Normalise: drop entries with empty name + empty command (operator
-        // added a row and abandoned it). Trim names so leading/trailing
-        // whitespace doesn't sneak into status messages.
+        // Normalise: drop entries the operator added then abandoned — empty
+        // name *and* no endpoint (no command for stdio, no url for remote).
+        // Trim names / urls so whitespace doesn't sneak into status messages.
         p.settings.mcp_servers = servers
             .into_iter()
             .filter_map(|mut s| {
                 s.name = s.name.trim().to_string();
                 s.command = s.command.trim().to_string();
-                if s.name.is_empty() && s.command.is_empty() {
+                s.url = s
+                    .url
+                    .map(|u| u.trim().to_string())
+                    .filter(|u| !u.is_empty());
+                let no_endpoint = s.command.is_empty() && s.url.is_none();
+                if s.name.is_empty() && no_endpoint {
                     None
                 } else {
                     Some(s)
@@ -1147,6 +1176,12 @@ pub(crate) async fn mcp_test_server(
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
     use tokio::sync::Mutex as AsyncMutex;
+
+    // Remote transports (sse / http) have no subprocess and no stderr to
+    // capture — connect over the network and run the same handshake.
+    if config.transport.is_remote() {
+        return Ok(mcp_test_remote(&config).await);
+    }
 
     let bin = config.command.trim();
     if bin.is_empty() {
@@ -1300,6 +1335,80 @@ pub(crate) async fn mcp_test_server(
             error: Some(format!("{e}{stderr_tail}")),
         },
     })
+}
+
+/// Test a remote (`sse` / `http`) MCP server: connect, run `initialize` +
+/// `tools/list`, and report the tool count. No subprocess / stderr (those are
+/// stdio-only), so failures surface as the transport / handshake error text.
+async fn mcp_test_remote(config: &McpServerConfig) -> McpTestResult {
+    use ferrisscope_agent::mcp::{HttpTransport, SseTransport};
+
+    let err = |msg: String| McpTestResult {
+        ok: false,
+        tool_count: 0,
+        tool_names: Vec::new(),
+        error: Some(msg),
+    };
+
+    let url = config.url.as_deref().map(str::trim).unwrap_or("");
+    if url.is_empty() {
+        return err("url is empty".to_string());
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let client = match config.transport {
+        ferrisscope_agent::McpTransport::Http => {
+            match HttpTransport::connect(url, &config.headers, tx) {
+                Ok(t) => ferrisscope_agent::McpClient::from_transport(t, rx),
+                Err(e) => return err(format!("connect failed: {e}")),
+            }
+        }
+        ferrisscope_agent::McpTransport::Sse => {
+            match SseTransport::connect(url, &config.headers, tx).await {
+                Ok(t) => ferrisscope_agent::McpClient::from_transport(t, rx),
+                Err(e) => return err(format!("connect failed: {e}")),
+            }
+        }
+        ferrisscope_agent::McpTransport::Stdio => {
+            return err("internal: stdio routed to remote test".to_string());
+        }
+    };
+
+    let outcome: Result<Vec<ferrisscope_agent::mcp::McpTool>, String> =
+        tokio::time::timeout(MCP_TEST_OVERALL, async {
+            tokio::time::timeout(
+                MCP_TEST_INITIALIZE,
+                client.initialize("ferrisscope", env!("CARGO_PKG_VERSION")),
+            )
+            .await
+            .map_err(|_| "MCP `initialize` timed out".to_string())?
+            .map_err(|e| format!("MCP `initialize` failed: {e}"))?;
+
+            tokio::time::timeout(MCP_TEST_LIST_TOOLS, client.list_tools())
+                .await
+                .map_err(|_| "MCP `tools/list` timed out".to_string())?
+                .map_err(|e| format!("MCP `tools/list` failed: {e}"))
+        })
+        .await
+        .unwrap_or_else(|_| Err("test timed out after 90s overall".to_string()));
+
+    match outcome {
+        Ok(tools) => {
+            #[allow(clippy::cast_possible_truncation)]
+            let tool_count = tools.len() as u32;
+            McpTestResult {
+                ok: true,
+                tool_count,
+                tool_names: tools
+                    .iter()
+                    .take(MCP_TEST_NAME_PREVIEW)
+                    .map(|t| t.name.clone())
+                    .collect(),
+                error: None,
+            }
+        }
+        Err(e) => err(e),
+    }
 }
 
 /// List models for a provider. Defaults to `active_provider` when
@@ -1590,9 +1699,13 @@ pub(crate) async fn chat_open(
         vec![McpServerConfig {
             id: "legacy".to_string(),
             name: "MCP server".to_string(),
+            transport: ferrisscope_agent::config::McpTransport::Stdio,
             command: legacy.clone(),
+            url: None,
             args: Vec::new(),
             env: HashMap::new(),
+            headers: HashMap::new(),
+            trust_as_read: false,
             enabled: true,
         }]
     } else {
@@ -1651,7 +1764,13 @@ pub(crate) async fn chat_open(
         session_id.clone(),
         restored_active,
     );
-    let native = agent_native::build_registry(app.clone(), cluster_ctx.clone());
+    // Per-chat disk spool for oversized tool output. Built from the stable
+    // (cluster, session) pair so a reopened chat resolves the same handles its
+    // rehydrated transcript references. Reap stale spills opportunistically on
+    // open (best-effort, off the open path).
+    let tool_spool = agent_native::tool_output::ToolSpool::new(&data.meta.cluster_id, &session_id);
+    tauri::async_runtime::spawn(agent_native::tool_output::sweep_expired());
+    let native = agent_native::build_registry(app.clone(), cluster_ctx.clone(), tool_spool.clone());
 
     let chat_id = format!("chat-{}", uuid::Uuid::new_v4());
     let on_event_for_replay = on_event.clone();
@@ -1666,6 +1785,7 @@ pub(crate) async fn chat_open(
             name: s.name.clone(),
             process: None,
             tools: Vec::new(),
+            trust_as_read: s.trust_as_read,
             message: None,
         })
         .collect();
@@ -1688,6 +1808,7 @@ pub(crate) async fn chat_open(
         external_scratch: external_scratch.clone(),
         native,
         cluster: cluster_ctx,
+        tool_spool,
         pending_approvals: HashMap::new(),
         approved_always: HashSet::new(),
         // Reset every chat-open. The persisted `meta.title` is the
@@ -2437,10 +2558,12 @@ pub(crate) async fn chat_list_tools(
     let mut out: Vec<ChatToolWire> = Vec::new();
     for server in &g.mcp_servers {
         for tool in &server.tools {
+            // A trusted server ("treat all as read") reports every tool as
+            // read so the inspector matches what the approval gate will do.
             out.push(ChatToolWire {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                category: category_label(classify_tool(&tool.name)),
+                category: category_label(mcp_category(server.trust_as_read, &tool.name)),
                 input_schema: tool.input_schema.clone(),
                 source: server.name.clone(),
             });
@@ -2472,6 +2595,18 @@ fn category_label(c: ToolCategory) -> &'static str {
         ToolCategory::Read => "read",
         ToolCategory::Write => "write",
         ToolCategory::Unknown => "unknown",
+    }
+}
+
+/// Resolve an MCP tool's category. A server the operator marked
+/// `trust_as_read` forces [`ToolCategory::Read`] (auto-run, no approval);
+/// otherwise fall back to the name heuristic. Native tools never go through
+/// here — they declare their own category.
+fn mcp_category(trust_as_read: bool, name: &str) -> ToolCategory {
+    if trust_as_read {
+        ToolCategory::Read
+    } else {
+        classify_tool(name)
     }
 }
 
@@ -3324,12 +3459,14 @@ async fn run_turn_loop(
         // before any of the already-approved cards get a ToolResult and
         // disappear, which feels like the UI is stuck.
         let mut futures = Vec::with_capacity(tool_calls.len());
+        let spool = { runtime.lock().await.tool_spool.clone() };
         for tc in &tool_calls {
             let runtime = runtime.clone();
             let store = store.clone();
             let cluster_id = cluster_id.clone();
             let session_id = session_id.clone();
             let tc = tc.clone();
+            let spool = spool.clone();
             let category = classify_tool(&tc.name);
             futures.push(async move {
                 let (content, is_error) = execute_tool_call(
@@ -3342,6 +3479,13 @@ async fn run_turn_loop(
                     approval_mode,
                 )
                 .await;
+                // Clamp before anything sees it — the wire ToolResult, the
+                // model-facing transcript, and the persisted log all derive
+                // from this one string, so capping here keeps them in sync
+                // and stops an oversized result from wedging the loop. The
+                // full payload is spilled to disk first so the model can
+                // recover it via fs_tool_output_read / _grep.
+                let content = maybe_spill(&spool, &tc.id, content).await;
                 let _ = runtime.lock().await.channel.send(ChatEvent::ToolResult {
                     tool_call_id: tc.id.clone(),
                     name: tc.name.clone(),
@@ -3949,6 +4093,93 @@ async fn run_provider_round(
 /// Native tools take precedence: if a name resolves to a native tool, its
 /// `category()` overrides the heuristic and dispatch goes in-process. Falls
 /// through to MCP otherwise.
+/// Largest byte index `<= max` that falls on a UTF-8 char boundary of `s`.
+/// Slicing `&s[..n]` at the returned `n` never panics mid-codepoint.
+/// Returns `s.len()` when the string already fits within `max`.
+pub(crate) fn char_boundary_floor(s: &str, max: usize) -> usize {
+    if s.len() <= max {
+        return s.len();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// Clamp a tool result to [`MAX_TOOL_RESULT_BYTES`], keeping the head and
+/// appending a marker that tells the model the output was clipped. Splits on a
+/// char boundary — never panics. Short results pass through untouched. Applied
+/// at the single tool-call chokepoint so the cap is uniform across the wire
+/// event, the model-facing transcript, and the on-disk log.
+///
+/// `handle: Some(id)` means the full output was spilled to disk and can be
+/// recovered with `fs_tool_output_read` / `fs_tool_output_grep` — the marker
+/// points the model at those tools. `None` means spilling was unavailable (no
+/// cache dir / write failed), so the dropped bytes are gone and the marker
+/// tells the model to narrow the request and retry instead.
+fn cap_tool_result(content: String, handle: Option<&str>) -> String {
+    if content.len() <= MAX_TOOL_RESULT_BYTES {
+        return content;
+    }
+    let end = char_boundary_floor(&content, MAX_TOOL_RESULT_BYTES);
+    let total = content.len();
+    let dropped = total - end;
+    let mut out = content;
+    out.truncate(end);
+    use std::fmt::Write as _;
+    match handle {
+        Some(h) => {
+            let _ = write!(
+                out,
+                "\n\n…[tool output truncated: showing the first {end} of {total} bytes. \
+                 Full output saved as handle \"{h}\" — call `fs_tool_output_read` \
+                 (offset/limit) to page through it or `fs_tool_output_grep` (pattern) to \
+                 search it. Or narrow the original request and call again.]"
+            );
+        }
+        None => {
+            let _ = write!(
+                out,
+                "\n\n…[tool output truncated: {dropped} of {total} bytes omitted. \
+                 Narrow the request (label/field selector, a more specific name, \
+                 namespace, time range, or limit) and call again to see the rest.]"
+            );
+        }
+    }
+    out
+}
+
+/// Spill an oversized tool result to the per-chat disk spool and return the
+/// capped, handle-bearing preview. Results within budget pass through
+/// untouched. If the spool write fails (no cache dir, IO error) we still cap —
+/// just lossily, without a handle — so an oversized result can never wedge the
+/// loop regardless of disk state.
+async fn maybe_spill(
+    spool: &agent_native::tool_output::ToolSpool,
+    handle: &str,
+    content: String,
+) -> String {
+    if content.len() <= MAX_TOOL_RESULT_BYTES {
+        return content;
+    }
+    if spool.put(handle, &content).await {
+        cap_tool_result(content, Some(handle))
+    } else {
+        cap_tool_result(content, None)
+    }
+}
+
+/// `true` when the MCP tool `name` is served by a server the operator marked
+/// `trust_as_read`. Walks the same per-server catalogues the dispatch lookup
+/// uses, so a name is trusted iff its owning server is trusted.
+async fn mcp_tool_is_trusted(runtime: &Arc<Mutex<ChatRuntime>>, name: &str) -> bool {
+    let g = runtime.lock().await;
+    g.mcp_servers
+        .iter()
+        .any(|s| s.trust_as_read && s.tools.iter().any(|t| t.name == name))
+}
+
 async fn execute_tool_call(
     runtime: &Arc<Mutex<ChatRuntime>>,
     store: &SessionStore,
@@ -3971,6 +4202,11 @@ async fn execute_tool_call(
     let native_tool = { runtime.lock().await.native.find(&tc.name) };
     let category = match &native_tool {
         Some(t) => t.category(),
+        // MCP tool: an operator-trusted server ("treat all as read") forces
+        // Read so the call auto-runs; otherwise keep the passed-in name
+        // heuristic. Mirrors `mcp_category`, but reuses the already-computed
+        // `category` instead of re-classifying.
+        None if mcp_tool_is_trusted(runtime, &tc.name).await => ToolCategory::Read,
         None => category,
     };
 
@@ -4829,8 +5065,12 @@ fn render_head_for_summary(messages: &[ChatMessage]) -> String {
             // past the model's context.
             const PER_MSG_CAP: usize = 8000;
             if m.content.len() > PER_MSG_CAP {
-                out.push_str(&m.content[..PER_MSG_CAP]);
-                let _ = writeln!(out, "\n…(truncated, {} chars)", m.content.len());
+                // Split on a char boundary — a raw `&m.content[..8000]`
+                // panics when byte 8000 lands mid-codepoint (UTF-8 in a
+                // tool result is enough to trip it).
+                let end = char_boundary_floor(&m.content, PER_MSG_CAP);
+                out.push_str(&m.content[..end]);
+                let _ = writeln!(out, "\n…(truncated, {} bytes)", m.content.len());
             } else {
                 out.push_str(&m.content);
                 out.push('\n');
@@ -4902,6 +5142,80 @@ mod tests {
     fn context_overflow_classifier_negative_auth() {
         let e = ProviderError::Auth("invalid token".into());
         assert!(!is_context_overflow_error(&e));
+    }
+
+    #[test]
+    fn mcp_category_trusted_forces_read_even_for_write_names() {
+        // A write-classified name from a trusted server still resolves Read.
+        assert_eq!(mcp_category(true, "pods_delete"), ToolCategory::Read);
+        assert_eq!(mcp_category(true, "frobnicate"), ToolCategory::Read);
+    }
+
+    #[test]
+    fn mcp_category_untrusted_keeps_name_heuristic() {
+        assert_eq!(mcp_category(false, "pods_delete"), ToolCategory::Write);
+        assert_eq!(mcp_category(false, "pods_list"), ToolCategory::Read);
+        assert_eq!(mcp_category(false, "frobnicate"), ToolCategory::Unknown);
+    }
+
+    #[test]
+    fn cap_tool_result_passes_short_through() {
+        let s = "small tool output".to_string();
+        assert_eq!(cap_tool_result(s.clone(), None), s);
+    }
+
+    #[test]
+    fn cap_tool_result_passes_exact_cap_through() {
+        let s = "x".repeat(MAX_TOOL_RESULT_BYTES);
+        // A result sitting exactly on the cap is left untouched — no marker.
+        assert_eq!(cap_tool_result(s.clone(), None), s);
+    }
+
+    #[test]
+    fn cap_tool_result_truncates_oversized_with_marker() {
+        let s = "y".repeat(MAX_TOOL_RESULT_BYTES + 5_000);
+        // No handle (spool unavailable) → lossy marker tells the model to narrow.
+        let out = cap_tool_result(s, None);
+        assert!(out.starts_with(&"y".repeat(MAX_TOOL_RESULT_BYTES)));
+        assert!(out.contains("tool output truncated"));
+        assert!(out.contains("5000 of"));
+        assert!(out.contains("Narrow the request"));
+    }
+
+    #[test]
+    fn cap_tool_result_with_handle_points_at_recovery_tools() {
+        let s = "z".repeat(MAX_TOOL_RESULT_BYTES + 1_000);
+        let out = cap_tool_result(s, Some("call_abc123"));
+        assert!(out.starts_with(&"z".repeat(MAX_TOOL_RESULT_BYTES)));
+        assert!(out.contains("tool output truncated"));
+        assert!(out.contains("call_abc123"));
+        assert!(out.contains("fs_tool_output_read"));
+        assert!(out.contains("fs_tool_output_grep"));
+    }
+
+    #[test]
+    fn cap_tool_result_never_splits_codepoint() {
+        // A 3-byte char straddling the cap so a naive `&s[..MAX]` would
+        // panic mid-codepoint. The whole char is dropped, not split.
+        let mut s = "a".repeat(MAX_TOOL_RESULT_BYTES - 1);
+        s.push('€'); // occupies bytes MAX-1..=MAX+1; byte MAX is not a boundary
+        s.push_str(&"b".repeat(100));
+        let out = cap_tool_result(s, None); // must not panic
+        assert!(out.starts_with(&"a".repeat(MAX_TOOL_RESULT_BYTES - 1)));
+        assert!(!out.contains('€'));
+        assert!(out.contains("tool output truncated"));
+    }
+
+    #[test]
+    fn char_boundary_floor_walks_back_to_boundary() {
+        // "a€" → bytes [a][€ € €], valid boundaries at 0, 1, 4.
+        let s = "a€";
+        assert_eq!(s.len(), 4);
+        assert_eq!(char_boundary_floor(s, 5), 4, "already fits → full len");
+        assert_eq!(char_boundary_floor(s, 4), 4, "exact boundary kept");
+        assert_eq!(char_boundary_floor(s, 3), 1, "mid-€ floors to 1");
+        assert_eq!(char_boundary_floor(s, 2), 1, "mid-€ floors to 1");
+        assert_eq!(char_boundary_floor(s, 1), 1, "ascii boundary kept");
     }
 
     #[test]

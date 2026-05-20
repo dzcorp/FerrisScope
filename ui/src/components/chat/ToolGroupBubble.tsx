@@ -125,13 +125,34 @@ function ToolGroupBubbleInner({ items }: Props) {
 
   if (!latest) return null;
 
-  const toggleOpen = (key: string) =>
+  // Collapsing the group resets per-row open state so re-expanding always
+  // starts from the clean summary view. Without this, a row left open
+  // before a collapse would silently reappear expanded on the next expand —
+  // state the operator can't see while collapsed, surfacing as a surprise.
+  const toggleGroup = () => {
+    if (expanded) {
+      setExpanded(false);
+      setOpenIds(new Set());
+    } else {
+      setExpanded(true);
+    }
+  };
+
+  // A row's payload only renders while the group is expanded (the collapsed
+  // viewport clips per-row height). So a row click in collapsed mode expands
+  // the group *and* opens that row in one batched update — the operator gets
+  // immediate, visible feedback. Previously the click only recorded hidden
+  // open state that did nothing until a later group expand, then sprang the
+  // row open as if pre-selected.
+  const toggleOpen = (key: string) => {
+    if (!expanded) setExpanded(true);
     setOpenIds((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
       return next;
     });
+  };
 
   return (
     <div
@@ -150,7 +171,7 @@ function ToolGroupBubbleInner({ items }: Props) {
     >
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={toggleGroup}
         style={{
           display: "flex",
           alignItems: "center",
@@ -230,8 +251,9 @@ export const ToolGroupBubble = memo(ToolGroupBubbleInner);
 //     pulsing accent dot + "running Xs" elapsed counter, no payload
 //     expand (no content yet).
 //   - `result`: tool finished; renders ✓/✗ + name + preview + line
-//     count, click to expand the payload (only when the group itself
-//     is also expanded — collapsed view clips per-row height anyway).
+//     count, click to expand the payload. Clicking a row while the group
+//     is collapsed expands the group too, so the payload is visible (the
+//     collapsed viewport clips per-row height).
 // Keying both states under the same tool_call_id means the transition
 // is an in-place update, not a remount.
 function ToolRow({
@@ -331,8 +353,10 @@ function ResultRow({
   const content = message.content ?? "";
   const preview = message.toolPreview ?? "";
   const lineCount = message.toolLineCount ?? 0;
-  // Payload-expand only makes sense when the group itself is expanded —
-  // when collapsed the viewport clips to N rows anyway.
+  // The payload only renders when the group is expanded — the collapsed
+  // viewport clips to N rows. `open` is kept in sync with `expanded` by the
+  // group's toggle handlers (opening a row expands the group; collapsing the
+  // group clears open rows), so this AND never strands hidden open state.
   const showPayload = open && expanded;
 
   return (
@@ -359,14 +383,14 @@ function ResultRow({
           color: t.textMuted,
           fontFamily: FF_MONO,
           fontSize: FS_SM,
-          cursor: expanded ? "pointer" : "default",
+          cursor: "pointer",
           textAlign: "left",
           width: "100%",
           ["--fs-tool-hover" as string]: t.hover,
           ["--fs-tool-open-bg" as string]: t.surfaceAlt,
           contain: "content",
         }}
-        title={expanded ? (showPayload ? "Collapse" : "Expand") : undefined}
+        title={showPayload ? "Collapse" : "Expand"}
       >
         <span style={{ color: t.textDim, width: 8 }}>
           {showPayload ? "▾" : "▸"}

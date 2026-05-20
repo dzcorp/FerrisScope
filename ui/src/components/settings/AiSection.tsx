@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useResolvedTheme } from "../../store";
 import { api } from "../../api";
 import type {
@@ -6,6 +12,7 @@ import type {
   ApprovalMode,
   AuthMode,
   McpServerConfig,
+  McpTransport,
   McpTestResult,
   ModelInfo,
   ProviderKind,
@@ -25,6 +32,13 @@ import {
   hexWithAlpha,
 } from "../../theme";
 import { Btn, ErrorBlock, Field, SectionHeader, Select, Toggle } from "../ui";
+import {
+  KvEditor,
+  kvBufferFromPairs,
+  kvBufferToMap,
+  kvBufferDirty,
+  type KvBuffer,
+} from "../detail/edit";
 
 // AiSection — settings page tab for the cluster-aware AI agent. The
 // settings shape is provider-list + per-provider credential state. Each
@@ -936,9 +950,13 @@ function McpServersField({
       {
         id: makeServerId(),
         name: `server-${servers.length + 1}`,
+        transport: "stdio",
         command: "",
+        url: null,
         args: [],
         env: {},
+        headers: {},
+        trust_as_read: false,
         enabled: true,
       },
     ];
@@ -963,9 +981,13 @@ function McpServersField({
       {
         id: makeServerId(),
         name: "MCP server",
+        transport: "stdio",
         command: legacyPath,
+        url: null,
         args: [],
         env: {},
+        headers: {},
+        trust_as_read: false,
         enabled: true,
       },
     ];
@@ -1051,7 +1073,9 @@ function McpServersField({
   );
 }
 
-function McpServerRow({
+// Exported for the interaction test (`AiSection.mcpEnv.test.tsx`); the
+// settings page renders it via `McpServersField`.
+export function McpServerRow({
   t,
   value,
   open,
@@ -1071,17 +1095,70 @@ function McpServerRow({
   // the settings page.
   const [name, setName] = useState(value.name);
   const [command, setCommand] = useState(value.command);
+  const [url, setUrl] = useState(value.url ?? "");
   useEffect(() => setName(value.name), [value.name]);
   useEffect(() => setCommand(value.command), [value.command]);
+  useEffect(() => setUrl(value.url ?? ""), [value.url]);
+
+  const isRemote = value.transport === "sse" || value.transport === "http";
 
   const argsText = useMemo(() => value.args.join("\n"), [value.args]);
-  const envText = useMemo(
+
+  // Env is edited through the shared KvEditor (KEY / VALUE fields + Add),
+  // not a `KEY=VALUE` textarea. The buffer is the in-progress draft; we
+  // commit it to the backend on blur (see the wrapping div below) so typing
+  // doesn't roundtrip per keystroke. A stable signature of the upstream env
+  // re-seeds the buffer when the canonical value changes (our own commit, a
+  // migrate, or an external edit) without clobbering edits mid-typing.
+  const envSig = useMemo(
     () =>
       Object.entries(value.env)
         .map(([k, v]) => `${k}=${v}`)
         .join("\n"),
     [value.env],
   );
+  const [envBuffer, setEnvBuffer] = useState<KvBuffer>(() =>
+    kvBufferFromPairs(Object.entries(value.env)),
+  );
+  const seededEnvRef = useRef(envSig);
+  useEffect(() => {
+    if (seededEnvRef.current === envSig) return;
+    seededEnvRef.current = envSig;
+    setEnvBuffer(kvBufferFromPairs(Object.entries(value.env)));
+  }, [envSig, value.env]);
+
+  // Push the buffer to the backend only when something actually changed —
+  // kvBufferDirty is 0 right after a (re)seed, so re-renders don't trigger
+  // redundant saves.
+  const commitEnv = () => {
+    if (kvBufferDirty(envBuffer) > 0) {
+      onChange({ env: kvBufferToMap(envBuffer) });
+    }
+  };
+
+  // Headers (sse / http auth etc.) reuse the same KvEditor + blur-commit
+  // pattern as env — see the env buffer above for the mechanics.
+  const headersSig = useMemo(
+    () =>
+      Object.entries(value.headers)
+        .map(([k, v]) => `${k}=${v}`)
+        .join("\n"),
+    [value.headers],
+  );
+  const [headersBuffer, setHeadersBuffer] = useState<KvBuffer>(() =>
+    kvBufferFromPairs(Object.entries(value.headers)),
+  );
+  const seededHeadersRef = useRef(headersSig);
+  useEffect(() => {
+    if (seededHeadersRef.current === headersSig) return;
+    seededHeadersRef.current = headersSig;
+    setHeadersBuffer(kvBufferFromPairs(Object.entries(value.headers)));
+  }, [headersSig, value.headers]);
+  const commitHeaders = () => {
+    if (kvBufferDirty(headersBuffer) > 0) {
+      onChange({ headers: kvBufferToMap(headersBuffer) });
+    }
+  };
 
   // Test state — `running` is the in-flight request, `result` is the most
   // recent outcome. Cleared whenever the underlying value mutates so the
@@ -1090,15 +1167,23 @@ function McpServerRow({
   const [testResult, setTestResult] = useState<McpTestResult | null>(null);
   useEffect(() => {
     setTestResult(null);
-  }, [value.command, value.args, value.env, value.name]);
+  }, [
+    value.transport,
+    value.command,
+    value.url,
+    value.args,
+    value.env,
+    value.headers,
+    value.name,
+  ]);
 
   const runTest = async () => {
-    if (!command.trim()) {
+    if (isRemote ? !url.trim() : !command.trim()) {
       setTestResult({
         ok: false,
         tool_count: 0,
         tool_names: [],
-        error: "command is empty",
+        error: isRemote ? "url is empty" : "command is empty",
       });
       return;
     }
@@ -1107,8 +1192,16 @@ function McpServerRow({
     try {
       // Use the in-buffer values so the operator can validate edits that
       // haven't been blur-committed yet — the test is meant to be quick
-      // feedback, not "save first then test".
-      const res = await api.mcpTestServer({ ...value, name, command });
+      // feedback, not "save first then test". Env / headers come from the
+      // live KvEditor buffers for the same reason.
+      const res = await api.mcpTestServer({
+        ...value,
+        name,
+        command,
+        url: url.trim() ? url.trim() : null,
+        env: kvBufferToMap(envBuffer),
+        headers: kvBufferToMap(headersBuffer),
+      });
       setTestResult(res);
     } catch (e) {
       setTestResult({
@@ -1160,7 +1253,7 @@ function McpServerRow({
           }}
           placeholder="name"
           style={{
-            width: 120,
+            width: 110,
             background: t.surface,
             border: `1px solid ${t.borderSoft}`,
             color: t.text,
@@ -1170,32 +1263,71 @@ function McpServerRow({
             fontSize: FS_SM,
           }}
         />
-        <input
-          type="text"
-          value={command}
-          onChange={(e) => setCommand(e.target.value)}
-          onBlur={() => {
-            if (command !== value.command) onChange({ command });
-          }}
-          placeholder="/usr/local/bin/my-mcp-server"
-          style={{
-            flex: 1,
-            background: t.surface,
-            border: `1px solid ${t.borderSoft}`,
-            color: t.text,
-            borderRadius: R_MD,
-            padding: "4px 6px",
-            fontFamily: FF_MONO,
-            fontSize: FS_SM,
-          }}
+        <Select<McpTransport>
+          t={t}
+          value={value.transport}
+          onChange={(transport) => onChange({ transport })}
+          options={[
+            { value: "stdio", label: "stdio" },
+            { value: "http", label: "http" },
+            { value: "sse", label: "sse" },
+          ]}
+          fullWidth={false}
+          style={{ width: 84 }}
         />
+        {isRemote ? (
+          <input
+            type="text"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onBlur={() => {
+              const next = url.trim() ? url.trim() : null;
+              if (next !== value.url) onChange({ url: next });
+            }}
+            placeholder="https://mcp.example.com/rpc"
+            style={{
+              flex: 1,
+              background: t.surface,
+              border: `1px solid ${t.borderSoft}`,
+              color: t.text,
+              borderRadius: R_MD,
+              padding: "4px 6px",
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
+            }}
+          />
+        ) : (
+          <input
+            type="text"
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            onBlur={() => {
+              if (command !== value.command) onChange({ command });
+            }}
+            placeholder="/usr/local/bin/my-mcp-server"
+            style={{
+              flex: 1,
+              background: t.surface,
+              border: `1px solid ${t.borderSoft}`,
+              color: t.text,
+              borderRadius: R_MD,
+              padding: "4px 6px",
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
+            }}
+          />
+        )}
         <Btn
           t={t}
           variant="ghost"
           size="sm"
           onClick={runTest}
-          disabled={testRunning || !command.trim()}
-          title="Spawn the server, run MCP initialize + tools/list, kill it. Confirms the binary is reachable and speaks MCP."
+          disabled={testRunning || (isRemote ? !url.trim() : !command.trim())}
+          title={
+            isRemote
+              ? "Connect to the URL, run MCP initialize + tools/list. Confirms the endpoint is reachable and speaks MCP."
+              : "Spawn the server, run MCP initialize + tools/list, kill it. Confirms the binary is reachable and speaks MCP."
+          }
         >
           {testRunning ? "Testing…" : "Test"}
         </Btn>
@@ -1232,90 +1364,142 @@ function McpServerRow({
             paddingLeft: 24,
           }}
         >
+          {/* Trust toggle — applies to every transport. */}
           <label
-            style={{
-              fontSize: FS_SM,
-              color: t.textMuted,
-              alignSelf: "start",
-              paddingTop: 4,
-            }}
-            title="Either paste a single shell-style line (`-y @scope/pkg /path`) or put one arg per line (preserves args with spaces)."
+            style={{ fontSize: FS_SM, color: t.textMuted, alignSelf: "center" }}
+            title="Treat every tool from this server as a read: auto-run with no approval prompt. Only enable for servers you fully trust — it bypasses the per-write approval gate."
           >
-            Args
+            Trust
           </label>
-          <textarea
-            // Uncontrolled — the textarea owns its in-progress text; we
-            // re-mount it (via `key`) only when the upstream value changes
-            // externally so a parent rerender doesn't blow away typing.
-            // After blur, the parsed args are joined back with newlines so
-            // the operator immediately sees how their input was tokenized.
-            key={`args-${argsText}`}
-            defaultValue={argsText}
-            onBlur={(e) => {
-              const next = parseMcpArgs(e.target.value);
-              if (
-                next.length !== value.args.length ||
-                next.some((a, i) => a !== value.args[i])
-              ) {
-                onChange({ args: next });
-              }
-            }}
-            rows={2}
-            placeholder={
-              "Paste shell-style: -y @modelcontextprotocol/server-filesystem /path\nor one per line"
-            }
-            style={{
-              background: t.surface,
-              border: `1px solid ${t.borderSoft}`,
-              color: t.text,
-              borderRadius: R_MD,
-              padding: "4px 6px",
-              fontFamily: FF_MONO,
-              fontSize: FS_SM,
-              resize: "vertical",
-              minHeight: 36,
-            }}
-          />
-          <label
-            style={{
-              fontSize: FS_SM,
-              color: t.textMuted,
-              alignSelf: "start",
-              paddingTop: 4,
-            }}
-          >
-            Env
-          </label>
-          <textarea
-            key={`env-${envText}`}
-            defaultValue={envText}
-            onBlur={(e) => {
-              const next: Record<string, string> = {};
-              for (const line of e.target.value.split("\n")) {
-                const trimmed = line.trim();
-                if (!trimmed) continue;
-                const eq = trimmed.indexOf("=");
-                if (eq <= 0) continue;
-                const k = trimmed.slice(0, eq).trim();
-                const v = trimmed.slice(eq + 1);
-                if (k) next[k] = v;
-              }
-              onChange({ env: next });
-            }}
-            rows={3}
-            placeholder="GITHUB_TOKEN=…"
-            style={{
-              background: t.surface,
-              border: `1px solid ${t.borderSoft}`,
-              color: t.text,
-              borderRadius: R_MD,
-              padding: "4px 6px",
-              fontFamily: FF_MONO,
-              fontSize: FS_SM,
-              resize: "vertical",
-              minHeight: 40,
-            }}
-          />
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Toggle
+              t={t}
+              checked={value.trust_as_read}
+              onChange={(v) => onChange({ trust_as_read: v })}
+              label="Auto-approve all tools"
+            />
+            {value.trust_as_read && (
+              <span style={{ fontSize: FS_XS, color: t.warn }}>
+                Tools run without approval
+              </span>
+            )}
+          </div>
+
+          {!isRemote && (
+            <>
+              <label
+                style={{
+                  fontSize: FS_SM,
+                  color: t.textMuted,
+                  alignSelf: "start",
+                  paddingTop: 4,
+                }}
+                title="Either paste a single shell-style line (`-y @scope/pkg /path`) or put one arg per line (preserves args with spaces)."
+              >
+                Args
+              </label>
+              <textarea
+                // Uncontrolled — the textarea owns its in-progress text; we
+                // re-mount it (via `key`) only when the upstream value changes
+                // externally so a parent rerender doesn't blow away typing.
+                // After blur, the parsed args are joined back with newlines so
+                // the operator immediately sees how their input was tokenized.
+                key={`args-${argsText}`}
+                defaultValue={argsText}
+                onBlur={(e) => {
+                  const next = parseMcpArgs(e.target.value);
+                  if (
+                    next.length !== value.args.length ||
+                    next.some((a, i) => a !== value.args[i])
+                  ) {
+                    onChange({ args: next });
+                  }
+                }}
+                rows={2}
+                placeholder={
+                  "Paste shell-style: -y @modelcontextprotocol/server-filesystem /path\nor one per line"
+                }
+                style={{
+                  background: t.surface,
+                  border: `1px solid ${t.borderSoft}`,
+                  color: t.text,
+                  borderRadius: R_MD,
+                  padding: "4px 6px",
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
+                  resize: "vertical",
+                  minHeight: 36,
+                }}
+              />
+              <label
+                style={{
+                  fontSize: FS_SM,
+                  color: t.textMuted,
+                  alignSelf: "start",
+                  paddingTop: 4,
+                }}
+                title="Extra environment variables passed to the server process. One KEY / VALUE pair per row — no quotes or = needed."
+              >
+                Env
+              </label>
+              <div
+                // Commit on blur of the whole editor, not when tabbing between
+                // a row's KEY and VALUE inputs. relatedTarget inside the div
+                // means focus stayed within the editor → keep the draft local.
+                onBlur={(e) => {
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                    return;
+                  }
+                  commitEnv();
+                }}
+              >
+                <KvEditor
+                  t={t}
+                  buffer={envBuffer}
+                  onChange={setEnvBuffer}
+                  keyPlaceholder="KEY"
+                  valuePlaceholder="VALUE"
+                  // Reject keys with '=' or whitespace — invalid env names and
+                  // the exact mistake the old `KEY=VALUE` textarea invited.
+                  validateKey={(k) => !/[\s=]/.test(k)}
+                />
+              </div>
+            </>
+          )}
+
+          {isRemote && (
+            <>
+              <label
+                style={{
+                  fontSize: FS_SM,
+                  color: t.textMuted,
+                  alignSelf: "start",
+                  paddingTop: 4,
+                }}
+                title="Extra HTTP headers sent on every request — typically Authorization for a remote server's token. One NAME / VALUE pair per row."
+              >
+                Headers
+              </label>
+              <div
+                onBlur={(e) => {
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                    return;
+                  }
+                  commitHeaders();
+                }}
+              >
+                <KvEditor
+                  t={t}
+                  buffer={headersBuffer}
+                  onChange={setHeadersBuffer}
+                  keyPlaceholder="Header"
+                  valuePlaceholder="value"
+                  // HTTP header names can't contain whitespace or a colon.
+                  validateKey={(k) => !/[\s:]/.test(k)}
+                />
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

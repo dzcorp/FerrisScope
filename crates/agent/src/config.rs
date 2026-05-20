@@ -173,10 +173,40 @@ impl ReasoningSettings {
     }
 }
 
+/// How FerrisScope connects to an MCP server. Mirrors the `type` field in
+/// Claude Desktop / Cursor configs so JSON copy-pastes between tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTransport {
+    /// Spawn `command` as a subprocess and talk JSON-RPC over its
+    /// stdin/stdout. The default and the only transport that uses
+    /// `command` / `args` / `env`.
+    #[default]
+    Stdio,
+    /// Legacy HTTP+SSE transport (MCP 2024-11-05): GET `url` for a
+    /// Server-Sent Events stream, POST requests to the `endpoint` URL the
+    /// server advertises on that stream.
+    Sse,
+    /// Streamable HTTP transport (MCP 2025-03-26): POST JSON-RPC to `url`;
+    /// each response is either a JSON body or an SSE stream. Session is
+    /// carried in the `Mcp-Session-Id` header.
+    Http,
+}
+
+impl McpTransport {
+    /// `true` for the network transports (`sse` / `http`) that connect to a
+    /// `url` rather than spawning a local `command`.
+    #[must_use]
+    pub fn is_remote(self) -> bool {
+        matches!(self, Self::Sse | Self::Http)
+    }
+}
+
 /// One operator-configured external MCP-protocol server. Each entry produces
-/// a separate child process per chat; their tool catalogues are merged with
-/// the native toolkit. The shape mirrors `mcpServers` in Claude Desktop /
-/// Cursor / similar tools so the JSON copy-pastes between them.
+/// a separate connection per chat (a subprocess for `stdio`, an HTTP client
+/// for `sse` / `http`); their tool catalogues are merged with the native
+/// toolkit. The shape mirrors `mcpServers` in Claude Desktop / Cursor /
+/// similar tools so the JSON copy-pastes between them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Stable id used to address this entry from the UI / events. Generated
@@ -185,19 +215,36 @@ pub struct McpServerConfig {
     /// Operator-friendly label ("filesystem", "github", "my-server"). Shown
     /// in the chat-tools popover and per-server status messages.
     pub name: String,
-    /// Path to the executable. Absolute paths are recommended (no PATH
-    /// lookup is performed by FerrisScope itself, but the OS may resolve
-    /// relative names).
+    /// How to reach the server. Defaults to `stdio` (subprocess). When set to
+    /// `sse` / `http`, `url` is used instead of `command` / `args` / `env`.
+    #[serde(default)]
+    pub transport: McpTransport,
+    /// Path to the executable. Used only by the `stdio` transport. Absolute
+    /// paths are recommended (no PATH lookup is performed by FerrisScope
+    /// itself, but the OS may resolve relative names).
+    #[serde(default)]
     pub command: String,
-    /// CLI args appended after the command. Most MCP servers want a `stdio`
-    /// flag here (e.g. `--stdio`, `--transport stdio`).
+    /// Endpoint URL. Used only by the `sse` / `http` transports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// CLI args appended after the command (`stdio` only). Most MCP servers
+    /// want a `stdio` flag here (e.g. `--stdio`, `--transport stdio`).
     #[serde(default)]
     pub args: Vec<String>,
     /// Extra env vars merged on top of the inherited environment + the
-    /// `KUBECONFIG` we set to pin the chat's bound context. Operator-supplied
-    /// vars win on key collision.
+    /// `KUBECONFIG` we set to pin the chat's bound context (`stdio` only).
+    /// Operator-supplied vars win on key collision.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Extra HTTP headers sent on every request (`sse` / `http` only) —
+    /// typically `Authorization` for a remote server's bearer token.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// Treat every tool from this server as a read (auto-run, no approval
+    /// prompt). Operator opt-in trust decision per server — off by default.
+    /// Overrides the name heuristic; native tools are unaffected.
+    #[serde(default)]
+    pub trust_as_read: bool,
     /// Disabled servers are persisted but not spawned. Lets operators keep
     /// configurations around without paying the spawn cost.
     #[serde(default = "default_enabled")]
@@ -251,4 +298,69 @@ pub struct AgentSettings {
     /// `provider_options` still wins.
     #[serde(default)]
     pub reasoning: ReasoningSettings,
+}
+
+#[cfg(test)]
+mod mcp_config_tests {
+    use super::{McpServerConfig, McpTransport};
+
+    #[test]
+    fn legacy_config_deserializes_with_transport_and_trust_defaults() {
+        // A pre-transport persisted entry omits the new fields entirely.
+        let json = r#"{
+            "id": "s1",
+            "name": "github",
+            "command": "/usr/local/bin/srv",
+            "args": ["--stdio"],
+            "env": { "TOKEN": "x" },
+            "enabled": true
+        }"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.transport, McpTransport::Stdio);
+        assert!(!cfg.trust_as_read);
+        assert_eq!(cfg.url, None);
+        assert!(cfg.headers.is_empty());
+        assert!(cfg.transport == McpTransport::default());
+    }
+
+    #[test]
+    fn remote_config_round_trips_transport_url_headers_trust() {
+        let json = r#"{
+            "id": "s2",
+            "name": "remote",
+            "transport": "http",
+            "url": "https://mcp.example.com/rpc",
+            "headers": { "Authorization": "Bearer t" },
+            "trust_as_read": true,
+            "enabled": true
+        }"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.transport, McpTransport::Http);
+        assert!(cfg.transport.is_remote());
+        assert_eq!(cfg.url.as_deref(), Some("https://mcp.example.com/rpc"));
+        assert_eq!(
+            cfg.headers.get("Authorization").map(String::as_str),
+            Some("Bearer t")
+        );
+        assert!(cfg.trust_as_read);
+        // Command defaults to empty for a remote entry.
+        assert!(cfg.command.is_empty());
+
+        // Re-serialize → re-parse keeps the snake_case transport tag stable.
+        let s = serde_json::to_string(&cfg).unwrap();
+        assert!(s.contains("\"transport\":\"http\""), "{s}");
+        let back: McpServerConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.transport, McpTransport::Http);
+    }
+
+    #[test]
+    fn transport_tags_are_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&McpTransport::Sse).unwrap(),
+            "\"sse\""
+        );
+        assert!(!McpTransport::Stdio.is_remote());
+        assert!(McpTransport::Sse.is_remote());
+        assert!(McpTransport::Http.is_remote());
+    }
 }

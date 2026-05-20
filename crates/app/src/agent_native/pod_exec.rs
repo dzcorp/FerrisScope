@@ -28,9 +28,13 @@ use tauri::{AppHandle, Manager};
 use crate::agent_native::{read_capped, ChatClusterRef};
 use crate::state::AppState;
 
-/// Output cap matches `fs_node_shell_exec` so the agent gets a consistent
-/// budget regardless of which exec path it picked.
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+/// Output cap matches `fs_node_shell_exec` / `fs_node_ssh_exec` so the agent
+/// gets a consistent budget regardless of which exec path it picked. Raised
+/// from 64 KiB now that the transcript is protected by the spill (oversized
+/// results are saved to disk and clipped to `MAX_TOOL_RESULT_BYTES`): this cap
+/// bounds captured memory only, and the full output stays searchable via
+/// `fs_tool_output_grep` / `fs_tool_output_read`.
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Per-call timeout default. Overridable via `timeout_seconds`. Sized to
 /// fit comfortably under the agent loop's 300s ceiling so a tool-level
@@ -83,7 +87,9 @@ impl NativeTool for PodExec {
             description: "Run a command in an existing pod's container (kubectl exec). \
                 argv-only — pass `[\"sh\",\"-c\",\"...\"]` for shell (won't work in \
                 distroless / scratch images). Container defaults to the first in \
-                the pod spec. Output capped at 64KiB."
+                the pod spec. Output capped at 1 MiB; large output is saved \
+                automatically — search it with `fs_tool_output_grep` / `fs_tool_output_read` \
+                using the handle in the truncation notice."
                 .into(),
             parameters: json!({
                 "type": "object",
