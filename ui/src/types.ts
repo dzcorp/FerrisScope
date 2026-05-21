@@ -194,6 +194,7 @@ export type PrefsSettings = {
   refresh_on_launch: boolean;
   ui_scale: number;
   fleet_view: PrefsFleetView;
+  dark_console: boolean;
 };
 export type PrefsUiState = {
   selected_context: string | null;

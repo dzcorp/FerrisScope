@@ -892,6 +892,28 @@ export function resolveTheme(opts: {
   };
 }
 
+// ── Console (logs + terminal) surface ───────────────────────────────────────
+// Logs and terminals conventionally read like a terminal — dark, regardless of
+// the surrounding chrome. With `darkConsole` on we resolve the *dark* palette of
+// the active theme even in light mode, so the surface stays a console while the
+// rest of the app follows the theme. Off → it follows the active mode like any
+// other panel. Overrides ride along exactly as the mode toggle reuses them.
+export function consoleTokens(opts: {
+  themeId: string;
+  paletteId: string;
+  mode: ThemeMode;
+  overrides?: ThemeOverrides | null;
+  darkConsole: boolean;
+}): ColorTokens {
+  const mode: ThemeMode = opts.darkConsole ? "dark" : opts.mode;
+  return resolveTheme({
+    themeId: opts.themeId,
+    paletteId: opts.paletteId,
+    mode,
+    overrides: opts.overrides,
+  }).tokens;
+}
+
 // ── Legacy `tokens(mode)` shim ─────────────────────────────────────────────
 // Existing call sites pass only `mode`. They get the Default theme's palette,
 // matching today's behaviour exactly. New code should read `tokens` off

@@ -89,6 +89,18 @@ describe("setTheme", () => {
   });
 });
 
+describe("darkConsole setting", () => {
+  it("defaults to on", () => {
+    expect(useAppStore.getState().settings.darkConsole).toBe(true);
+  });
+  it("patchSettings toggles it", () => {
+    useAppStore.getState().patchSettings({ darkConsole: false });
+    expect(useAppStore.getState().settings.darkConsole).toBe(false);
+    useAppStore.getState().patchSettings({ darkConsole: true });
+    expect(useAppStore.getState().settings.darkConsole).toBe(true);
+  });
+});
+
 describe("setPalette", () => {
   it("swaps palette inside the current theme", () => {
     useAppStore.getState().setTheme("default");

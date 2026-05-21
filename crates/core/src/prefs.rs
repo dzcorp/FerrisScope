@@ -153,6 +153,10 @@ fn default_ui_scale() -> f32 {
     1.0
 }
 
+fn default_dark_console() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub refresh_sec: u32,
@@ -165,6 +169,11 @@ pub struct Settings {
     pub ui_scale: f32,
     #[serde(default)]
     pub fleet_view: FleetView,
+    /// Force logs + terminal surfaces to a dark, console-style palette even
+    /// when the active theme is light. Defaults to true — operators expect a
+    /// terminal to look like a terminal. Toggleable in Settings → Appearance.
+    #[serde(default = "default_dark_console")]
+    pub dark_console: bool,
 }
 
 impl Default for Settings {
@@ -178,6 +187,7 @@ impl Default for Settings {
             refresh_on_launch: true,
             ui_scale: default_ui_scale(),
             fleet_view: FleetView::default(),
+            dark_console: default_dark_console(),
         }
     }
 }
@@ -329,6 +339,42 @@ mod tests {
             prefs.update.auto_check_enabled,
             "auto_check_enabled must default to true so legacy installs opt in"
         );
+    }
+
+    #[test]
+    fn legacy_prefs_without_dark_console_defaults_to_true() {
+        // `dark_console` post-dates the first Settings shape. A prefs.json
+        // written before it existed must deserialise with the field defaulting
+        // to true so existing installs get the dark console without re-opting.
+        let legacy = r#"{
+            "theme": "dark",
+            "settings": {
+                "refresh_sec": 15,
+                "confirm_destructive": true,
+                "show_system_ns": false,
+                "density": "comfortable",
+                "mono_tables": true,
+                "refresh_on_launch": true
+            },
+            "ui": {}
+        }"#;
+        let prefs = parse(legacy);
+        assert!(
+            prefs.settings.dark_console,
+            "dark_console must default to true for prefs files written before it existed"
+        );
+    }
+
+    #[test]
+    fn dark_console_round_trips_when_disabled() {
+        // An operator who turns the dark console off must have that choice
+        // survive a serialise → parse round-trip.
+        let mut prefs = Prefs::default();
+        assert!(prefs.settings.dark_console, "default is on");
+        prefs.settings.dark_console = false;
+        let json = serde_json::to_string(&prefs).unwrap();
+        let parsed = parse(&json);
+        assert!(!parsed.settings.dark_console);
     }
 
     #[test]
