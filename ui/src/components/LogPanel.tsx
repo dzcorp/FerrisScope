@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { useResolvedTheme } from "../store";
+import { useConsoleTokens, useResolvedTheme } from "../store";
 import { tokens, FF_MONO, type ThemeMode, FS_LG, FS_SM } from "../theme";
 import {
   Eyebrow,
@@ -41,6 +41,9 @@ export function LogPanel({
   onClose,
 }: Props) {
   const t = useResolvedTheme().tokens;
+  // Panel chrome (title bar, container Select) follows the theme; the log
+  // body + footer render as a console (dark by default).
+  const consoleT = useConsoleTokens();
   const initialContainer =
     (defaultContainer && pod.containers.includes(defaultContainer)
       ? defaultContainer
@@ -181,7 +184,7 @@ export function LogPanel({
         </header>
 
         <LogView
-          t={t}
+          t={consoleT}
           clusterId={clusterId}
           namespace={pod.namespace}
           pod={pod.name}

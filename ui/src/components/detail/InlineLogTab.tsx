@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { useResolvedTheme } from "../../store";
+import { useConsoleTokens, useResolvedTheme } from "../../store";
 import { FF_MONO, type ThemeMode, FS_SM } from "../../theme";
 import { Select } from "../ui";
 import { LogView, type LogViewState } from "../log/LogView";
@@ -41,6 +41,9 @@ export function InlineLogTab({
   defaultContainer?: string | null;
 }) {
   const t = useResolvedTheme().tokens;
+  // The log body + footer render as a console (dark by default); the tab
+  // chrome above stays in the active theme. See `useConsoleTokens`.
+  const consoleT = useConsoleTokens();
   const initialContainer =
     (defaultContainer && containers.includes(defaultContainer)
       ? defaultContainer
@@ -148,7 +151,7 @@ export function InlineLogTab({
         </span>
       </div>
       <LogView
-        t={t}
+        t={consoleT}
         clusterId={clusterId}
         namespace={namespace}
         pod={name}

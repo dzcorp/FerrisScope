@@ -43,6 +43,16 @@ textarea,
   -webkit-user-select: text;
 }
 
+/* Console (pod-log) text selection. `color-scheme` tracks the app theme, not
+   the console surface, so on a light theme with the dark console the UA's
+   default selection can come out invisible. `LogView` sets
+   `--fs-console-selection` from the console text colour; pin it explicitly so
+   the highlight is always visible and glyphs stay readable through the veil. */
+.fs-log-body::selection,
+.fs-log-body ::selection {
+  background: var(--fs-console-selection, rgba(110, 120, 140, 0.4));
+}
+
 @keyframes fs-pulse-dot-kf {
   0%,
   100% {

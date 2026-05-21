@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -8,10 +9,17 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import jsYaml from "js-yaml";
 import Editor from "@monaco-editor/react";
-import { useAppStore, type DockPlacement, type DockTab, useResolvedTheme } from "../store";
+import {
+  useAppStore,
+  type DockPlacement,
+  type DockTab,
+  useConsoleTokens,
+  useResolvedTheme,
+} from "../store";
 import { DockChat } from "./chat/DockChat";
 import {
   FF_MONO,
@@ -24,8 +32,10 @@ import {
   hexWithAlpha,
 } from "../theme";
 import { Btn, ErrorBlock, IconBtn, Icons, Select } from "./ui";
+import { MinimizedChatPill } from "./MinimizedChatPill";
 import { api } from "../api";
 import type { DocApplyResult } from "../types";
+import { latinLetter } from "../lib/keyboard";
 import { installClipboardShortcuts } from "../lib/monacoClipboard";
 import {
   YAML_TEMPLATES,
@@ -220,65 +230,12 @@ export function Dock({
     ? null
     : horizontal
     ? (
-        <div
-          style={{
-            position: "fixed",
-            top: "calc(60px + var(--fs-titlebar-h, 0px))",
-            right: 0,
-            background: t.headerAlt,
-            borderLeft: `1px solid ${t.border}`,
-            borderTop: `1px solid ${t.border}`,
-            borderBottom: `1px solid ${t.border}`,
-            borderTopLeftRadius: 6,
-            borderBottomLeftRadius: 6,
-            padding: "8px 8px",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 8,
-            zIndex: 25,
-            fontSize: FS_SM,
-          }}
-        >
-          <span style={{ color: t.textDim, display: "inline-flex" }}>
-            {Icons.chat}
-          </span>
-          <span
-            style={{
-              color: t.textMuted,
-              writingMode: "vertical-rl",
-              transform: "rotate(180deg)",
-              fontWeight: 500,
-              letterSpacing: 0.4,
-            }}
-          >
-            {tabs.length} chat{tabs.length === 1 ? "" : "s"}
-          </span>
-          <IconBtn
-            t={t}
-            title="Restore"
-            onClick={() => setDockMin(placement, false)}
-          >
-            <svg
-              width="11"
-              height="11"
-              viewBox="0 0 12 12"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-            >
-              <path d="M3 6h6M6 3v6" />
-            </svg>
-          </IconBtn>
-          <IconBtn
-            t={t}
-            title="Close all chats"
-            onClick={() => closeAllPlacement(placement)}
-          >
-            {Icons.close}
-          </IconBtn>
-        </div>
+        <MinimizedChatPill
+          t={t}
+          count={tabs.length}
+          onRestore={() => setDockMin(placement, false)}
+          onClose={() => closeAllPlacement(placement)}
+        />
       )
     : (
         <div
@@ -667,15 +624,129 @@ function DockTerminal({
   visible: boolean;
 }) {
   const resolved = useResolvedTheme();
-  const t = resolved.tokens;
+  // The terminal is a console — dark by default even under a light theme.
+  // xterm reads literal colors at construction time, so the live-update effect
+  // below re-applies `term.options.theme` when the operator toggles the
+  // setting on an open session.
+  const consoleT = useConsoleTokens();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
   const [status, setStatus] = useState<
     "starting" | "ready" | "exited" | "error"
   >("starting");
   const [error, setError] = useState<string | null>(null);
+
+  // ── Find-in-place (Cmd/Ctrl+F) ──────────────────────────────────────────
+  // Backed by xterm's SearchAddon. Cmd+F is intercepted via the terminal's
+  // custom-key handler (fires only when the terminal is focused) so it doesn't
+  // collide with the shell or the app-global table filter; the find input owns
+  // its own keys while it has focus.
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const findOpenRef = useRef(false);
+  const [findOpen, setFindOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  // Mirrors `query` for the mount-bound custom-key handler (Cmd+G), which
+  // would otherwise capture a stale empty string.
+  const queryRef = useRef("");
+  const [findResults, setFindResults] = useState({ index: -1, count: 0 });
+
+  // Search decorations follow the console palette. Kept in a ref so the
+  // mount-time custom-key handler and the React find input share one source,
+  // and `consoleT` changes (theme / dark-console toggle) re-tint live.
+  const searchOptsRef = useRef<ISearchOptions>({
+    decorations: {
+      matchBackground: consoleT.warn,
+      matchBorder: consoleT.warn,
+      matchOverviewRuler: consoleT.warn,
+      activeMatchBackground: consoleT.accent,
+      activeMatchColorOverviewRuler: consoleT.accent,
+    },
+  });
+  useEffect(() => {
+    searchOptsRef.current = {
+      decorations: {
+        matchBackground: consoleT.warn,
+        matchBorder: consoleT.warn,
+        matchOverviewRuler: consoleT.warn,
+        activeMatchBackground: consoleT.accent,
+        activeMatchColorOverviewRuler: consoleT.accent,
+      },
+    };
+  }, [consoleT.warn, consoleT.accent]);
+
+  const runSearch = useCallback((q: string, dir: "next" | "prev") => {
+    const s = searchRef.current;
+    if (!s || q.length === 0) return;
+    if (dir === "next") s.findNext(q, searchOptsRef.current);
+    else s.findPrevious(q, searchOptsRef.current);
+  }, []);
+
+  const openFind = useCallback(() => {
+    setFindOpen(true);
+    findOpenRef.current = true;
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  }, []);
+
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    findOpenRef.current = false;
+    setQuery("");
+    queryRef.current = "";
+    setFindResults({ index: -1, count: 0 });
+    searchRef.current?.clearDecorations();
+    termRef.current?.focus();
+  }, []);
+
+  // Re-run the search as the operator types — jumps to the first hit and keeps
+  // the live counter accurate. Empty query clears decorations.
+  const onFindChange = useCallback(
+    (v: string) => {
+      setQuery(v);
+      queryRef.current = v;
+      if (v.length === 0) {
+        searchRef.current?.clearDecorations();
+        setFindResults({ index: -1, count: 0 });
+        return;
+      }
+      runSearch(v, "next");
+    },
+    [runSearch],
+  );
+
+  const onFindKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      // Keep find keys out of the app-global handler while the input is focused.
+      e.stopPropagation();
+      const meta = e.metaKey || e.ctrlKey;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeFind();
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        runSearch(queryRef.current, e.shiftKey ? "prev" : "next");
+        return;
+      }
+      const letter = latinLetter(e);
+      if (meta && letter === "f") {
+        e.preventDefault();
+        findInputRef.current?.select();
+        return;
+      }
+      if (meta && letter === "g") {
+        e.preventDefault();
+        runSearch(queryRef.current, e.shiftKey ? "prev" : "next");
+      }
+    },
+    [closeFind, runSearch],
+  );
 
   const spec = tab.state.spec as TerminalTabSpec | undefined;
 
@@ -777,19 +848,55 @@ function DockTerminal({
           allowProposedApi: true,
           theme: {
             // xterm reads literal colors at construction time — it doesn't
-            // respond to subsequent token changes. The active palette's
-            // surface + text flow through here so light themes get a
-            // light-paper terminal (IDE-style) and dark themes stay dark.
-            // ANSI colors emitted by the shell aren't remapped — that's
-            // the program's choice.
-            background: t.surfaceAlt,
-            foreground: t.text,
-            cursor: t.good,
+            // respond to subsequent token changes (the live-update effect
+            // below handles toggles). The *console* palette flows through
+            // here: dark by default even under a light theme, so the terminal
+            // reads like a terminal. ANSI colors emitted by the shell aren't
+            // remapped — that's the program's choice.
+            background: consoleT.surfaceAlt,
+            foreground: consoleT.text,
+            cursor: consoleT.good,
+            // xterm's default selection is a translucent white — invisible on
+            // a light console. Derive a veil from the text colour so it stays
+            // visible (and glyphs readable) on both light and dark consoles.
+            selectionBackground: hexWithAlpha(consoleT.text, 0.3),
+            selectionInactiveBackground: hexWithAlpha(consoleT.text, 0.18),
           },
         });
         fit = new FitAddon();
         term.loadAddon(fit);
         term.loadAddon(new WebLinksAddon());
+        const search = new SearchAddon();
+        term.loadAddon(search);
+        searchRef.current = search;
+        // Live match counter for the find bar. `resultIndex` is -1 when there
+        // are no matches.
+        search.onDidChangeResults(({ resultIndex, resultCount }) => {
+          setFindResults({ index: resultIndex, count: resultCount });
+        });
+        // Cmd/Ctrl+F opens the find bar; Cmd/Ctrl+G steps matches while it's
+        // open. Both are swallowed (return false + stopPropagation) so the
+        // shell never sees them and the app-global Cmd+F (table filter)
+        // doesn't also fire. Everything else falls through to the PTY.
+        term.attachCustomKeyEventHandler((e) => {
+          if (e.type !== "keydown") return true;
+          const meta = e.metaKey || e.ctrlKey;
+          if (!meta) return true;
+          const letter = latinLetter(e);
+          if (letter === "f") {
+            e.preventDefault();
+            e.stopPropagation();
+            openFind();
+            return false;
+          }
+          if (letter === "g" && findOpenRef.current) {
+            e.preventDefault();
+            e.stopPropagation();
+            runSearch(queryRef.current, e.shiftKey ? "prev" : "next");
+            return false;
+          }
+          return true;
+        });
         term.open(host);
         // Auto-copy on selection (terminal-style UX): the moment the
         // operator finishes a drag-select / shift-arrow extension, the
@@ -945,6 +1052,7 @@ function DockTerminal({
       term?.dispose();
       termRef.current = null;
       fitRef.current = null;
+      searchRef.current = null;
     };
     // Spec is captured once at mount on purpose — the tab state doesn't change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -988,6 +1096,24 @@ function DockTerminal({
     };
   }, [visible]);
 
+  // Re-apply the console palette to an already-open terminal when the operator
+  // toggles "Dark console" or switches theme. xterm caches theme colors at
+  // construction, so reassigning `options.theme` is the supported way to
+  // recolor a live session. ANSI runs already on screen keep their codes;
+  // only the default fg/bg/cursor follow.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.theme = {
+      background: consoleT.surfaceAlt,
+      foreground: consoleT.text,
+      cursor: consoleT.good,
+      selectionBackground: hexWithAlpha(consoleT.text, 0.3),
+      selectionInactiveBackground: hexWithAlpha(consoleT.text, 0.18),
+    };
+    term.refresh(0, term.rows - 1);
+  }, [consoleT.surfaceAlt, consoleT.text, consoleT.good]);
+
   return (
     <div
       style={{
@@ -995,7 +1121,7 @@ function DockTerminal({
         inset: 0,
         // Matches the xterm theme background so the surrounding chrome
         // doesn't peek through during fit-resizes.
-        background: t.surfaceAlt,
+        background: consoleT.surfaceAlt,
         display: "flex",
         flexDirection: "column",
         // Padding belongs on the outer wrapper, not the host. xterm's inner
@@ -1006,6 +1132,116 @@ function DockTerminal({
         padding: 8,
       }}
     >
+      {findOpen && (
+        <div
+          style={{
+            position: "absolute",
+            top: 12,
+            right: 20,
+            zIndex: 5,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            padding: "4px 6px",
+            background: consoleT.surface,
+            border: `1px solid ${consoleT.border}`,
+            borderRadius: R_MD,
+            boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
+          }}
+        >
+          <input
+            ref={findInputRef}
+            value={query}
+            onChange={(e) => onFindChange(e.target.value)}
+            onKeyDown={onFindKeyDown}
+            placeholder="Find"
+            spellCheck={false}
+            style={{
+              width: 180,
+              border: "none",
+              outline: "none",
+              background: "transparent",
+              color: consoleT.text,
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
+            }}
+          />
+          <span
+            style={{
+              minWidth: 36,
+              textAlign: "right",
+              color:
+                query.length > 0 && findResults.count === 0
+                  ? consoleT.bad
+                  : consoleT.textMuted,
+              fontFamily: FF_MONO,
+              fontSize: FS_XS,
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {query.length === 0
+              ? ""
+              : findResults.count === 0
+                ? "0/0"
+                : `${findResults.index + 1}/${findResults.count}`}
+          </span>
+          <button
+            type="button"
+            onClick={() => runSearch(query, "prev")}
+            disabled={findResults.count === 0}
+            title="Previous match (Shift+Enter)"
+            style={{
+              border: "none",
+              background: "transparent",
+              color:
+                findResults.count === 0 ? consoleT.textMuted : consoleT.textDim,
+              cursor: findResults.count === 0 ? "default" : "pointer",
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
+              padding: "2px 4px",
+              lineHeight: 1,
+            }}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            onClick={() => runSearch(query, "next")}
+            disabled={findResults.count === 0}
+            title="Next match (Enter)"
+            style={{
+              border: "none",
+              background: "transparent",
+              color:
+                findResults.count === 0 ? consoleT.textMuted : consoleT.textDim,
+              cursor: findResults.count === 0 ? "default" : "pointer",
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
+              padding: "2px 4px",
+              lineHeight: 1,
+            }}
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            onClick={closeFind}
+            title="Close (Esc)"
+            style={{
+              border: "none",
+              background: "transparent",
+              color: consoleT.textDim,
+              cursor: "pointer",
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
+              padding: "2px 4px",
+              lineHeight: 1,
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <div
         ref={hostRef}
         style={{ flex: 1, minHeight: 0 }}
@@ -1015,12 +1251,12 @@ function DockTerminal({
         <div
           style={{
             padding: "6px 10px",
-            background: hexWithAlpha(t.bad, 0.13),
-            borderTop: `1px solid ${t.border}`,
+            background: hexWithAlpha(consoleT.bad, 0.13),
+            borderTop: `1px solid ${consoleT.border}`,
           }}
         >
           <ErrorBlock
-            t={t}
+            t={consoleT}
             message={error ?? "failed to start session"}
             kindLabel="terminal session"
             inline

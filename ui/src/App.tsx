@@ -190,6 +190,7 @@ export default function App() {
             refresh_on_launch: settings.refreshOnLaunch,
             ui_scale: settings.uiScale,
             fleet_view: settings.fleetView,
+            dark_console: settings.darkConsole,
           },
           ui: {
             selected_context: selectedContextName,

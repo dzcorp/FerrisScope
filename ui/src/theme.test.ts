@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   THEMES,
   clampUiScale,
+  consoleTokens,
   getPalette,
   getTheme,
   resolveTheme,
@@ -244,6 +245,56 @@ describe("resolveTheme", () => {
     expect(r.typography.scale.lg).toBe(14);
     expect(r.display.showRailIcons).toBe(false);
     expect(r.display.showDetailIcons).toBe(true);
+  });
+});
+
+describe("consoleTokens", () => {
+  it("forces the dark palette under a light theme when darkConsole is on", () => {
+    const c = consoleTokens({
+      themeId: "default",
+      paletteId: "default",
+      mode: "light",
+      darkConsole: true,
+    });
+    // Light mode would give surfaceAlt #f7f8fa; the forced-dark console must
+    // resolve the dark palette instead.
+    expect(c.surfaceAlt).toBe(
+      resolveTheme({ themeId: "default", paletteId: "default", mode: "dark" })
+        .tokens.surfaceAlt,
+    );
+    expect(c.surfaceAlt).not.toBe(
+      resolveTheme({ themeId: "default", paletteId: "default", mode: "light" })
+        .tokens.surfaceAlt,
+    );
+  });
+
+  it("follows the active light mode when darkConsole is off", () => {
+    const c = consoleTokens({
+      themeId: "default",
+      paletteId: "default",
+      mode: "light",
+      darkConsole: false,
+    });
+    expect(c.surfaceAlt).toBe(
+      resolveTheme({ themeId: "default", paletteId: "default", mode: "light" })
+        .tokens.surfaceAlt,
+    );
+  });
+
+  it("is a no-op in dark mode regardless of the toggle", () => {
+    const on = consoleTokens({
+      themeId: "default",
+      paletteId: "default",
+      mode: "dark",
+      darkConsole: true,
+    });
+    const off = consoleTokens({
+      themeId: "default",
+      paletteId: "default",
+      mode: "dark",
+      darkConsole: false,
+    });
+    expect(on.surfaceAlt).toBe(off.surfaceAlt);
   });
 });
 

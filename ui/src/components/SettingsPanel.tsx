@@ -604,6 +604,18 @@ function AppearanceSection({}: { mode: ThemeMode }) {
       </Field>
       <Field
         t={t}
+        label="Dark console"
+        hint="Keep pod logs and terminals dark even under a light theme, so they read like a terminal."
+      >
+        <Toggle
+          t={t}
+          checked={settings.darkConsole}
+          onChange={(v) => patchSettings({ darkConsole: v })}
+          label={settings.darkConsole ? "On" : "Off"}
+        />
+      </Field>
+      <Field
+        t={t}
         label="Interface scale"
         hint={`Zoom the whole UI. ${MOD_KEY}+− / ${MOD_KEY}+= to nudge, ${MOD_KEY}+0 to reset.`}
       >

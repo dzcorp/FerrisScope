@@ -3,15 +3,18 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../../api";
-import { FF_MONO, FS_SM, FS_XS, type Tokens } from "../../theme";
+import { FF_MONO, FS_SM, FS_XS, hexWithAlpha, type Tokens } from "../../theme";
 import { ErrorBlock } from "../ui";
-import { ansiToReact } from "../../lib/ansi";
+import { ansiToReact, stripAnsi } from "../../lib/ansi";
 import { splitTimestamp } from "../../lib/logFormat";
+import { findLogMatches, splitHighlight } from "../../lib/logSearch";
+import { latinLetter } from "../../lib/keyboard";
 
 // Pod-log surface body. Both surfaces (`InlineLogTab` — detail-panel Logs
 // tab; `LogPanel` — slide-in overlay) render their own chrome around this
@@ -126,6 +129,48 @@ export function LogView({
   // flushed.
   const programmaticScrollRef = useRef(false);
   const releaseRafRef = useRef<number | null>(null);
+
+  // ── Find-in-place (Cmd/Ctrl+F) ──────────────────────────────────────────
+  // The root wrapper is focusable (`tabIndex=-1`) and owns the keydown layer.
+  // Because the wrapper sits below React's root in the DOM, calling
+  // `stopPropagation()` here prevents the app-global Cmd+F (which opens the
+  // table filter) from also firing — find applies to the focused pane.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  // Index *into `matches`*, not into `lines`.
+  const [activeMatch, setActiveMatch] = useState(0);
+
+  // Line indices whose visible (ANSI-stripped) text contains the query.
+  const matches = useMemo(() => findLogMatches(lines, query), [lines, query]);
+  const activeLineIndex =
+    matches.length > 0 ? matches[Math.min(activeMatch, matches.length - 1)]! : -1;
+
+  // The app's `color-scheme` follows the theme, not the console, so the UA
+  // default text selection can render invisibly on a light theme with the dark
+  // console (or vice versa). Publish a console-derived veil for the
+  // `.fs-log-body ::selection` rule. Set via `setProperty` because csstype's
+  // inline-style type doesn't admit custom properties.
+  useEffect(() => {
+    scrollRef.current?.style.setProperty(
+      "--fs-console-selection",
+      hexWithAlpha(t.text, 0.3),
+    );
+  }, [t.text]);
+
+  // Focus the surface on mount so Cmd/Ctrl+F lands here (the keydown layer is
+  // on this wrapper) without the operator clicking in first. Skipped if an
+  // input already has focus, so we never steal from the container Select.
+  useEffect(() => {
+    const active = document.activeElement as HTMLElement | null;
+    const inField =
+      !!active &&
+      (active.tagName === "INPUT" ||
+        active.tagName === "TEXTAREA" ||
+        active.isContentEditable);
+    if (!inField) rootRef.current?.focus({ preventScroll: true });
+  }, []);
 
   // Mirror pause into a ref so the IPC handler (created once per stream)
   // can branch on the latest value.
@@ -333,12 +378,130 @@ export function LogView({
     });
   }, []);
 
+  const openFind = useCallback(() => {
+    setFindOpen(true);
+    // Tail-follow would yank the viewport off a match the moment a new line
+    // arrives. Park it while searching; the operator can re-enable it.
+    setAutoScroll(false);
+    // Focus + select after the input mounts so reopening over an existing
+    // query lets the operator type a replacement immediately.
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  }, []);
+
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    setQuery("");
+    rootRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const gotoMatch = useCallback(
+    (dir: 1 | -1) => {
+      setActiveMatch((m) => {
+        if (matches.length === 0) return 0;
+        return (m + dir + matches.length) % matches.length;
+      });
+    },
+    [matches.length],
+  );
+
+  // Keep the active pointer in range as the match set shrinks/grows while typing.
+  useEffect(() => {
+    setActiveMatch((m) =>
+      matches.length === 0 ? 0 : Math.min(m, matches.length - 1),
+    );
+  }, [matches.length]);
+
+  // Scroll the active match into view (also fires as matches change while
+  // typing, jumping to the first hit). Marked programmatic so `handleScroll`
+  // doesn't misread it as the user scrolling away from the tail.
+  useEffect(() => {
+    if (!findOpen || activeLineIndex < 0) return;
+    programmaticScrollRef.current = true;
+    virtualizer.scrollToIndex(activeLineIndex, { align: "center" });
+    const raf = requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [findOpen, activeLineIndex, virtualizer]);
+
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const meta = e.metaKey || e.ctrlKey;
+      const letter = latinLetter(e);
+      if (meta && letter === "f") {
+        e.preventDefault();
+        // Stop the app-global Cmd+F (table filter) from also firing.
+        e.stopPropagation();
+        openFind();
+        return;
+      }
+      if (!findOpen) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Stop the app-global Esc from closing the whole log panel — first
+        // Esc dismisses the find bar only.
+        e.stopPropagation();
+        closeFind();
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        gotoMatch(e.shiftKey ? -1 : 1);
+        return;
+      }
+      // Cmd/Ctrl+G — next / prev match (macOS find convention).
+      if (meta && letter === "g") {
+        e.preventDefault();
+        e.stopPropagation();
+        gotoMatch(e.shiftKey ? -1 : 1);
+      }
+    },
+    [findOpen, openFind, closeFind, gotoMatch],
+  );
+
+  // Highlight tints, derived once per render from the console palette so the
+  // memoised rows compare equal across unrelated re-renders.
+  const matchBg = hexWithAlpha(t.warn, 0.38);
+  const activeMatchBg = hexWithAlpha(t.accent, 0.55);
+  const activeRowBg = hexWithAlpha(t.accent, 0.12);
+
   return (
-    <>
+    <div
+      ref={rootRef}
+      tabIndex={-1}
+      onKeyDown={onKeyDown}
+      style={{
+        position: "relative",
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        outline: "none",
+      }}
+    >
+      {findOpen && (
+        <LogFindBar
+          t={t}
+          inputRef={findInputRef}
+          query={query}
+          onQueryChange={(v) => {
+            setQuery(v);
+            setActiveMatch(0);
+          }}
+          matchCount={matches.length}
+          activeMatch={activeMatch}
+          onPrev={() => gotoMatch(-1)}
+          onNext={() => gotoMatch(1)}
+          onClose={closeFind}
+        />
+      )}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="fs-selectable"
+        className="fs-selectable fs-log-body"
         style={{
           flex: 1,
           minHeight: 0,
@@ -402,6 +565,11 @@ export function LogView({
                     gutterDim={t.textDim}
                     divider={t.borderSoft}
                     showTs={showTs}
+                    query={findOpen ? query : ""}
+                    active={findOpen && vi.index === activeLineIndex}
+                    matchBg={matchBg}
+                    activeMatchBg={activeMatchBg}
+                    activeRowBg={activeRowBg}
                   />
                 </div>
               );
@@ -478,11 +646,31 @@ export function LogView({
           />
           timestamps
         </label>
+        <button
+          type="button"
+          onClick={() => (findOpen ? closeFind() : openFind())}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "2px 10px",
+            border: `1px solid ${t.border}`,
+            borderRadius: 4,
+            background: findOpen ? t.accentSoft : t.surface,
+            color: findOpen ? t.accent : t.text,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
+            cursor: "pointer",
+          }}
+          title="Find in logs (Ctrl/⌘+F)"
+        >
+          Find
+        </button>
         <span style={{ marginLeft: "auto" }}>
           drops oldest beyond {MAX_LINES.toLocaleString()}
         </span>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -503,6 +691,11 @@ const LogLine = memo(function LogLine({
   gutterDim,
   divider,
   showTs,
+  query,
+  active,
+  matchBg,
+  activeMatchBg,
+  activeRowBg,
 }: {
   entry: LineEntry;
   text: string;
@@ -511,6 +704,14 @@ const LogLine = memo(function LogLine({
   gutterDim: string;
   divider: string;
   showTs: boolean;
+  // Active find query ("" when the find bar is closed). Highlighting only
+  // kicks in for a non-empty query.
+  query: string;
+  // This row is the current find result (scrolled to, brighter highlight).
+  active: boolean;
+  matchBg: string;
+  activeMatchBg: string;
+  activeRowBg: string;
 }) {
   return (
     <div
@@ -518,6 +719,7 @@ const LogLine = memo(function LogLine({
         display: "flex",
         alignItems: "flex-start",
         contain: "content",
+        background: active ? activeRowBg : undefined,
       }}
     >
       <span
@@ -571,8 +773,170 @@ const LogLine = memo(function LogLine({
           wordBreak: "break-all",
         }}
       >
-        {entry.system ? entry.text : ansiToReact(entry.text)}
+        {renderLineBody(entry, query, active, matchBg, activeMatchBg)}
       </div>
     </div>
   );
 });
+
+// Render a line's body. With no active query we keep the fast path: system
+// lines render plain, everything else through `ansiToReact`. While searching,
+// only the lines that actually contain the query are re-rendered with
+// <mark>-style highlights over their ANSI-stripped text — non-matching lines
+// keep their colours untouched, so the matches stand out.
+function renderLineBody(
+  entry: LineEntry,
+  query: string,
+  active: boolean,
+  matchBg: string,
+  activeMatchBg: string,
+) {
+  if (query.length === 0) {
+    return entry.system ? entry.text : ansiToReact(entry.text);
+  }
+  const visible = entry.system ? entry.text : stripAnsi(entry.text);
+  const segments = splitHighlight(visible, query);
+  // No hit on this line → leave the original rendering (and ANSI colours) be.
+  if (segments.length === 1 && !segments[0]!.match) {
+    return entry.system ? entry.text : ansiToReact(entry.text);
+  }
+  return segments.map((seg, i) =>
+    seg.match ? (
+      <mark
+        key={i}
+        style={{
+          background: active ? activeMatchBg : matchBg,
+          color: "inherit",
+          borderRadius: 2,
+        }}
+      >
+        {seg.text}
+      </mark>
+    ) : (
+      <span key={i}>{seg.text}</span>
+    ),
+  );
+}
+
+// Floating find bar pinned to the top-right of the log surface. Styled with
+// the console palette so it sits on the dark body. Keyboard (Enter / Esc /
+// Cmd+G) is handled by the parent's root `onKeyDown`; the buttons are the
+// pointer affordances for the same actions.
+function LogFindBar({
+  t,
+  inputRef,
+  query,
+  onQueryChange,
+  matchCount,
+  activeMatch,
+  onPrev,
+  onNext,
+  onClose,
+}: {
+  t: Tokens;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  query: string;
+  onQueryChange: (v: string) => void;
+  matchCount: number;
+  activeMatch: number;
+  onPrev: () => void;
+  onNext: () => void;
+  onClose: () => void;
+}) {
+  const counter =
+    query.length === 0
+      ? ""
+      : matchCount === 0
+        ? "0/0"
+        : `${Math.min(activeMatch, matchCount - 1) + 1}/${matchCount}`;
+  const navBtn = (
+    label: string,
+    onClick: () => void,
+    title: string,
+  ) => (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={matchCount === 0}
+      title={title}
+      style={{
+        border: "none",
+        background: "transparent",
+        color: matchCount === 0 ? t.textMuted : t.textDim,
+        cursor: matchCount === 0 ? "default" : "pointer",
+        fontFamily: FF_MONO,
+        fontSize: FS_SM,
+        padding: "2px 4px",
+        lineHeight: 1,
+      }}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 8,
+        right: 16,
+        zIndex: 5,
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "4px 6px",
+        background: t.surface,
+        border: `1px solid ${t.border}`,
+        borderRadius: 6,
+        boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
+      }}
+    >
+      <input
+        ref={inputRef}
+        value={query}
+        onChange={(e) => onQueryChange(e.target.value)}
+        placeholder="Find"
+        spellCheck={false}
+        style={{
+          width: 180,
+          border: "none",
+          outline: "none",
+          background: "transparent",
+          color: t.text,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
+        }}
+      />
+      <span
+        style={{
+          minWidth: 36,
+          textAlign: "right",
+          color: query.length > 0 && matchCount === 0 ? t.bad : t.textMuted,
+          fontFamily: FF_MONO,
+          fontSize: FS_XS,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {counter}
+      </span>
+      {navBtn("↑", onPrev, "Previous match (Shift+Enter)")}
+      {navBtn("↓", onNext, "Next match (Enter)")}
+      <button
+        type="button"
+        onClick={onClose}
+        title="Close (Esc)"
+        style={{
+          border: "none",
+          background: "transparent",
+          color: t.textDim,
+          cursor: "pointer",
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
+          padding: "2px 4px",
+          lineHeight: 1,
+        }}
+      >
+        ✕
+      </button>
+    </div>
+  );
+}

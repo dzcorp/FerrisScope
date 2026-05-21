@@ -71,10 +71,16 @@ import {
   UI_SCALE_DEFAULT,
   UI_SCALE_STEP,
   clampUiScale,
+  consoleTokens,
   getTheme,
   resolveTheme,
 } from "./theme";
-import type { ResolvedTheme, ThemeMode, ThemeOverrides } from "./theme";
+import type {
+  ColorTokens,
+  ResolvedTheme,
+  ThemeMode,
+  ThemeOverrides,
+} from "./theme";
 
 type Status = "idle" | "loading" | "ready" | "error";
 
@@ -285,6 +291,9 @@ type AppState = {
     refreshOnLaunch: boolean;
     uiScale: number;
     fleetView: "tiles" | "mini" | "rows";
+    // Force the logs + terminal surfaces to a dark, console-style palette even
+    // under a light theme. Default on; toggled in Settings → Appearance.
+    darkConsole: boolean;
   };
 
   setContexts: (cs: ContextInfo[]) => void;
@@ -465,6 +474,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     refreshOnLaunch: true,
     uiScale: UI_SCALE_DEFAULT,
     fleetView: "tiles",
+    darkConsole: true,
   },
 
   appVersion: null,
@@ -829,6 +839,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         // but be tolerant if a stale type ever ships through.
         uiScale: clampUiScale(prefs.settings.ui_scale ?? UI_SCALE_DEFAULT),
         fleetView: prefs.settings.fleet_view ?? "tiles",
+        // Older prefs predate dark_console; default on so a light-theme user
+        // gets the console treatment without re-opting.
+        darkConsole: prefs.settings.dark_console ?? true,
       },
       // `prefs.update` lands populated by `#[serde(default)]` on the Rust side
       // for prefs.json files written before this block existed.
@@ -994,5 +1007,21 @@ export function useResolvedTheme(): ResolvedTheme {
   return useMemo(
     () => resolveTheme({ themeId, paletteId, mode, overrides }),
     [themeId, paletteId, mode, overrides],
+  );
+}
+
+/// Console (logs + terminal) color tokens. Mirrors `useResolvedTheme` but
+/// honours the `darkConsole` setting: when on, the surface resolves the active
+/// theme's dark palette even under a light theme so it reads like a terminal.
+/// When off, it follows the active mode like any other panel.
+export function useConsoleTokens(): ColorTokens {
+  const themeId = useAppStore((s) => s.themeId);
+  const paletteId = useAppStore((s) => s.paletteId);
+  const mode = useAppStore((s) => s.themeMode);
+  const overrides = useAppStore((s) => s.themeOverrides);
+  const darkConsole = useAppStore((s) => s.settings.darkConsole);
+  return useMemo(
+    () => consoleTokens({ themeId, paletteId, mode, overrides, darkConsole }),
+    [themeId, paletteId, mode, overrides, darkConsole],
   );
 }
