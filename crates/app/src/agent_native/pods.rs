@@ -16,14 +16,15 @@ use async_trait::async_trait;
 use ferrisscope_agent::native::{NativeTool, NativeToolError};
 use ferrisscope_agent::types::ToolSchema;
 use ferrisscope_agent::ToolCategory;
-use k8s_openapi::api::core::v1::{Container, Pod, PodSpec};
+use k8s_openapi::api::core::v1::{Container, ContainerPort, Pod, PodSpec, ResourceRequirements};
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DeleteParams, ListParams, PostParams};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use crate::agent_native::ChatClusterRef;
+use crate::agent_native::{delete_outcome_json, ChatClusterRef};
 use crate::state::AppState;
 
 /// Default total cap on rows returned. Conservative so a casual list
@@ -93,6 +94,32 @@ struct RunArgs {
     /// (Always for `:latest`, IfNotPresent otherwise).
     #[serde(default)]
     image_pull_policy: Option<String>,
+    /// Run the pod under a specific ServiceAccount. Needed when the namespace
+    /// is RBAC-locked or a policy engine requires a non-default SA.
+    #[serde(default)]
+    service_account_name: Option<String>,
+    /// `Always` / `OnFailure` / `Never`. Default `Never` (one-shot debug pod).
+    #[serde(default)]
+    restart_policy: Option<String>,
+    /// Labels to stamp on the pod — handy so a later `fs_pods_delete` /
+    /// selector can find it, or to satisfy a policy that requires labels.
+    #[serde(default)]
+    labels: Option<BTreeMap<String, String>>,
+    /// CPU/memory requests + limits. Many clusters run Kyverno / LimitRange
+    /// policies that reject pods with no resources set — pass them here to get
+    /// past those instead of hand-rolling YAML.
+    #[serde(default)]
+    resources: Option<RunResources>,
+}
+
+/// Resource requests/limits for `fs_pods_run`, each a map like
+/// `{"cpu": "100m", "memory": "128Mi"}`.
+#[derive(Debug, Deserialize)]
+struct RunResources {
+    #[serde(default)]
+    requests: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    limits: Option<BTreeMap<String, String>>,
 }
 
 // ─── fs_pods_list ────────────────────────────────────────────────────────────
@@ -289,7 +316,10 @@ impl NativeTool for PodsDelete {
             description: "Delete a Pod. `grace_period_seconds: 0` forces immediate removal \
                 (equivalent to `kubectl delete --grace-period=0 --force`). For \
                 controller-managed pods the controller will recreate them; if you want to \
-                actually scale-down or replace, use `fs_resources_scale` or `fs_apply_resource`."
+                actually scale-down or replace, use `fs_resources_scale` or `fs_apply_resource`. \
+                Result reports `actually_deleted` vs `still_exists` — a pod within its grace \
+                period or held by finalizers comes back `still_exists: true` with \
+                `deletion_timestamp` / `remaining_finalizers`, not a false success."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -321,12 +351,16 @@ impl NativeTool for PodsDelete {
             grace_period_seconds: a.grace_period_seconds,
             ..Default::default()
         };
-        api.delete(&a.name, &dp).await.map_err(kube_err)?;
-        Ok(json!({
-            "namespace": a.namespace,
-            "name": a.name,
-            "deleted": true,
-        }))
+        // `delete` returns the pod (Left) while it's still terminating
+        // (grace period / finalizers), a Status (Right) once it's gone.
+        let outcome = api.delete(&a.name, &dp).await.map_err(kube_err)?;
+        let mut out = delete_outcome_json(outcome.left().as_ref().map(|p| &p.metadata));
+        let obj = out
+            .as_object_mut()
+            .expect("delete_outcome_json returns object");
+        obj.insert("namespace".into(), json!(a.namespace));
+        obj.insert("name".into(), json!(a.name));
+        Ok(out)
     }
 }
 
@@ -352,7 +386,10 @@ impl NativeTool for PodsRun {
                 Use for ephemeral troubleshooting (netshoot, busybox, dnsutils). The pod has no \
                 controller — when it exits or is deleted it's gone for good. For long-running \
                 workloads create a Deployment via `fs_apply_resource` / `fs_resources_apply` \
-                instead. The pod's container is named `main` regardless of `name`."
+                instead. The pod's container is named `main` regardless of `name`. \
+                `restart_policy` defaults to `Never`. Set `service_account_name`, `labels`, and \
+                `resources` (requests/limits) when the namespace enforces RBAC or admission \
+                policies (Kyverno / LimitRange) that would otherwise reject a bare pod."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -374,6 +411,26 @@ impl NativeTool for PodsRun {
                     "image_pull_policy": {
                         "type": "string",
                         "enum": ["Always", "IfNotPresent", "Never"]
+                    },
+                    "service_account_name": { "type": "string", "description": "ServiceAccount to run as." },
+                    "restart_policy": {
+                        "type": "string",
+                        "enum": ["Always", "OnFailure", "Never"],
+                        "description": "Default Never."
+                    },
+                    "labels": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "Pod labels."
+                    },
+                    "resources": {
+                        "type": "object",
+                        "description": "CPU/memory requests + limits.",
+                        "properties": {
+                            "requests": { "type": "object", "additionalProperties": { "type": "string" } },
+                            "limits": { "type": "object", "additionalProperties": { "type": "string" } }
+                        },
+                        "additionalProperties": false
                     }
                 },
                 "required": ["namespace", "image"],
@@ -392,34 +449,7 @@ impl NativeTool for PodsRun {
         let client = client_for(&self.app, &self.cluster).await?;
         let api: Api<Pod> = Api::namespaced(client, &a.namespace);
 
-        let ports = a.port.map(|p| {
-            vec![k8s_openapi::api::core::v1::ContainerPort {
-                container_port: p,
-                ..Default::default()
-            }]
-        });
-        let container = Container {
-            name: "main".to_string(),
-            image: Some(a.image.clone()),
-            command: a.command,
-            args: a.args,
-            image_pull_policy: a.image_pull_policy,
-            ports,
-            ..Default::default()
-        };
-        let pod = Pod {
-            metadata: ObjectMeta {
-                name: a.name.clone(),
-                namespace: Some(a.namespace.clone()),
-                ..Default::default()
-            },
-            spec: Some(PodSpec {
-                containers: vec![container],
-                restart_policy: Some("Never".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let pod = build_run_pod(&a).map_err(NativeToolError::msg)?;
 
         let created = api
             .create(&PostParams::default(), &pod)
@@ -519,4 +549,152 @@ fn project_pod_row(p: &Pod) -> Value {
         "created": created,
         "reasons": reasons,
     })
+}
+
+/// Map a `{name: quantity}` string map into the typed `Quantity` map the
+/// `ResourceRequirements` struct expects. Validation of the quantity string
+/// itself is left to the apiserver — it's the final arbiter and its error
+/// message is clearer than anything we'd reconstruct.
+fn quantities(map: &BTreeMap<String, String>) -> BTreeMap<String, Quantity> {
+    map.iter()
+        .map(|(k, v)| (k.clone(), Quantity(v.clone())))
+        .collect()
+}
+
+/// Build the `Pod` for `fs_pods_run` from its args. Pure (no I/O) so the spec
+/// shaping — defaults, optional fields, resource mapping — is unit-testable.
+fn build_run_pod(a: &RunArgs) -> Result<Pod, String> {
+    if let Some(rp) = a.restart_policy.as_deref() {
+        if !matches!(rp, "Always" | "OnFailure" | "Never") {
+            return Err(format!(
+                "restart_policy must be Always, OnFailure, or Never (got `{rp}`)"
+            ));
+        }
+    }
+
+    let ports = a.port.map(|p| {
+        vec![ContainerPort {
+            container_port: p,
+            ..Default::default()
+        }]
+    });
+    let resources = a.resources.as_ref().map(|r| ResourceRequirements {
+        requests: r.requests.as_ref().map(quantities),
+        limits: r.limits.as_ref().map(quantities),
+        ..Default::default()
+    });
+    let container = Container {
+        name: "main".to_string(),
+        image: Some(a.image.clone()),
+        command: a.command.clone(),
+        args: a.args.clone(),
+        image_pull_policy: a.image_pull_policy.clone(),
+        ports,
+        resources,
+        ..Default::default()
+    };
+    let labels = a.labels.clone().filter(|m| !m.is_empty());
+    Ok(Pod {
+        metadata: ObjectMeta {
+            name: a.name.clone(),
+            namespace: Some(a.namespace.clone()),
+            labels,
+            ..Default::default()
+        },
+        spec: Some(PodSpec {
+            containers: vec![container],
+            restart_policy: Some(
+                a.restart_policy
+                    .clone()
+                    .unwrap_or_else(|| "Never".to_string()),
+            ),
+            service_account_name: a.service_account_name.clone(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_args(v: Value) -> RunArgs {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn run_pod_defaults_to_never_restart_one_container() {
+        let pod = build_run_pod(&run_args(json!({
+            "namespace": "ns",
+            "image": "nicolaka/netshoot:latest"
+        })))
+        .unwrap();
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.restart_policy.as_deref(), Some("Never"));
+        assert_eq!(spec.containers.len(), 1);
+        assert_eq!(spec.containers[0].name, "main");
+        assert_eq!(
+            spec.containers[0].image.as_deref(),
+            Some("nicolaka/netshoot:latest")
+        );
+        assert!(spec.service_account_name.is_none());
+        assert!(spec.containers[0].resources.is_none());
+        assert!(pod.metadata.labels.is_none());
+    }
+
+    #[test]
+    fn run_pod_wires_sa_labels_and_resources() {
+        let pod = build_run_pod(&run_args(json!({
+            "namespace": "ns",
+            "image": "busybox",
+            "service_account_name": "debugger",
+            "restart_policy": "OnFailure",
+            "labels": { "app": "debug" },
+            "resources": {
+                "requests": { "cpu": "100m", "memory": "128Mi" },
+                "limits": { "cpu": "200m", "memory": "256Mi" }
+            }
+        })))
+        .unwrap();
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.restart_policy.as_deref(), Some("OnFailure"));
+        assert_eq!(spec.service_account_name.as_deref(), Some("debugger"));
+        assert_eq!(
+            pod.metadata.labels.unwrap().get("app").map(String::as_str),
+            Some("debug")
+        );
+        let res = spec.containers[0].resources.as_ref().unwrap();
+        assert_eq!(
+            res.requests.as_ref().unwrap()["cpu"],
+            Quantity("100m".into())
+        );
+        assert_eq!(
+            res.limits.as_ref().unwrap()["memory"],
+            Quantity("256Mi".into())
+        );
+    }
+
+    #[test]
+    fn run_pod_rejects_bad_restart_policy() {
+        let err = build_run_pod(&run_args(json!({
+            "namespace": "ns",
+            "image": "busybox",
+            "restart_policy": "Sometimes"
+        })))
+        .unwrap_err();
+        assert!(err.contains("restart_policy"));
+    }
+
+    #[test]
+    fn run_pod_empty_labels_stay_unset() {
+        // An empty labels map shouldn't produce `metadata.labels: {}`.
+        let pod = build_run_pod(&run_args(json!({
+            "namespace": "ns",
+            "image": "busybox",
+            "labels": {}
+        })))
+        .unwrap();
+        assert!(pod.metadata.labels.is_none());
+    }
 }
