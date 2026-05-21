@@ -158,6 +158,46 @@ where
     truncated
 }
 
+/// Honest delete outcome from a `kube` `Api::delete` result.
+///
+/// `Api::delete` returns `Either<K, Status>`: the apiserver hands back the
+/// *object* (Left) when deletion is accepted but not yet complete — graceful
+/// termination, or finalizers holding it open — and a `Status` (Right) when
+/// the object is actually gone. A bare `deleted: true` hides this: a resource
+/// stuck on a finalizer reports the same as one that vanished. We surface the
+/// distinction so the model can tell "requested" from "actually gone" and see
+/// what's blocking termination.
+///
+/// `remaining` is the object's metadata when the apiserver returned the object
+/// (Left), `None` when it returned a `Status` (Right). Callers get it via
+/// `result.left().map(|obj| obj.metadata)`.
+pub(crate) fn delete_outcome_json(
+    remaining: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>,
+) -> serde_json::Value {
+    use serde_json::json;
+    match remaining {
+        // Object still present → terminating. Surface what's holding it.
+        Some(meta) => {
+            // `Time` wraps a `jiff::Timestamp` whose Display is RFC 3339.
+            let deletion_timestamp = meta.deletion_timestamp.as_ref().map(|t| t.0.to_string());
+            let finalizers = meta.finalizers.clone().unwrap_or_default();
+            json!({
+                "deletion_requested": true,
+                "actually_deleted": false,
+                "still_exists": true,
+                "deletion_timestamp": deletion_timestamp,
+                "remaining_finalizers": finalizers,
+            })
+        }
+        // Status returned → the object is gone.
+        None => json!({
+            "deletion_requested": true,
+            "actually_deleted": true,
+            "still_exists": false,
+        }),
+    }
+}
+
 /// Build the per-chat native registry. Tools close over `AppHandle` (cheap
 /// clone, internally ref-counted) and a shared `ChatClusterRef`; AppState is
 /// fetched per-call via `app.state::<AppState>()` so we don't need to thread
@@ -345,4 +385,51 @@ pub(crate) fn build_registry(
     reg.register(Arc::new(tool_output::ToolOutputGrep::new(spool)));
 
     reg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
+    use k8s_openapi::jiff::Timestamp;
+
+    #[test]
+    fn delete_outcome_gone_when_status_returned() {
+        let out = delete_outcome_json(None);
+        assert_eq!(out["deletion_requested"], true);
+        assert_eq!(out["actually_deleted"], true);
+        assert_eq!(out["still_exists"], false);
+        // No terminating-only fields leak when the object is gone.
+        assert!(out.get("remaining_finalizers").is_none());
+        assert!(out.get("deletion_timestamp").is_none());
+    }
+
+    #[test]
+    fn delete_outcome_terminating_surfaces_finalizers() {
+        let when: Timestamp = "2026-05-15T21:01:38Z".parse().unwrap();
+        let meta = ObjectMeta {
+            deletion_timestamp: Some(Time(when)),
+            finalizers: Some(vec!["finalizer.keda.sh".to_string()]),
+            ..Default::default()
+        };
+        let out = delete_outcome_json(Some(&meta));
+        assert_eq!(out["deletion_requested"], true);
+        assert_eq!(out["actually_deleted"], false);
+        assert_eq!(out["still_exists"], true);
+        assert_eq!(out["remaining_finalizers"][0], "finalizer.keda.sh");
+        assert_eq!(out["deletion_timestamp"], "2026-05-15T21:01:38Z");
+    }
+
+    #[test]
+    fn delete_outcome_terminating_without_finalizers() {
+        // Graceful deletion in flight (e.g. pod within grace period) — object
+        // returned, deletionTimestamp set, but no finalizers blocking it.
+        let meta = ObjectMeta {
+            deletion_timestamp: Some(Time(Timestamp::now())),
+            ..Default::default()
+        };
+        let out = delete_outcome_json(Some(&meta));
+        assert_eq!(out["still_exists"], true);
+        assert_eq!(out["remaining_finalizers"].as_array().unwrap().len(), 0);
+    }
 }
