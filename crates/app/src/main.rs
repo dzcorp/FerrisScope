@@ -174,6 +174,7 @@ fn main() {
             commands::get_validating_webhook_configuration_detail_cmd,
             commands::get_well_known_detail_cmd,
             commands::apply_resource_cmd,
+            commands::merge_patch_resource_cmd,
             commands::delete_resource_cmd,
             commands::cordon_node_cmd,
             commands::drain_node_cmd,

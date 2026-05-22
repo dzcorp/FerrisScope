@@ -36,10 +36,10 @@ use ferrisscope_kube_ext::{
     get_storage_class_detail, get_validating_webhook_configuration_detail, get_well_known_detail,
     helm_install_chart, helm_repo_update, helm_uninstall, helm_upgrade,
     list_config_maps_in_namespace, list_persistent_volume_claims_in_namespace, list_pods_on_node,
-    list_secrets_in_namespace, lookup, registry, restart_pod_owner, restart_pods_owners,
-    restart_workload, set_node_cordon, start_forward, ApplyResult, DrainReport, ForwardEntry,
-    ForwardStatus, HelmInstallResult, HelmUpgradeResult, ResourceKind, ResourceKindEntry,
-    RestartPodsReport,
+    list_secrets_in_namespace, lookup, merge_patch_resource, registry, restart_pod_owner,
+    restart_pods_owners, restart_workload, set_node_cordon, start_forward, ApplyResult,
+    DrainReport, ForwardEntry, ForwardStatus, HelmInstallResult, HelmUpgradeResult,
+    MergePatchResult, ResourceKind, ResourceKindEntry, RestartPodsReport,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -2229,6 +2229,37 @@ pub(crate) async fn apply_resource_cmd(
         &name,
         fields,
         force,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// `kubectl edit`-style save for the YAML manifest tab. Applies an RFC 7386
+/// JSON merge patch (adds + edits + `null` deletions). Distinct from
+/// `apply_resource_cmd` (SSA): the free-form manifest editor wants explicit
+/// deletions and last-write-wins rather than per-field ownership tracking.
+///
+/// `resource_version = Some(rv)` enforces optimistic concurrency (returns
+/// `MergePatchResult::Stale` on a 409 if the object moved on); `None` is the
+/// UI's explicit "apply anyway" overwrite.
+#[tauri::command]
+pub(crate) async fn merge_patch_resource_cmd(
+    cluster_id: String,
+    kind_id: String,
+    namespace: Option<String>,
+    name: String,
+    patch: Value,
+    resource_version: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<MergePatchResult, String> {
+    let entry = state.entry(&cluster_id).await?;
+    merge_patch_resource(
+        entry.cluster.client(),
+        &kind_id,
+        namespace.as_deref(),
+        &name,
+        patch,
+        resource_version.as_deref(),
     )
     .await
     .map_err(|e| e.to_string())

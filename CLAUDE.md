@@ -116,7 +116,9 @@ Every kind's detail panel composes the same kind-agnostic primitives in `ui/src/
 
 ## Inline editing (Server-Side Apply)
 
-Every editable surface goes through the **same edit kit** in `ui/src/components/detail/edit.tsx`. Don't fork — extend. Live precedents: ConfigMap / Secret / ResourceQuota / LimitRange data sections, and `MetaSection`'s Labels / Annotations rows (any kind can opt in).
+Every **structured** editable surface goes through the **same edit kit** in `ui/src/components/detail/edit.tsx`. Don't fork — extend. Live precedents: ConfigMap / Secret / ResourceQuota / LimitRange data sections, and `MetaSection`'s Labels / Annotations rows (any kind can opt in).
+
+> **The YAML tab is the deliberate exception.** The free-form manifest editor (`ui/src/components/detail/YamlTab.tsx`) follows the `kubectl edit` model, **not** SSA: it sends an RFC 7386 JSON merge patch via `merge_patch_resource_cmd` → `merge_patch_resource()`, computed by `lib/yamlEdit.ts::mergePatch`. This is on purpose — a partial-tree SSA apply can't express deletions (a removed key is omitted, not deleted) or empty values, which is why removals/blanks silently no-op'd under the old `diffPartial`. Merge patch emits `null` for removed keys (delete) and preserves `""` (empty string), and carries `metadata.resourceVersion` for optimistic concurrency (a stale 409 → `MergePatchResult::Stale`, surfaced as a Reload / Apply-anyway banner — there is no field-ownership "force takeover" here). **Don't "harmonize" the YAML tab back onto `apply_resource`/SSA**; the structured per-field editors keep SSA for its ownership tracking, the manifest editor keeps merge patch for honest deletes.
 
 ### Backend contract
 
