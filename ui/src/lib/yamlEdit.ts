@@ -3,13 +3,20 @@
 // Two responsibilities:
 //   • `stripServerFields` — remove fields the apiserver writes back so the
 //     operator sees source-like YAML (no managedFields noise, no status).
-//   • `diffPartial` — compute the minimal partial-object subtree the user
-//     actually changed, so SSA only takes ownership of touched fields.
+//   • `mergePatch` — compute an RFC 7386 JSON merge patch from the original
+//     vs the edited document, so a single PATCH expresses adds, edits *and*
+//     removals. The YAML tab follows the `kubectl edit` model rather than
+//     Server-Side Apply (which the structured per-field editors use).
 //
-// SSA caveat: dropping a key from the edited document does NOT request
-// deletion — it just declines ownership. Adds and modifications work as
-// expected; explicit removal is out of scope for v1 of this editor and
-// surfaced via `diffHasOnlyDeletions` so the UI can warn.
+// Merge-patch semantics the operator gets from this:
+//   • changed scalar / array → new value replaces the old wholesale.
+//   • added key → set.
+//   • removed key → emitted as `null`, which deletes the field server-side.
+//   • blanked value (`key:` → YAML null) → also `null` → deletes the field.
+//     Use `key: ""` for an explicit empty string (preserved as-is).
+// This is the deliberate divergence from the SSA path: SSA partial trees
+// can't express deletion by omission, which is why removals and empties
+// silently no-op'd under the old `diffPartial`.
 
 import jsYaml from "js-yaml";
 
@@ -90,24 +97,24 @@ export function stripYaml(text: string): string {
 }
 
 // Result of diffing original vs edited stripped JSON.
-export type DiffResult = {
-  // Minimal partial-object subtree containing only modified or added paths.
-  // Suitable as `fields` for apply_resource_cmd. Empty object if nothing
-  // changed.
-  partial: Record<string, Json>;
-  // True if the diff is a no-op (semantically equal documents).
+export type MergePatch = {
+  // RFC 7386 merge patch: object fields are merged recursively, `null`
+  // values delete the field, everything else replaces. Ready to hand to
+  // `merge_patch_resource_cmd`. Empty object when nothing changed.
+  patch: Record<string, Json>;
+  // True if the patch is a no-op (semantically equal documents).
   empty: boolean;
-  // True if the operator's only changes are key removals — none of which
-  // can be expressed via this SSA partial-tree approach. The UI surfaces a
-  // warning so the operator isn't confused when Save appears to do nothing.
-  onlyDeletions: boolean;
-  // Number of touched paths — drives the "Save (N)" chip.
+  // Number of touched leaf paths (adds + edits + removals) — drives the
+  // "Save (N)" chip. Unlike the old partial-diff, removals count here
+  // because they actually apply.
   count: number;
 };
 
-// Strip identity fields the backend re-attaches itself — we don't want to
-// claim ownership of `apiVersion`, `kind`, `metadata.name`,
-// `metadata.namespace` even if Monaco round-trips them unchanged.
+// Strip identity fields the backend re-attaches itself — we never want to
+// patch `apiVersion`, `kind`, `metadata.name`, `metadata.namespace`. A merge
+// patch that nulled `metadata.name` (operator deleted the line) would be a
+// rename attempt the apiserver rejects; dropping them keeps edits focused on
+// spec / data / labels.
 const IDENTITY_KEYS = new Set(["apiVersion", "kind"]);
 const META_IDENTITY_KEYS = new Set(["name", "namespace"]);
 
@@ -130,67 +137,70 @@ function stripIdentity(doc: Json): Json {
   return out;
 }
 
-export function diffPartial(originalRaw: Json, editedRaw: Json): DiffResult {
+export function mergePatch(originalRaw: Json, editedRaw: Json): MergePatch {
   const original = stripIdentity(originalRaw);
   const edited = stripIdentity(editedRaw);
 
-  const stats = { changed: 0, deletions: 0 };
-  const partial = walkDiff(original, edited, stats);
+  const stats = { count: 0 };
+  const patch = walkMerge(original, edited, stats, true);
   const obj: Record<string, Json> =
-    partial !== UNCHANGED && isObject(partial) ? partial : {};
-  const empty = stats.changed === 0 && stats.deletions === 0;
-  const onlyDeletions = stats.changed === 0 && stats.deletions > 0;
-  return {
-    partial: obj,
-    empty,
-    onlyDeletions,
-    count: stats.changed,
-  };
+    patch !== UNCHANGED && isObject(patch) ? patch : {};
+  return { patch: obj, empty: stats.count === 0, count: stats.count };
 }
 
-// Walk both trees together. Returns the minimal subtree of `edited` that
-// represents adds + modifications relative to `original`. Returns the
-// sentinel `UNCHANGED` when nothing changed in this subtree.
+// Walk both trees together, producing the RFC 7386 merge patch from
+// `original` → `edited`. Returns the sentinel `UNCHANGED` when nothing
+// changed in this subtree so unchanged branches drop out of the patch.
 const UNCHANGED: unique symbol = Symbol("unchanged");
 type WalkResult = Json | typeof UNCHANGED;
 
-function walkDiff(
+function walkMerge(
   original: Json,
   edited: Json,
-  stats: { changed: number; deletions: number },
+  stats: { count: number },
+  topLevel: boolean,
 ): WalkResult {
   if (deepEqual(original, edited)) return UNCHANGED;
 
-  // Object × object → per-key diff.
+  // Object × object → per-key merge.
   if (isObject(original) && isObject(edited)) {
     const out: Record<string, Json> = {};
     let touched = 0;
     for (const [k, v] of Object.entries(edited)) {
       if (!(k in original)) {
-        // New key.
+        // New key — set it.
         out[k] = v;
-        stats.changed += 1;
+        stats.count += 1;
         touched += 1;
         continue;
       }
-      const sub = walkDiff(original[k]!, v, stats);
+      const sub = walkMerge(original[k]!, v, stats, false);
       if (sub !== UNCHANGED) {
         out[k] = sub;
         touched += 1;
       }
     }
-    // Track removed keys for the "only deletions" warning. They don't go
-    // into `out` — SSA partial trees can't express deletion this way.
+    // Removed keys → explicit `null` so merge-patch deletes them. We refuse
+    // to null the top-level `metadata` block: it carries identity + the
+    // resourceVersion the backend injects, so deleting it wholesale is never
+    // what the operator means (and the apiserver would reject it). Removing
+    // individual metadata children (labels, annotations, a finalizer) still
+    // works because that recurses one level deeper.
     for (const k of Object.keys(original)) {
-      if (!(k in edited)) stats.deletions += 1;
+      if (k in edited) continue;
+      if (topLevel && k === "metadata") continue;
+      out[k] = null;
+      stats.count += 1;
+      touched += 1;
     }
     return touched === 0 ? UNCHANGED : out;
   }
 
-  // Anything else (scalar change, array change, type change): the leaf is
-  // the new value as-is. Arrays are replaced wholesale because we don't
-  // know each list's `listType` (map / set / atomic) without the schema.
-  stats.changed += 1;
+  // Anything else (scalar change, array change, type change): the leaf
+  // replaces wholesale. Arrays are replaced rather than element-merged —
+  // merge-patch has no concept of list keys, matching the operator's mental
+  // model of "what I typed is what gets stored".
+  stats.count += 1;
   return edited;
 }
 

@@ -1,13 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
 import { api, onResourceDelta } from "../api";
-import {
-  diffPartial,
-  parseYaml,
-  stripYaml,
-  type Json,
-} from "../lib/yamlEdit";
-import { installClipboardShortcuts } from "../lib/monacoClipboard";
+import { parseYaml, stripYaml, type Json } from "../lib/yamlEdit";
 import { useAppStore, useResolvedTheme } from "../store";
 import type {
   ContainerDetail,
@@ -20,7 +13,7 @@ import type {
   ResourceKind,
   ResourceRow,
 } from "../types";
-import { tokens, FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
+import { tokens, FF_MONO, type ThemeMode, type Tokens, R_LG, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
 import {
   Chip,
   ContainerDots,
@@ -75,8 +68,8 @@ import {
   NamespaceSummary,
   NodeSummary,
 } from "./detail/cluster";
-import { ConflictBanner, EditModeChrome } from "./detail/edit";
 import { InlineLogTab } from "./detail/InlineLogTab";
+import { YamlTab, type YamlStale } from "./detail/YamlTab";
 import { MetricsTab } from "./detail/MetricsTab";
 import {
   EndpointSliceSummary,
@@ -210,9 +203,31 @@ type LoadState =
       // Parsed JSON form of the same stripped doc — kept around so Save
       // can diff against it without re-parsing on every keystroke.
       original: Json;
+      // metadata.resourceVersion from the *unstripped* doc — threaded into
+      // the merge-patch save for optimistic concurrency. Null when absent or
+      // when the raw doc failed to parse.
+      resourceVersion: string | null;
       refreshedAt: number;
     }
   | { kind: "error"; message: string };
+
+// Pull `metadata.resourceVersion` out of the raw (unstripped) YAML so the
+// merge-patch save can use it for optimistic concurrency. Total — returns
+// null on any parse failure or shape drift rather than throwing.
+function resourceVersionFromYaml(rawYaml: string): string | null {
+  try {
+    const doc = parseYaml(rawYaml);
+    if (doc == null || typeof doc !== "object" || Array.isArray(doc)) return null;
+    const meta = (doc as Record<string, Json>).metadata;
+    if (meta == null || typeof meta !== "object" || Array.isArray(meta)) return null;
+    const rv = (meta as Record<string, Json>).resourceVersion;
+    if (typeof rv === "string") return rv;
+    if (typeof rv === "number") return String(rv);
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 type Tab = "summary" | "yaml" | "events" | "related" | "logs" | "metrics";
 
@@ -319,17 +334,14 @@ export function DetailPanel({
     hasSummary ? "summary" : hasYaml ? "yaml" : "summary",
   );
   const [load, setLoad] = useState<LoadState>({ kind: "loading" });
-  // YAML-tab edit state. `buffer` is the operator's in-flight edit; null
-  // when not editing. `saving` blocks the controls during the SSA round
-  // trip; `conflict` populates the ConflictBanner; `error` shows other
-  // failures (parse, network) above the editor.
+  // YAML-tab edit state. `buffer` is the operator's in-flight draft; null
+  // means "in sync with the server". `saving` blocks the controls during the
+  // merge-patch round trip; `stale` surfaces an optimistic-concurrency 409
+  // (the object changed under us); `error` shows other failures (parse,
+  // network) above the editor.
   const [yamlBuffer, setYamlBuffer] = useState<string | null>(null);
   const [yamlSaving, setYamlSaving] = useState(false);
-  const [yamlConflict, setYamlConflict] = useState<{
-    managers: string[];
-    fields: string[];
-    message: string;
-  } | null>(null);
+  const [yamlStale, setYamlStale] = useState<YamlStale | null>(null);
   const [yamlError, setYamlError] = useState<string | null>(null);
   // Bumped on every Upsert for this uid; the pod summary subtree refetches
   // its detail in response. The YAML tab still triggers via `refetch` below.
@@ -580,6 +592,7 @@ export function DetailPanel({
         yaml: "",
         yamlRaw: "",
         original: null,
+        resourceVersion: null,
         refreshedAt: Date.now(),
       });
       return;
@@ -597,6 +610,7 @@ export function DetailPanel({
             yaml: stripped,
             yamlRaw: yaml,
             original,
+            resourceVersion: resourceVersionFromYaml(yaml),
             refreshedAt: Date.now(),
           });
         } catch (e) {
@@ -608,6 +622,7 @@ export function DetailPanel({
             yaml,
             yamlRaw: yaml,
             original: null,
+            resourceVersion: resourceVersionFromYaml(yaml),
             refreshedAt: Date.now(),
           });
           console.warn("YAML strip failed", e);
@@ -658,7 +673,7 @@ export function DetailPanel({
     // buffer is keyed to the prior resource and would otherwise corrupt
     // the new one's apply payload.
     setYamlBuffer(null);
-    setYamlConflict(null);
+    setYamlStale(null);
     setYamlError(null);
     setYamlSaving(false);
 
@@ -1134,12 +1149,15 @@ export function DetailPanel({
             ) : load.kind === "loading" ? (
               <LoadingLine t={t} label="Fetching YAML…" />
             ) : (
-              <YamlPane
+              <YamlTab
                 mode={mode}
                 t={t}
                 yaml={load.kind === "ready" ? load.yaml : ""}
                 yamlRaw={load.kind === "ready" ? load.yamlRaw : ""}
                 original={load.kind === "ready" ? load.original : null}
+                resourceVersion={
+                  load.kind === "ready" ? load.resourceVersion : null
+                }
                 refreshedAt={load.kind === "ready" ? load.refreshedAt : null}
                 clusterId={clusterId}
                 kindId={kind.id}
@@ -1150,13 +1168,13 @@ export function DetailPanel({
                 setBuffer={setYamlBuffer}
                 saving={yamlSaving}
                 setSaving={setYamlSaving}
-                conflict={yamlConflict}
-                setConflict={setYamlConflict}
+                stale={yamlStale}
+                setStale={setYamlStale}
                 error={yamlError}
                 setError={setYamlError}
-                onSaved={() => {
+                onResync={() => {
                   setYamlBuffer(null);
-                  setYamlConflict(null);
+                  setYamlStale(null);
                   setYamlError(null);
                   refetch();
                   setDetailVersion((v) => v + 1);
@@ -1219,308 +1237,6 @@ export function DetailPanel({
   );
 }
 
-// Manifest editor — the YAML tab body. Read-only by default; the operator
-// flips into edit mode via the pencil chip in the chrome bar. Save sends
-// only the touched paths through `apply_resource_cmd` so SSA tracks
-// ownership at field-level granularity, not document-level.
-function YamlPane({
-  mode,
-  t,
-  yaml,
-  yamlRaw,
-  original,
-  refreshedAt,
-  clusterId,
-  kindId,
-  kindLabel,
-  namespace,
-  name,
-  buffer,
-  setBuffer,
-  saving,
-  setSaving,
-  conflict,
-  setConflict,
-  error,
-  setError,
-  onSaved,
-}: {
-  mode: ThemeMode;
-  t: Tokens;
-  yaml: string;
-  // Unstripped YAML — surfaced via the "HIDDEN" toggle in read mode so
-  // operators can inspect server-managed fields (managedFields, status,
-  // resourceVersion, …) without leaving the panel.
-  yamlRaw: string;
-  original: Json | null;
-  refreshedAt: number | null;
-  clusterId: string;
-  kindId: string;
-  kindLabel: string;
-  namespace: string | null;
-  name: string;
-  buffer: string | null;
-  setBuffer: (v: string | null) => void;
-  saving: boolean;
-  setSaving: (v: boolean) => void;
-  conflict: { managers: string[]; fields: string[]; message: string } | null;
-  setConflict: (
-    v: { managers: string[]; fields: string[]; message: string } | null,
-  ) => void;
-  error: string | null;
-  setError: (v: string | null) => void;
-  onSaved: () => void;
-}) {
-  // Monaco wants a literal font stack — pull the theme's mono so it
-  // tracks VS Code's Cascadia etc.
-  const monoFont = useResolvedTheme().typography.fontMono;
-  const editing = buffer !== null;
-  // Operator-facing toggle: when true, render the unstripped raw YAML
-  // (managedFields / status / etc visible). Forced false in edit mode so
-  // saves only ever diff against the stripped baseline — otherwise a
-  // toggle mid-edit would silently re-include server fields the apiserver
-  // would reject anyway. Reset to false whenever the document refetches.
-  const [showHidden, setShowHidden] = useState(false);
-  useEffect(() => {
-    if (editing) setShowHidden(false);
-  }, [editing]);
-  useEffect(() => {
-    setShowHidden(false);
-  }, [refreshedAt]);
-
-  // The editor's live text. When editing we render the operator's buffer;
-  // when in show-hidden read mode we render the raw YAML; otherwise the
-  // stripped YAML.
-  const value = editing ? buffer! : showHidden ? yamlRaw : yaml;
-
-  // 1s tick so the "fetched X ago" indicator in the toolbar refreshes.
-  const [, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (refreshedAt == null || editing) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [refreshedAt, editing]);
-
-  // Diff metrics — only meaningful while editing. `count` drives the Save
-  // chip; `onlyDeletions` flips the warning so the operator isn't confused
-  // when key-removal edits don't take effect under our partial-tree apply.
-  const diff = useMemo(() => {
-    if (!editing || original == null) {
-      return { count: 0, partial: {}, empty: true, onlyDeletions: false };
-    }
-    try {
-      const edited = parseYaml(buffer!);
-      return diffPartial(original, edited);
-    } catch {
-      return { count: -1, partial: {}, empty: true, onlyDeletions: false };
-    }
-  }, [editing, buffer, original]);
-
-  const enter = () => {
-    setError(null);
-    setConflict(null);
-    setBuffer(yaml);
-  };
-  const cancel = () => {
-    setBuffer(null);
-    setConflict(null);
-    setError(null);
-  };
-
-  const apply = async (force: boolean) => {
-    if (original == null) {
-      setError("Cannot edit: original document failed to parse.");
-      return;
-    }
-    let edited: Json;
-    try {
-      edited = parseYaml(buffer ?? "");
-    } catch (e) {
-      setError(`YAML parse error: ${String(e)}`);
-      return;
-    }
-    const d = diffPartial(original, edited);
-    if (d.empty && !d.onlyDeletions) {
-      setError("Nothing changed.");
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      const result = await api.applyResource(
-        clusterId,
-        kindId,
-        namespace,
-        name,
-        d.partial,
-        force,
-      );
-      if (result.kind === "applied") {
-        setSaving(false);
-        onSaved();
-      } else {
-        setSaving(false);
-        setConflict({
-          managers: result.managers,
-          fields: result.fields,
-          message: result.message,
-        });
-      }
-    } catch (e) {
-      setSaving(false);
-      setError(String(e));
-    }
-  };
-
-  // The chrome bar above the editor — pencil → Save (N) / Cancel chips.
-  // Disabled when the original couldn't be parsed (e.g. malformed YAML
-  // returned from the apiserver, which shouldn't happen but isn't fatal).
-  const editable = original != null;
-  const dirtyForChrome = diff.count > 0 ? diff.count : 0;
-
-  return (
-    <div
-      style={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 0,
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "6px 14px",
-          borderBottom: `1px solid ${t.borderSoft}`,
-          background: t.headerAlt,
-          flexShrink: 0,
-        }}
-      >
-        <span
-          style={{
-            fontSize: FS_XS,
-            fontFamily: FF_MONO,
-            color: t.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 0.6,
-          }}
-        >
-          {editing
-            ? diff.count === -1
-              ? "YAML parse error"
-              : diff.onlyDeletions && diff.count === 0
-                ? "removals only — not applied"
-                : `editing · ${dirtyForChrome} change${dirtyForChrome === 1 ? "" : "s"}`
-            : refreshedAt != null
-              ? showHidden
-                ? `read-only · all fields shown · fetched ${timeAgo(refreshedAt)}`
-                : `read-only · status & managed fields hidden · fetched ${timeAgo(refreshedAt)}`
-              : showHidden
-                ? "read-only · all fields shown"
-                : "read-only · status & managed fields hidden"}
-        </span>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-          {!editing && yamlRaw !== yaml && (
-            <button
-              type="button"
-              onClick={() => setShowHidden((v) => !v)}
-              title={
-                showHidden
-                  ? "Hide server-managed fields (managedFields, status, resourceVersion, …)"
-                  : "Show server-managed fields (managedFields, status, resourceVersion, …)"
-              }
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                height: 22,
-                padding: "0 8px",
-                borderRadius: R_SM,
-                border: "none",
-                background: showHidden ? t.accentSoft : t.chip,
-                color: showHidden ? t.accent : t.textDim,
-                fontFamily: FF_MONO,
-                fontSize: FS_SM,
-                fontWeight: 700,
-                letterSpacing: 0.4,
-                cursor: "pointer",
-                textTransform: "uppercase",
-              }}
-            >
-              {showHidden ? "Unhide" : "Hidden"}
-            </button>
-          )}
-          {editable && (
-            <EditModeChrome
-              t={t}
-              editing={editing}
-              dirty={dirtyForChrome}
-              saving={saving}
-              onEnter={enter}
-              onCancel={cancel}
-              onSave={() => apply(false)}
-            />
-          )}
-        </span>
-      </div>
-      {error && (
-        <div
-          style={{
-            padding: "8px 14px",
-            background: "rgba(244,63,94,0.1)",
-            borderBottom: `1px solid ${t.borderSoft}`,
-            flexShrink: 0,
-          }}
-        >
-          <ErrorBlock
-            t={t}
-            message={error}
-            kindLabel={kindLabel}
-            verb="save"
-            inline
-          />
-        </div>
-      )}
-      {conflict && (
-        <div style={{ padding: "10px 14px 0", flexShrink: 0 }}>
-          <ConflictBanner
-            t={t}
-            conflict={conflict}
-            saving={saving}
-            onForce={() => apply(true)}
-            onDismiss={() => setConflict(null)}
-          />
-        </div>
-      )}
-      <div style={{ flex: 1, minHeight: 0 }}>
-        <Editor
-          height="100%"
-          language="yaml"
-          theme={mode === "dark" ? "vs-dark" : "light"}
-          value={value}
-          onChange={(next) => {
-            if (!editing) return;
-            setBuffer(next ?? "");
-          }}
-          onMount={installClipboardShortcuts}
-          options={{
-            readOnly: !editing || saving,
-            minimap: { enabled: false },
-            // Monaco wants a literal font + numeric size.
-            fontSize: 12.5,
-            fontFamily: monoFont,
-            wordWrap: "on",
-            scrollBeyondLastLine: false,
-            renderLineHighlight: "none",
-            folding: true,
-          }}
-        />
-      </div>
-    </div>
-  );
-}
 
 // Related-resources tab. Pure-frontend projection of fields the kind's
 // existing detail API already returns:
@@ -3323,15 +3039,6 @@ function formatAge(value: unknown, nowMs: number): string {
   if (h < 24) return `${h}h`;
   const d = Math.floor(h / 24);
   return `${d}d`;
-}
-
-function timeAgo(then: number): string {
-  const s = Math.max(0, Math.floor((Date.now() - then) / 1000));
-  if (s < 5) return "just now";
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  return `${Math.floor(m / 60)}h ago`;
 }
 
 // Routes the structured Summary tab to the right per-kind component for

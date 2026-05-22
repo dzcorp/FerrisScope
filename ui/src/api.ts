@@ -35,6 +35,7 @@ import type {
   CompactMemoryResult,
   DevMemoryStats,
   DocApplyResult,
+  MergePatchResult,
   DrainReport,
   EndpointSliceDetail,
   EndpointsDetail,
@@ -542,6 +543,28 @@ export const api = {
       name,
       fields,
       force,
+    }),
+
+  // `kubectl edit`-style save for the YAML manifest tab: an RFC 7386 JSON
+  // merge patch (adds + edits + `null` deletions). `resourceVersion` carries
+  // optimistic concurrency — pass the version the operator opened to detect
+  // a concurrent change (`MergePatchResult.kind === "stale"`); pass null to
+  // overwrite regardless ("apply anyway").
+  mergePatchResource: (
+    clusterId: string,
+    kindId: string,
+    namespace: string | null,
+    name: string,
+    patch: Record<string, unknown>,
+    resourceVersion: string | null,
+  ) =>
+    invoke<MergePatchResult>("merge_patch_resource_cmd", {
+      clusterId,
+      kindId,
+      namespace,
+      name,
+      patch,
+      resourceVersion,
     }),
 
   // Cordon (cordon=true) or uncordon (false) a node. Patches

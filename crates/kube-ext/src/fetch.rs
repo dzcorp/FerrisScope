@@ -1942,6 +1942,135 @@ fn extract_manager(msg: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MergePatchResult {
+    /// Patch landed. Carries the new `resourceVersion` so the UI knows the
+    /// watcher will catch up.
+    Applied { resource_version: Option<String> },
+    /// The object changed on the server since the operator opened it — the
+    /// `resourceVersion` they edited from is stale. The UI offers reload or
+    /// apply-anyway. This is the only conflict mode of the merge-patch path
+    /// (unlike SSA, there is no per-field ownership conflict).
+    Stale { message: String },
+}
+
+/// Build the JSON merge-patch body that actually goes on the wire. Injects
+/// `metadata.resourceVersion` when the caller supplies one so the apiserver
+/// enforces optimistic concurrency (rejecting the PATCH with a 409 if the
+/// object moved on). Pulled out as a pure function so the envelope handling
+/// is unit-testable without a cluster.
+fn build_merge_patch_body(patch: Value, resource_version: Option<&str>) -> Value {
+    let mut body = if patch.is_object() { patch } else { json!({}) };
+    if let Some(rv) = resource_version {
+        let obj = body.as_object_mut().expect("ensured object above");
+        let metadata_entry = obj.entry("metadata").or_insert_with(|| json!({}));
+        if !metadata_entry.is_object() {
+            *metadata_entry = json!({});
+        }
+        metadata_entry
+            .as_object_mut()
+            .expect("ensured object above")
+            .insert("resourceVersion".to_owned(), Value::String(rv.to_owned()));
+    }
+    body
+}
+
+/// `kubectl edit`-style save for the YAML manifest tab. Applies an RFC 7386
+/// JSON merge patch (adds + edits + `null` deletions) against any kind in the
+/// registry. This is deliberately *not* Server-Side Apply: a free-form
+/// manifest editor wants last-write-wins with explicit deletions, not
+/// per-field ownership tracking (which is what the structured editors use via
+/// [`apply_resource`]).
+///
+/// `resource_version` carries optimistic concurrency: `Some(rv)` makes the
+/// apiserver reject the patch with a 409 if the object changed since the
+/// operator opened it (surfaced as [`MergePatchResult::Stale`]); `None` skips
+/// the check (the UI's explicit "apply anyway" overwrite).
+pub async fn merge_patch_resource(
+    client: Client,
+    kind_id: &str,
+    namespace: Option<&str>,
+    name: &str,
+    patch: Value,
+    resource_version: Option<&str>,
+) -> Result<MergePatchResult, FetchError> {
+    let entry =
+        registry::lookup(kind_id).ok_or_else(|| FetchError::UnknownKind(kind_id.to_owned()))?;
+    let meta = &entry.meta;
+
+    let gvk = GroupVersionKind::gvk(meta.group, meta.version, meta.kind);
+    let ar = ApiResource::from_gvk_with_plural(&gvk, meta.plural);
+
+    let api: Api<DynamicObject> = if meta.namespaced {
+        let ns = namespace.ok_or_else(|| FetchError::NamespaceRequired(kind_id.to_owned()))?;
+        Api::namespaced_with(client, ns, &ar)
+    } else {
+        Api::all_with(client, &ar)
+    };
+
+    let body = build_merge_patch_body(patch, resource_version);
+
+    match api
+        .patch(name, &PatchParams::default(), &Patch::Merge(&body))
+        .await
+    {
+        Ok(obj) => Ok(MergePatchResult::Applied {
+            resource_version: obj.metadata.resource_version,
+        }),
+        // A resourceVersion mismatch comes back as 409 Conflict with a
+        // message like "the object has been modified; please apply your
+        // changes to the latest version and try again".
+        Err(kube::Error::Api(status)) if status.code == 409 => Ok(MergePatchResult::Stale {
+            message: status.message.clone(),
+        }),
+        Err(e) => Err(FetchError::Kube(e)),
+    }
+}
+
+#[cfg(test)]
+mod merge_patch_tests {
+    use super::build_merge_patch_body;
+    use serde_json::json;
+
+    #[test]
+    fn injects_resource_version_into_existing_metadata() {
+        let patch = json!({ "metadata": { "labels": { "a": "b" } }, "data": { "k": "v" } });
+        let body = build_merge_patch_body(patch, Some("42"));
+        assert_eq!(body["metadata"]["resourceVersion"], json!("42"));
+        // existing fields survive
+        assert_eq!(body["metadata"]["labels"]["a"], json!("b"));
+        assert_eq!(body["data"]["k"], json!("v"));
+    }
+
+    #[test]
+    fn creates_metadata_when_absent() {
+        let patch = json!({ "spec": { "replicas": 3 } });
+        let body = build_merge_patch_body(patch, Some("7"));
+        assert_eq!(body["metadata"]["resourceVersion"], json!("7"));
+        assert_eq!(body["spec"]["replicas"], json!(3));
+    }
+
+    #[test]
+    fn preserves_null_deletions_in_the_patch() {
+        // The merge-patch's whole point: a removed key arrives as null and
+        // must stay null through envelope assembly.
+        let patch = json!({ "data": { "gone": null, "kept": "x" } });
+        let body = build_merge_patch_body(patch, None);
+        assert!(body["data"].as_object().unwrap().contains_key("gone"));
+        assert_eq!(body["data"]["gone"], json!(null));
+        assert_eq!(body["data"]["kept"], json!("x"));
+        // No resourceVersion requested → no metadata injected.
+        assert!(body.get("metadata").is_none());
+    }
+
+    #[test]
+    fn non_object_patch_becomes_empty_object() {
+        let body = build_merge_patch_body(json!("oops"), Some("1"));
+        assert_eq!(body["metadata"]["resourceVersion"], json!("1"));
+    }
+}
+
 // ── Node operations: cordon / uncordon / drain / pods-on-node ──────────────
 //
 // `cordon` / `uncordon` flip `spec.unschedulable` via Server-Side Apply with

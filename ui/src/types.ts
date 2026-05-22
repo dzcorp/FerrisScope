@@ -1926,6 +1926,15 @@ export type ApplyResult =
   | { kind: "applied"; resource_version: string | null }
   | ({ kind: "conflict" } & Omit<ApplyConflict, "conflict">);
 
+// ── Merge-patch (kubectl edit) result ──────────────────────────────────────
+//
+// The YAML manifest tab saves via an RFC 7386 JSON merge patch rather than
+// SSA, so its conflict mode is different: not per-field ownership, but a
+// stale `resourceVersion` (the object changed since the operator opened it).
+export type MergePatchResult =
+  | { kind: "applied"; resource_version: string | null }
+  | { kind: "stale"; message: string };
+
 // Per-doc result from the multi-doc YAML apply path. Tagged on `status`.
 export type DocApplyResult =
   | {

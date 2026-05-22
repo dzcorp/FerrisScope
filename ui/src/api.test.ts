@@ -117,6 +117,29 @@ describe("applyResource (SSA)", () => {
   });
 });
 
+describe("mergePatchResource (kubectl edit)", () => {
+  it("ships the merge patch + resourceVersion for the optimistic-lock path", async () => {
+    const cap = captureNext({ kind: "applied", resource_version: "43" });
+    const patch = { data: { KEY: "B", GONE: null } };
+    await api.mergePatchResource("ctx", "configmaps", "default", "cm", patch, "42");
+    expect(cap.calls[0]?.cmd).toBe("merge_patch_resource_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      clusterId: "ctx",
+      kindId: "configmaps",
+      namespace: "default",
+      name: "cm",
+      patch,
+      resourceVersion: "42",
+    });
+  });
+
+  it("resourceVersion=null is the overwrite (apply-anyway) path", async () => {
+    const cap = captureNext({ kind: "applied", resource_version: "44" });
+    await api.mergePatchResource("ctx", "configmaps", "default", "cm", {}, null);
+    expect(cap.calls[0]?.args?.resourceVersion).toBeNull();
+  });
+});
+
 describe("deleteResource", () => {
   it("force-delete sends gracePeriodSeconds: 0", async () => {
     const cap = captureNext(undefined);
