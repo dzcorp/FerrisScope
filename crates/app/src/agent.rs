@@ -21,7 +21,7 @@ use ferrisscope_agent::session::{
     ApprovalDecision, SessionData, SessionError, SessionEvent, SessionMeta, SessionStore,
     SessionUpdate,
 };
-use ferrisscope_agent::types::{ChatMessage, MessageRole, ToolSchema};
+use ferrisscope_agent::types::{ChatMessage, ImageAttachment, MessageRole, ToolSchema};
 use ferrisscope_agent::{
     classify_tool, AgentSettings, ApprovalMode, ChatProvider, CompletionEvent, CompletionRequest,
     Credential, FinishReason, ModelInfo, NativeRegistry, ProviderConfig, ProviderError,
@@ -2046,6 +2046,10 @@ pub(crate) async fn chat_send_message(
     chat_id: String,
     content: String,
     view_context: Option<ViewContextWire>,
+    // Image attachments (clipboard paste / file attach). `mime` + base64
+    // `data`, no data-URL prefix. Persisted on the user message and turned
+    // into provider-native image blocks for vision-capable models.
+    images: Option<Vec<ImageAttachment>>,
     state: State<'_, AgentState>,
     app_state: State<'_, AppState>,
 ) -> Result<(), String> {
@@ -2097,6 +2101,7 @@ pub(crate) async fn chat_send_message(
         tool_call_id: None,
         name: None,
         reasoning_content: None,
+        images: images.unwrap_or_default(),
     };
     let (cluster_id, session_id, queue_only, title_snapshot) = {
         let mut rt = runtime.lock().await;
@@ -2704,6 +2709,7 @@ async fn autocontinue_if_idle(
         tool_call_id: None,
         name: Some(AUTO_CONTINUE_NAME.to_string()),
         reasoning_content: None,
+        images: vec![],
     };
     let should_spawn = {
         let mut g = runtime.lock().await;
@@ -3177,6 +3183,7 @@ async fn run_turn_loop(
             tool_call_id: None,
             name: None,
             reasoning_content: None,
+            images: vec![],
         });
         full_messages.extend(messages_so_far);
 
@@ -3219,6 +3226,7 @@ async fn run_turn_loop(
                         tool_call_id: None,
                         name: None,
                         reasoning_content: None,
+                        images: vec![],
                     };
                     let now = chrono::Utc::now().timestamp_millis();
                     let _ = store
@@ -3284,6 +3292,7 @@ async fn run_turn_loop(
                         tool_call_id: None,
                         name: None,
                         reasoning_content: None,
+                        images: vec![],
                     };
                     let now = chrono::Utc::now().timestamp_millis();
                     let _ = store
@@ -3356,6 +3365,7 @@ async fn run_turn_loop(
                         tool_call_id: None,
                         name: None,
                         reasoning_content: None,
+                        images: vec![],
                     };
                     let now = chrono::Utc::now().timestamp_millis();
                     let _ = store
@@ -3513,6 +3523,7 @@ async fn run_turn_loop(
                 tool_call_id: Some(tc.id.clone()),
                 name: Some(tc.name.clone()),
                 reasoning_content: None,
+                images: vec![],
             })
             .collect();
         {
@@ -3622,6 +3633,7 @@ fn merge_trailing_user_run(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
         tool_call_id: None,
         name: None,
         reasoning_content: None,
+        images: vec![],
     });
     messages
 }
@@ -4001,6 +4013,7 @@ async fn run_provider_round(
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                images: vec![],
             };
             let now = chrono::Utc::now().timestamp_millis();
             let _ = store
@@ -4053,6 +4066,7 @@ async fn run_provider_round(
         tool_call_id: None,
         name: None,
         reasoning_content,
+        images: vec![],
     };
     runtime.lock().await.in_flight_message_id = None;
     let now = chrono::Utc::now().timestamp_millis();
@@ -4541,6 +4555,7 @@ fn build_title_request(snapshot: &TitleSnapshot, model: String) -> CompletionReq
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                images: vec![],
             },
             ChatMessage {
                 role: MessageRole::User,
@@ -4549,6 +4564,7 @@ fn build_title_request(snapshot: &TitleSnapshot, model: String) -> CompletionReq
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                images: vec![],
             },
         ],
         tools: vec![],
@@ -4795,6 +4811,7 @@ async fn repair_orphan_tool_calls(
                     tool_call_id: Some(tc.id.clone()),
                     name: Some(tc.name.clone()),
                     reasoning_content: None,
+                    images: vec![],
                 };
                 g.messages.insert(insert_at, msg.clone());
                 synthetic.push(msg);
@@ -4936,6 +4953,7 @@ async fn run_compaction_internal(
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                images: vec![],
             },
             ChatMessage {
                 role: MessageRole::User,
@@ -4944,6 +4962,7 @@ async fn run_compaction_internal(
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                images: vec![],
             },
         ],
         tools: vec![],
@@ -5019,6 +5038,7 @@ async fn run_compaction_internal(
             tool_call_id: None,
             name: Some("context_checkpoint".to_string()),
             reasoning_content: None,
+            images: vec![],
         });
         g.messages.extend(tail);
         g.last_total_tokens = 0;

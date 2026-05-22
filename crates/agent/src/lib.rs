@@ -27,4 +27,4 @@ pub use provider::{
 pub use session::{
     SessionData, SessionError, SessionEvent, SessionMeta, SessionStore, SessionUpdate,
 };
-pub use types::{ChatMessage, MessageRole, ToolCall, ToolSchema};
+pub use types::{ChatMessage, ImageAttachment, MessageRole, ToolCall, ToolSchema};

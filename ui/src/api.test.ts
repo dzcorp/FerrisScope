@@ -734,6 +734,24 @@ describe("AI agent + chat", () => {
     });
   });
 
+  it("chatSendMessage forwards image attachments when provided", async () => {
+    const cap = captureNext(undefined);
+    await api.chatSendMessage("c-1", "what is this?", undefined, [
+      { mime: "image/png", data: "AAAA" },
+      { mime: "image/jpeg", data: "Zm9v" },
+    ]);
+    expect(cap.calls[0]?.cmd).toBe("chat_send_message");
+    expect(cap.calls[0]?.args).toEqual({
+      chatId: "c-1",
+      content: "what is this?",
+      viewContext: undefined,
+      images: [
+        { mime: "image/png", data: "AAAA" },
+        { mime: "image/jpeg", data: "Zm9v" },
+      ],
+    });
+  });
+
   it("chatSendMessage forwards the view-context snapshot when provided", async () => {
     const cap = captureNext(undefined);
     await api.chatSendMessage("c-1", "fix this", {

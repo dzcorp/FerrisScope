@@ -15,8 +15,8 @@
 //! the agent loop and the UI don't have to care about Anthropic specifics.
 
 use super::{
-    merge_top_level, ChatProvider, CompletionEvent, CompletionFinal, CompletionRequest, EventSink,
-    FinishReason, ModelInfo, ProviderError, Usage,
+    dropped_images_note, merge_top_level, ChatProvider, CompletionEvent, CompletionFinal,
+    CompletionRequest, EventSink, FinishReason, ModelInfo, ProviderError, Usage,
 };
 use crate::config::Credential;
 use crate::provider::meta::{self, ProviderMeta};
@@ -77,13 +77,48 @@ impl AnthropicProvider {
 
 // ─── Request body construction ──────────────────────────────────────────────
 
+/// Build the `content` array for a user message: an optional text block
+/// followed by one `image` block per attachment. When the model can't see
+/// images we drop them and fold a short note into the text so the model
+/// isn't blind to something the operator attached. Anthropic requires a
+/// non-empty content array, so the no-image / no-text path still emits a
+/// single (possibly empty) text block — preserving the prior behaviour.
+fn user_content(m: &ChatMessage, supports_vision: bool) -> Vec<Value> {
+    if supports_vision && !m.images.is_empty() {
+        let mut blocks: Vec<Value> = Vec::new();
+        if !m.content.is_empty() {
+            blocks.push(json!({ "type": "text", "text": m.content }));
+        }
+        for img in &m.images {
+            blocks.push(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.mime,
+                    "data": img.data,
+                },
+            }));
+        }
+        blocks
+    } else {
+        let text = if m.images.is_empty() {
+            m.content.clone()
+        } else {
+            dropped_images_note(&m.content, m.images.len())
+        };
+        vec![json!({ "type": "text", "text": text })]
+    }
+}
+
 /// Convert the agent's neutral `Vec<ChatMessage>` into Anthropic's
 /// `(system: String, messages: [...] )` shape. System messages collapse
 /// into the top-level `system` field; assistant tool_calls become
 /// `tool_use` content blocks; `Tool` role messages become a `user`
 /// message containing a `tool_result` block (Anthropic's protocol uses
 /// `user` with `tool_result` blocks rather than a dedicated tool role).
-fn build_messages(messages: &[ChatMessage]) -> (String, Vec<Value>) {
+/// `supports_vision` gates whether user-message image attachments are
+/// emitted as `image` blocks or dropped with a note.
+fn build_messages(messages: &[ChatMessage], supports_vision: bool) -> (String, Vec<Value>) {
     let mut system_parts: Vec<String> = Vec::new();
     let mut out: Vec<Value> = Vec::new();
 
@@ -97,7 +132,7 @@ fn build_messages(messages: &[ChatMessage]) -> (String, Vec<Value>) {
             MessageRole::User => {
                 out.push(json!({
                     "role": "user",
-                    "content": [{ "type": "text", "text": m.content }],
+                    "content": user_content(m, supports_vision),
                 }));
             }
             MessageRole::Assistant => {
@@ -206,7 +241,14 @@ impl ChatProvider for AnthropicProvider {
         req: CompletionRequest,
         sink: EventSink,
     ) -> Result<CompletionFinal, ProviderError> {
-        let (system, messages) = build_messages(&req.messages);
+        // Drop image blocks only when models.dev positively says the
+        // model is text-only; unknown models default to "try it" and let
+        // the apiserver be the arbiter.
+        let supports_vision = crate::provider::catalogue::supports_vision(
+            crate::config::ProviderKind::Anthropic,
+            &req.model,
+        );
+        let (system, messages) = build_messages(&req.messages, supports_vision);
 
         let mut body = json!({
             "model": req.model,
@@ -487,7 +529,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let (sys, body) = build_messages(&msgs);
+        let (sys, body) = build_messages(&msgs, true);
         assert_eq!(sys, "You are helpful.");
         assert_eq!(body.len(), 3);
         assert_eq!(body[0]["role"], "user");
@@ -497,6 +539,48 @@ mod tests {
         assert_eq!(body[2]["role"], "user");
         assert_eq!(body[2]["content"][0]["type"], "tool_result");
         assert_eq!(body[2]["content"][0]["tool_use_id"], "call_1");
+    }
+
+    #[test]
+    fn user_message_with_image_emits_image_block_when_vision_supported() {
+        let msg = ChatMessage {
+            role: MessageRole::User,
+            content: "what is this?".into(),
+            images: vec![crate::types::ImageAttachment {
+                mime: "image/png".into(),
+                data: "AAAA".into(),
+            }],
+            ..Default::default()
+        };
+        let (_sys, body) = build_messages(std::slice::from_ref(&msg), true);
+        assert_eq!(body.len(), 1);
+        let content = body[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what is this?");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn user_message_with_image_drops_to_note_when_vision_unsupported() {
+        let msg = ChatMessage {
+            role: MessageRole::User,
+            content: "look".into(),
+            images: vec![crate::types::ImageAttachment {
+                mime: "image/png".into(),
+                data: "AAAA".into(),
+            }],
+            ..Default::default()
+        };
+        let (_sys, body) = build_messages(std::slice::from_ref(&msg), false);
+        let content = body[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.starts_with("look"));
+        assert!(text.contains("does not support image input"));
     }
 
     #[test]

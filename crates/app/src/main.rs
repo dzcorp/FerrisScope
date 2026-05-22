@@ -5,6 +5,7 @@ mod agent_keyring;
 mod agent_mcp;
 mod agent_native;
 mod agent_oauth;
+mod clipboard_image;
 mod commands;
 mod helm_install;
 mod kubectl_install;
@@ -104,6 +105,7 @@ fn main() {
         .manage(agent::AgentState::default())
         .invoke_handler(tauri::generate_handler![
             commands::ping,
+            clipboard_image::read_clipboard_image,
             commands::dev_memory_stats,
             commands::dev_compact_memory,
             commands::updater_info,

@@ -25,8 +25,8 @@
 //! Subsequent 401s surface as `ProviderError::Auth`.
 
 use super::{
-    merge_top_level, ChatProvider, CompletionEvent, CompletionFinal, CompletionRequest, EventSink,
-    FinishReason, ModelInfo, ProviderError, Usage,
+    dropped_images_note, merge_top_level, ChatProvider, CompletionEvent, CompletionFinal,
+    CompletionRequest, EventSink, FinishReason, ModelInfo, ProviderError, Usage,
 };
 use crate::config::Credential;
 use crate::provider::meta;
@@ -207,11 +207,42 @@ impl OpenAICodexProvider {
 
 // ─── Request body construction ──────────────────────────────────────────────
 
+/// Build the Responses `content` array for a user message: an optional
+/// `input_text` block followed by one `input_image` block per attachment
+/// (the Responses API takes the image as a data-URI string under
+/// `image_url`). When the model can't see images we drop them and fold a
+/// note into the text. Always emits at least one block — Codex rejects an
+/// empty content array.
+fn user_input_content(m: &ChatMessage, supports_vision: bool) -> Vec<Value> {
+    if supports_vision && !m.images.is_empty() {
+        let mut content: Vec<Value> = Vec::new();
+        if !m.content.is_empty() {
+            content.push(json!({ "type": "input_text", "text": m.content }));
+        }
+        for img in &m.images {
+            content.push(json!({
+                "type": "input_image",
+                "image_url": format!("data:{};base64,{}", img.mime, img.data),
+            }));
+        }
+        content
+    } else {
+        let text = if m.images.is_empty() {
+            m.content.clone()
+        } else {
+            dropped_images_note(&m.content, m.images.len())
+        };
+        vec![json!({ "type": "input_text", "text": text })]
+    }
+}
+
 /// Convert `Vec<ChatMessage>` into Codex Responses input items. The
 /// `instructions` system field is split off and returned separately so
 /// the caller can drop it into the top-level `instructions` slot
-/// (preferred over an in-line `system` message).
-fn build_input(messages: &[ChatMessage]) -> (String, Vec<Value>) {
+/// (preferred over an in-line `system` message). `supports_vision` gates
+/// whether user-message image attachments become `input_image` blocks or
+/// are dropped with a note.
+fn build_input(messages: &[ChatMessage], supports_vision: bool) -> (String, Vec<Value>) {
     let mut instructions: Vec<String> = Vec::new();
     let mut input: Vec<Value> = Vec::new();
 
@@ -225,7 +256,7 @@ fn build_input(messages: &[ChatMessage]) -> (String, Vec<Value>) {
             MessageRole::User => {
                 input.push(json!({
                     "role": "user",
-                    "content": [{ "type": "input_text", "text": m.content }],
+                    "content": user_input_content(m, supports_vision),
                 }));
             }
             MessageRole::Assistant => {
@@ -294,7 +325,13 @@ impl ChatProvider for OpenAICodexProvider {
             }
         }
 
-        let (instructions, input) = build_input(&req.messages);
+        // Codex uses the OpenAI models.dev catalogue. Drop image blocks
+        // only when it positively marks the model text-only.
+        let supports_vision = crate::provider::catalogue::supports_vision(
+            crate::config::ProviderKind::OpenAI,
+            &req.model,
+        );
+        let (instructions, input) = build_input(&req.messages, supports_vision);
 
         let body = build_request_body(&req, &instructions, &input);
 
@@ -619,7 +656,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let (instr, input) = build_input(&msgs);
+        let (instr, input) = build_input(&msgs, true);
         assert_eq!(instr, "be helpful");
         // user, function_call, function_call_output (assistant-text was empty)
         assert_eq!(input.len(), 3);
@@ -629,6 +666,46 @@ mod tests {
         assert_eq!(input[2]["type"], "function_call_output");
         assert_eq!(input[2]["call_id"], "call_a");
         assert_eq!(input[2]["output"], "[]");
+    }
+
+    #[test]
+    fn user_message_with_image_emits_input_image_when_vision_supported() {
+        let msg = ChatMessage {
+            role: MessageRole::User,
+            content: "explain".into(),
+            images: vec![crate::types::ImageAttachment {
+                mime: "image/webp".into(),
+                data: "YmFy".into(),
+            }],
+            ..Default::default()
+        };
+        let (_instr, input) = build_input(std::slice::from_ref(&msg), true);
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "explain");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "data:image/webp;base64,YmFy");
+    }
+
+    #[test]
+    fn user_message_with_image_drops_to_note_when_vision_unsupported() {
+        let msg = ChatMessage {
+            role: MessageRole::User,
+            content: "explain".into(),
+            images: vec![crate::types::ImageAttachment {
+                mime: "image/webp".into(),
+                data: "YmFy".into(),
+            }],
+            ..Default::default()
+        };
+        let (_instr, input) = build_input(std::slice::from_ref(&msg), false);
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "input_text");
+        assert!(content[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("does not support image input"));
     }
 
     #[test]

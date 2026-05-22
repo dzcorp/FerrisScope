@@ -40,6 +40,27 @@ pub struct ChatMessage {
     /// session JSONLs so reload restores correct round-trip behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Image attachments on a `user` message (clipboard paste / file
+    /// attach). Each is base64-encoded bytes plus a MIME type; providers
+    /// that support vision turn these into their native image content
+    /// blocks (Anthropic `image`, OpenAI `image_url`, Codex
+    /// `input_image`). Persisted in the session JSONL so reopening a chat
+    /// keeps the model's visual context. Empty (the common case) is
+    /// skipped on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
+}
+
+/// A single image attached to a user message. `data` is standard base64
+/// **without** the `data:<mime>;base64,` prefix — providers reconstruct a
+/// data URI (OpenAI / Codex) or pass `mime` + `data` separately
+/// (Anthropic) as their wire requires.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    /// MIME type, e.g. `"image/png"`, `"image/jpeg"`, `"image/webp"`.
+    pub mime: String,
+    /// Base64-encoded image bytes, no data-URL prefix.
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

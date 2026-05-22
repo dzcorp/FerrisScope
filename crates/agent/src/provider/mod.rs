@@ -140,6 +140,24 @@ pub(crate) fn merge_top_level(body: &mut serde_json::Value, overrides: &serde_js
     }
 }
 
+/// Build the replacement text when image attachments are dropped because
+/// the active model can't accept image input. Keeps the operator's prose
+/// and tells the model an image existed, so its reply isn't confusingly
+/// blind to something the operator clearly attached. Shared across
+/// providers so the wording (and the "drop, don't 400" policy) stays
+/// consistent.
+pub(crate) fn dropped_images_note(text: &str, count: usize) -> String {
+    let plural = if count == 1 { "image" } else { "images" };
+    let note = format!(
+        "[{count} {plural} attached but omitted: the selected model does not support image input.]"
+    );
+    if text.is_empty() {
+        note
+    } else {
+        format!("{text}\n\n{note}")
+    }
+}
+
 #[async_trait]
 pub trait ChatProvider: Send + Sync {
     fn name(&self) -> &'static str;
