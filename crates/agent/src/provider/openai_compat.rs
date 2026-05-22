@@ -6,8 +6,8 @@
 //! [`crate::provider::meta`].
 
 use super::{
-    merge_top_level, ChatProvider, CompletionEvent, CompletionFinal, CompletionRequest, EventSink,
-    FinishReason, ModelInfo, ProviderError, Usage,
+    dropped_images_note, merge_top_level, ChatProvider, CompletionEvent, CompletionFinal,
+    CompletionRequest, EventSink, FinishReason, ModelInfo, ProviderError, Usage,
 };
 use crate::config::{Credential, ProviderKind};
 use crate::provider::catalogue;
@@ -143,11 +143,35 @@ fn role_str(r: MessageRole) -> &'static str {
 /// names the per-model round-trip field (typically "reasoning_content")
 /// from models.dev — when set, every assistant message in the request
 /// body must carry it (empty string when the message has no captured
-/// reasoning) or DeepSeek-family backends 400.
-fn message_to_oa(m: &ChatMessage, interleaved: Option<&str>) -> Value {
+/// reasoning) or DeepSeek-family backends 400. `supports_vision` gates
+/// whether user-message image attachments are emitted as `image_url`
+/// content parts (which forces the array content form) or dropped with a
+/// note folded into the text.
+fn message_to_oa(m: &ChatMessage, interleaved: Option<&str>, supports_vision: bool) -> Value {
     let mut obj = serde_json::Map::new();
     obj.insert("role".to_string(), Value::String(role_str(m.role).into()));
-    if !m.content.is_empty() {
+    let user_with_images = matches!(m.role, MessageRole::User) && !m.images.is_empty();
+    if user_with_images && supports_vision {
+        // Multimodal user turn: content is an array of typed parts. OpenAI
+        // (and every vision-capable compat backend) takes images as a
+        // data-URI under `image_url.url`.
+        let mut parts: Vec<Value> = Vec::new();
+        if !m.content.is_empty() {
+            parts.push(json!({ "type": "text", "text": m.content }));
+        }
+        for img in &m.images {
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{};base64,{}", img.mime, img.data) },
+            }));
+        }
+        obj.insert("content".to_string(), Value::Array(parts));
+    } else if user_with_images {
+        // Vision-incapable model: keep the text, fold in a note so the
+        // model knows an image was attached, never send `image_url`.
+        let text = dropped_images_note(&m.content, m.images.len());
+        obj.insert("content".to_string(), Value::String(text));
+    } else if !m.content.is_empty() {
         obj.insert("content".to_string(), Value::String(m.content.clone()));
     }
     if let Some(name) = &m.name {
@@ -332,11 +356,14 @@ impl ChatProvider for OpenAICompatibleProvider {
         let interleaved = caps.as_ref().and_then(|c| c.interleaved_field.clone());
         let supports_temperature = caps.as_ref().is_none_or(|c| c.temperature);
         let supports_tools = caps.as_ref().is_none_or(|c| c.tool_call);
+        // Unknown models (no catalogue entry) default to "try it" — only
+        // drop images when models.dev positively marks the model text-only.
+        let supports_vision = caps.as_ref().is_none_or(|c| c.vision);
 
         let oa_messages: Vec<Value> = req
             .messages
             .iter()
-            .map(|m| message_to_oa(m, interleaved.as_deref()))
+            .map(|m| message_to_oa(m, interleaved.as_deref(), supports_vision))
             .collect();
 
         let mut body = json!({
@@ -601,7 +628,7 @@ mod tests {
             reasoning_content: Some("step 1; step 2".into()),
             ..Default::default()
         };
-        let v = message_to_oa(&msg, Some("reasoning_content"));
+        let v = message_to_oa(&msg, Some("reasoning_content"), true);
         assert_eq!(v["role"], "assistant");
         assert_eq!(v["content"], "hi");
         assert_eq!(v["reasoning_content"], "step 1; step 2");
@@ -618,7 +645,7 @@ mod tests {
             reasoning_content: None,
             ..Default::default()
         };
-        let v = message_to_oa(&msg, Some("reasoning_content"));
+        let v = message_to_oa(&msg, Some("reasoning_content"), true);
         assert_eq!(v["reasoning_content"], "");
     }
 
@@ -629,7 +656,7 @@ mod tests {
             content: "hi".into(),
             ..Default::default()
         };
-        let v = message_to_oa(&msg, Some("reasoning_content"));
+        let v = message_to_oa(&msg, Some("reasoning_content"), true);
         assert!(v.get("reasoning_content").is_none());
     }
 
@@ -641,8 +668,44 @@ mod tests {
             reasoning_content: Some("noise".into()),
             ..Default::default()
         };
-        let v = message_to_oa(&msg, None);
+        let v = message_to_oa(&msg, None, true);
         assert!(v.get("reasoning_content").is_none());
         assert!(v.get("reasoning_details").is_none());
+    }
+
+    #[test]
+    fn user_message_with_image_uses_array_content_with_image_url() {
+        let msg = ChatMessage {
+            role: MessageRole::User,
+            content: "describe".into(),
+            images: vec![crate::types::ImageAttachment {
+                mime: "image/jpeg".into(),
+                data: "Zm9v".into(),
+            }],
+            ..Default::default()
+        };
+        let v = message_to_oa(&msg, None, true);
+        let parts = v["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "describe");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,Zm9v");
+    }
+
+    #[test]
+    fn user_message_with_image_drops_to_string_note_when_vision_unsupported() {
+        let msg = ChatMessage {
+            role: MessageRole::User,
+            content: "describe".into(),
+            images: vec![crate::types::ImageAttachment {
+                mime: "image/jpeg".into(),
+                data: "Zm9v".into(),
+            }],
+            ..Default::default()
+        };
+        let v = message_to_oa(&msg, None, false);
+        let content = v["content"].as_str().unwrap();
+        assert!(content.starts_with("describe"));
+        assert!(content.contains("does not support image input"));
     }
 }

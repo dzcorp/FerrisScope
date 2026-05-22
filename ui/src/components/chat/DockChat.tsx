@@ -7,6 +7,7 @@ import type {
   AgentChatMessage,
   AiSettingsWire,
   ChatEvent,
+  ChatImageAttachment,
   ChatTool,
   ModelInfo,
   ProviderKind,
@@ -508,9 +509,9 @@ export function DockChat({ mode, tab, visible }: Props) {
     setModels(null);
   }, [activeSessionId]);
 
-  const onSend = async (text: string) => {
+  const onSend = async (text: string, images: ChatImageAttachment[] = []) => {
     if (!activeChatId || !activeSessionId) return;
-    if (!text.trim()) return;
+    if (!text.trim() && images.length === 0) return;
     const sid = activeSessionId;
     // Optimistic append so the user's bubble appears immediately,
     // before the backend's first AssistantStart fires. The backend
@@ -531,6 +532,7 @@ export function DockChat({ mode, tab, visible }: Props) {
                 id: `local-${Date.now()}`,
                 role: "user",
                 content: text,
+                images: images.length > 0 ? images : undefined,
               } satisfies ChatViewMessage,
             ],
           },
@@ -538,7 +540,12 @@ export function DockChat({ mode, tab, visible }: Props) {
       };
     });
     try {
-      await api.chatSendMessage(activeChatId, text, snapshotViewContext());
+      await api.chatSendMessage(
+        activeChatId,
+        text,
+        snapshotViewContext(),
+        images.length > 0 ? images : undefined,
+      );
     } catch (e) {
       setStatus({ kind: "error", message: String(e) });
     }

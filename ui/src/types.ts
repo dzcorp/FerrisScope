@@ -2197,12 +2197,23 @@ export type AgentToolCall = {
   arguments: string;
 };
 
+// A single image attached to a user message. `data` is base64 WITHOUT the
+// `data:<mime>;base64,` prefix — matches the Rust `ImageAttachment` wire
+// shape. The frontend reconstructs a data URI for <img> previews.
+export type ChatImageAttachment = {
+  mime: string;
+  data: string;
+};
+
 export type AgentChatMessage = {
   role: MessageRole;
   content: string;
   tool_calls?: AgentToolCall[];
   tool_call_id?: string | null;
   name?: string | null;
+  // Image attachments on user messages (clipboard paste / file attach).
+  // Absent / empty on every other role.
+  images?: ChatImageAttachment[] | null;
 };
 
 export type SessionMeta = {

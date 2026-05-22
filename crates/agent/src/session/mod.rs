@@ -230,6 +230,7 @@ pub(crate) fn apply_compaction(events: Vec<SessionEvent>) -> Vec<SessionEvent> {
             // Provider impls don't read it; the agent loop uses it.
             name: Some("context_checkpoint".to_string()),
             reasoning_content: None,
+            images: vec![],
         },
         ts,
     });

@@ -2,6 +2,7 @@ import type {
   AgentChatMessage,
   AgentToolCall,
   ChatEvent,
+  ChatImageAttachment,
   McpServerStatusWire,
 } from "../../types";
 
@@ -13,6 +14,10 @@ export type ChatViewMessage = {
   id: string;
   role: "user" | "assistant" | "tool";
   content: string;
+  // Image attachments on a user message — rendered as thumbnails in the
+  // bubble. Mirrors the wire `AgentChatMessage.images`. Empty / absent for
+  // every other message.
+  images?: ChatImageAttachment[];
   // Streaming flag — true while a TokenDelta stream is in flight. Cleared on
   // assistant_end / error. UI can render a blinking caret based on this.
   streaming?: boolean;
@@ -157,6 +162,10 @@ export function chatStateFromMessages(
         id: `hist-${i}`,
         role,
         content,
+        images:
+          role === "user" && m.images && m.images.length > 0
+            ? m.images
+            : undefined,
         toolCalls: m.tool_calls,
         toolCallId: m.tool_call_id ?? undefined,
         toolName: m.name ?? undefined,

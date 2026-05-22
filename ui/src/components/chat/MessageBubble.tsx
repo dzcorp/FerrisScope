@@ -1,6 +1,15 @@
 import { memo, useMemo } from "react";
 import { useResolvedTheme } from "../../store";
-import { tokens, FF_MONO, type ThemeMode, R_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
+import {
+  tokens,
+  FF_MONO,
+  type ThemeMode,
+  R_MD,
+  R_LG,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+} from "../../theme";
 import type { ChatViewMessage } from "./chatStreaming";
 import { Markdown } from "./markdown";
 import { safePrefixLength } from "./safePrefix";
@@ -137,7 +146,7 @@ function MessageBubbleInner({ message }: Props) {
           <ThinkingIndicator t={t} />
         ) : (
           <>
-            <Markdown text={renderText} t={t} />
+            {hasContent && <Markdown text={renderText} t={t} />}
             {message.streaming && (
               <span
                 style={{
@@ -153,7 +162,49 @@ function MessageBubbleInner({ message }: Props) {
             )}
           </>
         )}
+        {message.images && message.images.length > 0 && (
+          <ImageGrid t={t} images={message.images} withGap={hasContent} />
+        )}
       </div>
+    </div>
+  );
+}
+
+// ImageGrid — attached-image previews inside a user bubble. Each renders a
+// capped-size thumbnail reconstructed from the wire `{mime, data}` pair.
+// `withGap` adds top margin only when there's text above it.
+function ImageGrid({
+  t,
+  images,
+  withGap,
+}: {
+  t: ReturnType<typeof tokens>;
+  images: NonNullable<ChatViewMessage["images"]>;
+  withGap: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 6,
+        marginTop: withGap ? 8 : 0,
+      }}
+    >
+      {images.map((img, i) => (
+        <img
+          key={i}
+          src={`data:${img.mime};base64,${img.data}`}
+          alt="attachment"
+          style={{
+            maxWidth: 180,
+            maxHeight: 180,
+            borderRadius: R_MD,
+            border: `1px solid ${t.border}`,
+            display: "block",
+          }}
+        />
+      ))}
     </div>
   );
 }

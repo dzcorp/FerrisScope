@@ -60,6 +60,14 @@ pub struct ModelCapabilities {
     pub reasoning: bool,
     pub tool_call: bool,
     pub temperature: bool,
+    /// True when the model accepts image input (models.dev
+    /// `modalities.input` contains `"image"`). Drives whether the
+    /// providers emit image content blocks for attached images or drop
+    /// them with a note. Defaults to `false` when the catalogue lists the
+    /// model without modalities — callers treat a *missing* catalogue
+    /// entry (lookup returns `None`) as permissive, so unknown models
+    /// still get a chance to render attachments.
+    pub vision: bool,
     /// When set, the OpenAI-compat backend expects every assistant
     /// message to carry the named field with the previously-emitted
     /// reasoning text. The field name itself ("reasoning_content" or
@@ -109,6 +117,16 @@ struct ModelEntry {
     temperature: Option<bool>,
     #[serde(default)]
     interleaved: Option<InterleavedJson>,
+    /// `{ "input": ["text", "image", "pdf"], "output": ["text"] }`.
+    /// We only read `input` to decide vision support.
+    #[serde(default)]
+    modalities: Option<ModalitiesJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModalitiesJson {
+    #[serde(default)]
+    input: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -323,10 +341,15 @@ fn parse_catalogue(resp: ApiResponse) -> CatalogueMaps {
                 InterleavedJson::Bool(_) => None,
                 InterleavedJson::Obj { field } => field.filter(|s| !s.is_empty()),
             });
+            let vision = m
+                .modalities
+                .as_ref()
+                .is_some_and(|md| md.input.iter().any(|s| s == "image"));
             let caps = ModelCapabilities {
                 reasoning: m.reasoning.unwrap_or(false),
                 tool_call: m.tool_call.unwrap_or(true),
                 temperature: m.temperature.unwrap_or(true),
+                vision,
                 interleaved_field,
             };
             caps_by_id.insert(key, caps);
@@ -352,6 +375,17 @@ pub fn capabilities(kind: ProviderKind, model_id: &str) -> Option<ModelCapabilit
     g.caps_by_id
         .get(&(mdid.to_string(), model_id.to_string()))
         .cloned()
+}
+
+/// True iff `(kind, model)` is known to accept image input. Returns
+/// `true` when the model isn't in the catalogue yet — callers default to
+/// "try it" rather than silently dropping attachments for a model we have
+/// no data on (the apiserver is the final arbiter and surfaces a clean
+/// 400). Returns `false` only when models.dev lists the model *and* its
+/// input modalities exclude images, which is the one case where we can
+/// confidently drop the attachment with a note instead of erroring.
+pub fn supports_vision(kind: ProviderKind, model_id: &str) -> bool {
+    capabilities(kind, model_id).is_none_or(|c| c.vision)
 }
 
 /// Round-trip slot for OpenAI-compat assistant messages — when present,
@@ -501,6 +535,48 @@ mod tests {
             .expect("deepseek-chat caps");
         assert!(chat.interleaved_field.is_none());
         assert!(!chat.reasoning);
+    }
+
+    #[test]
+    fn parse_catalogue_extracts_vision_from_modalities() {
+        let raw = serde_json::json!({
+            "anthropic": {
+                "models": {
+                    "claude-opus": {
+                        "limit": { "context": 200000, "output": 8192 },
+                        "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
+                    },
+                    "text-only": {
+                        "limit": { "context": 128000, "output": 8192 },
+                        "modalities": { "input": ["text"], "output": ["text"] },
+                    },
+                    "no-modalities": {
+                        "limit": { "context": 128000, "output": 8192 },
+                    },
+                }
+            }
+        });
+        let resp: ApiResponse = serde_json::from_value(raw).unwrap();
+        let (_limits, _cost, caps) = parse_catalogue(resp);
+        assert!(
+            caps.get(&("anthropic".to_string(), "claude-opus".to_string()))
+                .unwrap()
+                .vision
+        );
+        assert!(
+            !caps
+                .get(&("anthropic".to_string(), "text-only".to_string()))
+                .unwrap()
+                .vision
+        );
+        // Missing modalities block → vision defaults to false (we only
+        // claim vision when models.dev positively lists "image").
+        assert!(
+            !caps
+                .get(&("anthropic".to_string(), "no-modalities".to_string()))
+                .unwrap()
+                .vision
+        );
     }
 
     #[test]

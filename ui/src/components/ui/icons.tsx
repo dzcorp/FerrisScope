@@ -221,6 +221,16 @@ export const Icons = {
     14,
     <path d="M10 4h4v6h6v4h-6v6h-4v-6H4v-4h6z" />,
   ),
+  // Chat composer send — an upward arrow (modern composer convention).
+  send: filled(
+    16,
+    <path d="M12 3 21 12h-5v8h-8v-8H3z" />,
+  ),
+  // Stop / cancel an in-flight stream — a rounded filled square.
+  stop: filled(
+    14,
+    <rect x="6" y="6" width="12" height="12" rx="2" />,
+  ),
   pencil: filled(
     14,
     <path d="M3 17l11-11 4 4-11 11H3v-4zM16 4l2-2 4 4-2 2z" />,

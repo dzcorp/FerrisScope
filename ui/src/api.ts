@@ -13,6 +13,7 @@ import type {
   ApprovalMode,
   ChatInitialMcp,
   ChatOpenResult,
+  ChatImageAttachment,
   ChatTool,
   ChatViewContext,
   KubectlDetection,
@@ -964,8 +965,15 @@ export const api = {
     chatId: string,
     content: string,
     viewContext?: ChatViewContext,
+    images?: ChatImageAttachment[],
   ) =>
-    invoke<void>("chat_send_message", { chatId, content, viewContext }),
+    invoke<void>("chat_send_message", { chatId, content, viewContext, images }),
+  // Read an image off the system clipboard as base64 PNG. The WebKitGTK
+  // webview doesn't surface clipboard images on the DOM paste event, so the
+  // composer falls back to this. Resolves `null` when the clipboard has no
+  // image (text, files, empty).
+  readClipboardImage: () =>
+    invoke<ChatImageAttachment | null>("read_clipboard_image"),
   chatCancelStreaming: (chatId: string) =>
     invoke<void>("chat_cancel_streaming", { chatId }),
   chatSetApprovalMode: (chatId: string, mode: ApprovalMode) =>
