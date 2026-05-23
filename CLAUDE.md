@@ -221,7 +221,7 @@ Both surface as the same `ToolSchema`, hit the same `ApprovalMode` gate, and app
 - **Per-call timeout is enforced by the loop, not by the tool.** `agent.rs` wraps every native call in `TOOL_CALL_TIMEOUT`. Tools may apply tighter internal timeouts (e.g. `fs_node_shell_exec`'s `timeout_seconds` arg).
 - **Errors are values, not panics.** Return `NativeToolError::Failed(...)`; the loop turns it into `is_error: true` so the LLM can recover. Never `unwrap()` on cluster state, JSON shape, or kube responses.
 - **Anything you allocate, you clean up.** External state (debug pods, port-forwards, ephemeral files, child processes) → implement `on_chat_close`. Hook fires from `chat_close` (operator close, app shutdown, *and* cluster switch — switching cluster means closing the chat and opening a new one against the new cluster). Best-effort; log failures, never propagate.
-- **Belt-and-braces for cluster-resident state.** Don't rely on `on_chat_close` alone — set a server-side TTL so orphans get reaped after crashes / force-quits. Pods: `spec.activeDeadlineSeconds`. Jobs: `spec.ttlSecondsAfterFinish`. Node-shell pod uses 5 minutes (`POD_TTL_SECONDS` in `node_shell.rs`).
+- **Belt-and-braces for cluster-resident state.** Don't rely on `on_chat_close` alone — set a server-side TTL so orphans get reaped after crashes / force-quits. Pods: `spec.activeDeadlineSeconds`. Jobs: `spec.ttlSecondsAfterFinish`. Node-shell pod uses 15 minutes (`POD_TTL_SECONDS` in `node_shell.rs`).
 - **Tell the LLM about lifetime in the tool's `description`.** If a session has a TTL or auto-closes, say so explicitly so the model plans around it.
 
 ### How to add a new native tool (recipe)

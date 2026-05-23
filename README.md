@@ -7,6 +7,8 @@
 **A Rust-native, open-source desktop IDE for Kubernetes.**
 A lightweight Lens replacement built on Tauri 2 + `kube-rs` + React.
 
+⚡ **Fast and lightweight, built in Rust — free and open-source.**
+
 [![CI](https://github.com/dzcorp/FerrisScope/actions/workflows/ci.yml/badge.svg)](https://github.com/dzcorp/FerrisScope/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/dzcorp/FerrisScope?label=release&color=blue)](https://github.com/dzcorp/FerrisScope/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
@@ -65,9 +67,10 @@ Lens is the de-facto desktop IDE for Kubernetes, but it bundles an entire Chromi
 - **One reflector per `(cluster, kind)`.** Watches are shared, started lazily on first subscribe, torn down a few seconds after the last unsubscribe. No duplicate watches, no orphaned tasks.
 - **Frontend is a mirror, not a source of truth.** All canonical state lives in Rust. The renderer is a thin view over typed Tauri commands and event streams.
 - **No bundled monitoring stack.** We *consume* whatever Prometheus / VictoriaMetrics / Thanos / Mimir / Cortex / M3 the operator already has — we never deploy one.
-- **Engine is reusable.** `crates/core` has no Tauri dependency, so a future TUI or CLI can sit on the same engine.
+- **Reusable engine.** The core engine is Tauri-free, so a future TUI or CLI can sit on the same foundation.
 - **Pure-Rust SSH for kubeconfig sources.** No `/usr/bin/ssh` shell-out; passphrases live in the OS keychain, never on disk.
-- **`unsafe_code = "forbid"`, `panic = "abort"`, rustls-only with `ring`.** No aws-lc-rs, no OpenSSL variants, no unwind tables in the release binary.
+- **`unsafe_code = "forbid"`, `panic = "abort"`, rustls + `ring` for all network TLS.** No aws-lc-rs, no unwind tables in the release binary.
+- **Memory that comes back.** A tuned mimalloc allocator returns freed pages to the OS promptly, so RSS settles back down after big-cluster excursions instead of lingering.
 
 ## What you get
 
@@ -76,51 +79,54 @@ Lens is the de-facto desktop IDE for Kubernetes, but it bundles an entire Chromi
 - **Fleet landing.** Per-cluster cards with cached probes (server version, node count, pod count, CPU / Mem load). Refresh is best-effort and never clears the last known good values.
 - **Auth-plugin diagnostics.** `gke-gcloud-auth-plugin` / `aws-iam-authenticator` / OIDC failures surface clearly — silent auth failures are the #1 Lens UX papercut we wanted to fix.
 
-### Resource browsing — 50+ kinds, reflector-backed
+### Resource browsing — 40+ built-in kinds, reflector-backed
 | Category | Kinds |
 |---|---|
 | **Workloads** | Pod, Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, CronJob, ReplicationController, HorizontalPodAutoscaler, PodDisruptionBudget |
 | **Network** | Service, Endpoints, EndpointSlice, Ingress, IngressClass, NetworkPolicy |
-| **Config** | ConfigMap, Secret, ResourceQuota, LimitRange |
+| **Config** | ConfigMap, Secret, ResourceQuota, LimitRange, MutatingWebhookConfiguration, ValidatingWebhookConfiguration |
 | **Storage** | PersistentVolume, PersistentVolumeClaim, StorageClass |
 | **Access** | ServiceAccount, Role, RoleBinding, ClusterRole, ClusterRoleBinding |
-| **Cluster** | Node, Namespace, Event, Lease, PriorityClass, MutatingWebhookConfiguration, ValidatingWebhookConfiguration |
+| **Cluster** | Node, Namespace, Event, Lease, PriorityClass |
 | **Apps** | Helm releases (read from `helm.sh/release.v1` Secrets) and discovered charts |
 | **Custom Resources** | Dynamic CRD discovery + browseable instances |
 | **Well-known CRDs** | Gateway API today (GatewayClass / Gateway / HTTPRoute / GRPCRoute / ReferenceGrant) — first-class category, columns, and detail panel without a typed crate per ecosystem |
 
-### Detail panels & inline editing (Server-Side Apply)
-- Kind-agnostic detail primitives: copyable values everywhere, cross-kind LinkValue navigation (owner refs, node names, service-account refs, image-pull-secret refs, volume sources), key/value chip strips, condition chips with invert support for "True is bad" conditions, sub-grids for nested structs.
-- **SSA editing** for ConfigMap data, Secret data, ResourceQuota hard limits, LimitRange items, plus Labels and Annotations on opted-in kinds. Stable field manager (`"ferrisscope"`) so per-field ownership tracking actually works across releases.
-- **Conflicts surface as a banner** with a visible *Force takeover* action — never defaulted on. You always see the colliding manager and field paths first.
-- **YAML viewer / editor** (Monaco) for any resource. Apply via SSA or copy out.
+### Detail panels & inline editing
+- Kind-agnostic detail primitives: copyable values everywhere, cross-kind navigation (owner refs, node names, service-account refs, image-pull-secret refs, volume sources), key/value chip strips, condition chips with invert support for "True is bad" conditions, sub-grids for nested structs.
+- **Inline editing** — ConfigMap and Secret data, ResourceQuota limits, LimitRange items, Deployment / StatefulSet / ReplicaSet replicas, PVC size, plus labels and annotations, straight from the detail panel. Edits go through Server-Side Apply, so FerrisScope coexists with your controllers and GitOps instead of stomping their fields.
+- **Concurrent-edit safety.** If another controller owns a field you're changing, you get a banner showing exactly who owns it before anything is overwritten — a *Force takeover* is always an explicit choice, never the default.
+- **Full-manifest YAML editor** (Monaco) for any resource — edit and apply just like `kubectl edit`. Removing a field or clearing a value does exactly what you'd expect, and if the object changed underneath you, you get a Reload / Apply-anyway prompt instead of a silent overwrite.
 
 ### Live data — logs, metrics, terminal, port-forwards
-- **Live logs** with backpressure-safe streaming and `LogLine::Lagged` markers for slow consumers; ANSI-colored, virtualized, ring-buffered to 5 000 lines.
-- **Metrics** from metrics-server (CPU / mem per pod and node) plus per-pod and per-PVC volume usage scraped via the kubelet `/stats/summary` proxy. Falls back to `available: false` snapshots when metrics-server is missing — no fake spinners.
-- **Prometheus-API metrics** via apiserver proxy — discovery by service labels, instant + range queries, vendor badge (Prom / VM / Thanos / Mimir / Cortex / M3).
-- **Embedded terminal** (xterm.js + portable-pty): pod shell, exec, kubectl. Survives window resizes; Cmd+\` spawns a shell pre-pointed at the active context.
+- **Live logs** with backpressure-safe streaming that flags dropped lines instead of stalling when the UI can't keep up; ANSI-colored, virtualized, ring-buffered to 5 000 lines, with in-log find (⌘F, next/prev, match highlighting).
+- **Metrics** from metrics-server (CPU / mem per pod and node) plus per-pod and per-PVC volume usage scraped via the kubelet `/stats/summary` proxy. If metrics-server isn't installed, it says so plainly — no fake spinners.
+- **Prometheus-API metrics** via apiserver proxy — discovery by service labels, instant + range queries, vendor badge (Prom / VM / Thanos / Mimir / Cortex / M3 / Promscale).
+- **Embedded terminal** (xterm.js + portable-pty): pod shell, exec, kubectl, with in-terminal find (⌘F). Survives window resizes; Cmd+\` spawns a shell pre-pointed at the active context.
 - **Port-forwards.** Pinned forwards persist across restarts and re-bind on next launch; the listener resolves Service / Deployment / StatefulSet / DaemonSet / ReplicaSet / Job to a backing pod per connection so it survives pod restarts. Ephemeral forwards opened from a detail panel live in memory only.
 
 ### Cluster mutation
 - **Helm.** Install / upgrade / uninstall (when the `helm` binary is on PATH), repo-update, release detail with revision history.
-- **Node operations.** Cordon / uncordon, drain (with `delete-emptydir-data`, `ignore-daemonsets`, force flags).
+- **Node operations.** Cordon / uncordon, drain (force flag to evict uncontrolled pods; DaemonSet and mirror pods are skipped, eviction respects PodDisruptionBudgets server-side).
 - **Workload restart.** Rollout-style restart for Deployments / StatefulSets / DaemonSets, plus single-pod owner-aware restart.
 
 ### AI agent — multi-provider, native in-process toolkit, optional MCP
-- **10 providers, one config shape.** OpenRouter, Anthropic, OpenAI (key + OAuth + Codex Responses for ChatGPT subscriptions), Z.AI, MiniMax, Groq, DeepSeek, Mistral, Together.ai, Ollama. API keys stored in the OS keychain by default.
-- **Native in-process tools** (`fs_*`) — full Kubernetes management surface, no external binary required. Pods (list/get/delete/run/exec), arbitrary GVK resources (list/get/delete/scale/apply), nodes (kubelet logs + stats summary + diagnose), namespaces, events, helm (list/get/history/install/uninstall), metrics (pod + node), prometheus query, log tail with selector fan-out, port-forward open/close/list, HTTP probe, SubjectAccessReview, SSA apply, configuration introspection, plus privileged node shell via debug pod and direct SSH fallback.
-- **Optional external MCP server.** Operators can plug any MCP-protocol server (filesystem, github, custom) into a chat by setting `mcp_binary_path` — its tools merge with the native catalogue. Not bundled; not auto-installed.
-- **Belt-and-braces TTLs.** Debug pods carry `activeDeadlineSeconds: 300`, agent-spawned Jobs carry `ttlSecondsAfterFinish` — the apiserver reaps orphans even if the chat crashes.
+- **11 providers, one config shape.** OpenCode Zen (the zero-config default — ships a free-tier key so a fresh install can chat immediately), OpenRouter, Anthropic, OpenAI (key + OAuth + Codex Responses for ChatGPT subscriptions), Z.AI, MiniMax, Groq, DeepSeek, Mistral, Together.ai, Ollama. API keys stored in the OS keychain by default.
+- **Native in-process tools** (`fs_*`) — full Kubernetes management surface (~45 tools), no external binary required. Pods (list/get/delete/run/exec/diagnose), arbitrary GVK resources (list/get/delete/scale/apply with SSA / merge-patch / JSON-patch modes), nodes (kubelet logs + stats summary + diagnose), namespaces, events, helm (list/get/history/install/uninstall), metrics (pod + node), prometheus query, log tail with selector fan-out, port-forward open/close/list, HTTP fetch, SubjectAccessReview, workload + rollout status, configuration introspection (including context switch), plus privileged node shell via debug pod and direct SSH fallback. Oversized tool output spools to disk and is paged / grepped on demand.
+- **Multimodal chat.** Paste images from the clipboard or attach files; they're sent to vision-capable providers alongside the prompt.
+- **Optional external MCP servers.** Plug any number of MCP-protocol servers (filesystem, github, custom) into a chat via `mcp_servers` — stdio (subprocess), Streamable HTTP, or legacy HTTP+SSE transports, each with custom headers and an optional `trust_as_read` bypass of the approval gate. Their tools merge with the native catalogue. Not bundled; not auto-installed.
+- **Belt-and-braces TTLs.** Debug pods carry `activeDeadlineSeconds: 900`, so the apiserver reaps orphans even if the chat crashes or the app is force-quit.
 - **Approval is never silent.** Write tools always require explicit approval per call; operators can opt into `AllowAllWrites` per chat — never globally.
 
 ### Workspace UX
 - **Command palette** (⌘K) with global cluster-resource search (FTS5), context switch, kind navigation, settings jump.
-- **Theme tokens** flow one direction: design → `ui/src/theme.ts`. No hardcoded hex values across components. Light & dark, plus per-window UI scale (⌘+ / ⌘− / ⌘0).
-- **Notifications panel**, port-forwards panel, namespace picker, bulk action bar.
+- **4 themes, each with multiple palettes.** Default (Helmsman v2, canonical), Lens, VS Code, and Readable — each ships its own typography, sizing, density, and corner-radius profile plus several light/dark palettes (Default's Slate / Forest / Violet, VS Code's Dark+ / Monokai / Solarized, …). Tokens flow one direction: design → `ui/src/theme.ts`, no hardcoded hex across components. Per-window UI scale (⌘+ / ⌘− / ⌘0) stacks on top.
+- **Dark console** for logs + embedded terminal, independent of the app theme.
+- **Notifications panel**, port-forwards panel, namespace picker, bulk action bar, and a chat dock that minimizes to a pill.
+- **Native chrome.** Integrated title bar with traffic-light insets and window vibrancy on macOS; borderless window on Linux.
 
 ### Distribution & updates
-- **Multi-platform installers** — `.deb`, `.rpm`, `.AppImage` (Linux x64 + arm64); `.dmg` (macOS x64 + arm64); NSIS `.exe` and `.msi` (Windows x64).
+- **Multi-platform installers** — `.deb`, `.rpm`, `.AppImage` (Linux x64); `.dmg` (macOS x64 + arm64); NSIS `.exe` and `.msi` (Windows x64).
 - **AUR**: `ferrisscope-bin` auto-published from CI on every release.
 - **In-app updater** for self-managed installs (AppImage, macOS bundle, Windows NSIS). Package-manager installs (apt / dnf / Homebrew / AUR) defer to the system tool with a clear hint instead of silently breaking.
 
@@ -160,20 +166,21 @@ yay -S ferrisscope-bin     # or: paru -S ferrisscope-bin
 2. **Pick a cluster** from the fleet landing or via ⌘K → "switch context".
 3. **Browse** with the rail (left sidebar) — Workloads → Pods, Network → Services, etc. Tables are virtualized so 5 000-pod namespaces stay snappy.
 4. **Open a detail panel.** Click any row. Cross-kind links (owner refs, node, service-account, mounted ConfigMaps / Secrets) navigate inline.
-5. **Edit live.** ConfigMap, Secret, ResourceQuota, LimitRange, plus labels / annotations on opted-in kinds — pencil → edit → Save. Conflicts surface a banner with the colliding manager.
-6. **Talk to the cluster.** Open the AI dock (right side) → pick a provider → ask "*why is this pod CrashLoopBackOff?*" The agent runs `fs_pod_diagnose`, pulls events, tails logs, and explains.
+5. **Edit live.** ConfigMap, Secret, ResourceQuota, LimitRange, replicas, PVC storage, plus labels / annotations on opted-in kinds — pencil → edit → Save. Conflicts surface a banner with the colliding manager. Or edit the whole manifest in the YAML tab, `kubectl edit`-style.
+6. **Talk to the cluster.** Open the AI dock (right side) — the bundled OpenCode Zen free tier works with zero setup, or pick your own provider — and ask "*why is this pod CrashLoopBackOff?*" The agent runs `fs_pod_diagnose`, pulls events, tails logs, and explains.
 
 ## Stack
 
 - **Shell:** Tauri 2 (system webview, ~10–40 MB)
 - **Backend:** Rust 1.94+, Tokio (audited feature set), [`kube-rs`](https://kube.rs) (`runtime`, `client`, `ws`, `config`)
+- **Allocator:** mimalloc (`#[global_allocator]`), with a tuned Linux purge policy via the `mimalloc-ext` shim
 - **Frontend:** React 19 + TypeScript 6 + Vite 8 + Tailwind 4 + Zustand 5
 - **Editor:** Monaco
 - **Terminal:** xterm.js + portable-pty
 - **Tables:** TanStack Table + TanStack Virtual
 - **Search index:** rusqlite + FTS5 (bundled SQLite so macOS predates-FTS5 doesn't matter)
 - **SSH:** russh (pure Rust async SSH-2)
-- **Targets:** Linux x64/arm64, macOS x64/arm64, Windows x64.
+- **Targets:** Linux x64, macOS x64/arm64, Windows x64.
 
 ## Layout
 
@@ -183,13 +190,19 @@ crates/
                # Prometheus, port-forwards, prefs, search index. No Tauri deps.
   kube-ext/    # helpers on top of kube-rs: row + detail projections, resource
                # registry, generic dynamic watcher, well-known CRD overrides,
-               # fetch / apply / delete / drain / restart.
-  agent/       # Tauri-free agent crate: provider abstraction, MCP client,
-               # native-tool trait, approval gate.
+               # fetch / apply / merge-patch / delete / drain / restart.
+  agent/       # Tauri-free agent crate: provider abstraction, tool registry,
+               # MCP client (stdio / http / sse), native-tool trait, session
+               # store, approval gate.
   app/         # Tauri 2 binary: commands, event bridge, terminal PTYs, app
                # state, in-app updater, native agent tools.
+  mimalloc-ext/  # safe shim over mimalloc's extended FFI (purge policy,
+               # mi_collect, process_info) — isolates the one unsafe block so
+               # the rest of the workspace keeps forbid(unsafe_code).
   test-support/  # fixtures + helpers for unit + integration tests.
 ui/            # Vite + React frontend. Thin renderer over typed Tauri commands.
+e2e/           # Playwright + tauri-driver end-to-end harness (smoke flows).
+tests/         # shared on-disk JSON/YAML fixtures (k8s, well-known CRDs).
 design/        # Helmsman v2 reference (read-only — source of truth for layout,
                # spacing, motion, tokens). See ./design/icon.md for icon spec.
 packaging/
@@ -208,7 +221,7 @@ These rules are enforced — see [`CLAUDE.md`](./CLAUDE.md) for the full set:
 - **`core` has no Tauri dep.** If you find yourself adding `tauri` to `core/Cargo.toml`, stop and reconsider.
 - **No `unwrap()` outside tests.** `thiserror` in libraries, `anyhow` in the binary, `tracing` everywhere.
 - **TS `strict: true`, no `any`.** Tauri command bindings flow through the typed wrapper in `ui/src/api.ts`.
-- **All edits are SSA with a stable field manager.** No per-kind apply functions — the dynamic API covers every kind in the registry.
+- **Structured field edits are SSA with a stable field manager** — no per-kind apply functions, the dynamic API covers every kind in the registry. The free-form YAML tab is the deliberate exception: it uses an RFC 7386 merge patch for honest deletes.
 - **Auth-plugin failures (gke / aws / oidc) surface as diagnostics, never silent.**
 
 ## Develop
@@ -236,6 +249,7 @@ The Tauri CLI ships via npm (`@tauri-apps/cli`) and runs through the `tauri` scr
 ### Build & test
 
 ```bash
+make fmt               # cargo fmt --all
 make check             # cargo check --workspace + tsc --noEmit
 make clippy            # cargo clippy --workspace -- -D warnings
 make test              # cargo test --workspace
@@ -245,14 +259,14 @@ make build-release     # release build (frontend bundled)
 make bundle            # produce installable bundles via `tauri build`
 
 # integration tests against a kind cluster (Docker required)
-cargo test --workspace --features integration -- --test-threads=1
+make test-integration  # = cargo test --workspace --features integration -- --test-threads=1
 ```
 
 CI runs `cargo fmt --check`, clippy `-D warnings`, the workspace test suite on Linux + macOS + Windows, and integration tests against two Kubernetes versions. See [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
 ### Release flow
 
-Tag a commit with `vX.Y.Z` and push — [`.github/workflows/release.yml`](./.github/workflows/release.yml) builds Linux x64/arm64, macOS x64/arm64, and Windows x64 bundles in parallel, publishes the GitHub Release, and updates the AUR `ferrisscope-bin` package. Manual `workflow_dispatch` runs are also supported for off-cycle bundles.
+Tag a commit with `vX.Y.Z` and push — [`.github/workflows/release.yml`](./.github/workflows/release.yml) builds Linux x64, macOS x64/arm64, and Windows x64 bundles in parallel, publishes the GitHub Release, and updates the AUR `ferrisscope-bin` package. Manual `workflow_dispatch` runs are also supported for off-cycle bundles.
 
 ## Design system
 
