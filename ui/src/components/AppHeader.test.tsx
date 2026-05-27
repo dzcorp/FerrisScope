@@ -75,9 +75,9 @@ describe("AppHeader layout", () => {
     // offset already separates the two visually.
     const divider = r.querySelector('div[style*="width: 1px"]');
     expect(divider).toBeNull();
-    // Row gutter drops back to the normal 22px since the brand is now
-    // visually beneath the lights, not next to them.
-    expect(r.style.paddingLeft).toBe("22px");
+    // Row gutter drops to 12px to align the brand with the leftmost
+    // traffic light, instead of the standard 22px gutter.
+    expect(r.style.paddingLeft).toBe("12px");
     // Drag region stays on the row so the header still moves the window.
     expect(r.getAttribute("data-tauri-drag-region")).not.toBeNull();
   });

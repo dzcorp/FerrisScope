@@ -555,14 +555,14 @@ export function AppHeader({
   // Single row everywhere. On macOS the brand sits in its own wrapper that
   // is `transform: translateY` nudged down so it tucks beneath the OS
   // traffic lights instead of competing with them for the row's left edge —
-  // and the row's left gutter drops to the normal 22 px since the brand is
-  // now visually under the lights, not next to them. Layout space for the
+  // and the row's left gutter drops to 12 px (matching the lights' own left
+  // edge) so the brand aligns with the leftmost light. Layout space for the
   // brand stays in its original position, so the breadcrumb + controls stay
-  // exactly where they were; the row's `paddingBottom` grows to absorb the
-  // brand's visual overflow so nothing spills into the content area below.
-  // The divider between brand and breadcrumb is dropped on macOS because
-  // the brand's vertical offset already separates the two; on other
-  // platforms it stays.
+  // exactly where they were; the row's `paddingBottom` is set to `BRAND_OFFSET`
+  // so it just contains the brand's visual overflow without adding extra
+  // chrome height beyond that. The divider between brand and breadcrumb is
+  // dropped on macOS because the brand's vertical offset already separates
+  // the two; on other platforms it stays.
   const BRAND_OFFSET = 18;
   return (
     <div style={shell}>
@@ -573,9 +573,9 @@ export function AppHeader({
           alignItems: "center",
           gap: 16,
           paddingTop: 12,
-          paddingBottom: IS_MAC ? 12 + BRAND_OFFSET : 12,
+          paddingBottom: IS_MAC ? BRAND_OFFSET : 12,
           paddingRight: 22,
-          paddingLeft: IS_MAC ? 22 : headerPaddingLeft(22),
+          paddingLeft: IS_MAC ? 12 : headerPaddingLeft(22),
         }}
       >
         <div
