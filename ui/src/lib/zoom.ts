@@ -1,29 +1,25 @@
-// Positioning helpers for `position: fixed` portals under the global UI scale.
+// Placement helpers for `position: fixed` portals.
 //
-// App.tsx applies the UI scale as `document.documentElement.style.zoom`
-// (= uiScale * UI_SCALE_BASELINE; baseline 1.1, so the default is already
-// >1.0). A `position: fixed` portal is a descendant of that zoomed root, so the
-// browser repaints its `top/left/width/height` coordinates × zoom (the "paint
-// scale", which is exactly the numeric `style.zoom`).
+// History: this module used to compensate for CSS `style.zoom` applied to
+// the document root — which Chromium/WebKitGTK and macOS WebKit treat
+// differently. macOS WebKit scaled paint only (not layout), so coordinates
+// from `getBoundingClientRect()` and `clientX/Y` lived in different spaces
+// and `position: fixed` repainted writes × zoom. The helpers below divided
+// each emitted coordinate by the right scale to land portals correctly.
 //
-// The inputs we measure from are reported differently per engine:
-//   - `clientX/clientY` (the mouse) are *visual* (post-zoom) px on every engine.
-//   - `getBoundingClientRect()` / `innerWidth` are visual on WebKitGTK (Linux)
-//     and modern Blink/WebView2, but the MetricsTab notes that macOS WebKit can
-//     report them *unzoomed*. So we can't assume rect == visual everywhere.
+// We've since switched to Tauri's native page-zoom API
+// (`WebviewWindow.setZoom`), which maps to WKWebView `setPageZoom` on
+// macOS, `webkit_web_view_set_zoom_level` on Linux, and the WebView2 zoom
+// factor on Windows — all of which rescale layout *and* paint uniformly.
+// Under native page zoom, every coordinate the page sees (cursor, rect,
+// `innerWidth`, fixed-style write) is in the same space, so the divides
+// collapse to identity and the engine-specific calibration probe is no
+// longer needed.
 //
-// The rule these helpers enforce: do all placement math in the same space the
-// inputs come in, then divide every coordinate written to the fixed portal by
-// the appropriate scale so the portal lands where intended once the root
-// repaints it × zoom:
-//   - cursor-anchored menus divide by the *paint scale* (`rootZoom()`), because
-//     the cursor is visual on all engines.
-//   - trigger-anchored menus divide by the *measured rect scale*
-//     (`fixedRectScale()`), which self-calibrates: it equals the paint scale on
-//     engines that report rects in visual px, and 1 where rects are unzoomed.
-//
-// Pure placement fns take the scale as a parameter so they stay testable; the
-// React call sites pass `rootZoom()` or `fixedRectScale()` as appropriate.
+// The helpers stay because they still own placement geometry (cursor
+// anchoring, trigger anchoring, viewport clamping, side flipping). The
+// `scale` parameter and the two getters below stay at `1` defensively in
+// case a future surface re-introduces a non-native zoom transform.
 
 export type Point = { x: number; y: number };
 export type Size = { width: number; height: number };
@@ -38,55 +34,27 @@ export type Rect = {
   height: number;
 };
 
-// Active root zoom (paint scale). Falls back to 1 when unset / unparseable
-// (jsdom in tests, first paint before App.tsx writes it).
+// Always 1 under native page zoom. Kept as a function (rather than a
+// constant) so the call sites read naturally and we have one symbol to
+// audit if a future feature ever stacks an extra paint transform on top.
 export function rootZoom(): number {
-  const z = Number.parseFloat(document.documentElement.style.zoom || "");
-  return Number.isFinite(z) && z > 0 ? z : 1;
+  return 1;
 }
 
-// Measured ratio between what `getBoundingClientRect()` reports for a
-// `position: fixed` element and the CSS px we set on it. This is the divisor
-// trigger-anchored portals need, and it works regardless of whether the engine
-// reports rects in visual px (ratio == paint zoom) or unzoomed px (ratio == 1)
-// — because the probe is measured the exact same way the real triggers are.
-//
-// Cached per zoom value (the ratio only changes when the scale changes); call
-// `resetFixedRectScaleCache()` in tests. Falls back to `rootZoom()` when the
-// probe can't be measured (jsdom reports 0-size rects).
-const PROBE_PX = 1000;
-let probeCache: { key: string; value: number } | null = null;
-
+// Kept for API stability; under native page zoom there's no rect/visual
+// mismatch, so it's the same as `rootZoom()`. `resetFixedRectScaleCache()`
+// stays for tests that still reach for it — it's a no-op now.
 export function resetFixedRectScaleCache(): void {
-  probeCache = null;
+  // no-op under native page zoom; retained for test compatibility.
 }
 
 export function fixedRectScale(): number {
-  const key = document.documentElement.style.zoom || "";
-  if (probeCache && probeCache.key === key) return probeCache.value;
-  let value = rootZoom();
-  const body = document.body;
-  if (body) {
-    const probe = document.createElement("div");
-    probe.style.position = "fixed";
-    probe.style.left = "0";
-    probe.style.top = "0";
-    probe.style.width = `${PROBE_PX}px`;
-    probe.style.height = "0";
-    probe.style.visibility = "hidden";
-    probe.style.pointerEvents = "none";
-    body.appendChild(probe);
-    const measured = probe.getBoundingClientRect().width;
-    body.removeChild(probe);
-    if (Number.isFinite(measured) && measured > 0) value = measured / PROBE_PX;
-  }
-  probeCache = { key, value };
-  return value;
+  return 1;
 }
 
 // Cursor-anchored menu (right-click ContextMenu). `cursor` is the visual-px
-// clientX/clientY; `menu` and `viewport` are visual px. Returns the fixed-layer
-// top/left in pre-zoom px, clamped 4px inside the viewport.
+// clientX/clientY; `menu` and `viewport` are in the same space. Returns the
+// fixed-layer top/left, clamped 4px inside the viewport.
 export function placeMenuAtCursor(
   cursor: Point,
   menu: Size,
@@ -111,10 +79,10 @@ export type SelectPlacement = {
   flipUp: boolean;
 };
 
-// Trigger-anchored dropdown (Select). `trigger` and `viewport` are visual px.
-// `flipUp` anchors the popover bottom to the trigger top (style `bottom`),
-// otherwise the popover top hangs below the trigger (style `top`). All emitted
-// pixel values (x, y, w, maxH) are pre-zoom px ready for the fixed style.
+// Trigger-anchored dropdown (Select). `trigger` and `viewport` share a
+// coordinate space. `flipUp` anchors the popover bottom to the trigger top
+// (style `bottom`), otherwise the popover top hangs below the trigger
+// (style `top`).
 export function placeSelectPopover(
   trigger: Rect,
   viewport: Size,
@@ -146,10 +114,10 @@ export function placeSelectPopover(
   };
 }
 
-// Trigger-anchored tooltip. `trigger`, `tip` and `viewport` are visual px.
-// Picks the requested `side`, flips to the opposite side if it doesn't fit,
-// then clamps. Returns the fixed-layer top/left in pre-zoom px plus the side
-// actually used (for the caller's arrow / styling).
+// Trigger-anchored tooltip. `trigger`, `tip` and `viewport` share a
+// coordinate space. Picks the requested `side`, flips to the opposite side
+// if it doesn't fit, then clamps. Returns top/left plus the side actually
+// used (for the caller's arrow / styling).
 export function placeTooltip(
   trigger: Rect,
   tip: Size,

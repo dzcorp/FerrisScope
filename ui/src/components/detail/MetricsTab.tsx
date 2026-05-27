@@ -2007,12 +2007,11 @@ type ChartSeries = {
 };
 
 // Map a viewport (clientX) coordinate into the SVG's user-space x.
-// getBoundingClientRect and clientX are both reported in the same visual
-// viewport CSS pixels, so the ratio across the SVG's rendered width is
-// zoom-invariant by construction — multiplying by the viewBox width
-// gives the user-space x. getScreenCTM() also works in Chrome but
-// behaves inconsistently under CSS `zoom` in WebKitGTK, which is what
-// Tauri uses on Linux. Exported for tests.
+// Under Tauri's native page zoom (WebviewWindow.setZoom — WKWebView
+// setPageZoom on macOS, webkit_web_view_set_zoom_level on Linux, WebView2
+// zoom on Windows), getBoundingClientRect and clientX share the same
+// coordinate space on every engine, so the ratio across the SVG's
+// rendered width is zoom-invariant by construction. Exported for tests.
 export function clientXToSvgX(svg: SVGSVGElement, clientX: number): number {
   const rect = svg.getBoundingClientRect();
   if (rect.width <= 0) return clientX - rect.left;
@@ -2034,28 +2033,7 @@ export function clientXToSvgX(svg: SVGSVGElement, clientX: number): number {
     viewBoxWidth = svg.viewBox.baseVal.width;
   }
 
-  // Detect applied CSS zoom on document root
-  let zoom = 1.0;
-  const zoomStr = document.documentElement.style.zoom;
-  if (zoomStr) {
-    const parsed = Number.parseFloat(zoomStr);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      zoom = parsed;
-    }
-  }
-
-  // Under CSS zoom, WebKit (Tauri on macOS/Linux) reports bounding rect in
-  // unzoomed layout pixels, while clientX is in zoomed visual pixels.
-  // Blink (Chrome) reports both in zoomed visual pixels.
-  // We detect WebKit by checking if rect.width is closer to unzoomed viewBoxWidth
-  // than to the zoomed viewBoxWidth * zoom.
-  const isRectUnzoomed =
-    Math.abs(zoom - 1.0) > 1e-4 &&
-    Math.abs(rect.width - viewBoxWidth) < Math.abs(rect.width - viewBoxWidth * zoom);
-
-  const clientXAdjusted = isRectUnzoomed ? clientX / zoom : clientX;
-
-  return ((clientXAdjusted - rect.left) / rect.width) * viewBoxWidth;
+  return ((clientX - rect.left) / rect.width) * viewBoxWidth;
 }
 
 function Chart({
