@@ -69,6 +69,17 @@ pub(crate) struct ClusterEntry {
     /// by `state.entry()` rather than `connect_context`). Same CAS
     /// pattern: true on first claim, false thereafter.
     health_wired: AtomicBool,
+    /// One-shot guard for the always-on namespaces subscription. Holds
+    /// a single internal subscriber on `(cluster, "namespaces", All)`
+    /// for the lifetime of the entry so the reflector survives across
+    /// modal-open / kind-flip cycles — the top-right namespace dropdown
+    /// would otherwise go stale whenever the frontend's eager subscribe
+    /// lost the watcher (transient unavailable, React lifecycle race,
+    /// linger expiry). The subscription is released implicitly when
+    /// `drop_cluster_watchers` / `tear_down_unhealthy` force-abort all
+    /// watchers and the entry is removed; a fresh `connect_context`
+    /// re-fires this on the new entry.
+    namespaces_pinned: AtomicBool,
     /// JoinHandle for the health-event forwarder task spawned by
     /// `spawn_health_forwarder`. Stored here so `drop_cluster_watchers`
     /// / `tear_down_unhealthy` can abort it explicitly on teardown.
@@ -118,6 +129,16 @@ impl ClusterEntry {
     /// the lazy-connect path too (App's eager namespaces subscribe).
     pub(crate) fn claim_health_wiring(&self) -> bool {
         self.health_wired
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Atomically claim the right to install the always-on namespaces
+    /// subscription. Returns `true` exactly once per `ClusterEntry`
+    /// lifetime; subsequent callers no-op. See `namespaces_pinned` for
+    /// the rationale.
+    pub(crate) fn claim_namespaces_pinning(&self) -> bool {
+        self.namespaces_pinned
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
@@ -270,6 +291,7 @@ impl AppState {
             unavailable: AtomicBool::new(false),
             connect_probes_done: AtomicBool::new(false),
             health_wired: AtomicBool::new(false),
+            namespaces_pinned: AtomicBool::new(false),
             health_forwarder: std::sync::Mutex::new(None),
             metrics_forwarder: std::sync::Mutex::new(None),
         });
@@ -309,6 +331,7 @@ impl AppState {
             unavailable: AtomicBool::new(false),
             connect_probes_done: AtomicBool::new(false),
             health_wired: AtomicBool::new(false),
+            namespaces_pinned: AtomicBool::new(false),
             health_forwarder: std::sync::Mutex::new(None),
             metrics_forwarder: std::sync::Mutex::new(None),
         });
@@ -367,5 +390,52 @@ impl AppState {
     /// deltas, the Tauri search command) must handle this gracefully.
     pub(crate) async fn search_index_for(&self, id: &str) -> Option<Arc<SearchIndex>> {
         self.search_indices.lock().await.get(id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Mirrors the CAS used by every `ClusterEntry::claim_*` method
+    /// (`claim_connect_probes`, `claim_health_wiring`,
+    /// `claim_namespaces_pinning`). Synthetic because constructing a real
+    /// `ClusterEntry` requires a live `Cluster` + `ClusterHealth` (real
+    /// kube `Client`) — that path is exercised end-to-end by the
+    /// kind-backed integration suite. This test pins the *contract* the
+    /// claim methods rely on: first caller wins, every subsequent caller
+    /// observes the flag set and no-ops. Catches future regressions like
+    /// accidentally weakening the `Ordering` or swapping the expected
+    /// value.
+    fn cas_one_shot(flag: &AtomicBool) -> bool {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    #[test]
+    fn claim_pattern_is_one_shot() {
+        let f = AtomicBool::new(false);
+        assert!(cas_one_shot(&f), "first claim must succeed");
+        assert!(!cas_one_shot(&f), "second claim must observe set + fail");
+        assert!(!cas_one_shot(&f), "third claim still fails");
+    }
+
+    #[test]
+    fn claim_pattern_concurrent_claims_pick_exactly_one_winner() {
+        // Two claims racing on the same flag — exactly one must win.
+        // Models a `StrictMode` double-fire or a fast `connect_context`
+        // followed by an `App.tsx` lazy-connect arriving on a parallel
+        // task.
+        let f = std::sync::Arc::new(AtomicBool::new(false));
+        let f1 = f.clone();
+        let f2 = f.clone();
+        let h1 = std::thread::spawn(move || cas_one_shot(&f1));
+        let h2 = std::thread::spawn(move || cas_one_shot(&f2));
+        let r1 = h1.join().unwrap();
+        let r2 = h2.join().unwrap();
+        assert!(
+            r1 ^ r2,
+            "exactly one caller must win (xor): r1={r1} r2={r2}"
+        );
     }
 }

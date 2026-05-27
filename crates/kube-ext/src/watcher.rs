@@ -366,51 +366,18 @@ impl ResourceWatcher {
             let mut applied = 0u64;
             let mut suppressed = 0u64;
             let mut first_apply_logged = false;
+            // Uids observed during the current Init→InitDone window. Allocated
+            // when Init fires, drained on InitDone to reconcile the cache:
+            // anything present locally but absent from the new LIST is a
+            // delete-while-disconnected (sleep/wake, 410 Gone resync). kube-rs
+            // never replays Delete for missing items — it just LISTs current
+            // state — so without this we'd carry ghost rows until the next
+            // teardown.
+            let mut init_seen: Option<HashSet<String>> = None;
             while let Some(event) = stream.next().await {
-                match event {
-                    Ok(watcher::Event::Apply(obj) | watcher::Event::InitApply(obj)) => {
-                        let Some(uid) = obj.uid() else { continue };
-                        let row = with_uid(uid.clone(), S::project(&obj));
-                        // Drop the typed object as soon as projection is done.
-                        drop(obj);
-                        // No-op suppression: if the projected row is byte-
-                        // identical to the last one we cached for this uid,
-                        // skip the broadcast. Catches kube-rs resync after a
-                        // 410 Gone (re-emits every object as InitApply, most
-                        // unchanged) and the steady-state churn from server-
-                        // side fields the projection deliberately drops
-                        // (managedFields, resourceVersion, lastTransitionTime
-                        // bumps that don't move any column). One Value::eq
-                        // walk is orders of magnitude cheaper than the IPC
-                        // emit + JSON-decode + React reconciliation we'd
-                        // otherwise pay downstream.
-                        let mut cache = cache_task.lock().expect("watcher cache poisoned");
-                        let unchanged = cache.get(&uid).is_some_and(|prev| prev == &row);
-                        if unchanged {
-                            suppressed += 1;
-                        } else {
-                            cache.insert(uid.clone(), row.clone());
-                            drop(cache);
-                            dirty_task.record_upsert(uid, row);
-                        }
-                        applied += 1;
-                        if !first_apply_logged {
-                            first_apply_logged = true;
-                            tracing::info!(
-                                kind = S::meta().id,
-                                elapsed_ms = started.elapsed().as_millis() as u64,
-                                "watcher: first apply (apiserver returned first object)"
-                            );
-                        } else if applied.is_multiple_of(50) {
-                            tracing::debug!(
-                                kind = S::meta().id,
-                                elapsed_ms = started.elapsed().as_millis() as u64,
-                                applied,
-                                suppressed,
-                                "watcher: apply progress"
-                            );
-                        }
-                    }
+                let (obj, is_init_apply) = match event {
+                    Ok(watcher::Event::Apply(o)) => (o, false),
+                    Ok(watcher::Event::InitApply(o)) => (o, true),
                     Ok(watcher::Event::Delete(obj)) => {
                         if let Some(uid) = obj.uid() {
                             tracing::debug!(
@@ -424,24 +391,78 @@ impl ResourceWatcher {
                                 .remove(&uid);
                             dirty_task.record_delete(uid);
                         }
+                        continue;
                     }
                     Ok(watcher::Event::Init) => {
                         tracing::debug!(kind = S::meta().id, "watcher: init");
+                        init_seen = Some(HashSet::new());
+                        continue;
                     }
                     Ok(watcher::Event::InitDone) => {
                         init_done_task.store(true, Ordering::SeqCst);
+                        let reconciled =
+                            reconcile_init_seen(&mut init_seen, &cache_task, &dirty_task);
                         tracing::info!(
                             kind = S::meta().id,
                             elapsed_ms = started.elapsed().as_millis() as u64,
                             applied,
                             suppressed,
+                            reconciled_deletes = reconciled,
                             "watcher: init done (initial sync complete)"
                         );
                         dirty_task.mark_init_done();
+                        continue;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, kind = S::meta().id, "watcher: stream error");
+                        continue;
                     }
+                };
+                let Some(uid) = obj.uid() else { continue };
+                if is_init_apply {
+                    if let Some(seen) = init_seen.as_mut() {
+                        seen.insert(uid.clone());
+                    }
+                }
+                let row = with_uid(uid.clone(), S::project(&obj));
+                // Drop the typed object as soon as projection is done.
+                drop(obj);
+                // No-op suppression: if the projected row is byte-
+                // identical to the last one we cached for this uid,
+                // skip the broadcast. Catches kube-rs resync after a
+                // 410 Gone (re-emits every object as InitApply, most
+                // unchanged) and the steady-state churn from server-
+                // side fields the projection deliberately drops
+                // (managedFields, resourceVersion, lastTransitionTime
+                // bumps that don't move any column). One Value::eq
+                // walk is orders of magnitude cheaper than the IPC
+                // emit + JSON-decode + React reconciliation we'd
+                // otherwise pay downstream.
+                let mut cache = cache_task.lock().expect("watcher cache poisoned");
+                let unchanged = cache.get(&uid).is_some_and(|prev| prev == &row);
+                if unchanged {
+                    suppressed += 1;
+                } else {
+                    cache.insert(uid.clone(), row.clone());
+                    drop(cache);
+                    dirty_task.record_upsert(uid, row);
+                }
+                applied += 1;
+                if !first_apply_logged {
+                    first_apply_logged = true;
+                    tracing::info!(
+                        kind = S::meta().id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "watcher: first apply (apiserver returned first object)"
+                    );
+                } else if applied.is_multiple_of(50) {
+                    tracing::debug!(
+                        kind = S::meta().id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        applied,
+                        suppressed,
+                        "watcher: apply progress"
+                    );
                 }
             }
             tracing::info!(
@@ -519,45 +540,13 @@ impl ResourceWatcher {
             let mut suppressed = 0u64;
             let mut skipped_no_uid = 0u64;
             let mut first_apply_logged = false;
+            // See `start_with_api` for the rationale — same reconcile
+            // applies to CRD watches.
+            let mut init_seen: Option<HashSet<String>> = None;
             while let Some(event) = stream.next().await {
-                match event {
-                    Ok(watcher::Event::Apply(obj) | watcher::Event::InitApply(obj)) => {
-                        let Some(uid) = obj.uid() else {
-                            skipped_no_uid += 1;
-                            continue;
-                        };
-                        let row = with_uid(uid.clone(), project_task(&obj));
-                        // No-op suppression — see typed-watcher branch above
-                        // for the rationale. Same behaviour: cheap structural
-                        // equality on the projected row; on miss, update the
-                        // cache and broadcast; on hit, drop silently.
-                        let mut cache = cache_task.lock().expect("dynamic watcher cache poisoned");
-                        let unchanged = cache.get(&uid).is_some_and(|prev| prev == &row);
-                        if unchanged {
-                            suppressed += 1;
-                        } else {
-                            cache.insert(uid.clone(), row.clone());
-                            drop(cache);
-                            dirty_task.record_upsert(uid, row);
-                        }
-                        applied += 1;
-                        if !first_apply_logged {
-                            first_apply_logged = true;
-                            tracing::info!(
-                                kind = %log_id_task,
-                                elapsed_ms = started.elapsed().as_millis() as u64,
-                                "dynamic watcher: first apply"
-                            );
-                        } else if applied.is_multiple_of(50) {
-                            tracing::debug!(
-                                kind = %log_id_task,
-                                elapsed_ms = started.elapsed().as_millis() as u64,
-                                applied,
-                                suppressed,
-                                "dynamic watcher: apply progress"
-                            );
-                        }
-                    }
+                let (obj, is_init_apply) = match event {
+                    Ok(watcher::Event::Apply(o)) => (o, false),
+                    Ok(watcher::Event::InitApply(o)) => (o, true),
                     Ok(watcher::Event::Delete(obj)) => {
                         if let Some(uid) = obj.uid() {
                             cache_task
@@ -566,21 +555,28 @@ impl ResourceWatcher {
                                 .remove(&uid);
                             dirty_task.record_delete(uid);
                         }
+                        continue;
                     }
                     Ok(watcher::Event::Init) => {
                         tracing::debug!(kind = %log_id_task, "dynamic watcher: init");
+                        init_seen = Some(HashSet::new());
+                        continue;
                     }
                     Ok(watcher::Event::InitDone) => {
+                        let reconciled =
+                            reconcile_init_seen(&mut init_seen, &cache_task, &dirty_task);
                         tracing::info!(
                             kind = %log_id_task,
                             elapsed_ms = started.elapsed().as_millis() as u64,
                             applied,
                             suppressed,
                             skipped_no_uid,
+                            reconciled_deletes = reconciled,
                             "dynamic watcher: init done"
                         );
                         init_done_task.store(true, Ordering::SeqCst);
                         dirty_task.mark_init_done();
+                        continue;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -588,7 +584,48 @@ impl ResourceWatcher {
                             kind = %log_id_task,
                             "dynamic watcher: stream error"
                         );
+                        continue;
                     }
+                };
+                let Some(uid) = obj.uid() else {
+                    skipped_no_uid += 1;
+                    continue;
+                };
+                if is_init_apply {
+                    if let Some(seen) = init_seen.as_mut() {
+                        seen.insert(uid.clone());
+                    }
+                }
+                let row = with_uid(uid.clone(), project_task(&obj));
+                // No-op suppression — see typed-watcher branch above
+                // for the rationale. Same behaviour: cheap structural
+                // equality on the projected row; on miss, update the
+                // cache and broadcast; on hit, drop silently.
+                let mut cache = cache_task.lock().expect("dynamic watcher cache poisoned");
+                let unchanged = cache.get(&uid).is_some_and(|prev| prev == &row);
+                if unchanged {
+                    suppressed += 1;
+                } else {
+                    cache.insert(uid.clone(), row.clone());
+                    drop(cache);
+                    dirty_task.record_upsert(uid, row);
+                }
+                applied += 1;
+                if !first_apply_logged {
+                    first_apply_logged = true;
+                    tracing::info!(
+                        kind = %log_id_task,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "dynamic watcher: first apply"
+                    );
+                } else if applied.is_multiple_of(50) {
+                    tracing::debug!(
+                        kind = %log_id_task,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        applied,
+                        suppressed,
+                        "dynamic watcher: apply progress"
+                    );
                 }
             }
             tracing::info!(
@@ -676,46 +713,17 @@ impl ResourceWatcher {
             let mut applied = 0u64;
             let mut decode_errors = 0u64;
             let mut first_apply_logged = false;
+            // Secret uids replayed during the current Init→InitDone window.
+            // On InitDone we diff against the per-release secret_uids maps
+            // and prune anything missing — same sleep/wake reconcile as the
+            // typed/dynamic watchers, but the aggregator shape (one row per
+            // logical release, multiple secrets per row) means we have to
+            // walk the store inline instead of using `reconcile_init_seen`.
+            let mut init_seen: Option<HashSet<String>> = None;
             while let Some(event) = stream.next().await {
-                match event {
-                    Ok(watcher::Event::Apply(obj) | watcher::Event::InitApply(obj)) => {
-                        let Some(secret_uid) = obj.uid() else {
-                            continue;
-                        };
-                        let release = match decode_release(&obj) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                decode_errors += 1;
-                                tracing::debug!(
-                                    error = %e,
-                                    secret = %obj.name_any(),
-                                    namespace = ?obj.namespace(),
-                                    "helm watcher: decode failed"
-                                );
-                                continue;
-                            }
-                        };
-                        let ns = release.namespace.clone().unwrap_or_default();
-                        let name = release.name.clone();
-                        let key = (ns.clone(), name.clone());
-                        let mut g = store_task.lock().expect("helm store poisoned");
-                        let entry = g.entry(key.clone()).or_default();
-                        entry.insert(secret_uid, release);
-                        if let Some(latest) = entry.values().max_by_key(|r| r.version) {
-                            let uid = synthetic_uid(&ns, &name);
-                            let row = with_uid(uid.clone(), project_row(latest));
-                            dirty_task.record_upsert(uid, row);
-                        }
-                        applied += 1;
-                        if !first_apply_logged {
-                            first_apply_logged = true;
-                            tracing::info!(
-                                kind = "helm_releases",
-                                elapsed_ms = started.elapsed().as_millis() as u64,
-                                "helm watcher: first apply"
-                            );
-                        }
-                    }
+                let (obj, is_init_apply) = match event {
+                    Ok(watcher::Event::Apply(o)) => (o, false),
+                    Ok(watcher::Event::InitApply(o)) => (o, true),
                     Ok(watcher::Event::Delete(obj)) => {
                         let Some(secret_uid) = obj.uid() else {
                             continue;
@@ -747,24 +755,104 @@ impl ResourceWatcher {
                             let row = with_uid(uid.clone(), project_row(latest));
                             dirty_task.record_upsert(uid, row);
                         }
+                        continue;
                     }
                     Ok(watcher::Event::Init) => {
                         tracing::debug!(kind = "helm_releases", "helm watcher: init");
+                        init_seen = Some(HashSet::new());
+                        continue;
                     }
                     Ok(watcher::Event::InitDone) => {
                         init_done_task.store(true, Ordering::SeqCst);
+                        let reconciled = if let Some(seen) = init_seen.take() {
+                            let mut g = store_task.lock().expect("helm store poisoned");
+                            // Snapshot (key, missing_secret_uid) pairs while
+                            // holding the lock; can't mutate `g` while a
+                            // borrow into it is alive.
+                            let stale: Vec<((String, String), String)> = g
+                                .iter()
+                                .flat_map(|(key, revs)| {
+                                    revs.keys()
+                                        .filter(|u| !seen.contains(u.as_str()))
+                                        .map(|u| (key.clone(), u.clone()))
+                                        .collect::<Vec<_>>()
+                                })
+                                .collect();
+                            for (key, secret_uid) in &stale {
+                                let Some(revs) = g.get_mut(key) else {
+                                    continue;
+                                };
+                                revs.remove(secret_uid);
+                                if revs.is_empty() {
+                                    g.remove(key);
+                                    dirty_task.record_delete(synthetic_uid(&key.0, &key.1));
+                                } else if let Some(latest) = revs.values().max_by_key(|r| r.version)
+                                {
+                                    let uid = synthetic_uid(&key.0, &key.1);
+                                    let row = with_uid(uid.clone(), project_row(latest));
+                                    dirty_task.record_upsert(uid, row);
+                                }
+                            }
+                            stale.len()
+                        } else {
+                            0
+                        };
                         tracing::info!(
                             kind = "helm_releases",
                             elapsed_ms = started.elapsed().as_millis() as u64,
                             applied,
                             decode_errors,
+                            reconciled_secret_uids = reconciled,
                             "helm watcher: init done"
                         );
                         dirty_task.mark_init_done();
+                        continue;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, kind = "helm_releases", "helm watcher: stream error");
+                        continue;
                     }
+                };
+                let Some(secret_uid) = obj.uid() else {
+                    continue;
+                };
+                if is_init_apply {
+                    if let Some(seen) = init_seen.as_mut() {
+                        seen.insert(secret_uid.clone());
+                    }
+                }
+                let release = match decode_release(&obj) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        decode_errors += 1;
+                        tracing::debug!(
+                            error = %e,
+                            secret = %obj.name_any(),
+                            namespace = ?obj.namespace(),
+                            "helm watcher: decode failed"
+                        );
+                        continue;
+                    }
+                };
+                let ns = release.namespace.clone().unwrap_or_default();
+                let name = release.name.clone();
+                let key = (ns.clone(), name.clone());
+                let mut g = store_task.lock().expect("helm store poisoned");
+                let entry = g.entry(key.clone()).or_default();
+                entry.insert(secret_uid, release);
+                if let Some(latest) = entry.values().max_by_key(|r| r.version) {
+                    let uid = synthetic_uid(&ns, &name);
+                    let row = with_uid(uid.clone(), project_row(latest));
+                    dirty_task.record_upsert(uid, row);
+                }
+                applied += 1;
+                if !first_apply_logged {
+                    first_apply_logged = true;
+                    tracing::info!(
+                        kind = "helm_releases",
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "helm watcher: first apply"
+                    );
                 }
             }
             tracing::info!(
@@ -895,72 +983,16 @@ impl ResourceWatcher {
             tokio::pin!(stream);
             let mut applied = 0u64;
             let mut decode_errors = 0u64;
+            // Secret uids replayed during the current Init→InitDone window.
+            // On InitDone we drop secret_to_chart entries for missing uids
+            // and demote the affected ChartEntry — same sleep/wake reconcile
+            // as the typed/dynamic watchers; the secret→chart reverse map
+            // means we don't have to scan cluster_charts here.
+            let mut init_seen: Option<HashSet<String>> = None;
             while let Some(event) = stream.next().await {
-                match event {
-                    Ok(watcher::Event::Apply(obj) | watcher::Event::InitApply(obj)) => {
-                        let Some(secret_uid) = obj.uid() else {
-                            continue;
-                        };
-                        let release = match decode_release(&obj) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                decode_errors += 1;
-                                tracing::debug!(
-                                    error = %e,
-                                    "helm-chart watcher: decode failed"
-                                );
-                                continue;
-                            }
-                        };
-                        let Some(name) = release.chart_meta_str("name") else {
-                            continue;
-                        };
-                        let Some(version) = release.chart_meta_str("version") else {
-                            continue;
-                        };
-                        let new_key: ClusterKey = (name.clone(), version.clone());
-
-                        // Demote a prior chart-key for this same secret
-                        // uid (rare in-place version change) before
-                        // promoting into the new key.
-                        let prior_key = secret_map_task
-                            .lock()
-                            .expect("helm-chart secret map poisoned")
-                            .get(&secret_uid)
-                            .cloned();
-                        if let Some(old_key) = prior_key {
-                            if old_key != new_key {
-                                demote_cluster_chart(
-                                    &cluster_charts_task,
-                                    &old_key,
-                                    &secret_uid,
-                                    &dirty_task,
-                                );
-                            }
-                        }
-
-                        {
-                            let mut g =
-                                cluster_charts_task.lock().expect("helm-chart map poisoned");
-                            let entry = g.entry(new_key.clone()).or_insert_with(|| ChartEntry {
-                                sample: release.clone(),
-                                secret_uids: HashSet::new(),
-                            });
-                            entry.secret_uids.insert(secret_uid.clone());
-                            let uid = synthetic_uid(HELM_CLUSTER_SOURCE, &name, &version);
-                            let row = with_uid(
-                                uid.clone(),
-                                project_cluster_row(&entry.sample, entry.secret_uids.len()),
-                            );
-                            dirty_task.record_upsert(uid, row);
-                        }
-                        secret_map_task
-                            .lock()
-                            .expect("helm-chart secret map poisoned")
-                            .insert(secret_uid, new_key);
-
-                        applied += 1;
-                    }
+                let (obj, is_init_apply) = match event {
+                    Ok(watcher::Event::Apply(o)) => (o, false),
+                    Ok(watcher::Event::InitApply(o)) => (o, true),
                     Ok(watcher::Event::Delete(obj)) => {
                         let Some(secret_uid) = obj.uid() else {
                             continue;
@@ -977,20 +1009,54 @@ impl ResourceWatcher {
                                 &dirty_task,
                             );
                         }
+                        continue;
                     }
                     Ok(watcher::Event::Init) => {
                         tracing::debug!(kind = "helm_charts", "helm-chart watcher: init");
+                        init_seen = Some(HashSet::new());
+                        continue;
                     }
                     Ok(watcher::Event::InitDone) => {
                         init_done_task.store(true, Ordering::SeqCst);
+                        let reconciled = if let Some(seen) = init_seen.take() {
+                            // Snapshot (secret_uid, key) for any tracked
+                            // secret missing from the new LIST, drop from
+                            // the reverse map, then demote each owning
+                            // chart entry (which may delete the row or
+                            // re-emit with a lower used_by count).
+                            let stale: Vec<(String, ClusterKey)> = secret_map_task
+                                .lock()
+                                .expect("helm-chart secret map poisoned")
+                                .iter()
+                                .filter(|(u, _)| !seen.contains(u.as_str()))
+                                .map(|(u, k)| (u.clone(), k.clone()))
+                                .collect();
+                            for (secret_uid, key) in &stale {
+                                secret_map_task
+                                    .lock()
+                                    .expect("helm-chart secret map poisoned")
+                                    .remove(secret_uid);
+                                demote_cluster_chart(
+                                    &cluster_charts_task,
+                                    key,
+                                    secret_uid,
+                                    &dirty_task,
+                                );
+                            }
+                            stale.len()
+                        } else {
+                            0
+                        };
                         tracing::info!(
                             kind = "helm_charts",
                             elapsed_ms = started.elapsed().as_millis() as u64,
                             applied,
                             decode_errors,
+                            reconciled_secret_uids = reconciled,
                             "helm-chart watcher: init done"
                         );
                         dirty_task.mark_init_done();
+                        continue;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -998,8 +1064,75 @@ impl ResourceWatcher {
                             kind = "helm_charts",
                             "helm-chart watcher: stream error"
                         );
+                        continue;
+                    }
+                };
+                let Some(secret_uid) = obj.uid() else {
+                    continue;
+                };
+                if is_init_apply {
+                    if let Some(seen) = init_seen.as_mut() {
+                        seen.insert(secret_uid.clone());
                     }
                 }
+                let release = match decode_release(&obj) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        decode_errors += 1;
+                        tracing::debug!(
+                            error = %e,
+                            "helm-chart watcher: decode failed"
+                        );
+                        continue;
+                    }
+                };
+                let Some(name) = release.chart_meta_str("name") else {
+                    continue;
+                };
+                let Some(version) = release.chart_meta_str("version") else {
+                    continue;
+                };
+                let new_key: ClusterKey = (name.clone(), version.clone());
+
+                // Demote a prior chart-key for this same secret
+                // uid (rare in-place version change) before
+                // promoting into the new key.
+                let prior_key = secret_map_task
+                    .lock()
+                    .expect("helm-chart secret map poisoned")
+                    .get(&secret_uid)
+                    .cloned();
+                if let Some(old_key) = prior_key {
+                    if old_key != new_key {
+                        demote_cluster_chart(
+                            &cluster_charts_task,
+                            &old_key,
+                            &secret_uid,
+                            &dirty_task,
+                        );
+                    }
+                }
+
+                {
+                    let mut g = cluster_charts_task.lock().expect("helm-chart map poisoned");
+                    let entry = g.entry(new_key.clone()).or_insert_with(|| ChartEntry {
+                        sample: release.clone(),
+                        secret_uids: HashSet::new(),
+                    });
+                    entry.secret_uids.insert(secret_uid.clone());
+                    let uid = synthetic_uid(HELM_CLUSTER_SOURCE, &name, &version);
+                    let row = with_uid(
+                        uid.clone(),
+                        project_cluster_row(&entry.sample, entry.secret_uids.len()),
+                    );
+                    dirty_task.record_upsert(uid, row);
+                }
+                secret_map_task
+                    .lock()
+                    .expect("helm-chart secret map poisoned")
+                    .insert(secret_uid, new_key);
+
+                applied += 1;
             }
         });
 
@@ -1103,6 +1236,43 @@ impl Drop for ResourceWatcher {
         // — small leak per cluster-switch, but accumulating.
         self.dirty.close();
     }
+}
+
+/// Diff the watcher cache against the uids replayed during an
+/// `Event::Init` → `Event::InitDone` window and emit a synthetic
+/// `Delete` for any uid present in the cache but absent from the
+/// replayed set. This is how we catch deletes that happened while
+/// the watcher was disconnected (sleep/wake, 410 Gone resync) —
+/// kube-rs only emits `Event::Delete` when the apiserver streams
+/// the deletion live; a resync is a plain LIST and never tells us
+/// "this item is gone." Returns the number of reconciled deletions.
+///
+/// Used by the typed and dynamic watchers (same `Mutex<HashMap<uid, row>>`
+/// cache shape). The helm aggregators carry a richer per-release /
+/// per-chart store and reconcile inline.
+fn reconcile_init_seen(
+    init_seen: &mut Option<HashSet<String>>,
+    cache: &Mutex<HashMap<String, Value>>,
+    dirty: &DirtyChannel,
+) -> usize {
+    let Some(seen) = init_seen.take() else {
+        return 0;
+    };
+    let mut cache = cache.lock().expect("watcher cache poisoned");
+    let stale: Vec<String> = cache
+        .keys()
+        .filter(|uid| !seen.contains(uid.as_str()))
+        .cloned()
+        .collect();
+    for uid in &stale {
+        cache.remove(uid);
+    }
+    drop(cache);
+    let n = stale.len();
+    for uid in stale {
+        dirty.record_delete(uid);
+    }
+    n
 }
 
 /// Inject `uid` into a projected row. If the projection produced something
@@ -1262,5 +1432,66 @@ mod tests {
         assert!(batch.init_done);
         // Second wait sees empty + closed.
         assert!(!chan.wait_for_change().await);
+    }
+
+    #[test]
+    fn reconcile_init_seen_none_is_noop() {
+        // If Init/InitDone never fired (e.g. an Apply-only stream), the
+        // reconcile must not touch the cache and must return 0.
+        let cache = Mutex::new(HashMap::from([("u1".to_owned(), row("a"))]));
+        let chan = DirtyChannel::new();
+        let mut seen: Option<HashSet<String>> = None;
+        let n = reconcile_init_seen(&mut seen, &cache, &chan);
+        assert_eq!(n, 0);
+        assert_eq!(cache.lock().unwrap().len(), 1);
+        assert!(chan.drain().is_empty());
+    }
+
+    #[test]
+    fn reconcile_init_seen_drops_missing_uids() {
+        // The reflector relist after sleep/wake / 410 Gone replays the
+        // current state via Init→InitApply→InitDone but never tells us
+        // what disappeared. `init_seen` carries the uids replayed in this
+        // window; anything in the cache that's missing is a ghost.
+        let cache = Mutex::new(HashMap::from([
+            ("kept".to_owned(), row("k")),
+            ("gone-1".to_owned(), row("g1")),
+            ("gone-2".to_owned(), row("g2")),
+        ]));
+        let chan = DirtyChannel::new();
+        let mut seen: Option<HashSet<String>> = Some(HashSet::from(["kept".to_owned()]));
+        let n = reconcile_init_seen(&mut seen, &cache, &chan);
+        assert_eq!(n, 2);
+        assert!(seen.is_none(), "init_seen consumed");
+        let c = cache.lock().unwrap();
+        assert!(c.contains_key("kept"));
+        assert!(!c.contains_key("gone-1"));
+        assert!(!c.contains_key("gone-2"));
+        let batch = chan.drain();
+        assert!(batch.deletes.contains("gone-1"));
+        assert!(batch.deletes.contains("gone-2"));
+        assert!(batch.upserts.is_empty());
+    }
+
+    #[test]
+    fn reconcile_init_seen_full_overlap_is_noop() {
+        // Steady-state resync (apiserver still has every object we knew
+        // about) must emit zero Deletes.
+        let cache = Mutex::new(HashMap::from([
+            ("a".to_owned(), row("a")),
+            ("b".to_owned(), row("b")),
+        ]));
+        let chan = DirtyChannel::new();
+        let mut seen: Option<HashSet<String>> = Some(HashSet::from([
+            "a".to_owned(),
+            "b".to_owned(),
+            "c".to_owned(),
+        ]));
+        // Extra "c" in seen (live object we don't yet have cached) is
+        // fine — InitApply for c would have already record_upsert'd it.
+        let n = reconcile_init_seen(&mut seen, &cache, &chan);
+        assert_eq!(n, 0);
+        assert_eq!(cache.lock().unwrap().len(), 2);
+        assert!(chan.drain().is_empty());
     }
 }
