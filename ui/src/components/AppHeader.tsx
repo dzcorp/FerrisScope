@@ -552,66 +552,46 @@ export function AppHeader({
     zIndex: 5,
   };
 
-  // On macOS the header is two rows. Row 1 is right-aligned: controls
-  // followed by the breadcrumb, with the OS traffic lights overlapping the
-  // empty left side. Row 2 sits the brand alone on the left, aligned with
-  // the leftmost light at `paddingLeft: 12`. Off macOS we keep the
-  // single-row layout: brand · divider · breadcrumb · spacer · controls.
+  // Single row everywhere. On macOS the brand sits in its own wrapper that
+  // is `transform: translateY` nudged down so it tucks beneath the OS
+  // traffic lights instead of competing with them for the row's left edge —
+  // and the row's left gutter drops to 12 px (matching the lights' own left
+  // edge) so the brand aligns with the leftmost light. Layout space for the
+  // brand stays in its original position, so the breadcrumb + controls stay
+  // exactly where they were; the row's `paddingBottom` is set to `BRAND_OFFSET`
+  // so it just contains the brand's visual overflow without adding extra
+  // chrome height beyond that. The divider between brand and breadcrumb is
+  // dropped on macOS because the brand's vertical offset already separates
+  // the two; on other platforms it stays.
+  const BRAND_OFFSET = 18;
   return (
     <div style={shell}>
-      {IS_MAC ? (
-        <>
-          <div
-            {...dragRegionProps()}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 16,
-              paddingTop: 30,
-              paddingBottom: 4,
-              paddingLeft: 22,
-              paddingRight: 22,
-            }}
-          >
-            <div {...dragRegionProps()} style={{ flex: 1 }} />
-            {controls}
-            <div style={{ height: 18, width: 1, background: t.border }} />
-            {breadcrumb}
-          </div>
-          <div
-            {...dragRegionProps()}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              paddingTop: 0,
-              paddingBottom: 10,
-              paddingLeft: 12,
-              paddingRight: 22,
-            }}
-          >
-            {brand}
-            <div {...dragRegionProps()} style={{ flex: 1 }} />
-          </div>
-        </>
-      ) : (
+      <div
+        {...dragRegionProps()}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 16,
+          paddingTop: 12,
+          paddingBottom: IS_MAC ? BRAND_OFFSET : 12,
+          paddingRight: 22,
+          paddingLeft: IS_MAC ? 12 : headerPaddingLeft(22),
+        }}
+      >
         <div
           style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 16,
-            paddingTop: 12,
-            paddingBottom: 12,
-            paddingRight: 22,
-            paddingLeft: headerPaddingLeft(22),
+            transform: IS_MAC ? `translateY(${BRAND_OFFSET}px)` : "none",
           }}
         >
           {brand}
-          <div style={{ height: 18, width: 1, background: t.border }} />
-          {breadcrumb}
-          <div style={{ flex: 1 }} />
-          {controls}
         </div>
-      )}
+        {!IS_MAC && (
+          <div style={{ height: 18, width: 1, background: t.border }} />
+        )}
+        {breadcrumb}
+        <div {...dragRegionProps()} style={{ flex: 1 }} />
+        {controls}
+      </div>
     </div>
   );
 }

@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, cleanup } from "@testing-library/react";
 
-// Control IS_MAC per-test. Off macOS the header is a single row (brand +
-// breadcrumb + controls). On macOS the layout splits into two rows: row 1 is
-// right-aligned (controls + breadcrumb), row 2 holds the brand alone on the
-// left below the OS traffic lights.
+// Control IS_MAC per-test. The header is a single row everywhere. On macOS
+// the brand is wrapped in its own block that is `transform: translateY` nudged
+// down so it tucks beneath the integrated transparent title bar's traffic
+// lights, and the divider between brand and breadcrumb is dropped (the
+// vertical offset already separates them).
 // AppHeader reads IS_MAC directly (and macChrome reads it too) — a
 // getter-backed override on the keyboard module lets one file flip the value
 // at render time while the rest of the module stays real.
@@ -61,34 +62,35 @@ describe("AppHeader layout", () => {
     expect(r.contains(getByText(/Search clusters/))).toBe(true);
   });
 
-  it("splits into two rows on macOS: controls + breadcrumb up top, brand below", () => {
+  it("nudges the brand block down beneath the traffic lights on macOS", () => {
     platform.isMac = true;
     const { container, getByText } = renderHeader();
-    const shell = container.firstChild as HTMLElement;
-    expect(shell.children).toHaveLength(2);
-    const topRow = shell.children[0] as HTMLElement;
-    const brandRow = shell.children[1] as HTMLElement;
-    // Top row: controls + breadcrumb (no brand). PaddingTop clears the OS
-    // traffic lights (~14px tall at y≈14).
-    expect(topRow.contains(getByText("Clusters"))).toBe(true);
-    expect(topRow.contains(getByText("FerrisScope"))).toBe(false);
-    expect(parseInt(topRow.style.paddingTop, 10)).toBeGreaterThanOrEqual(28);
-    // Bottom row: brand alone, aligned with the leftmost traffic light at
-    // 12px paddingLeft (not the standard 22px gutter).
-    expect(brandRow.contains(getByText("FerrisScope"))).toBe(true);
-    expect(brandRow.contains(getByText("Clusters"))).toBe(false);
-    expect(brandRow.style.paddingLeft).toBe("12px");
-    // Both rows act as window drag handles on macOS.
-    expect(topRow.getAttribute("data-tauri-drag-region")).not.toBeNull();
-    expect(brandRow.getAttribute("data-tauri-drag-region")).not.toBeNull();
+    const r = row(container);
+    // Single row still; the brand sits in the first child wrapper with a
+    // translateY transform that tucks it under the OS traffic lights.
+    const brandWrapper = r.firstElementChild as HTMLElement;
+    expect(brandWrapper.contains(getByText("FerrisScope"))).toBe(true);
+    expect(brandWrapper.style.transform).toMatch(/translateY\(\d+px\)/);
+    // The brand-breadcrumb divider is dropped on macOS — the vertical
+    // offset already separates the two visually.
+    const divider = r.querySelector('div[style*="width: 1px"]');
+    expect(divider).toBeNull();
+    // Row gutter drops to 12px to align the brand with the leftmost
+    // traffic light, instead of the standard 22px gutter.
+    expect(r.style.paddingLeft).toBe("12px");
+    // Drag region stays on the row so the header still moves the window.
+    expect(r.getAttribute("data-tauri-drag-region")).not.toBeNull();
   });
 
-  it("keeps a single row with the standard gutter and no drag region off macOS", () => {
+  it("uses the normal gutter, keeps the divider and no drag region off macOS", () => {
     platform.isMac = false;
     const { container } = renderHeader();
-    const shell = container.firstChild as HTMLElement;
-    expect(shell.children).toHaveLength(1);
     const r = row(container);
+    const brandWrapper = r.firstElementChild as HTMLElement;
+    expect(brandWrapper.style.transform === "" || brandWrapper.style.transform === "none").toBe(
+      true,
+    );
+    expect(r.querySelector('div[style*="width: 1px"]')).not.toBeNull();
     expect(r.style.paddingLeft).toBe("22px");
     expect(r.getAttribute("data-tauri-drag-region")).toBeNull();
   });
