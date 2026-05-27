@@ -93,7 +93,7 @@ mod tests {
         // Decodes back to the same dimensions + pixels.
         let decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
         let mut reader = decoder.read_info().expect("read_info");
-        let mut buf = vec![0; reader.output_buffer_size()];
+        let mut buf = vec![0; reader.output_buffer_size().expect("output buffer size")];
         let info = reader.next_frame(&mut buf).expect("frame");
         assert_eq!((info.width, info.height), (2, 1));
         assert_eq!(&buf[..info.buffer_size()], &rgba[..]);

@@ -1736,7 +1736,7 @@ dependencies = [
  "keyring",
  "kube",
  "mimalloc",
- "png 0.17.16",
+ "png 0.18.1",
  "portable-pty",
  "pretty_assertions",
  "reqwest",
