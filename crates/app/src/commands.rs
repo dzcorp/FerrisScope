@@ -533,6 +533,12 @@ pub(crate) async fn connect_context(
             // subscribe before connect_context). Cheap no-op if already
             // claimed by an earlier command.
             wire_cluster_health(&app, &name, entry.clone());
+            // Hold one internal subscriber on `(cluster, "namespaces", All)`
+            // for the entry's lifetime so the top-right namespace dropdown
+            // stays live across cluster reconnects and React lifecycle
+            // races. CAS-gated; no-op on a StrictMode double-fire. See
+            // `pin_cluster_namespaces`.
+            pin_cluster_namespaces(&app, &name);
             // Connect-time probes (cluster.info background fetch + bench)
             // run exactly once per cluster. The CAS in `claim_connect_probes`
             // guarantees that even if `connect_context` fires twice (React
@@ -677,6 +683,57 @@ fn wire_cluster_health(app: &AppHandle, cluster_id: &str, entry: Arc<crate::stat
             old.abort();
         }
     }
+}
+
+/// Install an always-on internal subscriber on `(cluster, "namespaces", All)`
+/// so the reflector stays alive for the lifetime of the entry. The top-right
+/// namespace dropdown (and any other UI that wants a live namespace list)
+/// then sees deltas immediately without depending on the frontend keeping
+/// its own subscription alive across cluster reconnects / React lifecycle
+/// quirks / 60 s linger windows. The internal subscriber count is released
+/// implicitly when `drop_cluster_watchers` / `tear_down_unhealthy` force-
+/// abort every watcher and the entry is removed; a fresh `connect_context`
+/// re-fires this on the rebuilt entry.
+///
+/// CAS-gated so a duplicate `connect_context` (StrictMode double-fire, fast
+/// operator click) doesn't add a second pin and leak one subscriber count
+/// past teardown. The actual subscribe runs in a spawned task so this
+/// helper stays non-async and the caller (a connect path that already paid
+/// for client / TLS / probe round trips) doesn't have to wait on the
+/// slot-bump round trip.
+fn pin_cluster_namespaces(app: &AppHandle, cluster_id: &str) {
+    let app = app.clone();
+    let cluster_id = cluster_id.to_owned();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        // Capture the entry Arc here and reuse it for the subscribe.
+        // Going through `subscribe_resource_inner` (which calls
+        // `state.entry()`) would lazy-reconnect if the operator
+        // disconnected between our spawn and this point — leaking a
+        // new entry whose `namespaces_pinned` we can't claim (we
+        // already claimed on the now-gone entry) and whose watcher
+        // would run forever with no UI consumer.
+        let Some(entry) = state.get_existing(&cluster_id).await else {
+            return;
+        };
+        if !entry.claim_namespaces_pinning() {
+            return;
+        }
+        if let Err(e) =
+            subscribe_resource_with_entry(&cluster_id, "namespaces", None, &app, &state, entry)
+                .await
+        {
+            // Lazy-failure rather than hard-failure: the frontend's
+            // belt-and-braces App.tsx subscribe will still try its own
+            // path. Worth a warn so the operator can correlate the
+            // top-right going stale with the underlying cluster issue.
+            tracing::warn!(
+                error = %e,
+                cluster_id = %cluster_id,
+                "pin_cluster_namespaces: internal subscribe failed"
+            );
+        }
+    });
 }
 
 /// Update the fleet cache entry for `cluster_id` with the latest
@@ -841,14 +898,51 @@ pub(crate) async fn subscribe_resource(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubscribeResult, String> {
+    subscribe_resource_inner(&cluster_id, &kind_id, namespaces.as_deref(), &app, &state).await
+}
+
+/// Body of `subscribe_resource` parameterised over borrowed types so
+/// internal callers (the always-on namespaces pin) can share the
+/// slot-bump / forwarder-spawn logic without going through Tauri's
+/// command dispatch. The `#[tauri::command]` wrapper above is a thin
+/// adapter — no logic of its own. Lazy-resolves the entry (this is
+/// the eager App.tsx-subscribe path that fires before
+/// `connect_context`); callers that already hold the entry and
+/// must NOT lazy-reconnect (the namespaces pin, racing against a
+/// cluster disconnect) should use `subscribe_resource_with_entry`.
+pub(crate) async fn subscribe_resource_inner(
+    cluster_id: &str,
+    kind_id: &str,
+    namespaces: Option<&[String]>,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<SubscribeResult, String> {
+    let entry = state.entry(cluster_id).await?;
+    subscribe_resource_with_entry(cluster_id, kind_id, namespaces, app, state, entry).await
+}
+
+/// Slot-bump / forwarder-spawn for an already-resolved
+/// `Arc<ClusterEntry>`. Use this when you've non-creatingly looked
+/// up the entry (via `state.get_existing`) and want to *avoid* the
+/// lazy-reconnect path inside `state.entry()` — typically because
+/// you're racing a teardown and a reconnect would leak the new
+/// entry. The Tauri-facing `subscribe_resource_inner` is a thin
+/// lazy-resolve wrapper over this.
+pub(crate) async fn subscribe_resource_with_entry(
+    cluster_id: &str,
+    kind_id: &str,
+    namespaces: Option<&[String]>,
+    app: &AppHandle,
+    state: &AppState,
+    entry: Arc<crate::state::ClusterEntry>,
+) -> Result<SubscribeResult, String> {
     let started = std::time::Instant::now();
-    let kind = lookup(&kind_id).ok_or_else(|| format!("unknown kind: {kind_id}"))?;
-    let entry = state.entry(&cluster_id).await?;
+    let kind = lookup(kind_id).ok_or_else(|| format!("unknown kind: {kind_id}"))?;
     // Lazy-connect callers (App's eager namespaces subscribe runs
     // before connect_context) need the health forwarder wired here so
     // probe events reach the UI. CAS-guarded — cheap no-op when
     // connect_context has already wired it.
-    wire_cluster_health(&app, &cluster_id, entry.clone());
+    wire_cluster_health(app, cluster_id, entry.clone());
     if entry.unavailable.load(Ordering::SeqCst) {
         // Cluster has been declared unavailable by the health probe and
         // its watchers + metrics service have been torn down. Refuse to
@@ -863,13 +957,13 @@ pub(crate) async fn subscribe_resource(
     // Cluster-scoped kinds ignore the selection upstream (the registry
     // coerces to `All`), so it doesn't hurt to pass the raw scope here
     // — the registry's `from_*_spec` closures do the right thing.
-    let scope = match namespaces.as_deref() {
+    let scope = match namespaces {
         Some(list) if kind.meta.namespaced => ferrisscope_kube_ext::NsScope::from_selection(list),
         _ => ferrisscope_kube_ext::NsScope::All,
     };
     let after_entry = started.elapsed().as_millis() as u64;
     let mut slots = entry.kinds.lock().await;
-    let slot_key = (kind_id.clone(), scope.clone());
+    let slot_key = (kind_id.to_owned(), scope.clone());
     let slot = slots
         .entry(slot_key.clone())
         .or_insert_with(KindSlot::empty);
@@ -899,11 +993,11 @@ pub(crate) async fn subscribe_resource(
         // fully-browsed UI. The pool is the middle ground.
         let client = entry.cluster.watcher_client();
         let w = (kind.start)(client, scope.clone(), strategy);
-        let search_index = state.search_index_for(&cluster_id).await;
+        let search_index = state.search_index_for(cluster_id).await;
         spawn_resource_forwarder(
             app.clone(),
-            cluster_id.clone(),
-            kind_id.clone(),
+            cluster_id.to_owned(),
+            kind_id.to_owned(),
             scope.clone(),
             w.clone(),
             search_index,
