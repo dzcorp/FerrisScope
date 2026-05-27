@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { api, onPortForwardStatus, onResourceDelta } from "./api";
 import { useAppStore, useResolvedTheme } from "./store";
 import type { AppInfo, ResourceKind } from "./types";
@@ -128,6 +129,23 @@ export default function App() {
       .setTheme(themeMode)
       .catch(() => {});
   }, [themeMode]);
+
+  // Global UI scale via the webview's native page-zoom API. Routes to
+  // WKWebView setPageZoom (macOS), webkit_web_view_set_zoom_level
+  // (Linux), and the WebView2 zoom factor (Windows) — all of which
+  // rescale layout *and* paint uniformly. CSS `zoom` did paint-only on
+  // macOS WebKit, which caused the root 100vw/100vh box to overflow the
+  // window above 1.0× and under-fill below. The applied factor is the
+  // user-facing slider value multiplied by a hidden baseline so "100 %"
+  // in Settings already renders 10 % larger than the raw theme baseline.
+  // The Rust setup() pre-applies the persisted scale to the main webview
+  // before the first paint; this effect keeps it in lockstep with the
+  // slider afterward.
+  useEffect(() => {
+    getCurrentWebviewWindow()
+      .setZoom(uiScale * UI_SCALE_BASELINE)
+      .catch(() => {});
+  }, [uiScale]);
 
   useEffect(() => {
     api
@@ -611,14 +629,8 @@ export default function App() {
   // theme themselves to match — otherwise the OS defaults to light, leaving
   // a white dropdown list on a dark page.
   document.documentElement.style.colorScheme = themeMode;
-  // Global UI scale via CSS `zoom` on the root. Chosen over rem/font-size
-  // because the codebase pins pixel literals (`fontSize: FS_MD`, paddings)
-  // throughout — `zoom` scales every pixel uniformly and is supported in
-  // both webview engines we ship to (WebKit on macOS, WebKitGTK on Linux).
-  // The applied zoom is the user-facing slider value multiplied by a
-  // hidden baseline so "100 %" in Settings already renders 10 % larger
-  // than the raw theme baseline.
-  document.documentElement.style.zoom = String(uiScale * UI_SCALE_BASELINE);
+  // Note: UI scale is applied via the webview's native page-zoom API in the
+  // sibling useEffect above (and pre-applied from prefs in Rust setup()).
 
   const leftInset = selectedContext
     ? railMode === "pinned"

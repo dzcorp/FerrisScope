@@ -15,11 +15,16 @@ mod state;
 mod terminal;
 mod updater;
 
-use ferrisscope_core::{kubeconfig, sources, watcher::KubeconfigWatcher};
+use ferrisscope_core::{kubeconfig, prefs, sources, watcher::KubeconfigWatcher};
 use tauri::{Emitter, Manager};
 use tracing_subscriber::EnvFilter;
 
 use crate::state::AppState;
+
+// Multiplier baked into every applied page-zoom value, so the user-facing
+// "100 %" in Settings already renders 10 % larger than the raw theme
+// baseline. Must stay in sync with `UI_SCALE_BASELINE` in ui/src/theme.ts.
+const UI_SCALE_BASELINE: f64 = 1.1;
 
 // Use mimalloc instead of glibc's ptmalloc2. Long-running Tauri apps tend
 // to accumulate "ghost" RSS under the default allocator because freed
@@ -269,6 +274,23 @@ fn main() {
             #[cfg(target_os = "linux")]
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_decorations(false);
+            }
+
+            // Pre-apply the persisted UI scale to the main webview before its
+            // first paint, via Tauri's native page-zoom API (WKWebView
+            // setPageZoom on macOS, webkit_web_view_set_zoom_level on Linux,
+            // WebView2 zoom on Windows). Without this, the page paints once at
+            // 1.0× and then snaps to the persisted scale a beat later when the
+            // frontend's hydratePrefs round-trip lands — a visible pop on
+            // every launch. The on-disk prefs file is tiny; a block_on at
+            // setup is fine. The frontend keeps the slider in sync at runtime
+            // (App.tsx → getCurrentWebviewWindow().setZoom on uiScale change).
+            if let Some(win) = app.get_webview_window("main") {
+                let prefs = tauri::async_runtime::block_on(prefs::load());
+                let scale = f64::from(prefs.settings.ui_scale) * UI_SCALE_BASELINE;
+                if let Err(e) = win.set_zoom(scale) {
+                    tracing::warn!(?e, scale, "failed to pre-apply UI scale");
+                }
             }
 
             // macOS window appearance is kept in lockstep with the app theme

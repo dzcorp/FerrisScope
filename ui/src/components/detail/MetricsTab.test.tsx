@@ -2,9 +2,10 @@ import { describe, it, expect } from "vitest";
 import { clientXToSvgX } from "./MetricsTab";
 
 // Build a minimal SVGSVGElement-shaped stub. The chart renders the SVG
-// with width=viewBoxWidth, then ancestor CSS zoom visually scales it by
-// `zoom`. getBoundingClientRect reports the visually-scaled width since
-// it's in the same coord system as clientX.
+// with width=viewBoxWidth, then native page zoom rescales layout + paint
+// together — getBoundingClientRect and clientX share a coordinate space,
+// so the stub's `zoom` parameter scales both the reported rect width and
+// the cursor input uniformly.
 function makeSvgStub(opts: {
   viewBoxWidth: number;
   zoom: number;
@@ -45,28 +46,26 @@ describe("clientXToSvgX", () => {
     expect(clientXToSvgX(svg, 560)).toBeCloseTo(560, 5);
   });
 
-  it("scales the cursor back to viewBox space under CSS zoom", () => {
-    // UI Scale slider applies zoom=1.5 to <html>: the chart renders at
-    // 840 screen px, but viewBox stays 0..560. Cursor at the visual
-    // midpoint (screen x=420) must map to viewBox x=280 — the previous
-    // implementation returned 420 here, which is what made the
-    // crosshair land to the right of the cursor.
+  it("maps cursor proportionally when the rect is wider than the viewBox", () => {
+    // SVG rendered at 840 CSS px but viewBox stays 0..560 (e.g. the
+    // chart was sized larger by its container). Cursor at the rect
+    // midpoint (420) must map to viewBox midpoint (280).
     const svg = makeSvgStub({ viewBoxWidth: 560, zoom: 1.5, rectLeft: 0 });
     expect(clientXToSvgX(svg, 420)).toBeCloseTo(280, 5);
     expect(clientXToSvgX(svg, 840)).toBeCloseTo(560, 5);
   });
 
-  it("scales correctly under a different zoom factor", () => {
-    // zoom=0.8 (UI Scale down). Visual width = 448. Cursor at the
-    // visual midpoint (224) maps to viewBox x=280.
+  it("maps cursor proportionally when the rect is narrower than the viewBox", () => {
+    // SVG rendered at 448 CSS px with viewBox 0..560. Cursor at the
+    // rect midpoint (224) maps to viewBox midpoint (280).
     const svg = makeSvgStub({ viewBoxWidth: 560, zoom: 0.8, rectLeft: 0 });
     expect(clientXToSvgX(svg, 224)).toBeCloseTo(280, 5);
   });
 
   it("accounts for the SVG's left offset on the page", () => {
-    // Chart sits 200px from the left of the viewport, zoom=1.25 —
-    // visual width = 700, visual midpoint = 200 + 350 = 550. viewBox
-    // x should be 280.
+    // Chart sits 200px from the left of the viewport with rendered
+    // width 700. Cursor at the rect midpoint (550) maps to viewBox
+    // midpoint (280); cursor at the rect edges maps to 0 / viewBoxWidth.
     const svg = makeSvgStub({ viewBoxWidth: 560, zoom: 1.25, rectLeft: 200 });
     expect(clientXToSvgX(svg, 550)).toBeCloseTo(280, 5);
     expect(clientXToSvgX(svg, 200)).toBeCloseTo(0, 5);
@@ -97,16 +96,16 @@ describe("clientXToSvgX", () => {
     expect(clientXToSvgX(svg, 400)).toBeCloseTo(400, 5);
   });
 
-  it("scales correctly under WebKit/Tauri CSS zoom behavior (unzoomed bounding rect)", () => {
-    // Under WebKit/Tauri, document.documentElement.style.zoom is set to 1.5.
-    // getBoundingClientRect reports unzoomed width (560) and left (0),
-    // but cursor clientX is reported in zoomed visual coordinates (midpoint = 420).
+  it("ignores document.documentElement.style.zoom under native page zoom", () => {
+    // Sanity check: native page zoom (WebviewWindow.setZoom) rescales
+    // layout and paint together, so getBoundingClientRect and clientX
+    // already share a space. Stray CSS `zoom` on the root must not enter
+    // the mapping.
     const prevZoom = document.documentElement.style.zoom;
     document.documentElement.style.zoom = "1.5";
     try {
-      const svg = makeSvgStub({ viewBoxWidth: 560, zoom: 1, rectLeft: 0 }); // rect.width is 560
-      expect(clientXToSvgX(svg, 420)).toBeCloseTo(280, 5);
-      expect(clientXToSvgX(svg, 840)).toBeCloseTo(560, 5);
+      const svg = makeSvgStub({ viewBoxWidth: 560, zoom: 1, rectLeft: 0 });
+      expect(clientXToSvgX(svg, 280)).toBeCloseTo(280, 5);
     } finally {
       document.documentElement.style.zoom = prevZoom;
     }
