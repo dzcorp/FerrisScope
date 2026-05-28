@@ -10,7 +10,9 @@ import {
   ChipStrip,
   ConditionChip,
   Copyable,
+  copyHint,
   DetailRow,
+  ExpandableList,
   KeyValueChips,
   LinkValue,
   Mute,
@@ -103,6 +105,81 @@ describe("Copyable", () => {
     fireEvent.click(screen.getByText("v"));
     expect(onParent).not.toHaveBeenCalled();
     expect(clipboardWrites).toEqual(["x"]);
+  });
+});
+
+describe("copyHint", () => {
+  it("echoes a short single-line value so the operator can confirm it", () => {
+    expect(copyHint("postgres://example")).toBe(
+      "Click to copy · postgres://example",
+    );
+  });
+
+  it("drops the echo for a multi-line value (would be a wall of text)", () => {
+    expect(copyHint("line one\nline two")).toBe("Click to copy");
+  });
+
+  it("drops the echo once the value exceeds the length cap", () => {
+    expect(copyHint("a".repeat(81))).toBe("Click to copy");
+  });
+
+  it("keeps echoing right up to the length cap (no off-by-one)", () => {
+    const at = "a".repeat(80);
+    expect(copyHint(at)).toBe(`Click to copy · ${at}`);
+  });
+});
+
+describe("ExpandableList", () => {
+  const renderItems = (items: string[]) => (
+    <>
+      {items.map((it) => (
+        <span key={it}>{it}</span>
+      ))}
+    </>
+  );
+
+  it("renders everything with no toggle when at or under the threshold", () => {
+    const items = Array.from({ length: 10 }, (_, i) => `item-${i}`);
+    render(<ExpandableList t={t} items={items} render={renderItems} />);
+    expect(screen.getByText("item-0")).toBeInTheDocument();
+    expect(screen.getByText("item-9")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("shows only the first `threshold` items and a 'Show N more' toggle past it", () => {
+    const items = Array.from({ length: 13 }, (_, i) => `item-${i}`);
+    render(<ExpandableList t={t} items={items} render={renderItems} />);
+    // First 10 visible, 11th+ hidden.
+    expect(screen.getByText("item-9")).toBeInTheDocument();
+    expect(screen.queryByText("item-10")).not.toBeInTheDocument();
+    const toggle = screen.getByRole("button");
+    expect(toggle).toHaveTextContent("Show 3 more");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("reveals the rest on click and re-collapses on 'Show less'", () => {
+    const items = Array.from({ length: 13 }, (_, i) => `item-${i}`);
+    render(<ExpandableList t={t} items={items} render={renderItems} />);
+    const toggle = screen.getByRole("button");
+
+    fireEvent.click(toggle);
+    expect(screen.getByText("item-12")).toBeInTheDocument();
+    expect(toggle).toHaveTextContent("Show less");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(toggle);
+    expect(screen.queryByText("item-12")).not.toBeInTheDocument();
+    expect(toggle).toHaveTextContent("Show 3 more");
+  });
+
+  it("honours a custom threshold", () => {
+    const items = ["a", "b", "c"];
+    render(
+      <ExpandableList t={t} items={items} threshold={2} render={renderItems} />,
+    );
+    expect(screen.getByText("b")).toBeInTheDocument();
+    expect(screen.queryByText("c")).not.toBeInTheDocument();
+    expect(screen.getByRole("button")).toHaveTextContent("Show 1 more");
   });
 });
 

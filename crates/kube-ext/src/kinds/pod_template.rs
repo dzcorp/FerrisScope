@@ -250,11 +250,14 @@ pub fn project_pod_template_summary(template: &PodTemplateSpec) -> Value {
         .and_then(|m| m.labels.as_ref())
         .map(|m| m.iter().map(|(k, v)| json!([k, v])).collect())
         .unwrap_or_default();
-    let annotations_count = template
-        .metadata
-        .as_ref()
-        .and_then(|m| m.annotations.as_ref())
-        .map_or(0, std::collections::BTreeMap::len);
+    // Elide the last-applied-configuration blob the same way project_meta
+    // does — a pod template can carry it too, and it's pure noise here.
+    let annotations = project_annotations(
+        template
+            .metadata
+            .as_ref()
+            .and_then(|m| m.annotations.as_ref()),
+    );
 
     let spec = template.spec.as_ref();
     let containers: Vec<Value> = spec
@@ -284,9 +287,22 @@ pub fn project_pod_template_summary(template: &PodTemplateSpec) -> Value {
         .map(|m| m.iter().map(|(k, v)| json!([k, v])).collect())
         .unwrap_or_default();
 
-    let tolerations_count = spec
+    let tolerations: Vec<Value> = spec
         .and_then(|s| s.tolerations.as_ref())
-        .map_or(0, std::vec::Vec::len);
+        .map(|ts| {
+            ts.iter()
+                .map(|t| {
+                    json!({
+                        "key": t.key.clone(),
+                        "operator": t.operator.clone(),
+                        "value": t.value.clone(),
+                        "effect": t.effect.clone(),
+                        "toleration_seconds": t.toleration_seconds,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let volumes: Vec<Value> = spec
         .and_then(|s| s.volumes.as_ref())
         .map(|vs| vs.iter().map(volume_value).collect())
@@ -298,12 +314,12 @@ pub fn project_pod_template_summary(template: &PodTemplateSpec) -> Value {
 
     json!({
         "labels": labels,
-        "annotations_count": annotations_count,
+        "annotations": annotations,
         "containers": containers,
         "service_account": spec.and_then(|s| s.service_account_name.clone()),
         "restart_policy": spec.and_then(|s| s.restart_policy.clone()),
         "node_selector": node_selector,
-        "tolerations_count": tolerations_count,
+        "tolerations": tolerations,
         "volumes": volumes,
         "image_pull_secrets": image_pull_secrets,
         "priority_class": spec.and_then(|s| s.priority_class_name.clone()),
@@ -440,4 +456,59 @@ pub fn project_managers(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::{PodSpec, Toleration};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn template_summary_carries_annotations_and_tolerations() {
+        let mut annotations = BTreeMap::new();
+        annotations.insert("team".to_string(), "platform".to_string());
+        // The last-applied-configuration blob must be elided, same as meta.
+        annotations.insert(
+            "kubectl.kubernetes.io/last-applied-configuration".to_string(),
+            "{\"huge\":\"blob\"}".to_string(),
+        );
+
+        let template = PodTemplateSpec {
+            metadata: Some(ObjectMeta {
+                annotations: Some(annotations),
+                ..Default::default()
+            }),
+            spec: Some(PodSpec {
+                tolerations: Some(vec![Toleration {
+                    key: Some("node.kubernetes.io/not-ready".to_string()),
+                    operator: Some("Exists".to_string()),
+                    effect: Some("NoExecute".to_string()),
+                    toleration_seconds: Some(300),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let v = project_pod_template_summary(&template);
+
+        // Annotations project as [k, v] pairs, with the hidden blob dropped.
+        let anns = v["annotations"].as_array().expect("annotations array");
+        assert_eq!(anns.len(), 1, "last-applied-configuration must be elided");
+        assert_eq!(anns[0], json!(["team", "platform"]));
+
+        // Tolerations project with full fields (no longer a bare count).
+        let tols = v["tolerations"].as_array().expect("tolerations array");
+        assert_eq!(tols.len(), 1);
+        assert_eq!(tols[0]["key"], "node.kubernetes.io/not-ready");
+        assert_eq!(tols[0]["operator"], "Exists");
+        assert_eq!(tols[0]["effect"], "NoExecute");
+        assert_eq!(tols[0]["toleration_seconds"], 300);
+
+        // The old count keys must be gone so the FE type stays honest.
+        assert!(v.get("annotations_count").is_none());
+        assert!(v.get("tolerations_count").is_none());
+    }
 }

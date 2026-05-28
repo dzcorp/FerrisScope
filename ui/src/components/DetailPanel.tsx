@@ -13,7 +13,7 @@ import type {
   ResourceKind,
   ResourceRow,
 } from "../types";
-import { tokens, FF_MONO, type ThemeMode, type Tokens, R_LG, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
+import { tokens, FF_MONO, type ThemeMode, type Tokens, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
 import {
   Chip,
   ContainerDots,
@@ -33,8 +33,10 @@ import {
   ChipWrap,
   ConditionChip,
   Copyable,
+  CollapsibleCard,
   DetailRow,
   EditSessionProvider,
+  ExpandableList,
   GlobalSaveBar,
   KeyValueChips,
   LinkValue,
@@ -42,6 +44,8 @@ import {
   SubGrid,
   ageFromIso,
   formatQuantity,
+  useCollapseGroup,
+  type CollapseSignal,
   type DetailNavigate,
   type SubEntry,
 } from "./detail";
@@ -54,6 +58,7 @@ import {
   StatefulSetSummary,
 } from "./detail/workload";
 import {
+  ContainerSectionMeta,
   EnvEditor,
   EnvFromEditor,
   ImageEditor,
@@ -61,6 +66,7 @@ import {
   MountsEditor,
   PortsEditor,
   ResourcesEditor,
+  TolerationList,
   VolumesEditor,
 } from "./detail/workload/shared";
 import {
@@ -785,18 +791,20 @@ export function DetailPanel({
                 </>
               )}
             </div>
-            <div
-              style={{
-                fontSize: FS_LG,
-                fontWeight: 600,
-                fontFamily: FF_MONO,
-                wordBreak: "break-all",
-                lineHeight: 1.3,
-                color: t.text,
-              }}
-            >
-              {target.name}
-            </div>
+            <Copyable text={target.name} block>
+              <span
+                style={{
+                  fontSize: FS_LG,
+                  fontWeight: 600,
+                  fontFamily: FF_MONO,
+                  wordBreak: "break-all",
+                  lineHeight: 1.3,
+                  color: t.text,
+                }}
+              >
+                {target.name}
+              </span>
+            </Copyable>
           </div>
           {canBack && (
             <IconBtn
@@ -1801,6 +1809,11 @@ function PodSummary({
   const reqId = useRef(0);
   const ns = target.namespace;
   const name = target.name;
+  // Container cards collapse by default; these drive the per-section
+  // "Expand all / Collapse all" toggles. Declared before the early returns to
+  // keep hook order stable across loading / error / ready renders.
+  const initGroup = useCollapseGroup();
+  const mainGroup = useCollapseGroup();
 
   useEffect(() => {
     if (!ns) {
@@ -2079,9 +2092,11 @@ function PodSummary({
         )}
         {d.tolerations.length > 0 && (
           <DetailRow t={t} label="Tolerations">
-            <span style={{ fontSize: FS_MD, color: t.textDim }}>
-              {d.tolerations.length} total
-            </span>
+            <ExpandableList
+              t={t}
+              items={d.tolerations}
+              render={(items) => <TolerationList t={t} tolerations={items} />}
+            />
           </DetailRow>
         )}
         {d.conditions.length > 0 && (
@@ -2259,15 +2274,11 @@ function PodSummary({
             t={t}
             title="Init Containers"
             right={
-              <span
-                style={{
-                  fontSize: FS_XS,
-                  color: t.textMuted,
-                  fontFamily: FF_MONO,
-                }}
-              >
-                {initContainers.length} total
-              </span>
+              <ContainerSectionMeta
+                t={t}
+                count={initContainers.length}
+                group={initGroup}
+              />
             }
           />
           <div style={{ marginBottom: 22 }}>
@@ -2277,6 +2288,7 @@ function PodSummary({
                 t={t}
                 mode={mode}
                 c={c}
+                signal={initGroup.signal}
                 namespace={ns}
                 podName={name}
                 onNavigate={onNavigate}
@@ -2294,15 +2306,11 @@ function PodSummary({
             t={t}
             title="Containers"
             right={
-              <span
-                style={{
-                  fontSize: FS_XS,
-                  color: t.textMuted,
-                  fontFamily: FF_MONO,
-                }}
-              >
-                {mainContainers.length} total
-              </span>
+              <ContainerSectionMeta
+                t={t}
+                count={mainContainers.length}
+                group={mainGroup}
+              />
             }
           />
           <div style={{ marginBottom: 22 }}>
@@ -2312,6 +2320,7 @@ function PodSummary({
                 t={t}
                 mode={mode}
                 c={c}
+                signal={mainGroup.signal}
                 namespace={ns}
                 podName={name}
                 onNavigate={onNavigate}
@@ -2583,6 +2592,7 @@ function ContainerCard({
   t,
   mode,
   c,
+  signal,
   namespace,
   podName,
   onNavigate,
@@ -2592,6 +2602,7 @@ function ContainerCard({
   t: Tokens;
   mode: ThemeMode;
   c: ContainerDetail;
+  signal?: CollapseSignal;
   namespace: string | null;
   podName: string;
   onNavigate?: DetailNavigate;
@@ -2599,63 +2610,61 @@ function ContainerCard({
   volumeNames?: string[];
 }) {
   return (
-    <div
-      style={{
-        border: `1px solid ${t.borderSoft}`,
-        borderRadius: R_LG,
-        marginBottom: 10,
-        background: t.surface,
-        overflow: "hidden",
-      }}
+    <CollapsibleCard
+      t={t}
+      signal={signal}
+      header={(open) => (
+        <>
+          <ContainerDots
+            containers={[
+              { name: c.name, status: c.state, kind: c.kind, ready: c.ready },
+            ]}
+            t={t}
+            showSeparator={false}
+          />
+          <span
+            style={{
+              fontFamily: FF_MONO,
+              fontSize: FS_MD,
+              fontWeight: 600,
+              flex: 1,
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {c.name}
+          </span>
+          {!open && c.restart_count > 0 && (
+            <span
+              style={{
+                fontSize: FS_XS,
+                fontFamily: FF_MONO,
+                fontWeight: 600,
+                color: c.restart_count > 5 ? t.bad : t.warn,
+                flexShrink: 0,
+              }}
+            >
+              {c.restart_count} restart{c.restart_count === 1 ? "" : "s"}
+            </span>
+          )}
+          <span
+            style={{
+              fontSize: FS_XS,
+              fontWeight: 700,
+              color: t.textMuted,
+              textTransform: "uppercase",
+              letterSpacing: 0.4,
+              fontFamily: FF_MONO,
+            }}
+          >
+            {c.kind}
+          </span>
+          <StatusPill status={c.state} t={t} mode={mode} dense />
+        </>
+      )}
     >
-      {/* Header — name + status + kind tag */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "10px 12px",
-          background: t.surfaceAlt,
-          borderBottom: `1px solid ${t.borderSoft}`,
-        }}
-      >
-        <ContainerDots
-          containers={[
-            { name: c.name, status: c.state, kind: c.kind, ready: c.ready },
-          ]}
-          t={t}
-          showSeparator={false}
-        />
-        <span
-          style={{
-            fontFamily: FF_MONO,
-            fontSize: FS_MD,
-            fontWeight: 600,
-            flex: 1,
-            minWidth: 0,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {c.name}
-        </span>
-        <span
-          style={{
-            fontSize: FS_XS,
-            fontWeight: 700,
-            color: t.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 0.4,
-            fontFamily: FF_MONO,
-          }}
-        >
-          {c.kind}
-        </span>
-        <StatusPill status={c.state} t={t} mode={mode} dense />
-      </div>
-
-      <div style={{ padding: "4px 12px" }}>
         <DetailRow t={t} label="Status">
           <span style={{ fontSize: FS_MD, color: c.ready ? t.good : t.textDim }}>
             {c.state.toLowerCase()}
@@ -2984,8 +2993,7 @@ function ContainerCard({
             <ContainerSecurityRow t={t} s={c.security} />
           </DetailRow>
         )}
-      </div>
-    </div>
+    </CollapsibleCard>
   );
 }
 

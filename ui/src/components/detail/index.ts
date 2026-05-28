@@ -11,6 +11,10 @@ export {
   LinkValue,
   ChipWrap,
   Mute,
+  ExpandableList,
+  CollapsibleCard,
+  useCollapseGroup,
+  ExpandAllButton,
   ConditionChip,
   SubGrid,
   ChipStrip,
@@ -23,6 +27,7 @@ export type {
   SubGroup,
   ChipStripItem,
   ConditionStatus,
+  CollapseSignal,
 } from "./primitives";
 export { ageFromIso, formatQuantity, parseQuantity } from "./helpers";
 export {
