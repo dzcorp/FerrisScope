@@ -7,7 +7,6 @@ import { useMemo, useState } from "react";
 import {
   FF_MONO,
   type Tokens,
-  R_LG,
   R_SM,
   R_PILL,
   CONTROL_H,
@@ -28,8 +27,11 @@ import {
 import {
   ChipStrip,
   ChipWrap,
+  CollapsibleCard,
   Copyable,
   DetailRow,
+  ExpandableList,
+  ExpandAllButton,
   KeyValueChips,
   LinkValue,
   Mute,
@@ -37,8 +39,10 @@ import {
   ageFromIso,
   formatQuantity,
   parseQuantity,
+  useCollapseGroup,
   useEditField,
   useEditSession,
+  type CollapseSignal,
   type DetailNavigate,
 } from "..";
 import {
@@ -65,6 +69,7 @@ import type {
   ContainerPort,
   LabelSelectorSummary,
   PodTemplateSummary,
+  PodToleration,
   PodVolume,
   WorkloadCondition,
   WorkloadContainerSummary,
@@ -423,10 +428,8 @@ export function MetaPairsRow({
             </>
           ) : pairs.length === 0 ? (
             <Mute t={t}>—</Mute>
-          ) : collapsedAsCount && pairs.length > 4 ? (
-            <span style={{ fontSize: FS_MD, color: t.textDim }}>
-              {pairs.length} total
-            </span>
+          ) : collapsedAsCount ? (
+            <CollapsedPairs t={t} pairs={pairs} />
           ) : (
             <KeyValueChips t={t} pairs={pairs} />
           )}
@@ -446,6 +449,169 @@ export function MetaPairsRow({
         </div>
       </DetailRow>
     </>
+  );
+}
+
+// Read-only collapse for commonly-bulky pair lists (annotations). Small sets
+// render in full; once there are more than the threshold, the first N show
+// and the rest hide behind a "Show N more" toggle. Each long value
+// (last-applied-configuration, controller state) still collapses individually
+// inside KeyValueChips.
+export function CollapsedPairs({
+  t,
+  pairs,
+}: {
+  t: Tokens;
+  pairs: [string, string][];
+}) {
+  return (
+    <ExpandableList
+      t={t}
+      items={pairs}
+      render={(items) => <KeyValueChips t={t} pairs={items} />}
+    />
+  );
+}
+
+// Canonical kubectl-ish one-line form for a toleration, e.g.
+//   node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+//   dedicated=gpu:NoSchedule op=Equal
+// A bare `op=Exists` with no key tolerates everything; an empty effect
+// tolerates all effects — surface both rather than rendering a blank.
+export function formatToleration(tol: PodToleration): string {
+  const key = tol.key ?? "*";
+  const value = tol.value ? `=${tol.value}` : "";
+  const effect = tol.effect ? `:${tol.effect}` : ":*";
+  const op = tol.operator ? ` op=${tol.operator}` : "";
+  const secs =
+    tol.toleration_seconds != null ? ` for ${tol.toleration_seconds}s` : "";
+  return `${key}${value}${effect}${op}${secs}`;
+}
+
+// Effect → severity colour + display label. NoExecute is the strongest (it
+// can evict an already-running pod), NoSchedule blocks placement, and
+// PreferNoSchedule is a soft preference. A missing effect tolerates every
+// effect on the matched key. Colours derive from the active palette's status
+// buckets (same approach as ConditionChip / statusFill) — no hardcoded hex.
+function effectFill(
+  t: Tokens,
+  effect: string | null,
+): { bg: string; fg: string; label: string } {
+  switch (effect) {
+    case "NoExecute":
+      return { bg: hexWithAlpha(t.bad, 0.16), fg: t.bad, label: "NoExecute" };
+    case "NoSchedule":
+      return { bg: hexWithAlpha(t.warn, 0.16), fg: t.warn, label: "NoSchedule" };
+    case "PreferNoSchedule":
+      return {
+        bg: hexWithAlpha(t.info, 0.16),
+        fg: t.info,
+        label: "PreferNoSchedule",
+      };
+    default:
+      return { bg: t.chip, fg: t.textMuted, label: "all effects" };
+  }
+}
+
+// Renders a list of tolerations as structured, colour-coded rows. Shared by
+// the Pod detail and every workload's Pod Template block so the presentation
+// stays identical. Each row shows key (or "any taint" for a keyless Exists),
+// the matched value when operator is Equal, a severity-coloured effect chip,
+// and the eviction grace period when set. The whole row click-copies the
+// canonical kubectl form for pasting into a manifest.
+export function TolerationList({
+  t,
+  tolerations,
+}: {
+  t: Tokens;
+  tolerations: PodToleration[];
+}) {
+  return (
+    <div
+      style={{ display: "flex", flexDirection: "column", gap: 6, width: "100%" }}
+    >
+      {tolerations.map((tol, i) => (
+        <TolerationRow key={i} t={t} tol={tol} />
+      ))}
+    </div>
+  );
+}
+
+function TolerationRow({ t, tol }: { t: Tokens; tol: PodToleration }) {
+  const eff = effectFill(t, tol.effect);
+  const wildcard = !tol.key; // keyless Exists tolerates every taint
+  // Only Equal carries a meaningful value; Exists matches any value for the key.
+  const showValue = tol.operator !== "Exists" && !!tol.value;
+  return (
+    <Copyable text={formatToleration(tol)} block>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 8,
+          padding: "5px 8px",
+          border: `1px solid ${t.borderSoft}`,
+          borderRadius: R_SM,
+          background: t.surface,
+          minWidth: 0,
+        }}
+      >
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "baseline",
+            gap: 4,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
+            minWidth: 0,
+          }}
+        >
+          {wildcard ? (
+            <span style={{ color: t.textMuted, fontStyle: "italic" }}>
+              any taint
+            </span>
+          ) : (
+            <span style={{ color: t.text, wordBreak: "break-all" }}>
+              {tol.key}
+            </span>
+          )}
+          {showValue && (
+            <>
+              <span style={{ color: t.textMuted }}>=</span>
+              <span style={{ color: t.text, wordBreak: "break-all" }}>
+                {tol.value}
+              </span>
+            </>
+          )}
+        </span>
+
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            padding: "1px 7px",
+            borderRadius: R_SM,
+            fontSize: FS_XS,
+            fontWeight: 600,
+            fontFamily: FF_MONO,
+            background: eff.bg,
+            color: eff.fg,
+          }}
+        >
+          {eff.label}
+        </span>
+
+        {tol.toleration_seconds != null && (
+          <span
+            title={`Evicted ${tol.toleration_seconds}s after the taint is applied`}
+            style={{ fontSize: FS_XS, color: t.textMuted, fontFamily: FF_MONO }}
+          >
+            evict after {tol.toleration_seconds}s
+          </span>
+        )}
+      </div>
+    </Copyable>
   );
 }
 
@@ -596,6 +762,8 @@ export function PodTemplateSection({
 }) {
   const initContainers = template.containers.filter((c) => c.kind === "init");
   const mainContainers = template.containers.filter((c) => c.kind !== "init");
+  const initGroup = useCollapseGroup();
+  const mainGroup = useCollapseGroup();
   const hostFlags: { label: string; tone: "bad" }[] = [];
   if (template.host_network) hostFlags.push({ label: "hostNetwork", tone: "bad" });
   if (template.host_pid) hostFlags.push({ label: "hostPID", tone: "bad" });
@@ -610,11 +778,9 @@ export function PodTemplateSection({
             <KeyValueChips t={t} pairs={template.labels} />
           </DetailRow>
         )}
-        {template.annotations_count > 0 && (
+        {template.annotations.length > 0 && (
           <DetailRow t={t} label="Pod Annotations">
-            <span style={{ fontSize: FS_MD, color: t.textDim }}>
-              {template.annotations_count} total
-            </span>
+            <CollapsedPairs t={t} pairs={template.annotations} />
           </DetailRow>
         )}
         {template.service_account && (
@@ -654,11 +820,13 @@ export function PodTemplateSection({
             <KeyValueChips t={t} pairs={template.node_selector} />
           </DetailRow>
         )}
-        {template.tolerations_count > 0 && (
+        {template.tolerations.length > 0 && (
           <DetailRow t={t} label="Tolerations">
-            <span style={{ fontSize: FS_MD, color: t.textDim }}>
-              {template.tolerations_count} total
-            </span>
+            <ExpandableList
+              t={t}
+              items={template.tolerations}
+              render={(items) => <TolerationList t={t} tolerations={items} />}
+            />
           </DetailRow>
         )}
         {template.image_pull_secrets.length > 0 && (
@@ -691,15 +859,11 @@ export function PodTemplateSection({
             t={t}
             title="Init Containers"
             right={
-              <span
-                style={{
-                  fontSize: FS_XS,
-                  color: t.textMuted,
-                  fontFamily: FF_MONO,
-                }}
-              >
-                {initContainers.length} total
-              </span>
+              <ContainerSectionMeta
+                t={t}
+                count={initContainers.length}
+                group={initGroup}
+              />
             }
           />
           <div style={{ marginBottom: 22 }}>
@@ -708,6 +872,7 @@ export function PodTemplateSection({
                 key={c.name}
                 t={t}
                 c={c}
+                signal={initGroup.signal}
                 editTarget={editTarget}
                 templateKind={templateKind}
                 onNavigate={onNavigate}
@@ -726,15 +891,11 @@ export function PodTemplateSection({
             t={t}
             title="Containers"
             right={
-              <span
-                style={{
-                  fontSize: FS_XS,
-                  color: t.textMuted,
-                  fontFamily: FF_MONO,
-                }}
-              >
-                {mainContainers.length} total
-              </span>
+              <ContainerSectionMeta
+                t={t}
+                count={mainContainers.length}
+                group={mainGroup}
+              />
             }
           />
           <div style={{ marginBottom: 22 }}>
@@ -743,6 +904,7 @@ export function PodTemplateSection({
                 key={c.name}
                 t={t}
                 c={c}
+                signal={mainGroup.signal}
                 editTarget={editTarget}
                 templateKind={templateKind}
                 onNavigate={onNavigate}
@@ -782,9 +944,41 @@ export function PodTemplateSection({
   );
 }
 
+// Count + "Expand all / Collapse all" toggle for a container section header.
+// The bulk toggle only appears when there's more than one card — a single
+// container has nothing to expand-all. Shared by the workload Pod Template and
+// the Pod detail's container sections.
+export function ContainerSectionMeta({
+  t,
+  count,
+  group,
+}: {
+  t: Tokens;
+  count: number;
+  group: { allOpen: boolean; toggleAll: () => void };
+}) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+      {count > 1 && (
+        <ExpandAllButton
+          t={t}
+          allOpen={group.allOpen}
+          onToggle={group.toggleAll}
+        />
+      )}
+      <span
+        style={{ fontSize: FS_XS, color: t.textMuted, fontFamily: FF_MONO }}
+      >
+        {count} total
+      </span>
+    </span>
+  );
+}
+
 function ContainerSummaryCard({
   t,
   c,
+  signal,
   editTarget,
   templateKind = "workload",
   onNavigate,
@@ -794,6 +988,7 @@ function ContainerSummaryCard({
 }: {
   t: Tokens;
   c: WorkloadContainerSummary;
+  signal?: CollapseSignal;
   editTarget?: ApplyTarget;
   templateKind?: "workload" | "cronjob";
   onNavigate?: DetailNavigate;
@@ -812,55 +1007,58 @@ function ContainerSummaryCard({
     (c.requests && Object.keys(c.requests).length > 0) ||
     (c.limits && Object.keys(c.limits).length > 0);
   return (
-    <div
-      style={{
-        border: `1px solid ${t.borderSoft}`,
-        borderRadius: R_LG,
-        marginBottom: 10,
-        background: t.surface,
-        overflow: "hidden",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "10px 12px",
-          background: t.surfaceAlt,
-          borderBottom: `1px solid ${t.borderSoft}`,
-        }}
-      >
-        <Copyable text={c.name}>
+    <CollapsibleCard
+      t={t}
+      signal={signal}
+      header={(open) => (
+        <>
+          <Copyable text={c.name}>
+            <span
+              style={{
+                fontFamily: FF_MONO,
+                fontSize: FS_MD,
+                fontWeight: 600,
+                flex: 1,
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {c.name}
+            </span>
+          </Copyable>
           <span
             style={{
+              fontSize: FS_XS,
+              fontWeight: 700,
+              color: t.textMuted,
+              textTransform: "uppercase",
+              letterSpacing: 0.4,
               fontFamily: FF_MONO,
-              fontSize: FS_MD,
-              fontWeight: 600,
-              flex: 1,
-              minWidth: 0,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
             }}
           >
-            {c.name}
+            {c.kind}
           </span>
-        </Copyable>
-        <span
-          style={{
-            fontSize: FS_XS,
-            fontWeight: 700,
-            color: t.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 0.4,
-            fontFamily: FF_MONO,
-          }}
-        >
-          {c.kind}
-        </span>
-      </div>
-      <div style={{ padding: "4px 12px" }}>
+          {!open && c.image && (
+            <span
+              style={{
+                fontFamily: FF_MONO,
+                fontSize: FS_XS,
+                color: t.textMuted,
+                minWidth: 0,
+                maxWidth: "50%",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {c.image}
+            </span>
+          )}
+        </>
+      )}
+    >
         {editTarget ? (
           <ImageEditor
             t={t}
@@ -1113,8 +1311,7 @@ function ContainerSummaryCard({
             />
           </>
         )}
-      </div>
-    </div>
+    </CollapsibleCard>
   );
 }
 

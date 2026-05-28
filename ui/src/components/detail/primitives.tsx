@@ -5,13 +5,14 @@
 // components compose these — they never reach in.
 
 import {
+  useEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { FF_MONO, type Tokens, R_SM, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { FF_MONO, type Tokens, R_SM, R_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { Chip, Icons, Tooltip } from "../ui";
 
 // ── Cross-kind navigation ──────────────────────────────────────────────────
@@ -105,6 +106,222 @@ export function Mute({ t, children }: { t: Tokens; children: ReactNode }) {
   return <span style={{ color: t.textMuted, fontSize: FS_MD }}>{children}</span>;
 }
 
+// ── ExpandableList ───────────────────────────────────────────────────────────
+// Read-only "show the first N, expand the rest" list for bulky collections
+// (annotations, tolerations, …). A small collection (≤ `threshold`) renders in
+// full with no chrome — most resources sit here, so no extra click. A large
+// one renders the first `threshold` items plus a "Show N more" toggle, keeping
+// the metadata block scannable without hiding the common case behind a count.
+// `render` is handed the slice to draw so callers that batch-render an array
+// (KeyValueChips) work unchanged.
+export const EXPANDABLE_LIST_THRESHOLD = 10;
+
+export function ExpandableList<T>({
+  t,
+  items,
+  threshold = EXPANDABLE_LIST_THRESHOLD,
+  render,
+}: {
+  t: Tokens;
+  items: T[];
+  threshold?: number;
+  render: (items: T[]) => ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const overflow = items.length > threshold;
+  const shown = overflow && !open ? items.slice(0, threshold) : items;
+  return (
+    <div style={{ width: "100%", minWidth: 0 }}>
+      {render(shown)}
+      {overflow && (
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            marginTop: 6,
+            padding: 0,
+            border: "none",
+            background: "transparent",
+            color: t.textDim,
+            cursor: "pointer",
+            fontSize: FS_SM,
+            fontFamily: "inherit",
+          }}
+        >
+          <span
+            style={{
+              display: "inline-flex",
+              color: t.textMuted,
+              transform: open ? "rotate(0deg)" : "rotate(-90deg)",
+              transition: "transform .12s ease",
+            }}
+          >
+            {Icons.chevD}
+          </span>
+          {open ? "Show less" : `Show ${items.length - threshold} more`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── CollapsibleCard ──────────────────────────────────────────────────────────
+// Bordered card with a click-to-toggle header and a hideable body. Used by the
+// container cards (Pod detail + workload Pod Template) so a long list of
+// init/sidecar containers collapses to a scannable row list, each expandable
+// on demand. Starts collapsed by default.
+//
+// The body is hidden with `display: none` rather than unmounted: the container
+// cards embed live edit-kit editors (`useEditField`) whose dirty buffers and
+// GlobalSaveBar registration must survive a collapse. Unmounting would drop an
+// in-flight edit; `display: none` keeps it mounted and intact.
+//
+// `header` is a render-prop of the open state so callers can show a compact
+// summary (image, status) only while collapsed and drop it once the full body
+// is visible. The whole header bar toggles; interactive children inside the
+// header (a `Copyable` name) stop propagation, so they act without toggling.
+//
+// `signal` lets a parent drive every card at once (an "Expand all" button)
+// while still allowing per-card toggles in between: when the signal's `nonce`
+// changes, the card snaps to the signalled `open`. See `useCollapseGroup`.
+export type CollapseSignal = { open: boolean; nonce: number };
+
+export function CollapsibleCard({
+  t,
+  header,
+  children,
+  defaultOpen = false,
+  signal,
+}: {
+  t: Tokens;
+  header: (open: boolean) => ReactNode;
+  children: ReactNode;
+  defaultOpen?: boolean;
+  signal?: CollapseSignal;
+}) {
+  const [open, setOpen] = useState(signal ? signal.open : defaultOpen);
+  const toggle = () => setOpen((o) => !o);
+  // Follow bulk expand/collapse: re-run only when the nonce ticks, so an
+  // individual toggle isn't clobbered on every parent re-render.
+  useEffect(() => {
+    if (signal) setOpen(signal.open);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signal?.nonce]);
+  return (
+    <div
+      style={{
+        border: `1px solid ${t.borderSoft}`,
+        borderRadius: R_LG,
+        marginBottom: 10,
+        background: t.surface,
+        overflow: "hidden",
+      }}
+    >
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={toggle}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggle();
+          }
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "10px 12px",
+          background: t.surfaceAlt,
+          borderBottom: open ? `1px solid ${t.borderSoft}` : "none",
+          cursor: "pointer",
+        }}
+      >
+        <span
+          aria-hidden
+          style={{
+            display: "inline-flex",
+            color: t.textMuted,
+            transform: open ? "rotate(0deg)" : "rotate(-90deg)",
+            transition: "transform .12s ease",
+            flexShrink: 0,
+          }}
+        >
+          {Icons.chevD}
+        </span>
+        {header(open)}
+      </div>
+      {/* display toggle (not unmount) keeps embedded editors' state alive */}
+      <div style={{ padding: "4px 12px", display: open ? "block" : "none" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// Drives a group of CollapsibleCards from one "Expand all / Collapse all"
+// control. `signal` is handed to every card; `expandAll` / `collapseAll` bump
+// its nonce so the cards snap open/closed. `allOpen` reflects the last bulk
+// action — what the toggle button should do next — not each card's live state
+// (individual toggles intentionally don't flip the bulk label).
+export function useCollapseGroup(defaultOpen = false) {
+  const [open, setOpen] = useState(defaultOpen);
+  const [nonce, setNonce] = useState(0);
+  const setAll = (v: boolean) => {
+    setOpen(v);
+    setNonce((n) => n + 1);
+  };
+  return {
+    signal: { open, nonce } as CollapseSignal,
+    allOpen: open,
+    expandAll: () => setAll(true),
+    collapseAll: () => setAll(false),
+    toggleAll: () => setAll(!open),
+  };
+}
+
+// Compact "Expand all / Collapse all" toggle for a CollapsibleCard group.
+// Drop into a Section's `right` slot next to the count.
+export function ExpandAllButton({
+  t,
+  allOpen,
+  onToggle,
+}: {
+  t: Tokens;
+  allOpen: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={allOpen}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: 0,
+        border: "none",
+        background: "transparent",
+        color: t.textDim,
+        cursor: "pointer",
+        fontSize: FS_XS,
+        fontFamily: FF_MONO,
+        textTransform: "uppercase",
+        letterSpacing: 0.4,
+        fontWeight: 700,
+      }}
+    >
+      {allOpen ? "Collapse all" : "Expand all"}
+    </button>
+  );
+}
+
 // ── useCopyFlash ───────────────────────────────────────────────────────────
 // Hook that returns (ref, flash). Apply the ref to the element you want to
 // pulse, call flash() to trigger the .fs-copy-flash animation. Re-runnable
@@ -125,6 +342,18 @@ function copyToClipboard(text: string) {
   if (typeof navigator !== "undefined" && navigator.clipboard) {
     navigator.clipboard.writeText(text).catch(() => {});
   }
+}
+
+// The tooltip echoes the value so the operator can confirm what they'll copy.
+// But a multi-line or very long value (a whole ConfigMap blob, a JSON manifest)
+// turns that hint into an unreadable wall of text — and the value is already
+// visible in the panel right under the cursor. Past this point, drop the echo
+// and keep just the gesture.
+const COPY_HINT_MAX = 80;
+
+export function copyHint(text: string): string {
+  if (text.length > COPY_HINT_MAX || text.includes("\n")) return "Click to copy";
+  return `Click to copy · ${text}`;
 }
 
 // ── Copyable ───────────────────────────────────────────────────────────────
@@ -151,16 +380,17 @@ export function Copyable({
     copyToClipboard(text);
     flash();
   };
+  const hint = copyHint(text);
   const tooltip: ReactNode =
     label != null ? (
       <span style={{ display: "block" }}>
         {label}
         <span style={{ display: "block", opacity: 0.7, marginTop: 4 }}>
-          Click to copy · {text}
+          {hint}
         </span>
       </span>
     ) : (
-      `Click to copy · ${text}`
+      hint
     );
   return (
     <Tooltip label={tooltip}>

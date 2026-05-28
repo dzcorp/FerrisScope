@@ -785,12 +785,12 @@ export type WorkloadContainerSummary = {
 
 export type PodTemplateSummary = {
   labels: [string, string][];
-  annotations_count: number;
+  annotations: [string, string][];
   containers: WorkloadContainerSummary[];
   service_account: string | null;
   restart_policy: string | null;
   node_selector: [string, string][];
-  tolerations_count: number;
+  tolerations: PodToleration[];
   volumes: PodVolume[];
   image_pull_secrets: string[];
   priority_class: string | null;

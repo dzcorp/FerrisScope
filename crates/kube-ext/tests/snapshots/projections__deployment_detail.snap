@@ -1,6 +1,5 @@
 ---
 source: crates/kube-ext/tests/projections.rs
-assertion_line: 39
 expression: value
 ---
 {
@@ -40,7 +39,7 @@ expression: value
   "observed_generation": 4,
   "paused": false,
   "pod_template": {
-    "annotations_count": 0,
+    "annotations": [],
     "containers": [
       {
         "args": null,
@@ -71,7 +70,7 @@ expression: value
     "priority_class": null,
     "restart_policy": null,
     "service_account": null,
-    "tolerations_count": 0,
+    "tolerations": [],
     "volumes": []
   },
   "progress_deadline_seconds": 600,
