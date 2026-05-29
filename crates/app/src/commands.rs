@@ -44,6 +44,8 @@ use ferrisscope_kube_ext::{
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+use crate::agent::AgentState;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
@@ -1298,7 +1300,14 @@ pub(crate) fn spawn_search_index_gc(handle: AppHandle) {
 pub(crate) async fn drop_cluster_watchers(
     cluster_id: String,
     state: State<'_, AppState>,
+    agent_state: State<'_, AgentState>,
 ) -> Result<(), String> {
+    // Close any chats bound to this cluster FIRST, while its kube `Client` is
+    // still alive, so each chat's `on_chat_close` can delete its debug pods and
+    // disconnect node-SSH sessions instead of leaking them (the frontend's own
+    // `chat_close` may never arrive on a backend-initiated disconnect, and the
+    // pods' TTL would otherwise be the only backstop).
+    let chats_closed = agent_state.close_chats_for_cluster(&cluster_id).await;
     let dropped = drop_all_kind_watchers(&state, &cluster_id).await;
     let removed = state.remove_cluster(&cluster_id).await.is_some();
     // Drop the in-memory search-index handle. The writer task flushes its
@@ -1306,11 +1315,21 @@ pub(crate) async fn drop_cluster_watchers(
     // stays on disk. Reconnecting calls `SearchIndex::open` which opens
     // the existing file and the bootstrap LIST refreshes rows in place.
     let index_closed = state.remove_search_index(&cluster_id).await.is_some();
+    // The printer-column cache is keyed by cluster-independent `crd:` ids, so
+    // an entry may be shared by other connected clusters — we can only safely
+    // reclaim it once NO cluster remains connected (nothing can reference it
+    // then). It repopulates on the next connect's CRD discovery.
+    let cleared_crd_columns = state.cluster_count().await == 0;
+    if cleared_crd_columns {
+        ferrisscope_kube_ext::clear_printer_column_cache();
+    }
     tracing::info!(
         cluster_id = %cluster_id,
+        chats_closed,
         dropped,
         removed,
         index_closed,
+        cleared_crd_columns,
         "drop_cluster_watchers: cluster left, watchers torn down"
     );
     // Tearing down a cluster frees a lot of memory in a short window:
@@ -1394,10 +1413,7 @@ fn spawn_resource_forwarder(
         //
         // - Init phase (until the watcher signals `InitDone` for this
         //   kind): 16 ms debounce so the table paints progressively as
-        //   the apiserver streams the first list. No per-batch cap is
-        //   needed — the dirty channel collapses repeat upserts by uid,
-        //   so each batch is bounded by distinct uids touched in the
-        //   debounce window, not by raw event volume.
+        //   the apiserver streams the first list.
         //
         // - Steady phase (after InitDone): 1 s debounce so a pod that
         //   flips status 40×/s produces one row update per second
@@ -1410,8 +1426,23 @@ fn spawn_resource_forwarder(
         // operator no longer sees Pods stall at ~2000 of 3000+ on big
         // clusters, and a CRD list with 6000+ instances paints
         // progressively instead of waiting for the whole sync to land.
+        //
+        // Per-emit cap: by-uid coalescing bounds a *steady* batch to the
+        // distinct uids touched in the debounce window, but the *initial*
+        // list has one distinct uid per object — so a 6000-instance CRD
+        // coalesces to a 6000-row drain. Emitting that in one shot
+        // serialises a multi-MB JSON payload and lands as a single giant
+        // React reconcile. `drain_capped(MAX_EMIT_DELTAS)` slices each wake
+        // into bounded chunks (holding `init_done` until the maps are fully
+        // drained); `yield_now` between chunks keeps one kind's init burst
+        // from monopolising the executor while other forwarders wait.
         const INIT_WINDOW: Duration = Duration::from_millis(16);
         const STEADY_WINDOW: Duration = Duration::from_secs(1);
+        // Max Upsert+Delete deltas per emitted batch. Bounds the per-message
+        // serialize + IPC copy cost and the size of any single frame the
+        // webview must reconcile. Steady-state batches are far smaller, so
+        // this only bites during the initial-sync burst.
+        const MAX_EMIT_DELTAS: usize = 1000;
 
         let started = std::time::Instant::now();
         let mut forwarded = 0u64;
@@ -1433,91 +1464,103 @@ fn spawn_resource_forwarder(
             let window = if steady { STEADY_WINDOW } else { INIT_WINDOW };
             tokio::time::sleep(window).await;
 
-            let drained = drainer.drain();
-            if drained.is_empty() {
-                continue;
-            }
+            // Drain-and-emit in bounded chunks. One wake can have accumulated
+            // far more than MAX_EMIT_DELTAS during init; `drain_capped` slices
+            // it so each `emit` carries a bounded payload. The inner loop ends
+            // when the channel is empty for this wake (the common steady-state
+            // case is one chunk + one cheap empty drain).
+            loop {
+                let drained = drainer.drain_capped(MAX_EMIT_DELTAS);
+                if drained.is_empty() {
+                    break;
+                }
 
-            let init_done_in_batch = drained.init_done;
-            let mut batch: Vec<ferrisscope_kube_ext::ResourceDelta> =
-                Vec::with_capacity(drained.delta_count() + usize::from(init_done_in_batch));
-            for (_, row) in drained.upserts {
-                batch.push(ferrisscope_kube_ext::ResourceDelta::Upsert { row });
-            }
-            for uid in drained.deletes {
-                batch.push(ferrisscope_kube_ext::ResourceDelta::Delete { uid });
-            }
-            if init_done_in_batch {
-                batch.push(ferrisscope_kube_ext::ResourceDelta::InitDone);
-            }
+                let init_done_in_batch = drained.init_done;
+                let mut batch: Vec<ferrisscope_kube_ext::ResourceDelta> =
+                    Vec::with_capacity(drained.delta_count() + usize::from(init_done_in_batch));
+                for (_, row) in drained.upserts {
+                    batch.push(ferrisscope_kube_ext::ResourceDelta::Upsert { row });
+                }
+                for uid in drained.deletes {
+                    batch.push(ferrisscope_kube_ext::ResourceDelta::Delete { uid });
+                }
+                if init_done_in_batch {
+                    batch.push(ferrisscope_kube_ext::ResourceDelta::InitDone);
+                }
 
-            // Fan every Upsert / Delete into the per-cluster search
-            // index when one is registered. The index handle is
-            // `Option`al so a cluster whose index failed to open keeps
-            // browsing without breaking. `InitDone` is bus-only.
-            if let Some(index) = search_index.as_ref() {
-                for d in &batch {
-                    match d {
-                        ferrisscope_kube_ext::ResourceDelta::Upsert { row } => {
-                            if let Some(uid) = row.get("uid").and_then(Value::as_str) {
-                                index.upsert(&kind_id, uid, row);
+                // Fan every Upsert / Delete into the per-cluster search
+                // index when one is registered. The index handle is
+                // `Option`al so a cluster whose index failed to open keeps
+                // browsing without breaking. `InitDone` is bus-only.
+                if let Some(index) = search_index.as_ref() {
+                    for d in &batch {
+                        match d {
+                            ferrisscope_kube_ext::ResourceDelta::Upsert { row } => {
+                                if let Some(uid) = row.get("uid").and_then(Value::as_str) {
+                                    index.upsert(&kind_id, uid, row);
+                                }
                             }
+                            ferrisscope_kube_ext::ResourceDelta::Delete { uid } => {
+                                index.delete(&kind_id, uid);
+                            }
+                            ferrisscope_kube_ext::ResourceDelta::InitDone => {}
                         }
-                        ferrisscope_kube_ext::ResourceDelta::Delete { uid } => {
-                            index.delete(&kind_id, uid);
-                        }
-                        ferrisscope_kube_ext::ResourceDelta::InitDone => {}
                     }
                 }
-            }
 
-            let n = batch.len();
-            if let Err(e) = app.emit(&event_name, &batch) {
-                tracing::warn!(error = %e, ?cluster_id, ?kind_id, "failed to emit batch");
-            }
-            forwarded += n as u64;
+                let n = batch.len();
+                if let Err(e) = app.emit(&event_name, &batch) {
+                    tracing::warn!(error = %e, ?cluster_id, ?kind_id, "failed to emit batch");
+                }
+                forwarded += n as u64;
 
-            if !first_forwarded {
-                first_forwarded = true;
-                tracing::info!(
-                    cluster_id = %cluster_id,
-                    kind_id = %kind_id,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    first_batch = n,
-                    phase = if steady { "steady" } else { "init" },
-                    "forwarder: first batch emitted to webview"
-                );
-            } else if forwarded.is_multiple_of(500) || forwarded < 200 {
-                tracing::debug!(
-                    cluster_id = %cluster_id,
-                    kind_id = %kind_id,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    forwarded,
-                    last_batch = n,
-                    phase = if steady { "steady" } else { "init" },
-                    "forwarder: emit progress"
-                );
-            }
+                if !first_forwarded {
+                    first_forwarded = true;
+                    tracing::info!(
+                        cluster_id = %cluster_id,
+                        kind_id = %kind_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        first_batch = n,
+                        phase = if steady { "steady" } else { "init" },
+                        "forwarder: first batch emitted to webview"
+                    );
+                } else if forwarded.is_multiple_of(500) || forwarded < 200 {
+                    tracing::debug!(
+                        cluster_id = %cluster_id,
+                        kind_id = %kind_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        forwarded,
+                        last_batch = n,
+                        phase = if steady { "steady" } else { "init" },
+                        "forwarder: emit progress"
+                    );
+                }
 
-            if init_done_in_batch {
-                tracing::info!(
-                    cluster_id = %cluster_id,
-                    kind_id = %kind_id,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    forwarded,
-                    "forwarder: init_done emitted, switching to steady-phase batching"
-                );
-                steady = true;
-                // Init-sync allocates a lot of transient memory: typed
-                // `Pod`/`Deployment`/… structs from kube-rs are
-                // deserialised, projected to `Value`, then dropped;
-                // intermediate JSON serialisations for IPC are emitted
-                // then freed. The allocator (mimalloc) often holds
-                // those arena pages until its next opportunistic
-                // collect — which can be minutes. Force one now so the
-                // operator sees RSS settle to the steady-state working
-                // set, not the high-water mark of the init burst.
-                ferrisscope_mimalloc_ext::collect(false);
+                if init_done_in_batch {
+                    tracing::info!(
+                        cluster_id = %cluster_id,
+                        kind_id = %kind_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        forwarded,
+                        "forwarder: init_done emitted, switching to steady-phase batching"
+                    );
+                    steady = true;
+                    // Init-sync allocates a lot of transient memory: typed
+                    // `Pod`/`Deployment`/… structs from kube-rs are
+                    // deserialised, projected to `Value`, then dropped;
+                    // intermediate JSON serialisations for IPC are emitted
+                    // then freed. The allocator (mimalloc) often holds
+                    // those arena pages until its next opportunistic
+                    // collect — which can be minutes. Force one now so the
+                    // operator sees RSS settle to the steady-state working
+                    // set, not the high-water mark of the init burst.
+                    ferrisscope_mimalloc_ext::collect(false);
+                }
+
+                // Yield between chunks so a capped init burst paints
+                // progressively and one kind's huge initial sync doesn't
+                // starve other forwarders sharing this executor.
+                tokio::task::yield_now().await;
             }
         }
     });
@@ -1583,239 +1626,91 @@ pub(crate) async fn get_resource_yaml_cmd(
     .map_err(|e| e.to_string())
 }
 
-/// Rich pod detail projection used by the summary tab in the detail panel.
-/// Separate from `get_resource_yaml_cmd` so the YAML view can keep using the
-/// dynamic API while the summary view gets a structured shape.
-#[tauri::command]
-pub(crate) async fn get_pod_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_pod_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
+/// Generate a Tauri detail command that resolves the cluster entry and forwards
+/// to the matching `get_<kind>_detail` fetch fn, mapping its `FetchError` to a
+/// `String` for the frontend. Three scopes mirror the fetch fns' signatures:
+///
+/// - `namespaced` → `(cluster_id, namespace, name)` → `inner(client, &namespace, &name)`
+/// - `cluster`    → `(cluster_id, name)`            → `inner(client, &name)`
+/// - `dynamic`    → `(cluster_id, kind_id, namespace?, name)` → `inner(client, &kind_id, namespace.as_deref(), &name)`
+///
+/// Command names are spelled out (not synthesized from the inner fn) so they
+/// stay greppable: `main.rs`'s `generate_handler!` references each by literal
+/// ident, and a reader searching for `get_pod_detail_cmd` must land here. The
+/// inner-fn name and command name share a stem by convention — keep them in
+/// sync. Wrong scope (arity/type mismatch with the inner fn) and wrong command
+/// name (unresolved ident in `generate_handler!`) both fail to compile.
+macro_rules! detail_cmd {
+    ($(#[$m:meta])* $cmd:ident => $inner:ident, namespaced) => {
+        $(#[$m])*
+        #[tauri::command]
+        pub(crate) async fn $cmd(
+            cluster_id: String,
+            namespace: String,
+            name: String,
+            state: State<'_, AppState>,
+        ) -> Result<Value, String> {
+            let entry = state.entry(&cluster_id).await?;
+            $inner(entry.cluster.client(), &namespace, &name)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
+    ($(#[$m:meta])* $cmd:ident => $inner:ident, cluster) => {
+        $(#[$m])*
+        #[tauri::command]
+        pub(crate) async fn $cmd(
+            cluster_id: String,
+            name: String,
+            state: State<'_, AppState>,
+        ) -> Result<Value, String> {
+            let entry = state.entry(&cluster_id).await?;
+            $inner(entry.cluster.client(), &name)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
+    ($(#[$m:meta])* $cmd:ident => $inner:ident, dynamic) => {
+        $(#[$m])*
+        #[tauri::command]
+        pub(crate) async fn $cmd(
+            cluster_id: String,
+            kind_id: String,
+            namespace: Option<String>,
+            name: String,
+            state: State<'_, AppState>,
+        ) -> Result<Value, String> {
+            let entry = state.entry(&cluster_id).await?;
+            $inner(entry.cluster.client(), &kind_id, namespace.as_deref(), &name)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
 }
 
-#[tauri::command]
-pub(crate) async fn get_deployment_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_deployment_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
+detail_cmd! {
+    /// Rich pod detail projection used by the summary tab in the detail panel.
+    /// Separate from `get_resource_yaml_cmd` so the YAML view can keep using the
+    /// dynamic API while the summary view gets a structured shape.
+    get_pod_detail_cmd => get_pod_detail, namespaced
 }
-
-#[tauri::command]
-pub(crate) async fn get_replica_set_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_replica_set_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_stateful_set_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_stateful_set_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_daemon_set_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_daemon_set_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_job_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_job_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_cron_job_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_cron_job_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_node_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_node_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_namespace_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_namespace_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_event_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_event_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_service_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_service_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_endpoints_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_endpoints_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_endpoint_slice_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_endpoint_slice_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_ingress_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_ingress_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_ingress_class_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_ingress_class_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_network_policy_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_network_policy_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_config_map_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_config_map_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_secret_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_secret_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
+detail_cmd! { get_deployment_detail_cmd => get_deployment_detail, namespaced }
+detail_cmd! { get_replica_set_detail_cmd => get_replica_set_detail, namespaced }
+detail_cmd! { get_stateful_set_detail_cmd => get_stateful_set_detail, namespaced }
+detail_cmd! { get_daemon_set_detail_cmd => get_daemon_set_detail, namespaced }
+detail_cmd! { get_job_detail_cmd => get_job_detail, namespaced }
+detail_cmd! { get_cron_job_detail_cmd => get_cron_job_detail, namespaced }
+detail_cmd! { get_node_detail_cmd => get_node_detail, cluster }
+detail_cmd! { get_namespace_detail_cmd => get_namespace_detail, cluster }
+detail_cmd! { get_event_detail_cmd => get_event_detail, namespaced }
+detail_cmd! { get_service_detail_cmd => get_service_detail, namespaced }
+detail_cmd! { get_endpoints_detail_cmd => get_endpoints_detail, namespaced }
+detail_cmd! { get_endpoint_slice_detail_cmd => get_endpoint_slice_detail, namespaced }
+detail_cmd! { get_ingress_detail_cmd => get_ingress_detail, namespaced }
+detail_cmd! { get_ingress_class_detail_cmd => get_ingress_class_detail, cluster }
+detail_cmd! { get_network_policy_detail_cmd => get_network_policy_detail, namespaced }
+detail_cmd! { get_config_map_detail_cmd => get_config_map_detail, namespaced }
+detail_cmd! { get_secret_detail_cmd => get_secret_detail, namespaced }
 
 /// Light "name + keys" projection of every ConfigMap in a namespace, used
 /// by the env-ref picker. Issues one apiserver list per call — no caching;
@@ -1862,18 +1757,7 @@ pub(crate) async fn list_secrets_in_namespace_cmd(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub(crate) async fn get_helm_release_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_helm_release_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
+detail_cmd! { get_helm_release_detail_cmd => get_helm_release_detail, namespaced }
 
 /// Detail for a single chart row. `source` is `"cluster"` for charts
 /// derived from existing helm releases or a repo name for charts from
@@ -1982,271 +1866,30 @@ pub(crate) async fn helm_repo_update_cmd() -> Result<u64, String> {
     helm_repo_update().await.map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub(crate) async fn get_resource_quota_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_resource_quota_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_limit_range_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_limit_range_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_persistent_volume_claim_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_persistent_volume_claim_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_persistent_volume_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_persistent_volume_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_storage_class_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_storage_class_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_custom_resource_definition_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_custom_resource_definition_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_custom_resource_detail_cmd(
-    cluster_id: String,
-    kind_id: String,
-    namespace: Option<String>,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_custom_resource_detail(
-        entry.cluster.client(),
-        &kind_id,
-        namespace.as_deref(),
-        &name,
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_service_account_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_service_account_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_role_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_role_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_role_binding_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_role_binding_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_cluster_role_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_cluster_role_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_cluster_role_binding_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_cluster_role_binding_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_horizontal_pod_autoscaler_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_horizontal_pod_autoscaler_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_pod_disruption_budget_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_pod_disruption_budget_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_priority_class_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_priority_class_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_replication_controller_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_replication_controller_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_lease_detail_cmd(
-    cluster_id: String,
-    namespace: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_lease_detail(entry.cluster.client(), &namespace, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_mutating_webhook_configuration_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_mutating_webhook_configuration_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn get_validating_webhook_configuration_detail_cmd(
-    cluster_id: String,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_validating_webhook_configuration_detail(entry.cluster.client(), &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// Detail fetch for any well-known dynamic kind (Gateway API, etc). The
-/// frontend passes the kind's `wkcrd:` id; the backend resolves the
-/// override and returns the rich projection.
-#[tauri::command]
-pub(crate) async fn get_well_known_detail_cmd(
-    cluster_id: String,
-    kind_id: String,
-    namespace: Option<String>,
-    name: String,
-    state: State<'_, AppState>,
-) -> Result<Value, String> {
-    let entry = state.entry(&cluster_id).await?;
-    get_well_known_detail(
-        entry.cluster.client(),
-        &kind_id,
-        namespace.as_deref(),
-        &name,
-    )
-    .await
-    .map_err(|e| e.to_string())
+detail_cmd! { get_resource_quota_detail_cmd => get_resource_quota_detail, namespaced }
+detail_cmd! { get_limit_range_detail_cmd => get_limit_range_detail, namespaced }
+detail_cmd! { get_persistent_volume_claim_detail_cmd => get_persistent_volume_claim_detail, namespaced }
+detail_cmd! { get_persistent_volume_detail_cmd => get_persistent_volume_detail, cluster }
+detail_cmd! { get_storage_class_detail_cmd => get_storage_class_detail, cluster }
+detail_cmd! { get_custom_resource_definition_detail_cmd => get_custom_resource_definition_detail, cluster }
+detail_cmd! { get_custom_resource_detail_cmd => get_custom_resource_detail, dynamic }
+detail_cmd! { get_service_account_detail_cmd => get_service_account_detail, namespaced }
+detail_cmd! { get_role_detail_cmd => get_role_detail, namespaced }
+detail_cmd! { get_role_binding_detail_cmd => get_role_binding_detail, namespaced }
+detail_cmd! { get_cluster_role_detail_cmd => get_cluster_role_detail, cluster }
+detail_cmd! { get_cluster_role_binding_detail_cmd => get_cluster_role_binding_detail, cluster }
+detail_cmd! { get_horizontal_pod_autoscaler_detail_cmd => get_horizontal_pod_autoscaler_detail, namespaced }
+detail_cmd! { get_pod_disruption_budget_detail_cmd => get_pod_disruption_budget_detail, namespaced }
+detail_cmd! { get_priority_class_detail_cmd => get_priority_class_detail, cluster }
+detail_cmd! { get_replication_controller_detail_cmd => get_replication_controller_detail, namespaced }
+detail_cmd! { get_lease_detail_cmd => get_lease_detail, namespaced }
+detail_cmd! { get_mutating_webhook_configuration_detail_cmd => get_mutating_webhook_configuration_detail, cluster }
+detail_cmd! { get_validating_webhook_configuration_detail_cmd => get_validating_webhook_configuration_detail, cluster }
+detail_cmd! {
+    /// Detail fetch for any well-known dynamic kind (Gateway API, etc). The
+    /// frontend passes the kind's `wkcrd:` id; the backend resolves the
+    /// override and returns the rich projection.
+    get_well_known_detail_cmd => get_well_known_detail, dynamic
 }
 
 /// Trigger a `kubectl rollout restart`-equivalent for the workload owning
@@ -3801,30 +3444,39 @@ fn spawn_health_forwarder(
         // gets the UI into the right state. The broadcast channel does
         // not buffer past events.
         let snap = health.snapshot().await;
-        if matches!(snap.status, ClusterHealthStatus::Unavailable) {
+        if health_status_triggers_teardown(&snap.status) {
             tracing::warn!(
                 ?cluster_id,
                 reason = ?snap.reason,
                 "spawn_health_forwarder: cluster already unavailable on subscribe — replaying"
             );
-            let state = app.state::<AppState>();
-            tear_down_unhealthy(state.inner(), &cluster_id).await;
+            // Emit BEFORE teardown — see the live-path note below.
             if let Err(e) = app.emit(&event_name, &snap) {
                 tracing::warn!(error = %e, ?cluster_id, "failed to emit cluster health");
             }
+            spawn_unhealthy_teardown(app.clone(), cluster_id.clone());
+            return;
         }
         loop {
             match rx.recv().await {
                 Ok(evt) => {
-                    if matches!(evt.status, ClusterHealthStatus::Unavailable) {
-                        // Tear down BEFORE emitting so that by the time
-                        // the UI handles the event and any in-flight
-                        // subscribe_* lands, the gate is up and the
-                        // command returns the unavailable error
-                        // cleanly instead of starting a watcher that
-                        // would then immediately fail.
-                        let state = app.state::<AppState>();
-                        tear_down_unhealthy(state.inner(), &cluster_id).await;
+                    if health_status_triggers_teardown(&evt.status) {
+                        // Emit the unavailable event BEFORE tearing down. The
+                        // teardown aborts THIS forwarder (drop_all_kind_watchers
+                        // takes the health_forwarder handle), and tearing down
+                        // first would cancel this task — at the first await
+                        // inside the teardown, after the self-abort — before the
+                        // emit ran, leaving the operator with no "cluster down"
+                        // banner. Detaching the teardown (below) also lets it
+                        // complete in full regardless of this forwarder's fate;
+                        // the gate (`unavailable`) is still set synchronously at
+                        // the top of tear_down_unhealthy, so in-flight
+                        // subscribe_* calls bail out a beat later.
+                        if let Err(e) = app.emit(&event_name, &evt) {
+                            tracing::warn!(error = %e, ?cluster_id, "failed to emit cluster health");
+                        }
+                        spawn_unhealthy_teardown(app.clone(), cluster_id.clone());
+                        return;
                     }
                     if let Err(e) = app.emit(&event_name, &evt) {
                         tracing::warn!(error = %e, ?cluster_id, "failed to emit cluster health");
@@ -3838,6 +3490,27 @@ fn spawn_health_forwarder(
             }
         }
     })
+}
+
+/// Whether a health status should trigger a data-plane teardown. Today only
+/// `Unavailable` does; pulled out so the replay and live paths in
+/// [`spawn_health_forwarder`] agree and the policy is unit-testable.
+fn health_status_triggers_teardown(status: &ClusterHealthStatus) -> bool {
+    matches!(status, ClusterHealthStatus::Unavailable)
+}
+
+/// Tear down an unhealthy cluster's data plane on a detached task. Called from
+/// the health forwarder, which must NOT run [`tear_down_unhealthy`] inline:
+/// the teardown aborts the health forwarder itself (via
+/// [`drop_all_kind_watchers`]), so an inline call would cancel the forwarder
+/// mid-teardown — at the first await after the self-abort — leaving the
+/// unavailable emit unsent and the metrics service un-dropped. Detaching lets
+/// the teardown complete regardless of the forwarder being aborted.
+fn spawn_unhealthy_teardown(app: AppHandle, cluster_id: String) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        tear_down_unhealthy(state.inner(), &cluster_id).await;
+    });
 }
 
 /// **Lifetime / memory.** The returned `JoinHandle` is stored on
@@ -4377,7 +4050,68 @@ fn emit_prom_changed(app: &AppHandle, cluster_id: &str, entry: Option<&PromCache
 
 #[cfg(test)]
 mod tests {
-    use super::{resource_event_name, sanitize_event_segment};
+    use super::{health_status_triggers_teardown, resource_event_name, sanitize_event_segment};
+    use ferrisscope_core::health::ClusterHealthStatus;
+
+    #[test]
+    fn detail_cmd_invocations_forward_to_same_stem_inner_fn() {
+        // The `detail_cmd!` macro can't catch a same-signature mis-wire — e.g.
+        // `detail_cmd! { get_pod_detail_cmd => get_service_detail, namespaced }`
+        // compiles cleanly (both inner fns share the namespaced signature) but
+        // silently returns the wrong kind's data. The compiler guards command
+        // names (via `main.rs`'s `generate_handler!`) and arity/types (via the
+        // inner fn signature); this guards the remaining convention: every
+        // invocation forwards `get_<x>_detail_cmd` to `get_<x>_detail`. We parse
+        // this very source file so a future mis-wire fails here, not in prod.
+        const SRC: &str = include_str!("commands.rs");
+        let mut checked = 0usize;
+        for line in SRC.lines() {
+            let Some((lhs, rhs)) = line.split_once("=>") else {
+                continue;
+            };
+            let Some((inner, scope)) = rhs.trim_start().split_once(',') else {
+                continue;
+            };
+            // Restrict to `detail_cmd!` scope lines: the token after the inner
+            // fn must be exactly one of the three scope keywords (an inline
+            // invocation ends `, namespaced }`; a doc'd one puts the `}` on the
+            // next line). Match arms / closures elsewhere with `=>` don't fit
+            // this `<ident>, (namespaced|cluster|dynamic)` shape.
+            let scope = scope.trim().trim_end_matches('}').trim();
+            if !matches!(scope, "namespaced" | "cluster" | "dynamic") {
+                continue;
+            }
+            let inner = inner.trim();
+            let cmd = lhs.split_whitespace().last().unwrap_or("");
+            assert_eq!(
+                cmd,
+                format!("{inner}_cmd"),
+                "detail_cmd! forwards `{cmd}` to `{inner}`; command name must be \
+                 `<inner>_cmd` (same stem) or the wrong kind's data is served"
+            );
+            checked += 1;
+        }
+        // Guard against the parser silently matching nothing (e.g. if the macro
+        // call syntax changes) — a passing-by-vacuity test is worse than none.
+        assert!(
+            checked >= 30,
+            "expected to validate the detail_cmd! catalogue (>=30 invocations), \
+             only saw {checked} — has the macro syntax changed?"
+        );
+    }
+
+    #[test]
+    fn only_unavailable_triggers_teardown() {
+        // The health forwarder tears down the data plane (and stops itself)
+        // only on Unavailable; a Healthy event just re-emits. If a new status
+        // variant is added, this test forces a deliberate decision here.
+        assert!(health_status_triggers_teardown(
+            &ClusterHealthStatus::Unavailable
+        ));
+        assert!(!health_status_triggers_teardown(
+            &ClusterHealthStatus::Healthy
+        ));
+    }
 
     #[test]
     fn sanitize_event_segment_keeps_allowed_alphabet() {

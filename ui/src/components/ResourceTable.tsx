@@ -24,7 +24,13 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, onResourceDelta } from "../api";
 import { useAppStore, useResolvedTheme } from "../store";
 import { formatQuantity } from "./detail";
-import type { ColumnDef, ResourceDelta, ResourceKind, ResourceRow } from "../types";
+import type {
+  ColumnDef,
+  MetricsSnapshot,
+  ResourceDelta,
+  ResourceKind,
+  ResourceRow,
+} from "../types";
 import { tokens, FF_MONO, FONT_MONO, type ThemeMode, FS_MD, FS_SM, FS_XS } from "../theme";
 import { LogPanel } from "./LogPanel";
 import { DetailPanel, type DetailTarget } from "./DetailPanel";
@@ -118,6 +124,17 @@ function NowProvider({ children }: { children: ReactNode }) {
   }, []);
   return <NowContext.Provider value={now}>{children}</NowContext.Provider>;
 }
+
+// Store selector for the pod-metrics map, gated on `isPods`. A connected
+// cluster keeps `metrics` ticking ~1 Hz (ClusterGauges holds a live
+// subscription), so an ungated read would re-render every non-Pod table
+// (ConfigMaps, Secrets, Deployments…) on each tick for data it never shows.
+// Returning a stable `null` for non-Pod kinds keeps those tables inert under
+// the metrics firehose. Exported for unit testing.
+export const selectPodMetrics =
+  (isPods: boolean) =>
+  (s: { metrics: MetricsSnapshot | null }): MetricsSnapshot["pods"] | null =>
+    isPods ? s.metrics?.pods ?? null : null;
 
 type Props = {
   mode: ThemeMode;
@@ -416,8 +433,10 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
 
   // Pull metrics here so the cell renderer can join CPU/Mem by uid. Keeping
   // the read at this level lets every table row re-render together when a
-  // new snapshot arrives instead of subscribing per-cell.
-  const podMetrics = useAppStore((s) => s.metrics?.pods ?? null);
+  // new snapshot arrives instead of subscribing per-cell. `selectPodMetrics`
+  // gates the read on `isPods` so non-Pod tables don't re-render on the
+  // ~1 Hz metrics tick (see the factory's doc comment).
+  const podMetrics = useAppStore(selectPodMetrics(isPods));
 
   // Sort / sizing state. Initialized from the persisted view, falls back
   // to the project default (single column, name asc). Multi-column sort

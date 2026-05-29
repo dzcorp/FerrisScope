@@ -40,7 +40,7 @@ pub use portforward::{
     ForwardHandle, ForwardStatus, PortForwardError,
 };
 pub use registry::{
-    lookup, registry, Category, ColumnDef, ColumnKind, DiscoveredCrd, DiscoveredPrinterColumn,
-    KindSpec, ResourceKind, ResourceKindEntry,
+    clear_printer_column_cache, lookup, registry, Category, ColumnDef, ColumnKind, DiscoveredCrd,
+    DiscoveredPrinterColumn, KindSpec, ResourceKind, ResourceKindEntry,
 };
 pub use watcher::{NsScope, ResourceDelta, ResourceWatcher};

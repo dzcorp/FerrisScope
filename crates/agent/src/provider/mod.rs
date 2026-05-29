@@ -12,8 +12,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
-    #[error("http error: {0}")]
-    Http(String),
+    /// An HTTP-layer failure. `status` is `Some` for a non-success response
+    /// (the authoritative numeric code) and `None` for a transport error
+    /// (connection refused / reset / timeout — no response, hence no status).
+    /// Carrying the status as a field lets the retry classifier key on the
+    /// number instead of grepping the prose, where a model id or body text
+    /// containing "503"/"429" used to cause misclassification.
+    #[error("http error{}: {body}", status.as_ref().map(|s| format!(" {s}")).unwrap_or_default())]
+    Http { status: Option<u16>, body: String },
     #[error("auth error: {0}")]
     Auth(String),
     #[error("provider returned an invalid response: {0}")]
@@ -24,6 +30,33 @@ pub enum ProviderError {
     Io(#[from] std::io::Error),
     #[error("decode: {0}")]
     Decode(String),
+}
+
+impl ProviderError {
+    /// Classify a non-success HTTP response into the right error. 401 →
+    /// [`ProviderError::Auth`] (never retryable); everything else →
+    /// [`ProviderError::Http`] with the numeric status preserved. Centralises
+    /// the per-provider mapping that was previously copy-pasted three times.
+    pub fn from_http_status(status: u16, body: String) -> Self {
+        if status == 401 {
+            ProviderError::Auth(body)
+        } else {
+            ProviderError::Http {
+                status: Some(status),
+                body,
+            }
+        }
+    }
+
+    /// A transport-level failure (connection refused / reset / timeout) with no
+    /// HTTP response — `status` is `None`, so the retry classifier falls back
+    /// to phrase matching for these inherently-retryable cases.
+    pub fn transport(msg: impl Into<String>) -> Self {
+        ProviderError::Http {
+            status: None,
+            body: msg.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -183,6 +183,7 @@ function ToolApprovalCardInner({ chatId, approval }: Props) {
             size="sm"
             onClick={() => decide("approved_always")}
             disabled={busy}
+            title={`Auto-approves every future ${approval.name} call in this chat, with any arguments`}
           >
             Approve always
           </Btn>
@@ -195,6 +196,20 @@ function ToolApprovalCardInner({ chatId, approval }: Props) {
           >
             Deny
           </Btn>
+        </div>
+        {/* Make the broad scope of "Approve always" explicit: it remembers the
+            tool *name*, so it auto-runs every future call of that tool in this
+            chat regardless of arguments — not just this one invocation. */}
+        <div
+          data-testid="approve-always-scope"
+          style={{
+            marginTop: 6,
+            fontSize: FS_XS,
+            color: hexWithAlpha(t.text, 0.55),
+          }}
+        >
+          “Approve always” allows <span style={{ fontFamily: FF_MONO }}>{approval.name}</span>{" "}
+          for the rest of this chat — every future call, any arguments.
         </div>
       </div>
     </div>

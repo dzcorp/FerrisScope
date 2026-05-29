@@ -32,14 +32,15 @@ type Props = {
 // folder added/removed, etc.) so the fleet stays live without a reload.
 export function FleetLanding({ mode, onSelect }: Props) {
   const t = useResolvedTheme().tokens;
-  const {
-    contexts,
-    contextsStatus,
-    contextsError,
-    setContexts,
-    setContextsLoading,
-    setContextsError,
-  } = useAppStore();
+  // Per-field selectors rather than a bulk `useAppStore()` destructure, which
+  // would re-render the whole landing screen on every unrelated store mutation
+  // (toasts, modals, notifications). Action functions are stable store refs.
+  const contexts = useAppStore((s) => s.contexts);
+  const contextsStatus = useAppStore((s) => s.contextsStatus);
+  const contextsError = useAppStore((s) => s.contextsError);
+  const setContexts = useAppStore((s) => s.setContexts);
+  const setContextsLoading = useAppStore((s) => s.setContextsLoading);
+  const setContextsError = useAppStore((s) => s.setContextsError);
 
   const [probes, setProbes] = useState<Record<string, ClusterProbe>>({});
   const [menu, setMenu] = useState<{ pos: MenuPosition; ctx: ContextInfo } | null>(null);

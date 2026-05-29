@@ -2021,11 +2021,27 @@ pub async fn merge_patch_resource(
         // A resourceVersion mismatch comes back as 409 Conflict with a
         // message like "the object has been modified; please apply your
         // changes to the latest version and try again".
-        Err(kube::Error::Api(status)) if status.code == 409 => Ok(MergePatchResult::Stale {
-            message: status.message.clone(),
-        }),
+        Err(kube::Error::Api(status))
+            if is_stale_conflict(status.code, resource_version.is_some()) =>
+        {
+            Ok(MergePatchResult::Stale {
+                message: status.message.clone(),
+            })
+        }
         Err(e) => Err(FetchError::Kube(e)),
     }
+}
+
+/// Whether a 409 from a merge-patch should surface as [`MergePatchResult::Stale`]
+/// (the optimistic-concurrency "object changed, reload?" path) versus a hard
+/// error. Only a patch that *carried* a resourceVersion can get a genuine
+/// resourceVersion conflict; for the unconditional "apply anyway" overwrite
+/// (`resource_version: None`) the apiserver runs no concurrency check, so a 409
+/// there is something else entirely (admission webhook, `AlreadyExists` race)
+/// and must not masquerade as staleness — which would loop the operator
+/// through a pointless reload that can never resolve it.
+fn is_stale_conflict(status_code: u16, had_resource_version: bool) -> bool {
+    status_code == 409 && had_resource_version
 }
 
 #[cfg(test)]
@@ -2068,6 +2084,20 @@ mod merge_patch_tests {
     fn non_object_patch_becomes_empty_object() {
         let body = build_merge_patch_body(json!("oops"), Some("1"));
         assert_eq!(body["metadata"]["resourceVersion"], json!("1"));
+    }
+
+    #[test]
+    fn stale_conflict_only_when_resource_version_was_sent() {
+        use super::is_stale_conflict;
+        // Conditional save (rv sent) + 409 → optimistic-concurrency stale.
+        assert!(is_stale_conflict(409, true));
+        // Unconditional "apply anyway" (no rv) + 409 → NOT stale; it's a real
+        // error (webhook / AlreadyExists), surfaced as such instead of looping
+        // the operator through a reload that can't resolve it.
+        assert!(!is_stale_conflict(409, false));
+        // Non-409 statuses are never stale, regardless of rv.
+        assert!(!is_stale_conflict(422, true));
+        assert!(!is_stale_conflict(404, true));
     }
 }
 

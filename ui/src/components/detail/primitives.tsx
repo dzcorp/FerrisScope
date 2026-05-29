@@ -106,6 +106,31 @@ export function Mute({ t, children }: { t: Tokens; children: ReactNode }) {
   return <span style={{ color: t.textMuted, fontSize: FS_MD }}>{children}</span>;
 }
 
+// ── Mono ─────────────────────────────────────────────────────────────────────
+// Monospace value at the detail-panel body size. This was the single most
+// inlined idiom across the summaries (`<span style={{ fontFamily: FF_MONO,
+// fontSize: FS_MD }}>…</span>`) — IDs, generations, counts, image refs, sizes.
+// Centralising it means the mono font + body size are tuned in one place.
+// Purely presentational: copy support comes from wrapping in <Copyable>, link
+// behaviour from <LinkValue>; <Mono> only sets the typeface + size. `size`
+// overrides the default for the rare smaller-text site; `style` merges extra
+// declarations (e.g. `wordBreak`, `color`).
+export function Mono({
+  children,
+  size = FS_MD,
+  style,
+}: {
+  children: ReactNode;
+  size?: string;
+  style?: CSSProperties;
+}) {
+  return (
+    <span style={{ fontFamily: FF_MONO, fontSize: size, ...style }}>
+      {children}
+    </span>
+  );
+}
+
 // ── ExpandableList ───────────────────────────────────────────────────────────
 // Read-only "show the first N, expand the rest" list for bulky collections
 // (annotations, tolerations, …). A small collection (≤ `threshold`) renders in

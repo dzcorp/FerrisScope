@@ -9,6 +9,7 @@ import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS }
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
+  Mono,
   ChipWrap,
   Copyable,
   DetailRow,
@@ -19,6 +20,8 @@ import {
   ageFromIso,
   formatQuantity,
   type DetailNavigate,
+  useDetail,
+  type LoadState,
 } from "..";
 import type {
   EventDetail,
@@ -28,37 +31,6 @@ import type {
   WorkloadCondition,
 } from "../../../types";
 import { ConditionsSection, MetaSection } from "../workload/shared";
-
-type LoadState<T> =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: T }
-  | { kind: "error"; message: string };
-
-function useDetail<T>(
-  fetcher: () => Promise<T>,
-  deps: ReadonlyArray<unknown>,
-): LoadState<T> {
-  const [state, setState] = useState<LoadState<T>>({ kind: "loading" });
-  const reqId = useRef(0);
-  useEffect(() => {
-    const id = ++reqId.current;
-    // Don't flip back to "loading" on a refetch — keep the previous panel
-    // contents on screen until the new fetch lands, then swap. Otherwise the
-    // detail panel collapses to a one-line spinner during cordon/drain
-    // refresh, the scroll container's content height drops to zero, and the
-    // browser snaps back to scroll-top. R-01: no spinner on poll.
-    fetcher()
-      .then((detail) => {
-        if (reqId.current === id) setState({ kind: "ready", detail });
-      })
-      .catch((e: unknown) => {
-        if (reqId.current === id)
-          setState({ kind: "error", message: String(e) });
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-  return state;
-}
 
 function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
   return (
@@ -238,9 +210,9 @@ export function NodeSummary(props: {
             {d.addresses.map((a, i) => (
               <DetailRow key={`${a.type}-${i}`} t={t} label={a.type}>
                 <Copyable text={a.address}>
-                  <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                  <Mono>
                     {a.address}
-                  </span>
+                  </Mono>
                 </Copyable>
               </DetailRow>
             ))}
@@ -1070,7 +1042,7 @@ export function EventSummary(props: {
       <Section t={t} title="Timing" />
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Count">
-          <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.count}</span>
+          <Mono>{d.count}</Mono>
         </DetailRow>
         {d.first_timestamp && (
           <DetailRow t={t} label="First Seen">
@@ -1110,12 +1082,12 @@ export function EventSummary(props: {
         )}
         {d.series && (
           <DetailRow t={t} label="Series">
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {d.series.count ?? 0} observations
               {d.series.last_observed_time
                 ? ` · last ${ageFromIso(d.series.last_observed_time)} ago`
                 : ""}
-            </span>
+            </Mono>
           </DetailRow>
         )}
       </div>
@@ -1124,9 +1096,9 @@ export function EventSummary(props: {
       <div style={{ marginBottom: 22 }}>
         {d.source?.component && (
           <DetailRow t={t} label="Component">
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {d.source.component}
-            </span>
+            </Mono>
           </DetailRow>
         )}
         {d.source?.host && (

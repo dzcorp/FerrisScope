@@ -15,9 +15,10 @@ import {
   ExpandableList,
   KeyValueChips,
   LinkValue,
+  Mono,
   Mute,
 } from "./primitives";
-import { tokens } from "../../theme";
+import { tokens, FF_MONO, FS_MD, FS_SM } from "../../theme";
 
 const t = tokens("dark");
 
@@ -325,5 +326,34 @@ describe("KeyValueChips", () => {
     expect(screen.getByText("env=prod")).toBeInTheDocument();
     fireEvent.click(screen.getByText("env=prod"));
     expect(clipboardWrites).toEqual(["env=prod"]);
+  });
+});
+
+describe("Mono", () => {
+  it("renders children in the mono font at the body size by default", () => {
+    render(<Mono>web-0</Mono>);
+    const el = screen.getByText("web-0");
+    expect(el.tagName).toBe("SPAN");
+    expect(el.style.fontFamily).toBe(FF_MONO);
+    expect(el.style.fontSize).toBe(FS_MD);
+  });
+
+  it("honours a size override", () => {
+    render(<Mono size={FS_SM}>tiny</Mono>);
+    const el = screen.getByText("tiny");
+    expect(el.style.fontSize).toBe(FS_SM);
+    expect(el.style.fontFamily).toBe(FF_MONO); // still mono
+  });
+
+  it("merges extra style without clobbering the mono font", () => {
+    render(
+      <Mono style={{ wordBreak: "break-all", color: "rgb(1, 2, 3)" }}>
+        sha256:deadbeef
+      </Mono>,
+    );
+    const el = screen.getByText("sha256:deadbeef");
+    expect(el.style.fontFamily).toBe(FF_MONO);
+    expect(el.style.wordBreak).toBe("break-all");
+    expect(el.style.color).toBe("rgb(1, 2, 3)");
   });
 });

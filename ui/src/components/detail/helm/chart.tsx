@@ -21,6 +21,7 @@ import { FF_MONO, type ThemeMode, type Tokens, R_MD, FS_MD, FS_SM, FS_XS } from 
 import {  } from "../../../theme";
 import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
+  Mono,
   ChipWrap,
   Copyable,
   DetailRow,
@@ -277,18 +278,18 @@ export function HelmChartSummary(props: {
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Name">
           <Copyable text={d.chart_name}>
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.chart_name}</span>
+            <Mono>{d.chart_name}</Mono>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Version">
           <Copyable text={d.chart_version}>
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.chart_version}</span>
+            <Mono>{d.chart_version}</Mono>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="App version">
           {d.app_version ? (
             <Copyable text={d.app_version}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.app_version}</span>
+              <Mono>{d.app_version}</Mono>
             </Copyable>
           ) : (
             <Mute t={t}>—</Mute>

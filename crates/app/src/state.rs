@@ -371,6 +371,13 @@ impl AppState {
         self.connects.lock().await.len()
     }
 
+    /// Number of currently-connected cluster entries. Used by the
+    /// disconnect path to decide when the process holds no clusters and
+    /// process-wide caches can be safely reclaimed.
+    pub(crate) async fn cluster_count(&self) -> usize {
+        self.inner.lock().await.len()
+    }
+
     /// Register a freshly-opened search index for `id`. Called from
     /// `connect_context`. If an index was already registered (re-connect
     /// without an intervening drop), the old one is replaced and dropped

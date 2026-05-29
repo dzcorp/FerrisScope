@@ -2,7 +2,7 @@
 // each kind fetches via the generic well-known detail getter, then composes
 // the standard primitives.
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM } from "../../../theme";
@@ -16,6 +16,7 @@ import {
   LinkValue,
   Mute,
   type DetailNavigate,
+  useDetail,
 } from "..";
 import { MetaSection } from "../workload/shared";
 import type {
@@ -25,32 +26,6 @@ import type {
   ReferenceGrantDetail,
   RouteDetail,
 } from "../../../types";
-
-type LoadState<T> =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: T }
-  | { kind: "error"; message: string };
-
-function useDetail<T>(
-  fetcher: () => Promise<T>,
-  deps: ReadonlyArray<unknown>,
-): LoadState<T> {
-  const [state, setState] = useState<LoadState<T>>({ kind: "loading" });
-  const reqId = useRef(0);
-  useEffect(() => {
-    const id = ++reqId.current;
-    fetcher()
-      .then((detail) => {
-        if (reqId.current === id) setState({ kind: "ready", detail });
-      })
-      .catch((e: unknown) => {
-        if (reqId.current === id)
-          setState({ kind: "error", message: String(e) });
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-  return state;
-}
 
 function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
   return (

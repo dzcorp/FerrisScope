@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { Mono } from "./primitives";
 import { api, onMetrics, onPrometheusChanged } from "../../api";
 import { FF_MONO, type ThemeMode, type Tokens, R_SM, FS_MD, FS_SM, FS_XS } from "../../theme";
 import type {
@@ -635,9 +636,9 @@ function PvcMetrics({
       <Section t={t} title="Volume usage" />
       <UsageGauge t={t} v={v} />
       <DetailRow t={t} label="Mounted by">
-        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+        <Mono>
           {v.pod_namespace}/{v.pod_name}
-        </span>
+        </Mono>
       </DetailRow>
       <InodeRow t={t} v={v} />
 
@@ -1822,9 +1823,9 @@ function UsageGauge({ t, v }: { t: Tokens; v: VolumeMetric }) {
         </span>
       </DetailRow>
       <DetailRow t={t} label="Available">
-        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+        <Mono>
           {fmtBytes(v.available_bytes)}
-        </span>
+        </Mono>
       </DetailRow>
       <Bar t={t} pct={pct} tone={tone} />
     </div>
