@@ -165,7 +165,7 @@ impl OpenAICodexProvider {
             ))
             .send()
             .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?;
+            .map_err(|e| ProviderError::transport(e.to_string()))?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(ProviderError::Auth(format!("refresh failed: {body}")));
@@ -341,13 +341,9 @@ impl ChatProvider for OpenAICodexProvider {
             response = self.send(&body).await?;
         }
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let body_text = response.text().await.unwrap_or_default();
-            return Err(if status == reqwest::StatusCode::UNAUTHORIZED {
-                ProviderError::Auth(body_text)
-            } else {
-                ProviderError::Http(format!("{status}: {body_text}"))
-            });
+            return Err(ProviderError::from_http_status(status, body_text));
         }
 
         let mut stream = response.bytes_stream().eventsource();
@@ -413,7 +409,7 @@ impl OpenAICodexProvider {
             .json(body)
             .send()
             .await
-            .map_err(|e| ProviderError::Http(e.to_string()))
+            .map_err(|e| ProviderError::transport(e.to_string()))
     }
 }
 

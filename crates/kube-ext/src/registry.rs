@@ -6,7 +6,7 @@
 //! sent to the frontend so it can build navigation + table headers without
 //! hard-coding any kind metadata.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use kube::{
@@ -309,6 +309,17 @@ fn leak(s: String) -> &'static str {
     leaked
 }
 
+/// Hard ceiling on the printer-column cache. The `crd:` id is
+/// cluster-independent (group/version/plural/kind/scope), so the cache is
+/// *deduplicated* across clusters — its size is bounded by the number of
+/// distinct CRD types the app has ever seen, not by cluster connections.
+/// That's still monotonic over a long session browsing an ever-changing
+/// fleet, so we cap it. A miss after eviction is harmless: the row falls
+/// back to the default name/namespace/age columns and the next
+/// `discover_crds` re-caches the real ones. The cap is generous enough that
+/// realistic single-cluster / modest-fleet use never evicts a live entry.
+const PRINTER_COLUMN_CACHE_CAP: usize = 4096;
+
 /// Process-wide cache of the `printer_columns` field of every CRD we've
 /// discovered, keyed by `crd:` id. The id encodes group/version/plural/kind/scope
 /// but not the printer columns (would explode the id length and re-encoding
@@ -317,17 +328,59 @@ fn leak(s: String) -> &'static str {
 ///
 /// Reconstruction without a cache hit is still valid — the row falls back to
 /// the default name/namespace/age columns. So a cold reconnect after restart
-/// degrades gracefully until the next `discover_crds` call repopulates it.
-fn printer_column_cache() -> &'static Mutex<HashMap<String, Vec<DiscoveredPrinterColumn>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Vec<DiscoveredPrinterColumn>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+/// (or a FIFO eviction) degrades gracefully until the next `discover_crds`
+/// call repopulates it.
+struct PrinterColumnCache {
+    map: HashMap<String, Vec<DiscoveredPrinterColumn>>,
+    /// First-insertion order of the keys currently in `map`, for FIFO
+    /// eviction once the cap is reached. Exactly one entry per map key.
+    order: VecDeque<String>,
+}
+
+impl PrinterColumnCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn insert(&mut self, id: &str, cols: &[DiscoveredPrinterColumn]) {
+        if self.map.insert(id.to_owned(), cols.to_vec()).is_none() {
+            // New key: record its insertion order and enforce the cap by
+            // dropping the oldest entries. Re-inserting an existing key
+            // (re-discovery refreshing columns) only updates the value and
+            // leaves its position — FIFO by first-insert is enough for a
+            // degrade-gracefully cache.
+            self.order.push_back(id.to_owned());
+            while self.order.len() > PRINTER_COLUMN_CACHE_CAP {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+    }
+
+    fn get(&self, id: &str) -> Vec<DiscoveredPrinterColumn> {
+        self.map.get(id).cloned().unwrap_or_default()
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+}
+
+fn printer_column_cache() -> &'static Mutex<PrinterColumnCache> {
+    static CACHE: OnceLock<Mutex<PrinterColumnCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(PrinterColumnCache::new()))
 }
 
 fn cache_printer_columns(id: &str, cols: &[DiscoveredPrinterColumn]) {
-    let mut g = printer_column_cache()
+    printer_column_cache()
         .lock()
-        .expect("printer-column cache poisoned");
-    g.insert(id.to_owned(), cols.to_vec());
+        .expect("printer-column cache poisoned")
+        .insert(id, cols);
 }
 
 fn cached_printer_columns(id: &str) -> Vec<DiscoveredPrinterColumn> {
@@ -335,8 +388,18 @@ fn cached_printer_columns(id: &str) -> Vec<DiscoveredPrinterColumn> {
         .lock()
         .expect("printer-column cache poisoned")
         .get(id)
-        .cloned()
-        .unwrap_or_default()
+}
+
+/// Drop every cached printer-column set. Safe to call whenever no cluster is
+/// connected (no entry can be live then): the next discovery repopulates it.
+/// Wired into the cluster-disconnect path when the last cluster leaves, so a
+/// long fleet-browsing session that returns to zero connected clusters
+/// reclaims the cache instead of holding it for the process lifetime.
+pub fn clear_printer_column_cache() {
+    printer_column_cache()
+        .lock()
+        .expect("printer-column cache poisoned")
+        .clear();
 }
 
 fn default_dynamic_columns(namespaced: bool) -> Vec<ColumnDef> {
@@ -705,4 +768,75 @@ pub fn lookup(id: &str) -> Option<ResourceKindEntry> {
         return Some(ResourceKindEntry::from_dynamic_crd(crd));
     }
     registry().into_iter().find(|e| e.meta.id == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col(name: &str) -> DiscoveredPrinterColumn {
+        DiscoveredPrinterColumn {
+            name: name.to_owned(),
+            json_path: ".spec.x".to_owned(),
+            type_: "string".to_owned(),
+        }
+    }
+
+    #[test]
+    fn printer_cache_hit_and_miss() {
+        let mut c = PrinterColumnCache::new();
+        c.insert("crd:a", &[col("A")]);
+        assert_eq!(c.get("crd:a").len(), 1);
+        assert_eq!(c.get("crd:a")[0].name, "A");
+        // A miss returns empty — `from_dynamic_crd` then falls back to the
+        // default name/namespace/age columns.
+        assert!(c.get("crd:missing").is_empty());
+    }
+
+    #[test]
+    fn printer_cache_reinsert_updates_without_growing_order() {
+        let mut c = PrinterColumnCache::new();
+        c.insert("crd:a", &[col("old")]);
+        c.insert("crd:a", &[col("new1"), col("new2")]);
+        // Re-discovery refreshes the value but must not duplicate the key's
+        // FIFO slot (which would corrupt eviction accounting).
+        assert_eq!(c.order.len(), 1);
+        assert_eq!(c.get("crd:a").len(), 2);
+        assert_eq!(c.get("crd:a")[0].name, "new1");
+    }
+
+    #[test]
+    fn printer_cache_evicts_oldest_at_cap() {
+        let mut c = PrinterColumnCache::new();
+        for i in 0..PRINTER_COLUMN_CACHE_CAP + 5 {
+            c.insert(&format!("crd:{i}"), &[col("x")]);
+        }
+        // Bounded: never exceeds the cap regardless of distinct ids seen.
+        assert_eq!(c.map.len(), PRINTER_COLUMN_CACHE_CAP);
+        assert_eq!(c.order.len(), PRINTER_COLUMN_CACHE_CAP);
+        // The five oldest ids were evicted FIFO; the newest survive.
+        for i in 0..5 {
+            assert!(
+                c.get(&format!("crd:{i}")).is_empty(),
+                "oldest must be evicted"
+            );
+        }
+        assert_eq!(
+            c.get(&format!("crd:{}", PRINTER_COLUMN_CACHE_CAP + 4))
+                .len(),
+            1,
+            "most-recent id must survive"
+        );
+    }
+
+    #[test]
+    fn printer_cache_clear_empties() {
+        let mut c = PrinterColumnCache::new();
+        c.insert("crd:a", &[col("A")]);
+        c.insert("crd:b", &[col("B")]);
+        c.clear();
+        assert!(c.get("crd:a").is_empty());
+        assert_eq!(c.map.len(), 0);
+        assert_eq!(c.order.len(), 0);
+    }
 }

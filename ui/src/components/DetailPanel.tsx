@@ -29,6 +29,7 @@ import type { ContainerLite } from "./ui";
 import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
 import { confirm, toast } from "../lib/dialog";
 import {
+  Mono,
   ChipStrip,
   ChipWrap,
   ConditionChip,
@@ -252,6 +253,31 @@ const RELATED_KINDS = new Set([
   "cronjobs",
 ]);
 
+// Workload kinds share a single Prom-scoped MetricsTab via owner-ref join
+// through kube-state-metrics. Each kind maps to a `controllerKind` string that
+// selects the right kube_pod_owner / kube_<kind>_status_* names on the
+// frontend. Render-invariant — module scope so it isn't reallocated on every
+// DetailPanel render (which fires on every detailVersion bump / YAML keystroke).
+const WORKLOAD_KIND_BY_KIND_ID: Record<string, string> = {
+  deployments: "Deployment",
+  statefulsets: "StatefulSet",
+  daemonsets: "DaemonSet",
+  replicasets: "ReplicaSet",
+  jobs: "Job",
+};
+
+// Workload kinds that support `kubectl rollout restart` semantics. The backend
+// uses a JSON merge-patch to bump
+// `spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"]`
+// — *not* SSA, because a partial SSA payload makes the apiserver null
+// `selector` / `containers` and reject the Deployment with 422. Module scope:
+// render-invariant constant, see WORKLOAD_KIND_BY_KIND_ID.
+const RESTARTABLE_WORKLOAD_KINDS = new Set([
+  "deployments",
+  "statefulsets",
+  "daemonsets",
+]);
+
 export type DetailTarget = {
   uid: string;
   namespace: string | null;
@@ -303,18 +329,10 @@ export function DetailPanel({
   const isNode = kind.id === "nodes";
   const isPvc = kind.id === "persistentvolumeclaims";
   const isNamespace = kind.id === "namespaces";
-  // Workload kinds share a single Prom-scoped MetricsTab via owner-ref join
-  // through kube-state-metrics. Each kind maps to a `controllerKind` string
-  // that selects the right kube_pod_owner / kube_<kind>_status_* names on
-  // the frontend.
-  const workloadKindByKindId: Record<string, string> = {
-    deployments: "Deployment",
-    statefulsets: "StatefulSet",
-    daemonsets: "DaemonSet",
-    replicasets: "ReplicaSet",
-    jobs: "Job",
-  };
-  const workloadControllerKind = workloadKindByKindId[kind.id] as
+  // Workload controller-kind lookup is a module-level constant
+  // (WORKLOAD_KIND_BY_KIND_ID) — render-invariant, so it isn't reallocated on
+  // every detailVersion bump.
+  const workloadControllerKind = WORKLOAD_KIND_BY_KIND_ID[kind.id] as
     | "Deployment"
     | "StatefulSet"
     | "DaemonSet"
@@ -482,17 +500,8 @@ export function DetailPanel({
     }
   };
 
-  // Workload kinds that support `kubectl rollout restart` semantics. The
-  // backend uses a JSON merge-patch to bump
-  // `spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"]`
-  // — *not* SSA, because a partial SSA payload makes the apiserver null
-  // `selector` / `containers` and reject the Deployment with 422.
-  const restartableWorkloadKinds = new Set([
-    "deployments",
-    "statefulsets",
-    "daemonsets",
-  ]);
-  const isRestartableWorkload = restartableWorkloadKinds.has(kind.id);
+  // RESTARTABLE_WORKLOAD_KINDS is a module-level constant (see its definition).
+  const isRestartableWorkload = RESTARTABLE_WORKLOAD_KINDS.has(kind.id);
 
   const runRestartWorkload = async () => {
     if (!target.namespace) {
@@ -1365,15 +1374,15 @@ function RelatedPane({
                     copyText={it.targetName}
                     enabled={!!onNavigate}
                   >
-                    <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                    <Mono>
                       {it.targetKind} · {it.targetName}
-                    </span>
+                    </Mono>
                   </LinkValue>
                 ) : (
                   <Copyable text={it.targetName}>
-                    <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                    <Mono>
                       {it.targetName}
-                    </span>
+                    </Mono>
                   </Copyable>
                 )}
               </DetailRow>
@@ -1907,7 +1916,7 @@ function PodSummary({
         </DetailRow>
         <DetailRow t={t} label="Name">
           <Copyable text={d.name}>
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.name}</span>
+            <Mono>{d.name}</Mono>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Namespace">
@@ -2075,18 +2084,18 @@ function PodSummary({
         {d.termination_grace_period_s != null && (
           <DetailRow t={t} label="Termination Grace Period">
             <Copyable text={`${d.termination_grace_period_s}s`}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.termination_grace_period_s}s
-              </span>
+              </Mono>
             </Copyable>
           </DetailRow>
         )}
         {d.priority_class && (
           <DetailRow t={t} label="Priority Class">
             <Copyable text={d.priority_class}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.priority_class}
-              </span>
+              </Mono>
             </Copyable>
           </DetailRow>
         )}
@@ -2222,25 +2231,25 @@ function PodSummary({
               d.scheduling.scheduler_name !== "default-scheduler" && (
                 <DetailRow t={t} label="Scheduler">
                   <Copyable text={d.scheduling.scheduler_name}>
-                    <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                    <Mono>
                       {d.scheduling.scheduler_name}
-                    </span>
+                    </Mono>
                   </Copyable>
                 </DetailRow>
               )}
             {d.scheduling.priority != null && (
               <DetailRow t={t} label="Priority">
-                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                <Mono>
                   {d.scheduling.priority}
-                </span>
+                </Mono>
               </DetailRow>
             )}
             {d.scheduling.runtime_class && (
               <DetailRow t={t} label="Runtime Class">
                 <Copyable text={d.scheduling.runtime_class}>
-                  <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                  <Mono>
                     {d.scheduling.runtime_class}
-                  </span>
+                  </Mono>
                 </Copyable>
               </DetailRow>
             )}

@@ -26,6 +26,7 @@ import { FF_MONO, type ThemeMode, type Tokens, R_MD, R_SM, FS_LG, FS_MD, FS_SM, 
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill, Tooltip } from "../../ui";
 import {
+  Mono,
   ChipWrap,
   ConditionChip,
   Copyable,
@@ -184,11 +185,11 @@ export function CustomResourceSummary(props: {
                     <Mute t={t}>—</Mute>
                   ) : (
                     <Copyable text={String(v)}>
-                      <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                      <Mono>
                         {c.type === "date" && typeof v === "string"
                           ? `${ageFromIso(v)} (${v})`
                           : String(v)}
-                      </span>
+                      </Mono>
                     </Copyable>
                   )}
                 </DetailRow>
@@ -869,7 +870,7 @@ function Leaf({
     const s = String(v);
     return (
       <Copyable text={s}>
-        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{s}</span>
+        <Mono>{s}</Mono>
       </Copyable>
     );
   }
@@ -892,7 +893,7 @@ function Leaf({
       const s = v.map(String).join(", ");
       return (
         <Copyable text={s}>
-          <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{s}</span>
+          <Mono>{s}</Mono>
         </Copyable>
       );
     }
@@ -927,9 +928,9 @@ function ScalarString({
   if (schema?.format === "date-time" || isIsoDate(v)) {
     return (
       <Copyable text={v}>
-        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+        <Mono>
           {ageFromIso(v)} ({v})
-        </span>
+        </Mono>
       </Copyable>
     );
   }

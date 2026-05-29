@@ -135,8 +135,11 @@ pub(crate) fn dyn_meta_value(obj: &DynamicObject) -> Value {
 }
 
 pub(crate) fn obj_get<'a>(obj: &'a DynamicObject, path: &[&str]) -> Option<&'a Value> {
-    let mut cur = obj.data.as_object()?.get(path[0])?;
-    for seg in &path[1..] {
+    // `split_first` returns None on an empty path, so this stays total — the
+    // module contract is that projections never panic on shape (or arg) drift.
+    let (first, rest) = path.split_first()?;
+    let mut cur = obj.data.as_object()?.get(*first)?;
+    for seg in rest {
         cur = cur.as_object()?.get(*seg)?;
     }
     Some(cur)
@@ -152,4 +155,36 @@ pub(crate) fn arr_at<'a>(obj: &'a DynamicObject, path: &[&str]) -> &'a [Value] {
         .and_then(|v| v.as_array())
         .map(Vec::as_slice)
         .unwrap_or(&EMPTY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kube::api::DynamicObject;
+
+    fn dyn_obj() -> DynamicObject {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "x.example.com/v1",
+            "kind": "Thing",
+            "metadata": { "name": "n" },
+            "spec": { "a": { "b": "v" } },
+        }))
+        .expect("dynamic object")
+    }
+
+    #[test]
+    fn obj_get_empty_path_returns_none_not_panic() {
+        let obj = dyn_obj();
+        // The guard: an empty path must yield None, never index-panic.
+        assert!(obj_get(&obj, &[]).is_none());
+        // Normal nested access still works.
+        assert_eq!(
+            obj_get(&obj, &["spec", "a", "b"]).and_then(Value::as_str),
+            Some("v")
+        );
+        // Missing segments project to None (totality on shape drift).
+        assert!(obj_get(&obj, &["spec", "missing"]).is_none());
+        assert!(str_at(&obj, &[]).is_none());
+        assert!(arr_at(&obj, &[]).is_empty());
+    }
 }

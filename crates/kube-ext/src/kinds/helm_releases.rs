@@ -24,7 +24,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::registry::{Category, ColumnDef, ColumnKind, ResourceKind};
 
@@ -364,6 +364,20 @@ pub fn chart_has_dependencies(release: &Release) -> bool {
         .is_some_and(|arr| !arr.is_empty())
 }
 
+/// True if `name` is a safe in-tree chart file path (cannot escape the chart
+/// root). String-splitting on `/` (the old guard) missed Windows absolute
+/// paths (`C:\…`) and backslash separators, so we walk real path components
+/// and require every one to be a plain in-tree segment. This rejects `..`
+/// (`ParentDir`), leading `/` (`RootDir`), drive prefixes (`Prefix`), and `.`
+/// (`CurDir`) under whatever platform we're extracting on — which is exactly
+/// the platform whose filesystem we'd be writing to.
+fn is_safe_chart_path(name: &str) -> bool {
+    !name.is_empty()
+        && Path::new(name)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+}
+
 fn write_chart_files(list: Option<&Value>, root: &Path) -> Result<(), ChartExtractError> {
     let Some(arr) = list.and_then(|v| v.as_array()) else {
         return Ok(());
@@ -377,12 +391,12 @@ fn write_chart_files(list: Option<&Value>, root: &Path) -> Result<(), ChartExtra
             .get("data")
             .and_then(|v| v.as_str())
             .ok_or(ChartExtractError::BadFileEntry)?;
-        // Reject paths that would escape the chart root. Helm itself
-        // enforces this on chart load; we mirror that defensively.
-        if name
-            .split('/')
-            .any(|seg| seg == ".." || seg.is_empty() && !name.is_empty())
-        {
+        // Reject paths that would escape the chart root. Helm enforces this
+        // on chart load; we mirror it defensively because file names come from
+        // a cluster-resident release secret — attacker-controllable on a
+        // compromised or multi-tenant cluster, and this is a write-arbitrary-
+        // file primitive otherwise.
+        if !is_safe_chart_path(name) {
             return Err(ChartExtractError::BadFileEntry);
         }
         let target = root.join(name);
@@ -440,6 +454,44 @@ mod tests {
             "metadata": { "name": "plain" },
         }));
         assert!(!chart_has_dependencies(&none));
+    }
+
+    #[test]
+    fn is_safe_chart_path_accepts_in_tree_and_rejects_escapes() {
+        // Legitimate Helm chart member paths.
+        assert!(is_safe_chart_path("Chart.yaml"));
+        assert!(is_safe_chart_path("templates/deployment.yaml"));
+        assert!(is_safe_chart_path("charts/common/values.yaml"));
+        // Escapes / non-plain components.
+        assert!(!is_safe_chart_path(""), "empty name");
+        assert!(!is_safe_chart_path("../escape"), "parent ref");
+        assert!(
+            !is_safe_chart_path("a/b/../../../etc/passwd"),
+            "nested parent ref"
+        );
+        assert!(!is_safe_chart_path("/etc/cron.d/evil"), "unix absolute");
+        assert!(!is_safe_chart_path("./foo"), "current-dir prefix");
+        // On Windows a drive-absolute path parses to a Prefix/RootDir
+        // component and is rejected; on Unix the same string is a single
+        // in-tree segment (backslash isn't a separator) and stays contained.
+        #[cfg(windows)]
+        assert!(
+            !is_safe_chart_path(r"C:\windows\evil"),
+            "windows drive absolute"
+        );
+    }
+
+    #[test]
+    fn write_chart_files_rejects_path_traversal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let malicious = json!([{
+            "name": "../escape.txt",
+            "data": base64::engine::general_purpose::STANDARD.encode(b"pwned"),
+        }]);
+        let err = write_chart_files(Some(&malicious), tmp.path());
+        assert!(matches!(err, Err(ChartExtractError::BadFileEntry)));
+        // Nothing was written outside (or inside) the chart root.
+        assert!(!tmp.path().parent().unwrap().join("escape.txt").exists());
     }
 
     #[test]

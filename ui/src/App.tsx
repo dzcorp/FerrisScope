@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -31,6 +31,7 @@ import { NotificationsPanel } from "./components/NotificationsPanel";
 import { PortForwardsPanel } from "./components/PortForwardsPanel";
 import { confirm, toast } from "./lib/dialog";
 import { latinLetter, IS_MAC } from "./lib/keyboard";
+import { applyThemeCssVars } from "./lib/themeDom";
 import { Icons } from "./components/ui";
 
 const RAIL_COLLAPSED_W = 56;
@@ -586,51 +587,25 @@ export default function App() {
 
   const resolved = useResolvedTheme();
   const t = resolved.tokens;
-  document.body.style.background = t.bg;
-  document.body.style.color = t.text;
-  // Theme typography flows to the document so every component that doesn't
-  // explicitly override font / base size picks it up. Cheap blanket effect —
-  // covers the long tail of components that haven't been swept to consume
-  // ResolvedTheme directly.
-  document.body.style.fontFamily = resolved.typography.fontSans;
-  document.body.style.fontSize = `${resolved.typography.base}px`;
-  // macOS vibrancy: the window is transparent and an NSVisualEffectView sits
-  // behind the webview (tauri.macos.conf.json). The page background must be
-  // clear for that material to show through; the opaque content area repaints
-  // t.bg itself. No-op (and reverts to the stylesheet) off macOS.
-  document.body.style.background = IS_MAC ? "transparent" : "";
-  // Publish the typography + sizing scale as CSS custom properties so
-  // components can read `var(--fs-fs-sm)` etc. without each one threading
-  // ResolvedTheme through props. Incremental migration: components keep
-  // their inline pixel literals as the var fallback until they're swept.
-  const root = document.documentElement.style;
-  root.setProperty("--fs-font-sans", resolved.typography.fontSans);
-  root.setProperty("--fs-font-mono", resolved.typography.fontMono);
-  root.setProperty("--fs-fs-xs", `${resolved.typography.scale.xs}px`);
-  root.setProperty("--fs-fs-sm", `${resolved.typography.scale.sm}px`);
-  root.setProperty("--fs-fs-md", `${resolved.typography.scale.md}px`);
-  root.setProperty("--fs-fs-lg", `${resolved.typography.scale.lg}px`);
-  root.setProperty("--fs-fs-xl", `${resolved.typography.scale.xl}px`);
-  root.setProperty("--fs-radius-sm", `${resolved.sizing.radius.sm}px`);
-  root.setProperty("--fs-radius-md", `${resolved.sizing.radius.md}px`);
-  root.setProperty("--fs-radius-lg", `${resolved.sizing.radius.lg}px`);
-  root.setProperty("--fs-control-h", `${resolved.sizing.controlHeight}px`);
-  root.setProperty("--fs-border-w", `${resolved.sizing.borderWidth}px`);
-  // Publish the custom-titlebar height (Linux only — 0 elsewhere) as a
-  // CSS variable. Every fixed-position overlay (scrim, side panel,
-  // modal, dock) reads `var(--fs-titlebar-h, 0px)` for its top inset so
-  // the titlebar stays accessible (drag, close) above modals — matching
-  // native macOS/Windows behavior.
-  document.documentElement.style.setProperty(
-    "--fs-titlebar-h",
-    `${TITLEBAR_INSET_PX}px`,
-  );
-  // Tell native form controls (select dropdowns, scrollbars, autofill) to
-  // theme themselves to match — otherwise the OS defaults to light, leaving
-  // a white dropdown list on a dark page.
-  document.documentElement.style.colorScheme = themeMode;
-  // Note: UI scale is applied via the webview's native page-zoom API in the
-  // sibling useEffect above (and pre-applied from prefs in Rust setup()).
+  // Publish theme-derived DOM state — body background/typography, the `:root`
+  // CSS custom properties, and the native `color-scheme` — as a layout effect
+  // rather than inline in the render body.
+  //
+  // These are idempotent DOM writes whose values change ONLY when the resolved
+  // theme or mode changes. Running them inline meant they re-ran on every App
+  // render (App re-renders on every selection toggle, since it subscribes to
+  // `s.selection`), and writing to `document.*` during render is a side effect
+  // that double-applies under concurrent/Strict-Mode double-render. Keying the
+  // effect on `[resolved, themeMode]` runs it only when the theme actually
+  // changes; `useLayoutEffect` applies it before paint, so there's no flash.
+  useLayoutEffect(() => {
+    applyThemeCssVars(resolved, themeMode, {
+      isMac: IS_MAC,
+      titlebarInsetPx: TITLEBAR_INSET_PX,
+    });
+    // Note: UI scale is applied via the webview's native page-zoom API in the
+    // sibling useEffect above (and pre-applied from prefs in Rust setup()).
+  }, [resolved, themeMode]);
 
   const leftInset = selectedContext
     ? railMode === "pinned"

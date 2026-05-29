@@ -235,6 +235,54 @@ impl DirtyChannel {
             init_done: std::mem::replace(&mut s.init_done_pending, false),
         }
     }
+
+    /// Drain at most `max` `Upsert` + `Delete` deltas, leaving any remainder
+    /// in the channel for a subsequent call. A `max` of 0 means "no cap"
+    /// (equivalent to [`drain`](Self::drain)).
+    ///
+    /// `init_done` is only carried out when this call fully empties the
+    /// backing maps — so a forwarder draining in chunks never emits
+    /// "initial sync complete" before every initial row has been delivered.
+    fn drain_capped(&self, max: usize) -> DrainedBatch {
+        let mut s = self.state.lock().expect("dirty channel poisoned");
+        // Fast path: the whole pending set fits (the steady-state norm — by-uid
+        // coalescing keeps batches tiny). Take it all, `init_done` included.
+        if max == 0 || s.changed.len() + s.deleted.len() <= max {
+            return DrainedBatch {
+                upserts: std::mem::take(&mut s.changed),
+                deletes: std::mem::take(&mut s.deleted),
+                init_done: std::mem::replace(&mut s.init_done_pending, false),
+            };
+        }
+        // Capped path (init bursts only): take up to `max` deltas. Deletes go
+        // first (cheap, usually few), then fill the remaining budget from
+        // upserts. The maps are non-empty afterwards by construction (we only
+        // get here when total > max), so `init_done` is held back.
+        let mut budget = max;
+        let mut deletes = HashSet::new();
+        if !s.deleted.is_empty() {
+            let take: Vec<String> = s.deleted.iter().take(budget).cloned().collect();
+            for uid in take {
+                s.deleted.remove(&uid);
+                deletes.insert(uid);
+            }
+            budget -= deletes.len();
+        }
+        let mut upserts = HashMap::new();
+        if budget > 0 {
+            let take: Vec<String> = s.changed.keys().take(budget).cloned().collect();
+            for uid in take {
+                if let Some(v) = s.changed.remove(&uid) {
+                    upserts.insert(uid, v);
+                }
+            }
+        }
+        DrainedBatch {
+            upserts,
+            deletes,
+            init_done: false,
+        }
+    }
 }
 
 /// Drain side of a [`ResourceWatcher`]'s delta stream. Obtain via
@@ -259,6 +307,15 @@ impl ResourceDrainer {
     /// fresh empty maps while the caller emits this batch.
     pub fn drain(&self) -> DrainedBatch {
         self.chan.drain()
+    }
+
+    /// Take at most `max` `Upsert` + `Delete` deltas, leaving the remainder
+    /// for the next call (`max == 0` means "no cap"). Lets a forwarder bound
+    /// the size of each emitted batch during the initial-sync burst — see
+    /// [`DirtyChannel::drain_capped`]. `init_done` is withheld until the
+    /// backing maps are fully drained.
+    pub fn drain_capped(&self, max: usize) -> DrainedBatch {
+        self.chan.drain_capped(max)
     }
 }
 
@@ -1333,6 +1390,83 @@ mod tests {
         assert!(batch.deletes.is_empty(), "upsert must clear pending delete");
         assert_eq!(batch.upserts.len(), 1);
         assert_eq!(batch.upserts["u1"]["name"], "a");
+    }
+
+    #[tokio::test]
+    async fn drain_capped_bounds_each_batch_and_loses_nothing() {
+        // An init-phase drain can carry one distinct uid per object. Draining
+        // in capped chunks must bound each batch yet deliver every uid exactly
+        // once across the chunks.
+        let chan = DirtyChannel::new();
+        const N: usize = 2_500;
+        for i in 0..N {
+            chan.record_upsert(format!("u{i}"), row(&format!("v{i}")));
+        }
+        let mut seen = HashSet::new();
+        let mut chunks = 0;
+        loop {
+            let batch = chan.drain_capped(1000);
+            if batch.is_empty() {
+                break;
+            }
+            assert!(batch.delta_count() <= 1000, "chunk exceeded the cap");
+            for uid in batch.upserts.keys() {
+                assert!(seen.insert(uid.clone()), "uid emitted twice: {uid}");
+            }
+            chunks += 1;
+        }
+        assert_eq!(seen.len(), N, "every uid must be delivered exactly once");
+        assert_eq!(chunks, 3, "2500 / 1000 → 1000 + 1000 + 500");
+        assert!(chan.drain().is_empty(), "channel fully drained");
+    }
+
+    #[tokio::test]
+    async fn drain_capped_withholds_init_done_until_fully_drained() {
+        // `init_done` means "initial sync complete". When the initial set is
+        // sliced across chunks, the marker must ride the LAST chunk, never an
+        // intermediate one — else the frontend flips to "ready" with rows
+        // still in flight.
+        let chan = DirtyChannel::new();
+        for i in 0..2_500 {
+            chan.record_upsert(format!("u{i}"), row("x"));
+        }
+        chan.mark_init_done();
+
+        let first = chan.drain_capped(1000);
+        assert!(!first.init_done, "init_done must not ride an early chunk");
+        let second = chan.drain_capped(1000);
+        assert!(!second.init_done, "init_done must not ride a middle chunk");
+        let last = chan.drain_capped(1000);
+        assert!(last.init_done, "init_done rides the final chunk");
+        assert_eq!(last.delta_count(), 500);
+        assert!(chan.drain_capped(1000).is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_capped_fast_path_takes_all_under_cap() {
+        // The common case: a steady-state batch fits under the cap, so one
+        // call takes everything plus the init_done marker.
+        let chan = DirtyChannel::new();
+        for i in 0..5 {
+            chan.record_upsert(format!("u{i}"), row("x"));
+        }
+        chan.mark_init_done();
+        let batch = chan.drain_capped(1000);
+        assert_eq!(batch.upserts.len(), 5);
+        assert!(batch.init_done);
+        assert!(chan.drain_capped(1000).is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_capped_zero_means_no_cap() {
+        let chan = DirtyChannel::new();
+        for i in 0..2_000 {
+            chan.record_upsert(format!("u{i}"), row("x"));
+        }
+        chan.mark_init_done();
+        let batch = chan.drain_capped(0);
+        assert_eq!(batch.upserts.len(), 2_000, "max=0 drains everything");
+        assert!(batch.init_done);
     }
 
     #[tokio::test]

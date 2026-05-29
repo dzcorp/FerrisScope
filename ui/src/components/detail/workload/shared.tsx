@@ -25,6 +25,7 @@ import {
   type KeyRefSelection,
 } from "../keyRefPicker";
 import {
+  Mono,
   ChipStrip,
   ChipWrap,
   CollapsibleCard,
@@ -123,7 +124,7 @@ export function MetaSection({
         </DetailRow>
         <DetailRow t={t} label="Name">
           <Copyable text={meta.name}>
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{meta.name}</span>
+            <Mono>{meta.name}</Mono>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Namespace">
@@ -202,9 +203,9 @@ export function MetaSection({
         />
         {meta.generation != null && (
           <DetailRow t={t} label="Generation">
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {meta.generation}
-            </span>
+            </Mono>
           </DetailRow>
         )}
       </div>
@@ -809,9 +810,9 @@ export function PodTemplateSection({
         {template.priority_class && (
           <DetailRow t={t} label="Priority Class">
             <Copyable text={template.priority_class}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {template.priority_class}
-              </span>
+              </Mono>
             </Copyable>
           </DetailRow>
         )}

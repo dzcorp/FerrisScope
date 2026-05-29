@@ -17,6 +17,7 @@ import { FF_MONO, type ThemeMode, type Tokens, R_MD, FS_MD, FS_SM, FS_XS } from 
 import {  } from "../../../theme";
 import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
+  Mono,
   ChipWrap,
   Copyable,
   DetailRow,
@@ -527,15 +528,15 @@ function HelmReleaseView({
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Name">
           <Copyable text={d.name}>
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.name}</span>
+            <Mono>{d.name}</Mono>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Namespace">
           {d.namespace ? (
             <Copyable text={d.namespace}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.namespace}
-              </span>
+              </Mono>
             </Copyable>
           ) : (
             <Mute t={t}>—</Mute>
@@ -543,13 +544,13 @@ function HelmReleaseView({
         </DetailRow>
         <DetailRow t={t} label="Revision">
           <Copyable text={String(d.revision)}>
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.revision}</span>
+            <Mono>{d.revision}</Mono>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Status">
           {d.status ? (
             <Copyable text={d.status}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.status}</span>
+              <Mono>{d.status}</Mono>
             </Copyable>
           ) : (
             <Mute t={t}>—</Mute>
@@ -595,9 +596,9 @@ function HelmReleaseView({
         {d.deleted ? (
           <DetailRow t={t} label="Deleted">
             <Copyable text={d.deleted}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {ageFromIso(d.deleted)} ago
-              </span>
+              </Mono>
             </Copyable>
           </DetailRow>
         ) : null}
@@ -609,7 +610,7 @@ function HelmReleaseView({
         <DetailRow t={t} label="Reference">
           {d.chart ? (
             <Copyable text={d.chart}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>{d.chart}</span>
+              <Mono>{d.chart}</Mono>
             </Copyable>
           ) : (
             <Mute t={t}>—</Mute>

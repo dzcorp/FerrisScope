@@ -10,7 +10,7 @@
 //! and reconnects across mid-stream drops / container restarts without
 //! re-emitting already-shown lines. Aborts the underlying task on drop.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{AsyncBufRead, AsyncBufReadExt, StreamExt};
@@ -296,6 +296,14 @@ async fn open_stream(
 
 pub struct LogStream {
     tx: broadcast::Sender<LogEvent>,
+    /// Receiver subscribed *before* the reader task starts producing, so the
+    /// first consumer can't miss the initial tail. tokio `broadcast` only
+    /// delivers values sent *after* a receiver subscribes — a receiver created
+    /// once `start` returns (the forwarder does this) could otherwise miss the
+    /// 200-line tail burst the reader fires immediately. Handed to the first
+    /// `subscribe` caller; later callers (a rare second viewer of the same
+    /// stream) get a fresh, best-effort receiver.
+    initial_rx: Mutex<Option<broadcast::Receiver<LogEvent>>>,
     task: JoinHandle<()>,
 }
 
@@ -313,7 +321,12 @@ impl LogStream {
         let pod = pod.to_owned();
         let container: Option<String> = container.map(ToOwned::to_owned);
 
-        let (tx, _rx) = broadcast::channel(LINE_BUFFER);
+        // Subscribe `initial_rx` here, before the reader task is spawned, so
+        // the first consumer is guaranteed to be attached for the very first
+        // `send` — closing the race where the reader's tail burst lands before
+        // the forwarder subscribes (broadcast receivers never see pre-subscribe
+        // sends, and the 200-line tail can outrun the subscribe gap).
+        let (tx, initial_rx) = broadcast::channel(LINE_BUFFER);
         let tx_task = tx.clone();
 
         let task = tokio::spawn(async move {
@@ -420,12 +433,23 @@ impl LogStream {
             }
         });
 
-        Ok(Arc::new(Self { tx, task }))
+        Ok(Arc::new(Self {
+            tx,
+            initial_rx: Mutex::new(Some(initial_rx)),
+            task,
+        }))
     }
 
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<LogEvent> {
-        self.tx.subscribe()
+        // Hand the pre-subscribed receiver to the first consumer so it can't
+        // miss lines the reader already sent; later consumers get a fresh
+        // (post-subscribe, best-effort) receiver.
+        self.initial_rx
+            .lock()
+            .expect("log stream initial_rx mutex poisoned")
+            .take()
+            .unwrap_or_else(|| self.tx.subscribe())
     }
 }
 
@@ -452,6 +476,41 @@ mod tests {
             code,
             ..Default::default()
         }))
+    }
+
+    #[tokio::test]
+    async fn first_subscriber_receives_lines_sent_before_subscribe() {
+        // Mirrors `start`: `initial_rx` is subscribed up-front, so a line the
+        // reader sends before the consumer calls `subscribe` is still
+        // delivered. Guards the regression where `subscribe` returned a fresh
+        // `tx.subscribe()` and the first consumer missed the initial tail
+        // burst (tokio broadcast never delivers pre-subscribe sends).
+        let (tx, initial_rx) = broadcast::channel(8);
+        let ls = LogStream {
+            tx: tx.clone(),
+            initial_rx: Mutex::new(Some(initial_rx)),
+            task: tokio::spawn(async {}),
+        };
+
+        // Reader emits a line BEFORE the consumer subscribes.
+        tx.send(LogEvent::Line {
+            text: "early".to_owned(),
+        })
+        .expect("a receiver (initial_rx) is alive");
+
+        let mut rx = ls.subscribe();
+        match rx.try_recv() {
+            Ok(LogEvent::Line { text }) => assert_eq!(text, "early"),
+            other => panic!("first subscriber must see the pre-subscribe line, got {other:?}"),
+        }
+
+        // A second viewer gets a fresh, best-effort receiver: it only sees
+        // lines from its own subscribe point, so "early" isn't redelivered.
+        let mut rx2 = ls.subscribe();
+        assert!(
+            rx2.try_recv().is_err(),
+            "second subscriber is fresh (post-subscribe only)"
+        );
     }
 
     #[test]

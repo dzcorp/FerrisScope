@@ -12,6 +12,7 @@ import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS } from "../..
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
+  Mono,
   ChipWrap,
   Copyable,
   DetailRow,
@@ -135,31 +136,31 @@ export function CustomResourceDefinitionSummary(props: {
       <div style={{ marginBottom: 22 }}>
         <DetailRow t={t} label="Group">
           <Copyable text={d.group}>
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {d.group}
-            </span>
+            </Mono>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Kind">
           <Copyable text={d.names.kind}>
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {d.names.kind}
-            </span>
+            </Mono>
           </Copyable>
         </DetailRow>
         <DetailRow t={t} label="Plural">
           <Copyable text={d.names.plural}>
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {d.names.plural}
-            </span>
+            </Mono>
           </Copyable>
         </DetailRow>
         {d.names.singular && (
           <DetailRow t={t} label="Singular">
             <Copyable text={d.names.singular}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.names.singular}
-              </span>
+              </Mono>
             </Copyable>
           </DetailRow>
         )}

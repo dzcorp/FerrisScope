@@ -8,13 +8,14 @@
 // and namespace-scoped variants share their renderer (the only difference is
 // `meta.namespace`).
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section } from "../../ui";
 import {
+  Mono,
   ChipWrap,
   Copyable,
   DetailRow,
@@ -25,6 +26,7 @@ import {
   Mute,
   ageFromIso,
   type DetailNavigate,
+  useDetail,
 } from "..";
 import { MetaSection } from "../workload/shared";
 import type {
@@ -37,35 +39,6 @@ import type {
   RoleRefSummary,
   ServiceAccountDetail,
 } from "../../../types";
-
-type LoadState<T> =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: T }
-  | { kind: "error"; message: string };
-
-function useDetail<T>(
-  fetcher: () => Promise<T>,
-  deps: ReadonlyArray<unknown>,
-): LoadState<T> {
-  const [state, setState] = useState<LoadState<T>>({ kind: "loading" });
-  const reqId = useRef(0);
-  useEffect(() => {
-    const id = ++reqId.current;
-    // No `setState({ loading })` on refetch — keep the previous detail on
-    // screen until the new fetch resolves so the panel doesn't collapse and
-    // snap the scroll container back to the top after every action.
-    fetcher()
-      .then((detail) => {
-        if (reqId.current === id) setState({ kind: "ready", detail });
-      })
-      .catch((e: unknown) => {
-        if (reqId.current === id)
-          setState({ kind: "error", message: String(e) });
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-  return state;
-}
 
 function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
   return (
@@ -704,9 +677,9 @@ export function ClusterRoleSummary(props: {
             <Section t={t} title="Aggregation Rule" />
             <div style={{ marginBottom: 22 }}>
               <DetailRow t={t} label="Selectors">
-                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                <Mono>
                   {d.aggregation_rule.selector_count}
-                </span>
+                </Mono>
               </DetailRow>
               {d.aggregation_rule.match_labels.length > 0 && (
                 <DetailRow t={t} label="Match Labels">

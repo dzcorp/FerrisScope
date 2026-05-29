@@ -5,9 +5,9 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
-import { renderCell } from "./ResourceTable";
+import { renderCell, selectPodMetrics } from "./ResourceTable";
 import { tokens } from "../theme";
-import type { ColumnDef, ResourceRow } from "../types";
+import type { ColumnDef, MetricsSnapshot, ResourceRow } from "../types";
 
 const t = tokens("dark");
 
@@ -111,6 +111,36 @@ describe("renderCell — node link", () => {
     );
     fireEvent.click(container.firstChild as Element);
     expect(nav).not.toHaveBeenCalled();
+  });
+});
+
+describe("selectPodMetrics — metrics read gated on isPods", () => {
+  const pods = { "uid-1": { cpu_milli: 250, mem_mib: 512 } };
+  const snap = { pods } as unknown as MetricsSnapshot;
+
+  it("returns the pods map for a Pods table", () => {
+    expect(selectPodMetrics(true)({ metrics: snap })).toBe(pods);
+  });
+
+  it("returns null for non-Pod tables even when metrics are present", () => {
+    // This is the gate: a ConfigMap/Secret/Deployment table must read a
+    // stable null so the ~1 Hz metrics tick never re-renders it.
+    expect(selectPodMetrics(false)({ metrics: snap })).toBeNull();
+  });
+
+  it("returns null when no metrics snapshot exists yet", () => {
+    expect(selectPodMetrics(true)({ metrics: null })).toBeNull();
+  });
+
+  it("returns a referentially-stable null across snapshots for non-Pod tables", () => {
+    // Two distinct snapshots both resolve to the SAME null, so Zustand's
+    // Object.is comparison sees no change and skips the re-render.
+    const a = selectPodMetrics(false)({ metrics: snap });
+    const b = selectPodMetrics(false)({
+      metrics: { pods: { "uid-2": { cpu_milli: 1, mem_mib: 2 } } } as unknown as MetricsSnapshot,
+    });
+    expect(a).toBe(b);
+    expect(a).toBeNull();
   });
 });
 

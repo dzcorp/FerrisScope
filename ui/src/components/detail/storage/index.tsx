@@ -4,7 +4,7 @@
 // from `..` compose the body; MetaSection carries the editTarget so labels +
 // annotations are editable without each kind reimplementing the pencil.
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
 import {
@@ -21,6 +21,7 @@ import {
   EditableTextValue,
 } from "../edit";
 import {
+  Mono,
   ChipWrap,
   Copyable,
   DetailRow,
@@ -33,6 +34,7 @@ import {
   parseQuantity,
   useEditField,
   type DetailNavigate,
+  useDetail,
 } from "..";
 import { ConditionsSection, MetaSection } from "../workload/shared";
 import type {
@@ -40,35 +42,6 @@ import type {
   PersistentVolumeDetail,
   StorageClassDetail,
 } from "../../../types";
-
-type LoadState<T> =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: T }
-  | { kind: "error"; message: string };
-
-function useDetail<T>(
-  fetcher: () => Promise<T>,
-  deps: ReadonlyArray<unknown>,
-): LoadState<T> {
-  const [state, setState] = useState<LoadState<T>>({ kind: "loading" });
-  const reqId = useRef(0);
-  useEffect(() => {
-    const id = ++reqId.current;
-    // No `setState({ loading })` on refetch — keep the previous detail on
-    // screen until the new fetch resolves so the panel doesn't collapse and
-    // snap the scroll container back to the top after every action.
-    fetcher()
-      .then((detail) => {
-        if (reqId.current === id) setState({ kind: "ready", detail });
-      })
-      .catch((e: unknown) => {
-        if (reqId.current === id)
-          setState({ kind: "error", message: String(e) });
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-  return state;
-}
 
 function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
   return (
@@ -638,9 +611,9 @@ export function PersistentVolumeSummary(props: {
             <Section t={t} title="Node Affinity" />
             <div style={{ marginBottom: 22 }}>
               <DetailRow t={t} label="Required Terms">
-                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                <Mono>
                   {d.node_affinity.term_count}
-                </span>
+                </Mono>
               </DetailRow>
               {d.node_affinity.keys.length > 0 && (
                 <DetailRow t={t} label="Keys">
@@ -831,9 +804,9 @@ export function StorageClassSummary(props: {
             <Section t={t} title="Allowed Topologies" />
             <div style={{ marginBottom: 22 }}>
               <DetailRow t={t} label="Terms">
-                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                <Mono>
                   {d.allowed_topologies.term_count}
-                </span>
+                </Mono>
               </DetailRow>
               {d.allowed_topologies.keys.length > 0 && (
                 <DetailRow t={t} label="Keys">

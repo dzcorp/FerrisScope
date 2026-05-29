@@ -371,39 +371,17 @@ fn format_totals(
         .collect()
 }
 
+// CPU cores → millicores, memory bytes → MiB. Both delegate to the one shared
+// Quantity parser (`ferrisscope_core::quantity`); the rounding-to-i64 and the
+// "skip unparseable entries" contract (`None` is dropped by `accumulate`) stay
+// here because they're specific to this projection.
 fn parse_cpu_milli(raw: &str) -> Option<i64> {
-    let raw = raw.trim();
-    if let Some(rest) = raw.strip_suffix('m') {
-        rest.parse::<i64>().ok()
-    } else {
-        // whole cores or fractional cores
-        raw.parse::<f64>().ok().map(|f| (f * 1000.0).round() as i64)
-    }
+    ferrisscope_core::quantity::parse_quantity(raw).map(|cores| (cores * 1000.0).round() as i64)
 }
 
 fn parse_memory_mib(raw: &str) -> Option<i64> {
-    let raw = raw.trim();
-    let (num, unit): (&str, &str) = if let Some(idx) = raw.find(|c: char| c.is_alphabetic()) {
-        raw.split_at(idx)
-    } else {
-        (raw, "")
-    };
-    let n: f64 = num.parse().ok()?;
-    let bytes = match unit {
-        "" => n,
-        "K" => n * 1_000.0,
-        "Ki" => n * 1_024.0,
-        "M" => n * 1_000_000.0,
-        "Mi" => n * 1_024.0 * 1_024.0,
-        "G" => n * 1_000_000_000.0,
-        "Gi" => n * 1_024.0 * 1_024.0 * 1_024.0,
-        "T" => n * 1e12,
-        "Ti" => n * 1_024_f64.powi(4),
-        "P" => n * 1e15,
-        "Pi" => n * 1_024_f64.powi(5),
-        _ => return None,
-    };
-    Some((bytes / (1024.0 * 1024.0)).round() as i64)
+    ferrisscope_core::quantity::parse_quantity(raw)
+        .map(|bytes| (bytes / (1024.0 * 1024.0)).round() as i64)
 }
 
 fn parse_plain_int(raw: &str) -> Option<i64> {

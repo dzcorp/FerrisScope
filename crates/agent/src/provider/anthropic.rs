@@ -291,15 +291,11 @@ impl ChatProvider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?;
+            .map_err(|e| ProviderError::transport(e.to_string()))?;
         if !resp.status().is_success() {
-            let status = resp.status();
+            let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            return Err(if status == reqwest::StatusCode::UNAUTHORIZED {
-                ProviderError::Auth(body)
-            } else {
-                ProviderError::Http(format!("{status}: {body}"))
-            });
+            return Err(ProviderError::from_http_status(status, body));
         }
 
         let mut stream = resp.bytes_stream().eventsource();

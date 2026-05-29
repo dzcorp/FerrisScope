@@ -45,20 +45,24 @@ export function Rail({}: Props) {
   const resolved = useResolvedTheme();
   const t = resolved.tokens;
   const themeMode = resolved.mode;
-  const {
-    kinds,
-    kindsStatus,
-    kindsError,
-    selectedKindId,
-    selectedContext,
-    setKinds,
-    setKindsLoading,
-    setKindsError,
-    selectKind,
-    railMode,
-    setRailMode,
-    cycleRailMode,
-  } = useAppStore();
+  // Per-field selectors, not a bulk `useAppStore()` destructure: the bulk form
+  // subscribes to the whole state object, so this always-mounted rail would
+  // re-render its full kind list on every unrelated mutation (metrics tick,
+  // table-count updates, toasts, selection toggles). Each selector below
+  // re-renders only when its own slice changes; the action functions are
+  // stable store references and never trigger a render.
+  const kinds = useAppStore((s) => s.kinds);
+  const kindsStatus = useAppStore((s) => s.kindsStatus);
+  const kindsError = useAppStore((s) => s.kindsError);
+  const selectedKindId = useAppStore((s) => s.selectedKindId);
+  const selectedContext = useAppStore((s) => s.selectedContext);
+  const setKinds = useAppStore((s) => s.setKinds);
+  const setKindsLoading = useAppStore((s) => s.setKindsLoading);
+  const setKindsError = useAppStore((s) => s.setKindsError);
+  const selectKind = useAppStore((s) => s.selectKind);
+  const railMode = useAppStore((s) => s.railMode);
+  const setRailMode = useAppStore((s) => s.setRailMode);
+  const cycleRailMode = useAppStore((s) => s.cycleRailMode);
   // Track the static-kind count so we can splice dynamic kinds onto the
   // tail of `kinds` and `setKinds` again — keeps `s.kinds.find(...)`
   // working in ClusterPanel (which is what discovers the table to render).

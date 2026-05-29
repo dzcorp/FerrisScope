@@ -9,7 +9,7 @@
 // hook into — keep the row structure stable so the Edit pencil can drop in
 // per-row without reflowing the layout.
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
@@ -28,6 +28,7 @@ import {
   EditSessionProvider,
   useEditField,
   GlobalSaveBar,
+  useDetail,
 } from "..";
 import type {
   ConfigMapDetail,
@@ -44,36 +45,6 @@ import {
 } from "../edit";
 
 // ── Local fetch + chrome (mirrors cluster/index.tsx) ───────────────────────
-
-type LoadState<T> =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: T }
-  | { kind: "error"; message: string };
-
-function useDetail<T>(
-  fetcher: () => Promise<T>,
-  deps: ReadonlyArray<unknown>,
-): LoadState<T> {
-  const [state, setState] = useState<LoadState<T>>({ kind: "loading" });
-  const reqId = useRef(0);
-  useEffect(() => {
-    const id = ++reqId.current;
-    // No `setState({ loading })` on refetch — keep the previous detail on
-    // screen until the new fetch resolves so the panel doesn't collapse and
-    // snap the scroll container back to the top after every action (save,
-    // force-takeover, etc.).
-    fetcher()
-      .then((detail) => {
-        if (reqId.current === id) setState({ kind: "ready", detail });
-      })
-      .catch((e: unknown) => {
-        if (reqId.current === id)
-          setState({ kind: "error", message: String(e) });
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-  return state;
-}
 
 function Frame({ t, children }: { t: Tokens; children: ReactNode }) {
   return (

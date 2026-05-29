@@ -3,13 +3,14 @@
 // workload + cluster summaries: fetch on mount + on detailVersion bumps,
 // compose shared primitives, dispatch from DetailPanel.
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
+  Mono,
   ChipStrip,
   ChipWrap,
   Copyable,
@@ -22,6 +23,7 @@ import {
   EditSessionProvider,
   useEditField,
   GlobalSaveBar,
+  useDetail,
 } from "..";
 import type {
   EndpointAddress,
@@ -58,35 +60,6 @@ import {
   type ListBuffer,
 } from "../edit";
 import { useMemo } from "react";
-
-type LoadState<T> =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: T }
-  | { kind: "error"; message: string };
-
-function useDetail<T>(
-  fetcher: () => Promise<T>,
-  deps: ReadonlyArray<unknown>,
-): LoadState<T> {
-  const [state, setState] = useState<LoadState<T>>({ kind: "loading" });
-  const reqId = useRef(0);
-  useEffect(() => {
-    const id = ++reqId.current;
-    // No `setState({ loading })` on refetch — keep the previous detail on
-    // screen until the new fetch resolves so the panel doesn't collapse and
-    // snap the scroll container back to the top after every action.
-    fetcher()
-      .then((detail) => {
-        if (reqId.current === id) setState({ kind: "ready", detail });
-      })
-      .catch((e: unknown) => {
-        if (reqId.current === id)
-          setState({ kind: "error", message: String(e) });
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-  return state;
-}
 
 function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
   return (
@@ -140,9 +113,9 @@ function LoadBalancerSection({
                 <Mute t={t}>—</Mute>
               ) : (
                 <Copyable text={addr}>
-                  <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                  <Mono>
                     {addr}
-                  </span>
+                  </Mono>
                 </Copyable>
               )}
               {i.ports.length > 0 && (
@@ -330,9 +303,9 @@ export function ServiceSummary(props: {
               {d.cluster_ip && (
                 <DetailRow t={t} label="Cluster IP">
                   <Copyable text={d.cluster_ip}>
-                    <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                    <Mono>
                       {d.cluster_ip}
-                    </span>
+                    </Mono>
                   </Copyable>
                 </DetailRow>
               )}
@@ -419,9 +392,9 @@ export function ServiceSummary(props: {
           )}
           {d.health_check_node_port != null && (
             <DetailRow t={t} label="Health Check NodePort">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.health_check_node_port}
-              </span>
+              </Mono>
             </DetailRow>
           )}
           {d.publish_not_ready_addresses && (
@@ -727,11 +700,11 @@ function ServicePortRow({
   return (
     <DetailRow t={t} label={label}>
       <Copyable text={`${port.port}/${port.protocol}`}>
-        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+        <Mono>
           {port.port}/{port.protocol}
           {target}
           {nodePort}
-        </span>
+        </Mono>
       </Copyable>
       {port.app_protocol && (
         <Chip t={t} mono>
@@ -986,9 +959,9 @@ function EndpointAddressRow({
         {label === "Ready" ? "READY" : "NOT READY"}
       </span>
       <Copyable text={address.ip}>
-        <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+        <Mono>
           {address.ip}
-        </span>
+        </Mono>
       </Copyable>
       {address.hostname && (
         <span style={{ fontSize: FS_SM, color: t.textDim }}>
@@ -1252,9 +1225,9 @@ function EndpointSliceEntryRow({
       {entry.hostname && (
         <DetailRow t={t} label="Hostname">
           <Copyable text={entry.hostname}>
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {entry.hostname}
-            </span>
+            </Mono>
           </Copyable>
         </DetailRow>
       )}
@@ -1272,9 +1245,9 @@ function EndpointSliceEntryRow({
       )}
       {entry.zone && (
         <DetailRow t={t} label="Zone">
-          <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+          <Mono>
             {entry.zone}
-          </span>
+          </Mono>
         </DetailRow>
       )}
       <TargetRefRow
@@ -1636,9 +1609,9 @@ function BackendValue({
           {backend.resource.kind}
         </span>
         <Copyable text={backend.resource.name}>
-          <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+          <Mono>
             {backend.resource.name}
-          </span>
+          </Mono>
         </Copyable>
         {backend.resource.api_group && (
           <span style={{ fontSize: FS_SM, color: t.textMuted }}>

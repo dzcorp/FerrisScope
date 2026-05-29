@@ -11,6 +11,7 @@ export {
   LinkValue,
   ChipWrap,
   Mute,
+  Mono,
   ExpandableList,
   CollapsibleCard,
   useCollapseGroup,
@@ -38,3 +39,5 @@ export {
 } from "./editSession";
 export type { ConflictInfo } from "./editSession";
 export { GlobalSaveBar } from "./globalSaveBar";
+export { useDetail } from "./useDetail";
+export type { LoadState } from "./useDetail";

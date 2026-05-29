@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { Mono } from "./detail";
 import type { ContextInfo, ClusterInfo } from "../types";
 import { tokens, FF_MONO, type ThemeMode, R_LG, R_MD, FS_MD, FS_XS } from "../theme";
 import { useAppStore, useResolvedTheme } from "../store";
@@ -133,9 +134,9 @@ export function ClusterBar({ mode, context, state, style }: Props) {
         t={t}
         label="Cluster"
         value={
-          <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+          <Mono>
             {context.cluster}
-          </span>
+          </Mono>
         }
       />
       {showUser && context.user && (
@@ -143,9 +144,9 @@ export function ClusterBar({ mode, context, state, style }: Props) {
           t={t}
           label="User"
           value={
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {context.user}
-            </span>
+            </Mono>
           }
         />
       )}

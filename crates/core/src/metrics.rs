@@ -209,29 +209,58 @@ pub(crate) enum MetricsError {
 /// missing metrics-server doesn't mask kubelet volume stats and vice versa,
 /// because operators commonly have one but not both.
 async fn poll(client: &Client) -> MetricsSnapshot {
-    let metrics_fut = async {
-        let pods = list_pod_metrics(client).await?;
-        let nodes = list_node_metrics(client).await?;
-        let caps = list_node_capacity(client).await?;
-        Ok::<_, MetricsError>((pods, nodes, caps))
-    };
-    let volumes_fut = list_volume_stats(client);
+    // Resolve the metrics-server / capacity calls independently so a failure
+    // in one doesn't mask the others. Operators commonly run partial setups
+    // (metrics-server serving PodMetrics but NodeMetrics RBAC-denied, or node
+    // capacity readable while metrics-server is absent). These were chained
+    // with `?` before, so any single failure discarded *all* of them — most
+    // visibly, per-pod CPU/Mem vanished from the table whenever node capacity
+    // 404'd. Now each side stands alone (and they run concurrently, not in
+    // sequence as the old `?`-chained block did).
+    let (pods_res, nodes_res, caps_res, volumes_res) = tokio::join!(
+        list_pod_metrics(client),
+        list_node_metrics(client),
+        list_node_capacity(client),
+        list_volume_stats(client),
+    );
 
-    let (metrics_res, volumes_res) = tokio::join!(metrics_fut, volumes_fut);
+    // Warn on genuine failures; stay quiet on 404 (the API / metrics-server
+    // simply isn't installed — an expected, common state).
+    fn note(label: &str, e: &MetricsError) {
+        let absent = matches!(e, MetricsError::Kube(kube::Error::Api(err)) if err.code == 404);
+        if !absent {
+            tracing::warn!(error = %e, "{label} poll failed");
+        }
+    }
 
-    let (pods, cluster, available) = match metrics_res {
-        Ok((pods, nodes, caps)) => (pods, Some(aggregate(&nodes, &caps)), true),
+    // Per-pod CPU/Mem is the primary metrics-server signal the table joins by
+    // uid; `available` tracks whether that responded, independent of the
+    // node-level calls. (ClusterBar gates its gauge on `available && cluster`,
+    // and `cluster` already requires both node calls below — so the gauge's
+    // behaviour is unchanged; only the per-pod metrics gained resilience.)
+    let (available, pods) = match pods_res {
+        Ok(p) => (true, p),
         Err(e) => {
-            let absent = matches!(
-                &e,
-                MetricsError::Kube(kube::Error::Api(err)) if err.code == 404,
-            );
-            if !absent {
-                tracing::warn!(error = %e, "metrics-server poll failed");
-            }
-            (HashMap::new(), None, false)
+            note("pod metrics", &e);
+            (false, HashMap::new())
         }
     };
+
+    let nodes = match nodes_res {
+        Ok(n) => Some(n),
+        Err(e) => {
+            note("node metrics", &e);
+            None
+        }
+    };
+    let caps = match caps_res {
+        Ok(c) => Some(c),
+        Err(e) => {
+            note("node capacity", &e);
+            None
+        }
+    };
+    let cluster = cluster_aggregate(nodes.as_ref(), caps.as_ref());
 
     let (pod_volumes, pvcs, volumes_available) = match volumes_res {
         Ok((p, v)) if !p.is_empty() || !v.is_empty() => (p, v, true),
@@ -529,6 +558,19 @@ fn parse_volume(vol: &Value, pod_ns: &str, pod_name: &str) -> Option<VolumeMetri
     })
 }
 
+/// Cluster aggregate from independently-resolved node usage + capacity. An
+/// aggregate needs BOTH, so a failure in either yields `None` (the gauge is
+/// suppressed) without discarding the per-pod metrics resolved alongside it.
+fn cluster_aggregate(
+    nodes: Option<&HashMap<String, (u64, u64)>>,
+    caps: Option<&HashMap<String, (u64, u64)>>,
+) -> Option<ClusterMetrics> {
+    match (nodes, caps) {
+        (Some(n), Some(c)) => Some(aggregate(n, c)),
+        _ => None,
+    }
+}
+
 fn aggregate(
     used: &HashMap<String, (u64, u64)>,
     caps: &HashMap<String, (u64, u64)>,
@@ -549,49 +591,17 @@ fn aggregate(
 }
 
 // ── Quantity parsing ───────────────────────────────────────────────────────
-// Kubernetes resource.Quantity uses either a decimal SI suffix (n, u, m, K,
-// M, G, T, P, E) or a binary IEC suffix (Ki, Mi, Gi, Ti, Pi, Ei). We parse
-// to base units (cores, bytes) and then convert to milli/Mi at the call site.
-
-fn parse_quantity_base(s: &str) -> Option<f64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let split = s
-        .char_indices()
-        .find(|(_, c)| !matches!(c, '0'..='9' | '.' | '+' | '-' | 'e' | 'E'))
-        .map_or(s.len(), |(i, _)| i);
-    let (num, suf) = s.split_at(split);
-    let n: f64 = num.parse().ok()?;
-    let mult: f64 = match suf {
-        "" => 1.0,
-        "n" => 1e-9,
-        "u" => 1e-6,
-        "m" => 1e-3,
-        "K" | "k" => 1e3,
-        "M" => 1e6,
-        "G" => 1e9,
-        "T" => 1e12,
-        "P" => 1e15,
-        "E" => 1e18,
-        "Ki" => 1024.0,
-        "Mi" => 1024.0_f64.powi(2),
-        "Gi" => 1024.0_f64.powi(3),
-        "Ti" => 1024.0_f64.powi(4),
-        "Pi" => 1024.0_f64.powi(5),
-        "Ei" => 1024.0_f64.powi(6),
-        _ => return None,
-    };
-    Some(n * mult)
-}
+// The Quantity → base-unit parser lives in `crate::quantity` (shared with
+// kube-ext so there's one copy). Here we only convert: cores → millicores and
+// bytes → MiB, both clamped to a non-negative `u64` for the gauges.
 
 fn cpu_milli(s: &str) -> u64 {
-    parse_quantity_base(s).map_or(0, |c| (c * 1000.0).round().max(0.0) as u64)
+    crate::quantity::parse_quantity(s).map_or(0, |c| (c * 1000.0).round().max(0.0) as u64)
 }
 
 fn mem_mib(s: &str) -> u64 {
-    parse_quantity_base(s).map_or(0, |b| (b / (1024.0 * 1024.0)).round().max(0.0) as u64)
+    crate::quantity::parse_quantity(s)
+        .map_or(0, |b| (b / (1024.0 * 1024.0)).round().max(0.0) as u64)
 }
 
 fn now_ms() -> i64 {
@@ -604,6 +614,25 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cluster_aggregate_requires_both_nodes_and_caps() {
+        let nodes = HashMap::from([("n1".to_owned(), (1000u64, 2048u64))]);
+        let caps = HashMap::from([("n1".to_owned(), (4000u64, 8192u64))]);
+
+        // Both present → aggregate over the nodes.
+        let agg = cluster_aggregate(Some(&nodes), Some(&caps)).expect("aggregate");
+        assert_eq!(agg.cpu_used_milli, 1000);
+        assert_eq!(agg.cpu_capacity_milli, 4000);
+        assert_eq!(agg.mem_used_mib, 2048);
+        assert_eq!(agg.mem_capacity_mib, 8192);
+
+        // Missing either side → None: the gauge is suppressed, but this is the
+        // path that previously also discarded per-pod metrics. It no longer does.
+        assert!(cluster_aggregate(None, Some(&caps)).is_none());
+        assert!(cluster_aggregate(Some(&nodes), None).is_none());
+        assert!(cluster_aggregate(None, None).is_none());
+    }
 
     #[test]
     fn cpu_quantities() {

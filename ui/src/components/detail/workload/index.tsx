@@ -3,13 +3,14 @@
 // composes the shared workload primitives (`MetaSection`, `SelectorRow`,
 // `ConditionsSection`, `PodTemplateSection`) plus a kind-specific block.
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS } from "../../../theme";
 import {  } from "../../../theme";
 import { ErrorBlock, Section, StatusPill, LoadingLine } from "../../ui";
 import {
+  Mono,
   Copyable,
   DetailRow,
   EditSessionProvider,
@@ -17,6 +18,7 @@ import {
   Mute,
   ageFromIso,
   type DetailNavigate,
+  useDetail,
 } from "..";
 import type {
   CronJobDetail,
@@ -35,36 +37,6 @@ import {
   ReplicasEditor,
   SelectorRow,
 } from "./shared";
-
-type LoadState<T> =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: T }
-  | { kind: "error"; message: string };
-
-function useDetail<T>(
-  fetcher: () => Promise<T>,
-  deps: ReadonlyArray<unknown>,
-): LoadState<T> {
-  const [state, setState] = useState<LoadState<T>>({ kind: "loading" });
-  const reqId = useRef(0);
-  useEffect(() => {
-    const id = ++reqId.current;
-    // No `setState({ loading })` on refetch — keep the previous detail on
-    // screen until the new fetch resolves so the panel doesn't collapse and
-    // snap the scroll container back to the top after every action (cordon,
-    // restart, save…). R-01: no spinner on poll.
-    fetcher()
-      .then((detail) => {
-        if (reqId.current === id) setState({ kind: "ready", detail });
-      })
-      .catch((e: unknown) => {
-        if (reqId.current === id)
-          setState({ kind: "error", message: String(e) });
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-  return state;
-}
 
 function Frame({
   t,
@@ -218,30 +190,30 @@ export function DeploymentSummary(props: {
           <StrategyChips t={t} strategy={d.strategy} />
           {d.min_ready_seconds != null && d.min_ready_seconds > 0 && (
             <DetailRow t={t} label="Min Ready">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.min_ready_seconds}s
-              </span>
+              </Mono>
             </DetailRow>
           )}
           {d.progress_deadline_seconds != null && (
             <DetailRow t={t} label="Progress Deadline">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.progress_deadline_seconds}s
-              </span>
+              </Mono>
             </DetailRow>
           )}
           {d.revision_history_limit != null && (
             <DetailRow t={t} label="Revision History">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.revision_history_limit}
-              </span>
+              </Mono>
             </DetailRow>
           )}
           {d.observed_generation != null && (
             <DetailRow t={t} label="Observed Generation">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.observed_generation}
-              </span>
+              </Mono>
             </DetailRow>
           )}
         </div>
@@ -357,16 +329,16 @@ export function ReplicaSetSummary(props: {
           <SelectorRow t={t} selector={d.selector} />
           {d.min_ready_seconds != null && d.min_ready_seconds > 0 && (
             <DetailRow t={t} label="Min Ready">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.min_ready_seconds}s
-              </span>
+              </Mono>
             </DetailRow>
           )}
           {d.observed_generation != null && (
             <DetailRow t={t} label="Observed Generation">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.observed_generation}
-              </span>
+              </Mono>
             </DetailRow>
           )}
         </div>
@@ -484,9 +456,9 @@ export function StatefulSetSummary(props: {
           {d.service_name && (
             <DetailRow t={t} label="Service">
               <Copyable text={d.service_name}>
-                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                <Mono>
                   {d.service_name}
-                </span>
+                </Mono>
               </Copyable>
             </DetailRow>
           )}
@@ -521,9 +493,9 @@ export function StatefulSetSummary(props: {
             )}
           {d.observed_generation != null && (
             <DetailRow t={t} label="Observed Generation">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.observed_generation}
-              </span>
+              </Mono>
             </DetailRow>
           )}
         </div>
@@ -549,9 +521,9 @@ export function StatefulSetSummary(props: {
               {d.volume_claim_templates.map((vct) => (
                 <DetailRow key={vct.name} t={t} label={vct.name}>
                   {vct.storage && (
-                    <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                    <Mono>
                       {vct.storage}
-                    </span>
+                    </Mono>
                   )}
                   {vct.access_modes.length > 0 && (
                     <span style={{ fontSize: FS_SM, color: t.textDim }}>
@@ -696,23 +668,23 @@ export function DaemonSetSummary(props: {
           />
           {d.min_ready_seconds != null && d.min_ready_seconds > 0 && (
             <DetailRow t={t} label="Min Ready">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.min_ready_seconds}s
-              </span>
+              </Mono>
             </DetailRow>
           )}
           {d.revision_history_limit != null && (
             <DetailRow t={t} label="Revision History">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.revision_history_limit}
-              </span>
+              </Mono>
             </DetailRow>
           )}
           {d.observed_generation != null && (
             <DetailRow t={t} label="Observed Generation">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.observed_generation}
-              </span>
+              </Mono>
             </DetailRow>
           )}
         </div>
@@ -814,48 +786,48 @@ export function JobSummary(props: {
         <Section t={t} title="Spec" />
         <div style={{ marginBottom: 22 }}>
           <DetailRow t={t} label="Completions">
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {d.status.succeeded} / {d.completions_desired ?? 1}
               {d.completion_mode ? ` · ${d.completion_mode}` : ""}
-            </span>
+            </Mono>
           </DetailRow>
           {d.parallelism != null && (
             <DetailRow t={t} label="Parallelism">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.parallelism}
-              </span>
+              </Mono>
             </DetailRow>
           )}
           {d.backoff_limit != null && (
             <DetailRow t={t} label="Backoff Limit">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.backoff_limit}
-              </span>
+              </Mono>
             </DetailRow>
           )}
           {d.active_deadline_seconds != null && (
             <DetailRow t={t} label="Active Deadline">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.active_deadline_seconds}s
-              </span>
+              </Mono>
             </DetailRow>
           )}
           {d.ttl_seconds_after_finished != null && (
             <DetailRow t={t} label="TTL After Finished">
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.ttl_seconds_after_finished}s
-              </span>
+              </Mono>
             </DetailRow>
           )}
           <DetailRow t={t} label="Status">
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               active={d.status.active} succeeded={d.status.succeeded} failed=
               {d.status.failed}
               {d.status.ready != null ? ` ready=${d.status.ready}` : ""}
               {d.status.terminating != null
                 ? ` terminating=${d.status.terminating}`
                 : ""}
-            </span>
+            </Mono>
           </DetailRow>
           {d.start_time && (
             <DetailRow t={t} label="Started">
@@ -995,9 +967,9 @@ export function CronJobSummary(props: {
         <DetailRow t={t} label="Cron Expression">
           {d.schedule ? (
             <Copyable text={d.schedule}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+              <Mono>
                 {d.schedule}
-              </span>
+              </Mono>
             </Copyable>
           ) : (
             <Mute t={t}>—</Mute>
@@ -1005,9 +977,9 @@ export function CronJobSummary(props: {
         </DetailRow>
         {d.time_zone && (
           <DetailRow t={t} label="Time Zone">
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {d.time_zone}
-            </span>
+            </Mono>
           </DetailRow>
         )}
         <DetailRow t={t} label="Suspend">
@@ -1020,23 +992,23 @@ export function CronJobSummary(props: {
         )}
         {d.starting_deadline_seconds != null && (
           <DetailRow t={t} label="Starting Deadline">
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {d.starting_deadline_seconds}s
-            </span>
+            </Mono>
           </DetailRow>
         )}
         {d.successful_jobs_history_limit != null && (
           <DetailRow t={t} label="History (succeeded)">
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {d.successful_jobs_history_limit}
-            </span>
+            </Mono>
           </DetailRow>
         )}
         {d.failed_jobs_history_limit != null && (
           <DetailRow t={t} label="History (failed)">
-            <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+            <Mono>
               {d.failed_jobs_history_limit}
-            </span>
+            </Mono>
           </DetailRow>
         )}
         {d.last_schedule_time && (
@@ -1113,37 +1085,37 @@ export function CronJobSummary(props: {
           <div style={{ marginBottom: 22 }}>
             {d.job_template.completions != null && (
               <DetailRow t={t} label="Completions">
-                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                <Mono>
                   {d.job_template.completions}
-                </span>
+                </Mono>
               </DetailRow>
             )}
             {d.job_template.parallelism != null && (
               <DetailRow t={t} label="Parallelism">
-                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                <Mono>
                   {d.job_template.parallelism}
-                </span>
+                </Mono>
               </DetailRow>
             )}
             {d.job_template.backoff_limit != null && (
               <DetailRow t={t} label="Backoff Limit">
-                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                <Mono>
                   {d.job_template.backoff_limit}
-                </span>
+                </Mono>
               </DetailRow>
             )}
             {d.job_template.active_deadline_seconds != null && (
               <DetailRow t={t} label="Active Deadline">
-                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                <Mono>
                   {d.job_template.active_deadline_seconds}s
-                </span>
+                </Mono>
               </DetailRow>
             )}
             {d.job_template.ttl_seconds_after_finished != null && (
               <DetailRow t={t} label="TTL After Finished">
-                <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                <Mono>
                   {d.job_template.ttl_seconds_after_finished}s
-                </span>
+                </Mono>
               </DetailRow>
             )}
           </div>
