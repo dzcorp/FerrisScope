@@ -89,7 +89,7 @@ tar = "0.4"
 # keyed off the binary's cdhash). Pure-Rust, no_std-capable, audited by NCC
 # Group; the API surface is `forbid(unsafe_code)`-clean. AES-256-GCM picks up
 # AES-NI on Intel and ARMv8 crypto extensions on Apple Silicon.
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 
 # Replace the system allocator with mimalloc. glibc's allocator (ptmalloc2)
 # tends to hold freed pages in per-thread arenas indefinitely on long-running
