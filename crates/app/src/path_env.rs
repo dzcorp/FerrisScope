@@ -136,9 +136,37 @@ mod unix {
             // Homebrew on Linux.
             (PathBuf::from("/home/linuxbrew/.linuxbrew/bin"), false),
             (PathBuf::from("/home/linuxbrew/.linuxbrew/sbin"), false),
-            // Homebrew-cask gcloud: the auth plugin lives beside `gcloud`.
+            // Homebrew-cask gcloud: the auth plugin lives beside `gcloud` in the
+            // SDK's own `bin`, NOT symlinked into `{prefix}/bin` (brew only links
+            // `gcloud` itself, never components installed later via
+            // `gcloud components install gke-gcloud-auth-plugin`). The SDK
+            // extracts to `{prefix}/share/google-cloud-sdk/bin` regardless of the
+            // cask name (`google-cloud-sdk` → renamed `gcloud-cli`), so the
+            // `share` dir is the stable target; the versioned Caskroom dir is a
+            // belt for layouts where `share` isn't populated.
+            //
+            // Apple Silicon (`/opt/homebrew`):
+            (
+                PathBuf::from("/opt/homebrew/share/google-cloud-sdk/bin"),
+                false,
+            ),
+            (
+                PathBuf::from("/opt/homebrew/Caskroom/gcloud-cli/latest/google-cloud-sdk/bin"),
+                false,
+            ),
+            (
+                PathBuf::from(
+                    "/opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/bin",
+                ),
+                false,
+            ),
+            // Intel / `/usr/local`:
             (
                 PathBuf::from("/usr/local/share/google-cloud-sdk/bin"),
+                false,
+            ),
+            (
+                PathBuf::from("/usr/local/Caskroom/gcloud-cli/latest/google-cloud-sdk/bin"),
                 false,
             ),
             (
@@ -507,6 +535,28 @@ mod unix {
         fn strip_ansi_removes_csi() {
             assert_eq!(strip_ansi("\x1b[1;32mhi\x1b[0m"), "hi");
             assert_eq!(strip_ansi("plain"), "plain");
+        }
+
+        #[test]
+        fn curated_dirs_cover_brew_cask_gcloud_sdk_bin() {
+            // The Homebrew-cask gcloud SDK puts `gke-gcloud-auth-plugin` in the
+            // SDK's own `bin` (never symlinked into `{prefix}/bin`). Apple
+            // Silicon installs under `/opt/homebrew` — the dir that was missing
+            // and caused the GKE "auth exec: No such file or directory" failure
+            // even after a clean brew install. Both arches + both cask names
+            // (`google-cloud-sdk` → `gcloud-cli`) must be covered.
+            let dirs: Vec<PathBuf> = curated_dirs().into_iter().map(|(p, _)| p).collect();
+            for want in [
+                "/opt/homebrew/share/google-cloud-sdk/bin",
+                "/usr/local/share/google-cloud-sdk/bin",
+                "/opt/homebrew/Caskroom/gcloud-cli/latest/google-cloud-sdk/bin",
+                "/usr/local/Caskroom/gcloud-cli/latest/google-cloud-sdk/bin",
+            ] {
+                assert!(
+                    dirs.contains(&PathBuf::from(want)),
+                    "curated_dirs() should include {want}; got {dirs:?}"
+                );
+            }
         }
     }
 }
