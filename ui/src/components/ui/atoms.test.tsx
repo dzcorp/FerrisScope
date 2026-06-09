@@ -542,3 +542,40 @@ describe("ErrorBlock — classification branches", () => {
     expect(getByText(/permission to stream logs/i)).toBeInTheDocument();
   });
 });
+
+describe("ErrorBlock — selectable error strings", () => {
+  // The app sets `body { user-select: none }`; error surfaces opt back in via
+  // the `.fs-selectable` class so operators can drag-select and copy the text.
+  it("block variant marks title and body selectable", () => {
+    const { getByText } = render(
+      <ErrorBlock
+        t={t}
+        message="exec credential plugin 'gke-gcloud-auth-plugin' not found on PATH"
+        kindLabel="cluster"
+      />,
+    );
+    expect(getByText("Auth plugin not found")).toHaveClass("fs-selectable");
+  });
+
+  it("revealed raw <pre> is selectable and shows the verbatim error", async () => {
+    const raw = "some quirky thing went wrong";
+    const { getByText, container } = render(<ErrorBlock t={t} message={raw} />);
+    await userEvent.click(getByText("Show details"));
+    const pre = container.querySelector("pre");
+    expect(pre).not.toBeNull();
+    expect(pre).toHaveClass("fs-selectable");
+    expect(pre).toHaveTextContent(raw);
+  });
+
+  it("inline variant marks its text selectable", () => {
+    const { container } = render(
+      <ErrorBlock
+        t={t}
+        message="kube client: auth error: unable to run auth exec"
+        kindLabel="cluster"
+        inline
+      />,
+    );
+    expect(container.querySelector(".fs-selectable")).not.toBeNull();
+  });
+});

@@ -1381,6 +1381,7 @@ export function ErrorBlock({
   if (inline) {
     return (
       <span
+        className="fs-selectable"
         style={{
           fontFamily: FF_MONO,
           fontSize: FS_SM,
@@ -1389,6 +1390,7 @@ export function ErrorBlock({
           alignItems: "baseline",
           gap: 8,
           flexWrap: "wrap",
+          cursor: "text",
         }}
       >
         <span style={{ fontWeight: 600 }}>{c.title}</span>
@@ -1409,10 +1411,26 @@ export function ErrorBlock({
         textAlign: "center",
       }}
     >
-      <div style={{ fontSize: FS_LG, fontWeight: 600, color: t.bad }}>
+      <div
+        className="fs-selectable"
+        style={{
+          fontSize: FS_LG,
+          fontWeight: 600,
+          color: t.bad,
+          cursor: "text",
+        }}
+      >
         {c.title}
       </div>
-      <div style={{ fontSize: FS_MD, color: t.textMuted, maxWidth: 460 }}>
+      <div
+        className="fs-selectable"
+        style={{
+          fontSize: FS_MD,
+          color: t.textMuted,
+          maxWidth: 460,
+          cursor: "text",
+        }}
+      >
         {c.body}
       </div>
       <button
@@ -1433,7 +1451,11 @@ export function ErrorBlock({
         {showRaw ? "Hide details" : "Show details"}
       </button>
       {showRaw && (
+        // `fs-selectable` opts this back into text selection (the app sets
+        // `body { user-select: none }`), so operators can drag-select and copy
+        // the raw error string to paste into an issue / chat.
         <pre
+          className="fs-selectable"
           style={{
             marginTop: 6,
             padding: "10px 14px",
@@ -1450,6 +1472,7 @@ export function ErrorBlock({
             maxHeight: 240,
             overflow: "auto",
             textAlign: "left",
+            cursor: "text",
           }}
         >
           {c.raw}
