@@ -1,3 +1,4 @@
+import { logErr } from "../lib/log";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, onResourceDelta } from "../api";
 import { parseYaml, stripYaml, type Json } from "../lib/yamlEdit";
@@ -1629,7 +1630,7 @@ function ObjectEvents({
       cancelled = true;
       clearInterval(tick);
       if (unlisten) unlisten();
-      api.unsubscribeResource(clusterId, "events").catch(() => {});
+      api.unsubscribeResource(clusterId, "events").catch(logErr("detail-panel"));
     };
   }, [clusterId, targetUid]);
 

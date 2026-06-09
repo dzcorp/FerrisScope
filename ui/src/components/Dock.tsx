@@ -1,3 +1,4 @@
+import { logErr } from "../lib/log";
 import {
   useCallback,
   useEffect,
@@ -991,7 +992,7 @@ function DockTerminal({
         const id = opened.sessionId;
         if (cancelled) {
           opened.close();
-          api.terminalClose(id).catch(() => {});
+          api.terminalClose(id).catch(logErr("dock"));
           return;
         }
         sessionIdRef.current = id;
@@ -1003,10 +1004,10 @@ function DockTerminal({
           let bin = "";
           for (let i = 0; i < enc.length; i++)
             bin += String.fromCharCode(enc[i]!);
-          api.terminalWrite(id, btoa(bin)).catch(() => {});
+          api.terminalWrite(id, btoa(bin)).catch(logErr("dock"));
         });
         term.onResize(({ cols, rows }) => {
-          api.terminalResize(id, cols, rows).catch(() => {});
+          api.terminalResize(id, cols, rows).catch(logErr("dock"));
         });
 
         // Final fit after a layout settle — picks up any size changes
@@ -1019,7 +1020,7 @@ function DockTerminal({
         await new Promise<void>((r) => setTimeout(r, 10));
         fitNow();
         if (term) {
-          api.terminalResize(id, term.cols, term.rows).catch(() => {});
+          api.terminalResize(id, term.cols, term.rows).catch(logErr("dock"));
           term.refresh(0, term.rows - 1);
         }
         setStatus("ready");
@@ -1046,7 +1047,7 @@ function DockTerminal({
       ro.disconnect();
       detachChannel?.();
       const id = sessionIdRef.current;
-      if (id) api.terminalClose(id).catch(() => {});
+      if (id) api.terminalClose(id).catch(logErr("dock"));
       // term may be null if cleanup ran before `start()` finished mounting
       // xterm (e.g. tab closed during the fonts.ready / IPC await window).
       term?.dispose();

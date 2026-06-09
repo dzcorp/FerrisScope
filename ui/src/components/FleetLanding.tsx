@@ -1,3 +1,4 @@
+import { logErr } from "../lib/log";
 import { useEffect, useState } from "react";
 import { api, onFleetProbe, onKubeconfigChanged } from "../api";
 import { useAppStore, useResolvedTheme } from "../store";
@@ -116,7 +117,7 @@ export function FleetLanding({ mode, onSelect }: Props) {
         contexts.map((c) => c.id),
         false,
       )
-      .catch(() => {});
+      .catch(logErr("fleet"));
   }, [contexts, refreshOnLaunch]);
 
   useEffect(() => {
@@ -124,7 +125,7 @@ export function FleetLanding({ mode, onSelect }: Props) {
     if (refreshSec <= 0) return;
     const ids = contexts.map((c) => c.id);
     const id = setInterval(() => {
-      api.refreshFleet(ids, false).catch(() => {});
+      api.refreshFleet(ids, false).catch(logErr("fleet"));
     }, refreshSec * 1000);
     return () => clearInterval(id);
   }, [contexts, refreshSec]);

@@ -1,3 +1,4 @@
+import { logErr } from "../lib/log";
 import type { ResourceKind, ResourceRow } from "../types";
 import type { MenuItem } from "./ContextMenu";
 
@@ -161,5 +162,5 @@ export function actionsForRow(ctx: RowActionContext): MenuItem[] {
 }
 
 function copy(text: string) {
-  navigator.clipboard.writeText(text).catch(() => {});
+  navigator.clipboard.writeText(text).catch(logErr("row-actions"));
 }

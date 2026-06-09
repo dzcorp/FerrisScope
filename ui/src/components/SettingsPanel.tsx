@@ -1,3 +1,4 @@
+import { logErr } from "../lib/log";
 import { useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -2255,7 +2256,7 @@ function SystemInstallHint({
   const label = installMethodLabel(method);
   const onCopy = () => {
     if (typeof navigator !== "undefined" && navigator.clipboard) {
-      navigator.clipboard.writeText(command).catch(() => {});
+      navigator.clipboard.writeText(command).catch(logErr("settings"));
       toast.ok("Command copied");
     }
   };

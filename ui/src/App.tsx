@@ -1,3 +1,4 @@
+import { logErr, reportErr } from "./lib/log";
 import { useEffect, useLayoutEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -128,7 +129,7 @@ export default function App() {
     if (!IS_MAC) return;
     getCurrentWindow()
       .setTheme(themeMode)
-      .catch(() => {});
+      .catch(logErr("app"));
   }, [themeMode]);
 
   // Global UI scale via the webview's native page-zoom API. Routes to
@@ -145,22 +146,22 @@ export default function App() {
   useEffect(() => {
     getCurrentWebviewWindow()
       .setZoom(uiScale * UI_SCALE_BASELINE)
-      .catch(() => {});
+      .catch(logErr("app"));
   }, [uiScale]);
 
   useEffect(() => {
     api
       .ping()
       .then(setInfo)
-      .catch(() => {});
+      .catch(logErr("app"));
     api
       .getTableViews()
       .then((file) => hydrateTableViews(file.views))
-      .catch(() => {});
+      .catch(reportErr("app", "Couldn't load saved table views"));
     api
       .getPrefs()
       .then((p) => hydratePrefs(p))
-      .catch(() => {})
+      .catch(reportErr("app", "Couldn't load preferences — using defaults"))
       .finally(() => setPrefsLoaded(true));
     const unlisten = listen<void>("app://ready", () => setReady(true));
 
@@ -173,11 +174,11 @@ export default function App() {
       .then((fn) => {
         unlistenPf = fn;
       })
-      .catch(() => {});
+      .catch(logErr("app"));
     api
       .pfList()
       .then((entries) => hydrateForwards(entries))
-      .catch(() => {});
+      .catch(reportErr("app", "Couldn't restore port-forwards"));
 
     return () => {
       unlisten.then((fn) => fn());
@@ -226,7 +227,7 @@ export default function App() {
             auto_check_enabled: updateState.autoCheckEnabled,
           },
         })
-        .catch(() => {});
+        .catch(logErr("app"));
     }, 250);
     return () => clearTimeout(t);
   }, [
@@ -251,7 +252,7 @@ export default function App() {
     api
       .updaterInfo()
       .then((info) => setAppVersion(info.current_version))
-      .catch(() => {});
+      .catch(logErr("app"));
   }, [setAppVersion]);
 
   // Periodic background update check. First run 15s after launch (don't
@@ -283,7 +284,7 @@ export default function App() {
             patchUpdateState({ lastCheckAt: now });
           }
         })
-        .catch(() => {});
+        .catch(logErr("app"));
     };
     const kick = setTimeout(run, 15_000);
     const id = setInterval(run, 6 * 60 * 60 * 1000);
@@ -317,7 +318,7 @@ export default function App() {
     if (!selectedContextName) return;
     const leaving = selectedContextName;
     return () => {
-      api.dropClusterWatchers(leaving).catch(() => {});
+      api.dropClusterWatchers(leaving).catch(logErr("app"));
     };
   }, [selectedContextName]);
 
@@ -401,7 +402,7 @@ export default function App() {
       if (unlisten) unlisten();
       api
         .unsubscribeResource(selectedContextName, "namespaces")
-        .catch(() => {});
+        .catch(logErr("app"));
     };
   }, [selectedContextName]);
 

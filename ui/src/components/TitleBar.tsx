@@ -1,3 +1,4 @@
+import { logErr } from "../lib/log";
 import { useEffect, useState } from "react";
 import { useResolvedTheme } from "../store";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -48,14 +49,14 @@ export function TitleBar({}: { mode: ThemeMode }) {
     if (!IS_LINUX_TITLEBAR) return;
     const w = getCurrentWindow();
     let unlisten: (() => void) | null = null;
-    w.isMaximized().then(setMaximized).catch(() => {});
+    w.isMaximized().then(setMaximized).catch(logErr("titlebar"));
     w.onResized(() => {
-      w.isMaximized().then(setMaximized).catch(() => {});
+      w.isMaximized().then(setMaximized).catch(logErr("titlebar"));
     })
       .then((fn) => {
         unlisten = fn;
       })
-      .catch(() => {});
+      .catch(logErr("titlebar"));
     return () => {
       if (unlisten) unlisten();
     };
@@ -160,14 +161,14 @@ export function ResizeEdges() {
     if (!IS_LINUX_TITLEBAR) return;
     const w = getCurrentWindow();
     let unlisten: (() => void) | null = null;
-    w.isMaximized().then(setMaximized).catch(() => {});
+    w.isMaximized().then(setMaximized).catch(logErr("titlebar"));
     w.onResized(() => {
-      w.isMaximized().then(setMaximized).catch(() => {});
+      w.isMaximized().then(setMaximized).catch(logErr("titlebar"));
     })
       .then((fn) => {
         unlisten = fn;
       })
-      .catch(() => {});
+      .catch(logErr("titlebar"));
     return () => {
       if (unlisten) unlisten();
     };

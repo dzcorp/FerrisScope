@@ -5,7 +5,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
-import { renderCell, selectPodMetrics } from "./ResourceTable";
+import { renderCell, selectPodMetrics, sortingFnFor } from "./ResourceTable";
 import { tokens } from "../theme";
 import type { ColumnDef, MetricsSnapshot, ResourceRow } from "../types";
 
@@ -141,6 +141,57 @@ describe("selectPodMetrics — metrics read gated on isPods", () => {
     });
     expect(a).toBe(b);
     expect(a).toBeNull();
+  });
+});
+
+describe("sortingFnFor — cpu/mem comparator reads live metrics via ref", () => {
+  type PodMetrics = Record<string, { cpu_milli: number; mem_mib: number }>;
+  type Cmp = Exclude<ReturnType<typeof sortingFnFor>, "auto">;
+  const tanRow = (ns: string, name: string) =>
+    ({ original: { uid: name, namespace: ns, name } }) as unknown as Parameters<Cmp>[0];
+
+  it("picks up metrics that arrive after the comparator was built", () => {
+    // Regression: the comparator used to close over a snapshot taken at
+    // columns-build time, so sorts ran against stale (often empty) metrics
+    // until the columns happened to rebuild.
+    const ref: { current: PodMetrics | null } = { current: null };
+    const cmp = sortingFnFor({ id: "cpu", header: "CPU" }, ref, true);
+    if (cmp === "auto") throw new Error("expected a custom comparator");
+
+    const a = tanRow("default", "pod-a");
+    const b = tanRow("default", "pod-b");
+    // No metrics yet → both unknown (-1), tie.
+    expect(cmp(a, b)).toBe(0);
+
+    ref.current = {
+      "default/pod-a": { cpu_milli: 50, mem_mib: 10 },
+      "default/pod-b": { cpu_milli: 200, mem_mib: 10 },
+    };
+    expect(cmp(a, b)).toBeLessThan(0);
+
+    // A later tick flips the ordering — the same comparator must see it.
+    ref.current = {
+      "default/pod-a": { cpu_milli: 500, mem_mib: 10 },
+      "default/pod-b": { cpu_milli: 100, mem_mib: 10 },
+    };
+    expect(cmp(a, b)).toBeGreaterThan(0);
+  });
+
+  it("sorts mem by mem_mib, not cpu", () => {
+    const ref: { current: PodMetrics | null } = {
+      current: {
+        "default/pod-a": { cpu_milli: 999, mem_mib: 5 },
+        "default/pod-b": { cpu_milli: 1, mem_mib: 50 },
+      },
+    };
+    const cmp = sortingFnFor({ id: "mem", header: "Mem" }, ref, true);
+    if (cmp === "auto") throw new Error("expected a custom comparator");
+    expect(cmp(tanRow("default", "pod-a"), tanRow("default", "pod-b"))).toBeLessThan(0);
+  });
+
+  it("falls back to auto sorting off the Pods table", () => {
+    const ref: { current: PodMetrics | null } = { current: null };
+    expect(sortingFnFor({ id: "cpu", header: "CPU" }, ref, false)).toBe("auto");
   });
 });
 

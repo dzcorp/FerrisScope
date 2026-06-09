@@ -2,6 +2,7 @@
 // Event). Same shape as the workload summaries: fetch on mount + on
 // detailVersion bumps, compose shared primitives, dispatch from DetailPanel.
 
+import { logErr } from "../../../lib/log";
 import { useEffect, useRef, useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api, onResourceDelta } from "../../../api";
@@ -633,7 +634,7 @@ function PodsOnNodeSection(props: {
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
-      api.unsubscribeResource(props.clusterId, "pods").catch(() => {});
+      api.unsubscribeResource(props.clusterId, "pods").catch(logErr("cluster-detail"));
     };
     // `detailVersion` is intentionally NOT a dep: the pod watcher's deltas
     // already keep this list in sync, and re-running the effect on every

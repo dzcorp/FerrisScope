@@ -1,3 +1,4 @@
+import { logErr } from "../../lib/log";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DockTab } from "../../store";
 import { useAppStore, useResolvedTheme } from "../../store";
@@ -452,7 +453,7 @@ export function DockChat({ mode, tab, visible }: Props) {
         // one during `chat_open`, but events sent during the same
         // Tauri invoke can race with the channel handler / RAF flush;
         // re-emitting is idempotent and cheap.
-        api.chatRefreshStatus(opened.chatId).catch(() => {});
+        api.chatRefreshStatus(opened.chatId).catch(logErr("chat"));
       } catch (e) {
         if (cancelled) return;
         setStatus({ kind: "error", message: String(e) });
@@ -477,7 +478,7 @@ export function DockChat({ mode, tab, visible }: Props) {
       for (const [, refs] of chatChannels.current.entries()) {
         if (refs.raf !== null) cancelAnimationFrame(refs.raf);
         refs.close();
-        if (refs.chatId) api.chatClose(refs.chatId).catch(() => {});
+        if (refs.chatId) api.chatClose(refs.chatId).catch(logErr("chat"));
       }
       chatChannels.current.clear();
     };
@@ -497,7 +498,7 @@ export function DockChat({ mode, tab, visible }: Props) {
   useEffect(() => {
     if (!visible || settingsOpen) return;
     if (!activeChatId) return;
-    api.chatRefreshStatus(activeChatId).catch(() => {});
+    api.chatRefreshStatus(activeChatId).catch(logErr("chat"));
   }, [visible, settingsOpen, activeChatId]);
 
   // The model catalogue cache is bound to a provider, not a session.
@@ -667,7 +668,7 @@ export function DockChat({ mode, tab, visible }: Props) {
         api
           .aiGetSettings()
           .then((s) => setAiSettings(s))
-          .catch(() => {});
+          .catch(logErr("chat"));
       }
       return next;
     });
@@ -788,7 +789,7 @@ export function DockChat({ mode, tab, visible }: Props) {
     if (refs) {
       if (refs.raf !== null) cancelAnimationFrame(refs.raf);
       refs.close();
-      if (refs.chatId) api.chatClose(refs.chatId).catch(() => {});
+      if (refs.chatId) api.chatClose(refs.chatId).catch(logErr("chat"));
       chatChannels.current.delete(sessionId);
     }
     setOpenChats((prev) => {
@@ -808,7 +809,7 @@ export function DockChat({ mode, tab, visible }: Props) {
       // index file; serializing keeps the index consistent without a bulk
       // command.
       for (const s of list) {
-        await api.chatDeleteSession(s.id).catch(() => {});
+        await api.chatDeleteSession(s.id).catch(logErr("chat"));
         evictOpenChat(s.id);
       }
       setSessions([]);
@@ -1001,7 +1002,7 @@ export function DockChat({ mode, tab, visible }: Props) {
         approvalMode={meta?.approval_mode ?? "approve_per_write"}
         onApprovalModeChange={(am) => {
           if (!activeChatId || !activeSessionId) return;
-          api.chatSetApprovalMode(activeChatId, am).catch(() => {});
+          api.chatSetApprovalMode(activeChatId, am).catch(logErr("chat"));
           const sid = activeSessionId;
           setOpenChats((prev) => {
             const cur = prev[sid];

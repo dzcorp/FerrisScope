@@ -1,3 +1,4 @@
+import { logErr } from "../../lib/log";
 import {
   memo,
   useCallback,
@@ -316,7 +317,7 @@ export function LogView({
         );
         if (cancelled) {
           handle.close();
-          api.stopLogStream(handle.streamId).catch(() => {});
+          api.stopLogStream(handle.streamId).catch(logErr("logs"));
           return;
         }
         activeStreamId = handle.streamId;
@@ -331,7 +332,7 @@ export function LogView({
       if (rafHandle != null) cancelAnimationFrame(rafHandle);
       if (unlisten) unlisten();
       if (activeStreamId) {
-        api.stopLogStream(activeStreamId).catch(() => {});
+        api.stopLogStream(activeStreamId).catch(logErr("logs"));
       }
     };
   }, [clusterId, namespace, pod, container]);

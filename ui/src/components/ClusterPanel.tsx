@@ -1,3 +1,4 @@
+import { logErr } from "../lib/log";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, onClusterHealth, onClusterInfoChanged } from "../api";
 import { useAppStore, useResolvedTheme } from "../store";
@@ -124,13 +125,13 @@ export function ClusterPanel({ mode, context }: Props) {
       cancelled = true;
       if (unlisten) unlisten();
       if (unlistenHealth) unlistenHealth();
-      api.cancelConnect(connectId).catch(() => {});
+      api.cancelConnect(connectId).catch(logErr("cluster-panel"));
     };
   }, [context.id, attempt, applyClusterHealth]);
 
   const onCancel = () => {
     if (state.status !== "connecting") return;
-    api.cancelConnect(state.connectId).catch(() => {});
+    api.cancelConnect(state.connectId).catch(logErr("cluster-panel"));
     setState({ status: "cancelled" });
   };
 
@@ -146,7 +147,7 @@ export function ClusterPanel({ mode, context }: Props) {
     const id = context.id;
     api
       .reconnectCluster(id)
-      .catch(() => {})
+      .catch(logErr("cluster-panel"))
       .finally(() => {
         clearClusterHealth(id);
         setAttempt((n) => n + 1);

@@ -1,3 +1,4 @@
+import { logErr } from "../../lib/log";
 import { memo, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { FF_MONO, type Tokens, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { api } from "../../api";
@@ -394,7 +395,7 @@ function CodeBlock({
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       })
-      .catch(() => {});
+      .catch(logErr("chat-markdown"));
   };
   return (
     <div
@@ -683,7 +684,7 @@ function renderLink(url: string, label: ReactNode, t: Tokens, key: number): Reac
           return;
         }
         e.preventDefault();
-        api.openExternal(url).catch(() => {});
+        api.openExternal(url).catch(logErr("chat-markdown"));
       }}
       style={LINK_STYLE(t)}
     >

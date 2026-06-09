@@ -1,3 +1,4 @@
+import { logErr } from "./log";
 import { useEffect } from "react";
 import { api, onMetrics } from "../api";
 import { useAppStore } from "../store";
@@ -40,7 +41,7 @@ export function useMetricsSubscription(clusterId: string | null) {
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
-      api.unsubscribeMetrics(clusterId).catch(() => {});
+      api.unsubscribeMetrics(clusterId).catch(logErr("metrics-sub"));
     };
   }, [clusterId, setMetrics]);
 }

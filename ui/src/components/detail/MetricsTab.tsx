@@ -1,3 +1,4 @@
+import { logErr } from "../../lib/log";
 import {
   createContext,
   useContext,
@@ -176,7 +177,7 @@ function usePromEntry(clusterId: string): PromCacheEntry | null | undefined {
         // PROM_VALIDATE_RECENT_MS — so this is cheap on a warm cache and
         // the only path that actually triggers discovery on a cold one.
         // Result lands via `prometheus://changed`.
-        api.prometheusRedetect(clusterId).catch(() => {});
+        api.prometheusRedetect(clusterId).catch(logErr("metrics"));
         // Watchdog: if the redetect never emits (cluster disconnected
         // between mount and dispatch, or any other backend short-circuit
         // before it could fire the event), don't spin forever — fall to
@@ -415,7 +416,7 @@ function useMetricsSnapshot(
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
-      api.unsubscribeMetrics(clusterId).catch(() => {});
+      api.unsubscribeMetrics(clusterId).catch(logErr("metrics"));
     };
   }, [clusterId]);
   return snap;

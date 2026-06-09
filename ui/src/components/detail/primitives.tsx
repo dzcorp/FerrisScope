@@ -4,6 +4,7 @@
 // only, never a Kubernetes-shape value. Pod / Deployment / Node / etc. summary
 // components compose these — they never reach in.
 
+import { logErr } from "../../lib/log";
 import {
   useEffect,
   useMemo,
@@ -365,7 +366,7 @@ export function useCopyFlash<T extends HTMLElement = HTMLSpanElement>() {
 
 function copyToClipboard(text: string) {
   if (typeof navigator !== "undefined" && navigator.clipboard) {
-    navigator.clipboard.writeText(text).catch(() => {});
+    navigator.clipboard.writeText(text).catch(logErr("detail"));
   }
 }
 

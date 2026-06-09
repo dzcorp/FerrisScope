@@ -1,3 +1,4 @@
+import { logErr } from "../../lib/log";
 import { memo, useMemo, useState } from "react";
 import { useResolvedTheme } from "../../store";
 import { api } from "../../api";
@@ -47,7 +48,7 @@ function ToolApprovalCardInner({ chatId, approval }: Props) {
     navigator.clipboard
       .writeText(pretty)
       .then(() => flashArgs())
-      .catch(() => {});
+      .catch(logErr("chat-tools"));
   };
 
   const decide = async (

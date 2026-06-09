@@ -1,3 +1,4 @@
+import { logErr } from "../lib/log";
 import {
   createContext,
   memo,
@@ -366,7 +367,7 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
       for (const scope of subscribeScopes) {
         api
           .unsubscribeResource(clusterId, kind.id, scope)
-          .catch(() => {});
+          .catch(logErr("table"));
       }
     };
     // `subscribeScopeKey` joins scope flips with the existing
@@ -469,7 +470,7 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
     const timeout = setTimeout(() => {
       const view = { sorting, column_sizing: {} };
       setTableView(clusterId, kind.id, view);
-      api.setTableView(clusterId, kind.id, view).catch(() => {});
+      api.setTableView(clusterId, kind.id, view).catch(logErr("table"));
     }, 200);
     return () => clearTimeout(timeout);
   }, [sorting, clusterId, kind.id, setTableView]);
@@ -505,7 +506,7 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
         // sortingFn reads from the ref so a metrics tick doesn't force
         // a columns rebuild; sort comparator is invoked at sort time
         // and picks up the current podMetrics ref then.
-        sortingFn: sortingFnFor(c, podMetricsRef.current, isPods),
+        sortingFn: sortingFnFor(c, podMetricsRef, isPods),
         accessorFn: accessorFor(c),
         cell: (ctx) =>
           renderCell(
@@ -1965,9 +1966,16 @@ function accessorFor(c: ColumnDef) {
 // `phase` sorts by status bucket so CrashLoopBackOff floats above Running
 // when ascending — what the operator usually wants. Pods' CPU/Mem are
 // metrics-server values, joined here so the sort matches what's rendered.
-function sortingFnFor(
+// Takes the metrics *ref* (not a snapshot) — the comparator runs at sort
+// time, long after the columns were built, and must see live values.
+export function sortingFnFor(
   c: ColumnDef,
-  podMetrics: Record<string, { cpu_milli: number; mem_mib: number }> | null,
+  podMetricsRef: {
+    readonly current: Record<
+      string,
+      { cpu_milli: number; mem_mib: number }
+    > | null;
+  },
   isPods: boolean,
 ) {
   if (c.kind === "phase") {
@@ -1979,6 +1987,7 @@ function sortingFnFor(
   }
   if (isPods && (c.id === "cpu" || c.id === "mem")) {
     return (a: TanRow<ResourceRow>, b: TanRow<ResourceRow>) => {
+      const podMetrics = podMetricsRef.current;
       const ak = `${a.original.namespace ?? ""}/${a.original.name ?? ""}`;
       const bk = `${b.original.namespace ?? ""}/${b.original.name ?? ""}`;
       const av = podMetrics?.[ak] ?? null;
