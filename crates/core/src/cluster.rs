@@ -4,6 +4,7 @@
 //! reflector machinery lands in M0.4 — for now this is just enough to prove
 //! we can talk to an apiserver.
 
+use crate::sync::LockExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -394,10 +395,7 @@ impl Cluster {
     /// one each. Falls back to the shared client on builder failure
     /// rather than failing the subscribe.
     pub fn watcher_client(&self) -> Client {
-        let mut pool = self
-            .watcher_pool
-            .lock()
-            .expect("watcher client pool poisoned");
+        let mut pool = self.watcher_pool.lock_recover();
         if pool.len() < WATCHER_CLIENT_POOL_SIZE {
             match build_compressed_client(self.config.clone()) {
                 Ok(c) => pool.push(c),

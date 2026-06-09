@@ -1,3 +1,4 @@
+use ferrisscope_core::sync::LockExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -672,12 +673,7 @@ fn wire_cluster_health(app: &AppHandle, cluster_id: &str, entry: Arc<crate::stat
         // `claim_health_wiring` already guarantees we only get here
         // once per entry lifetime, but be defensive — replace any
         // stale handle and abort it instead of leaking the task.
-        if let Some(old) = entry
-            .health_forwarder
-            .lock()
-            .expect("health_forwarder mutex poisoned")
-            .replace(handle)
-        {
+        if let Some(old) = entry.health_forwarder.lock_recover().replace(handle) {
             tracing::warn!(
                 cluster_id = %cluster_id,
                 "wire_cluster_health: replaced a pre-existing forwarder handle"
@@ -1152,20 +1148,10 @@ async fn drop_all_kind_watchers(state: &AppState, cluster_id: &str) -> usize {
     // forever and the source's task + kube `Client` HTTP keepalive
     // stay resident. See `ClusterEntry::health_forwarder` rustdoc for
     // the retention-cycle write-up.
-    if let Some(h) = entry
-        .health_forwarder
-        .lock()
-        .expect("health_forwarder mutex poisoned")
-        .take()
-    {
+    if let Some(h) = entry.health_forwarder.lock_recover().take() {
         h.abort();
     }
-    if let Some(h) = entry
-        .metrics_forwarder
-        .lock()
-        .expect("metrics_forwarder mutex poisoned")
-        .take()
-    {
+    if let Some(h) = entry.metrics_forwarder.lock_recover().take() {
         h.abort();
     }
     // Also tear down the metrics service itself so the next
@@ -2280,12 +2266,7 @@ pub(crate) async fn subscribe_metrics(
         // any stale handle (shouldn't exist because we only spawn when
         // service was None, but be defensive — a stray handle would
         // pin the next service via JoinHandle ↔ task captures).
-        if let Some(old) = entry
-            .metrics_forwarder
-            .lock()
-            .expect("metrics_forwarder mutex poisoned")
-            .replace(handle)
-        {
+        if let Some(old) = entry.metrics_forwarder.lock_recover().replace(handle) {
             old.abort();
         }
         slot.service = Some(s.clone());
@@ -2316,12 +2297,7 @@ pub(crate) async fn unsubscribe_metrics(
         // entry's Arc drops next → MetricsService::Drop runs → poll task
         // aborts. Without this we'd leak the poll task + metrics-server
         // HTTP keepalive for the rest of the cluster's session.
-        if let Some(h) = entry
-            .metrics_forwarder
-            .lock()
-            .expect("metrics_forwarder mutex poisoned")
-            .take()
-        {
+        if let Some(h) = entry.metrics_forwarder.lock_recover().take() {
             h.abort();
         }
         slot.service.take();

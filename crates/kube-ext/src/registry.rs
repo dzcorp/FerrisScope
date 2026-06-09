@@ -6,6 +6,7 @@
 //! sent to the frontend so it can build navigation + table headers without
 //! hard-coding any kind metadata.
 
+use ferrisscope_core::sync::LockExt;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -300,7 +301,7 @@ impl ResourceKindEntry {
 fn leak(s: String) -> &'static str {
     static POOL: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
     let pool = POOL.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut g = pool.lock().expect("string-intern pool poisoned");
+    let mut g = pool.lock_recover();
     if let Some(existing) = g.get(&s) {
         return existing;
     }
@@ -377,17 +378,11 @@ fn printer_column_cache() -> &'static Mutex<PrinterColumnCache> {
 }
 
 fn cache_printer_columns(id: &str, cols: &[DiscoveredPrinterColumn]) {
-    printer_column_cache()
-        .lock()
-        .expect("printer-column cache poisoned")
-        .insert(id, cols);
+    printer_column_cache().lock_recover().insert(id, cols);
 }
 
 fn cached_printer_columns(id: &str) -> Vec<DiscoveredPrinterColumn> {
-    printer_column_cache()
-        .lock()
-        .expect("printer-column cache poisoned")
-        .get(id)
+    printer_column_cache().lock_recover().get(id)
 }
 
 /// Drop every cached printer-column set. Safe to call whenever no cluster is
@@ -396,10 +391,7 @@ fn cached_printer_columns(id: &str) -> Vec<DiscoveredPrinterColumn> {
 /// long fleet-browsing session that returns to zero connected clusters
 /// reclaims the cache instead of holding it for the process lifetime.
 pub fn clear_printer_column_cache() {
-    printer_column_cache()
-        .lock()
-        .expect("printer-column cache poisoned")
-        .clear();
+    printer_column_cache().lock_recover().clear();
 }
 
 fn default_dynamic_columns(namespaced: bool) -> Vec<ColumnDef> {

@@ -6,6 +6,7 @@
 //! tagged with the source it came from so we can re-load the right kubeconfig
 //! file when connecting.
 
+use crate::sync::LockExt;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -275,11 +276,7 @@ fn load_folder_into(
         // why we don't need to filter watcher events to "kubeconfig only":
         // re-running `list_contexts` on every fs tick is now cheap because
         // unchanged files reuse their cached parse.
-        let cached = folder_cache()
-            .lock()
-            .expect("scan cache lock")
-            .get(&path)
-            .cloned();
+        let cached = folder_cache().lock_recover().get(&path).cloned();
         let kc = match cached {
             Some(e) if e.mtime == mtime && e.len == len => e.kc,
             _ => {
@@ -294,7 +291,7 @@ fn load_folder_into(
                 } else {
                     None
                 };
-                folder_cache().lock().expect("scan cache lock").insert(
+                folder_cache().lock_recover().insert(
                     path.clone(),
                     ScanEntry {
                         mtime,
@@ -321,7 +318,7 @@ fn load_folder_into(
 
     // Prune entries for files that have disappeared from this folder. Other
     // folders' entries (different parent path) are untouched.
-    let mut cache = folder_cache().lock().expect("scan cache lock");
+    let mut cache = folder_cache().lock_recover();
     cache.retain(|p, _| !p.starts_with(folder) || seen.contains(p));
 }
 
@@ -626,11 +623,11 @@ pub fn set_ssh_refresh_notifier<F>(f: F)
 where
     F: Fn() + Send + Sync + 'static,
 {
-    *ssh_notifier().lock().expect("ssh notifier lock") = Some(Box::new(f));
+    *ssh_notifier().lock_recover() = Some(Box::new(f));
 }
 
 fn fire_ssh_refresh_notifier() {
-    if let Some(f) = ssh_notifier().lock().expect("ssh notifier lock").as_ref() {
+    if let Some(f) = ssh_notifier().lock_recover().as_ref() {
         f();
     }
 }
@@ -638,7 +635,7 @@ fn fire_ssh_refresh_notifier() {
 /// Directly seed the SSH cache (used by the "test connection" flow so a
 /// successful test populates the fleet without a second round-trip).
 pub fn cache_ssh_kubeconfig(source_id: &str, kc: kube::config::Kubeconfig) {
-    let mut cache = ssh_cache().lock().expect("ssh cache lock");
+    let mut cache = ssh_cache().lock_recover();
     cache.insert(
         source_id.to_owned(),
         SshCacheEntry {
@@ -652,10 +649,7 @@ pub fn cache_ssh_kubeconfig(source_id: &str, kc: kube::config::Kubeconfig) {
 /// Drop a cache entry — called from `remove_kubeconfig_source` so a stale
 /// kubeconfig doesn't keep showing up after the operator deletes the source.
 pub fn forget_ssh_cache(source_id: &str) {
-    ssh_cache()
-        .lock()
-        .expect("ssh cache lock")
-        .remove(source_id);
+    ssh_cache().lock_recover().remove(source_id);
 }
 
 fn load_ssh_into(out: &mut Vec<ContextInfo>, src: &KubeconfigSource, group: &str) {
@@ -663,11 +657,7 @@ fn load_ssh_into(out: &mut Vec<ContextInfo>, src: &KubeconfigSource, group: &str
         tracing::warn!(source_id = %src.id, "ssh source missing config — skipping");
         return;
     };
-    let cached = ssh_cache()
-        .lock()
-        .expect("ssh cache lock")
-        .get(&src.id)
-        .cloned();
+    let cached = ssh_cache().lock_recover().get(&src.id).cloned();
 
     let needs_refresh = match &cached {
         None => true,
@@ -692,7 +682,7 @@ fn load_ssh_into(out: &mut Vec<ContextInfo>, src: &KubeconfigSource, group: &str
     } else if let Some(SshCacheEntry {
         last_error: Some(err),
         ..
-    }) = ssh_cache().lock().expect("ssh cache lock").get(&src.id)
+    }) = ssh_cache().lock_recover().get(&src.id)
     {
         tracing::warn!(source_id = %src.id, host = %cfg.host, error = %err, "ssh kubeconfig fetch failed");
     }
@@ -700,7 +690,7 @@ fn load_ssh_into(out: &mut Vec<ContextInfo>, src: &KubeconfigSource, group: &str
 
 fn spawn_ssh_refresh(source_id: String, cfg: SshSourceConfig) {
     {
-        let mut in_flight = ssh_in_flight().lock().expect("ssh in_flight lock");
+        let mut in_flight = ssh_in_flight().lock_recover();
         if !in_flight.insert(source_id.clone()) {
             // A refresh is already running for this source.
             return;
@@ -720,8 +710,7 @@ fn spawn_ssh_refresh(source_id: String, cfg: SshSourceConfig) {
                 // Preserve the last successful kubeconfig if we had one — a
                 // transient connect failure shouldn't blank the fleet.
                 let prior = ssh_cache()
-                    .lock()
-                    .expect("ssh cache lock")
+                    .lock_recover()
                     .get(&source_id)
                     .and_then(|e| e.kubeconfig.clone());
                 SshCacheEntry {
@@ -731,14 +720,8 @@ fn spawn_ssh_refresh(source_id: String, cfg: SshSourceConfig) {
                 }
             }
         };
-        ssh_cache()
-            .lock()
-            .expect("ssh cache lock")
-            .insert(source_id.clone(), entry);
-        ssh_in_flight()
-            .lock()
-            .expect("ssh in_flight lock")
-            .remove(&source_id);
+        ssh_cache().lock_recover().insert(source_id.clone(), entry);
+        ssh_in_flight().lock_recover().remove(&source_id);
         fire_ssh_refresh_notifier();
     });
 }

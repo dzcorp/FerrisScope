@@ -20,6 +20,7 @@
 //! collapse by uid into a `HashMap` while the forwarder is busy emitting,
 //! and the drainer always sees the latest state.
 
+use ferrisscope_core::sync::LockExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -164,7 +165,7 @@ impl DirtyChannel {
     }
 
     fn record_upsert(&self, uid: String, row: Value) {
-        let mut s = self.state.lock().expect("dirty channel poisoned");
+        let mut s = self.state.lock_recover();
         if s.closed {
             return;
         }
@@ -175,7 +176,7 @@ impl DirtyChannel {
     }
 
     fn record_delete(&self, uid: String) {
-        let mut s = self.state.lock().expect("dirty channel poisoned");
+        let mut s = self.state.lock_recover();
         if s.closed {
             return;
         }
@@ -186,7 +187,7 @@ impl DirtyChannel {
     }
 
     fn mark_init_done(&self) {
-        let mut s = self.state.lock().expect("dirty channel poisoned");
+        let mut s = self.state.lock_recover();
         if s.closed {
             return;
         }
@@ -196,7 +197,7 @@ impl DirtyChannel {
     }
 
     fn close(&self) {
-        let mut s = self.state.lock().expect("dirty channel poisoned");
+        let mut s = self.state.lock_recover();
         s.closed = true;
         drop(s);
         // `notify_waiters` wakes every parked task at once. We only ever
@@ -215,7 +216,7 @@ impl DirtyChannel {
             // await is not lost.
             let notified = self.notify.notified();
             {
-                let s = self.state.lock().expect("dirty channel poisoned");
+                let s = self.state.lock_recover();
                 if !s.changed.is_empty() || !s.deleted.is_empty() || s.init_done_pending {
                     return true;
                 }
@@ -228,7 +229,7 @@ impl DirtyChannel {
     }
 
     fn drain(&self) -> DrainedBatch {
-        let mut s = self.state.lock().expect("dirty channel poisoned");
+        let mut s = self.state.lock_recover();
         DrainedBatch {
             upserts: std::mem::take(&mut s.changed),
             deletes: std::mem::take(&mut s.deleted),
@@ -244,7 +245,7 @@ impl DirtyChannel {
     /// backing maps — so a forwarder draining in chunks never emits
     /// "initial sync complete" before every initial row has been delivered.
     fn drain_capped(&self, max: usize) -> DrainedBatch {
-        let mut s = self.state.lock().expect("dirty channel poisoned");
+        let mut s = self.state.lock_recover();
         // Fast path: the whole pending set fits (the steady-state norm — by-uid
         // coalescing keeps batches tiny). Take it all, `init_done` included.
         if max == 0 || s.changed.len() + s.deleted.len() <= max {
@@ -442,10 +443,7 @@ impl ResourceWatcher {
                                 uid = %uid,
                                 "watcher: delete"
                             );
-                            cache_task
-                                .lock()
-                                .expect("watcher cache poisoned")
-                                .remove(&uid);
+                            cache_task.lock_recover().remove(&uid);
                             dirty_task.record_delete(uid);
                         }
                         continue;
@@ -495,7 +493,7 @@ impl ResourceWatcher {
                 // walk is orders of magnitude cheaper than the IPC
                 // emit + JSON-decode + React reconciliation we'd
                 // otherwise pay downstream.
-                let mut cache = cache_task.lock().expect("watcher cache poisoned");
+                let mut cache = cache_task.lock_recover();
                 let unchanged = cache.get(&uid).is_some_and(|prev| prev == &row);
                 if unchanged {
                     suppressed += 1;
@@ -531,14 +529,8 @@ impl ResourceWatcher {
             );
         });
 
-        let snapshot_fn: Box<dyn Fn() -> Vec<Value> + Send + Sync> = Box::new(move || {
-            cache
-                .lock()
-                .expect("watcher cache poisoned")
-                .values()
-                .cloned()
-                .collect()
-        });
+        let snapshot_fn: Box<dyn Fn() -> Vec<Value> + Send + Sync> =
+            Box::new(move || cache.lock_recover().values().cloned().collect());
 
         Self {
             snapshot_fn,
@@ -606,10 +598,7 @@ impl ResourceWatcher {
                     Ok(watcher::Event::InitApply(o)) => (o, true),
                     Ok(watcher::Event::Delete(obj)) => {
                         if let Some(uid) = obj.uid() {
-                            cache_task
-                                .lock()
-                                .expect("dynamic watcher cache poisoned")
-                                .remove(&uid);
+                            cache_task.lock_recover().remove(&uid);
                             dirty_task.record_delete(uid);
                         }
                         continue;
@@ -658,7 +647,7 @@ impl ResourceWatcher {
                 // for the rationale. Same behaviour: cheap structural
                 // equality on the projected row; on miss, update the
                 // cache and broadcast; on hit, drop silently.
-                let mut cache = cache_task.lock().expect("dynamic watcher cache poisoned");
+                let mut cache = cache_task.lock_recover();
                 let unchanged = cache.get(&uid).is_some_and(|prev| prev == &row);
                 if unchanged {
                     suppressed += 1;
@@ -701,12 +690,7 @@ impl ResourceWatcher {
             // the lossy try_lock path the previous version used (which
             // returned empty whenever the watcher task happened to hold
             // the lock).
-            cache_snap
-                .lock()
-                .expect("dynamic watcher cache poisoned")
-                .values()
-                .cloned()
-                .collect()
+            cache_snap.lock_recover().values().cloned().collect()
         });
 
         Self {
@@ -785,7 +769,7 @@ impl ResourceWatcher {
                         let Some(secret_uid) = obj.uid() else {
                             continue;
                         };
-                        let mut g = store_task.lock().expect("helm store poisoned");
+                        let mut g = store_task.lock_recover();
                         // We don't have the parsed Release here (the Delete
                         // event only carries metadata) — locate which (ns,
                         // name) holds this secret uid by scanning. Helm
@@ -822,7 +806,7 @@ impl ResourceWatcher {
                     Ok(watcher::Event::InitDone) => {
                         init_done_task.store(true, Ordering::SeqCst);
                         let reconciled = if let Some(seen) = init_seen.take() {
-                            let mut g = store_task.lock().expect("helm store poisoned");
+                            let mut g = store_task.lock_recover();
                             // Snapshot (key, missing_secret_uid) pairs while
                             // holding the lock; can't mutate `g` while a
                             // borrow into it is alive.
@@ -894,7 +878,7 @@ impl ResourceWatcher {
                 let ns = release.namespace.clone().unwrap_or_default();
                 let name = release.name.clone();
                 let key = (ns.clone(), name.clone());
-                let mut g = store_task.lock().expect("helm store poisoned");
+                let mut g = store_task.lock_recover();
                 let entry = g.entry(key.clone()).or_default();
                 entry.insert(secret_uid, release);
                 if let Some(latest) = entry.values().max_by_key(|r| r.version) {
@@ -923,7 +907,7 @@ impl ResourceWatcher {
 
         let store_snap = store.clone();
         let snapshot_fn: Box<dyn Fn() -> Vec<Value> + Send + Sync> = Box::new(move || {
-            let g = store_snap.lock().expect("helm store poisoned");
+            let g = store_snap.lock_recover();
             g.iter()
                 .filter_map(|((ns, name), revs)| {
                     let latest = revs.values().max_by_key(|r| r.version)?;
@@ -1021,7 +1005,7 @@ impl ResourceWatcher {
                 let store = repo_charts_task.clone();
                 tokio::spawn(async move {
                     let entries = helm_search_repo().await;
-                    let mut g = store.lock().expect("helm-chart repo map poisoned");
+                    let mut g = store.lock_recover();
                     for rc in &entries {
                         let key: RepoKey = (rc.repo.clone(), rc.name.clone(), rc.version.clone());
                         g.insert(key.clone(), rc.clone());
@@ -1054,10 +1038,7 @@ impl ResourceWatcher {
                         let Some(secret_uid) = obj.uid() else {
                             continue;
                         };
-                        let key = secret_map_task
-                            .lock()
-                            .expect("helm-chart secret map poisoned")
-                            .remove(&secret_uid);
+                        let key = secret_map_task.lock_recover().remove(&secret_uid);
                         if let Some(k) = key {
                             demote_cluster_chart(
                                 &cluster_charts_task,
@@ -1082,17 +1063,13 @@ impl ResourceWatcher {
                             // chart entry (which may delete the row or
                             // re-emit with a lower used_by count).
                             let stale: Vec<(String, ClusterKey)> = secret_map_task
-                                .lock()
-                                .expect("helm-chart secret map poisoned")
+                                .lock_recover()
                                 .iter()
                                 .filter(|(u, _)| !seen.contains(u.as_str()))
                                 .map(|(u, k)| (u.clone(), k.clone()))
                                 .collect();
                             for (secret_uid, key) in &stale {
-                                secret_map_task
-                                    .lock()
-                                    .expect("helm-chart secret map poisoned")
-                                    .remove(secret_uid);
+                                secret_map_task.lock_recover().remove(secret_uid);
                                 demote_cluster_chart(
                                     &cluster_charts_task,
                                     key,
@@ -1154,11 +1131,7 @@ impl ResourceWatcher {
                 // Demote a prior chart-key for this same secret
                 // uid (rare in-place version change) before
                 // promoting into the new key.
-                let prior_key = secret_map_task
-                    .lock()
-                    .expect("helm-chart secret map poisoned")
-                    .get(&secret_uid)
-                    .cloned();
+                let prior_key = secret_map_task.lock_recover().get(&secret_uid).cloned();
                 if let Some(old_key) = prior_key {
                     if old_key != new_key {
                         demote_cluster_chart(
@@ -1171,7 +1144,7 @@ impl ResourceWatcher {
                 }
 
                 {
-                    let mut g = cluster_charts_task.lock().expect("helm-chart map poisoned");
+                    let mut g = cluster_charts_task.lock_recover();
                     let entry = g.entry(new_key.clone()).or_insert_with(|| ChartEntry {
                         sample: release.clone(),
                         secret_uids: HashSet::new(),
@@ -1184,10 +1157,7 @@ impl ResourceWatcher {
                     );
                     dirty_task.record_upsert(uid, row);
                 }
-                secret_map_task
-                    .lock()
-                    .expect("helm-chart secret map poisoned")
-                    .insert(secret_uid, new_key);
+                secret_map_task.lock_recover().insert(secret_uid, new_key);
 
                 applied += 1;
             }
@@ -1200,7 +1170,7 @@ impl ResourceWatcher {
             use crate::fetch::HELM_CLUSTER_SOURCE;
             let mut out = Vec::new();
             {
-                let g = cluster_snap.lock().expect("helm-chart map poisoned");
+                let g = cluster_snap.lock_recover();
                 for ((name, version), entry) in g.iter() {
                     out.push(with_uid(
                         synthetic_uid(HELM_CLUSTER_SOURCE, name, version),
@@ -1209,7 +1179,7 @@ impl ResourceWatcher {
                 }
             }
             {
-                let g = repo_snap.lock().expect("helm-chart repo map poisoned");
+                let g = repo_snap.lock_recover();
                 for ((repo, name, version), rc) in g.iter() {
                     out.push(with_uid(
                         synthetic_uid(repo, name, version),
@@ -1238,7 +1208,7 @@ impl ResourceWatcher {
             dirty: &DirtyChannel,
         ) {
             use crate::fetch::HELM_CLUSTER_SOURCE;
-            let mut g = charts.lock().expect("helm-chart map poisoned");
+            let mut g = charts.lock_recover();
             let Some(entry) = g.get_mut(key) else { return };
             entry.secret_uids.remove(secret_uid);
             if entry.secret_uids.is_empty() {
@@ -1315,7 +1285,7 @@ fn reconcile_init_seen(
     let Some(seen) = init_seen.take() else {
         return 0;
     };
-    let mut cache = cache.lock().expect("watcher cache poisoned");
+    let mut cache = cache.lock_recover();
     let stale: Vec<String> = cache
         .keys()
         .filter(|uid| !seen.contains(uid.as_str()))

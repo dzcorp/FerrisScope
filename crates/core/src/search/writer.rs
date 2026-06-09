@@ -1,3 +1,4 @@
+use crate::sync::LockExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -79,7 +80,7 @@ pub(super) async fn writer_loop(path: PathBuf, mut rx: mpsc::UnboundedReceiver<I
                 }
                 let conn_c = conn.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    let c = conn_c.lock().expect("conn poisoned");
+                    let c = conn_c.lock_recover();
                     super::query::run(&c, &query, limit)
                 })
                 .await
@@ -97,7 +98,7 @@ pub(super) async fn writer_loop(path: PathBuf, mut rx: mpsc::UnboundedReceiver<I
                 }
                 let conn_c = conn.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    let c = conn_c.lock().expect("conn poisoned");
+                    let c = conn_c.lock_recover();
                     super::gc::run(&c, tombstone_age, stale_age)
                 })
                 .await
@@ -111,7 +112,7 @@ pub(super) async fn writer_loop(path: PathBuf, mut rx: mpsc::UnboundedReceiver<I
                 }
                 let conn_c = conn.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    let c = conn_c.lock().expect("conn poisoned");
+                    let c = conn_c.lock_recover();
                     newest_updated_at(&c)
                 })
                 .await
@@ -136,7 +137,7 @@ async fn flush(conn: &Arc<Mutex<Connection>>, buffer: &mut Vec<WriteOp>) {
     let conn = conn.clone();
     let started = std::time::Instant::now();
     let result = tokio::task::spawn_blocking(move || {
-        let mut c = conn.lock().expect("conn poisoned");
+        let mut c = conn.lock_recover();
         apply_writes(&mut c, &to_flush)
     })
     .await;

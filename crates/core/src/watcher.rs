@@ -8,6 +8,7 @@
 //! When the source list changes (the user adds/removes/toggles), call
 //! [`KubeconfigWatcher::reconfigure`] to swap the watched paths atomically.
 
+use crate::sync::LockExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -60,8 +61,8 @@ impl KubeconfigWatcher {
     /// (notify on a single file is unreliable across editors that rename-
     /// then-replace) but events are still narrowed downstream by re-reading.
     pub fn reconfigure(&self, paths: &[PathBuf]) {
-        let mut deb = self.debouncer.lock().expect("watcher lock");
-        let mut current = self.watched.lock().expect("watched lock");
+        let mut deb = self.debouncer.lock_recover();
+        let mut current = self.watched.lock_recover();
 
         // Unwatch everything we previously watched. Errors here mean the path
         // was already gone, which is fine.

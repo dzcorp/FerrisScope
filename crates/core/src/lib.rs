@@ -22,6 +22,7 @@ pub mod quantity;
 pub mod search;
 pub mod sources;
 pub mod ssh;
+pub mod sync;
 pub mod table_views;
 pub mod watcher;
 

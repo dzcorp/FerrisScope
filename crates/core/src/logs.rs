@@ -10,6 +10,7 @@
 //! and reconnects across mid-stream drops / container restarts without
 //! re-emitting already-shown lines. Aborts the underlying task on drop.
 
+use crate::sync::LockExt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -446,8 +447,7 @@ impl LogStream {
         // miss lines the reader already sent; later consumers get a fresh
         // (post-subscribe, best-effort) receiver.
         self.initial_rx
-            .lock()
-            .expect("log stream initial_rx mutex poisoned")
+            .lock_recover()
             .take()
             .unwrap_or_else(|| self.tx.subscribe())
     }
