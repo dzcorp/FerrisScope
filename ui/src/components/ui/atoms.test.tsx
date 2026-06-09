@@ -436,6 +436,49 @@ describe("ErrorBlock — classification branches", () => {
     expect(getByText(/the pod/i)).toBeInTheDocument();
   });
 
+  it("exec-plugin 'not found on PATH' → 'Auth plugin not found', not 'cluster doesn't exist'", () => {
+    const { getByText, queryByText } = render(
+      <ErrorBlock
+        t={t}
+        message="exec credential plugin 'gke-gcloud-auth-plugin' not found on PATH — install the gcloud CLI"
+        kindLabel="cluster"
+      />,
+    );
+    expect(getByText("Auth plugin not found")).toBeInTheDocument();
+    // Must NOT be mis-classified as a deleted/missing cluster.
+    expect(queryByText(/doesn't exist/i)).not.toBeInTheDocument();
+  });
+
+  it("kube-rs ENOENT auth-exec error → 'Auth plugin not found'", () => {
+    const { getByText } = render(
+      <ErrorBlock
+        t={t}
+        message="kube client: auth error: unable to run auth exec: No such file or directory (os error 2)"
+        kindLabel="cluster"
+      />,
+    );
+    expect(getByText("Auth plugin not found")).toBeInTheDocument();
+  });
+
+  it("auth-exec run failure (no 'not found') → 'Auth plugin failed'", () => {
+    const { getByText } = render(
+      <ErrorBlock
+        t={t}
+        message="auth exec command 'gcloud' failed with status exit status: 1"
+        kindLabel="cluster"
+      />,
+    );
+    expect(getByText("Auth plugin failed")).toBeInTheDocument();
+  });
+
+  it("genuine apiserver 404 (no exec tokens) still → 'Not found' / cluster doesn't exist", () => {
+    const { getByText } = render(
+      <ErrorBlock t={t} message="kube error: api error: NotFound" kindLabel="cluster" />,
+    );
+    expect(getByText("Not found")).toBeInTheDocument();
+    expect(getByText(/doesn't exist/i)).toBeInTheDocument();
+  });
+
   it("403 → 'Access denied' and verb-specific body for save", () => {
     const { getByText } = render(
       <ErrorBlock

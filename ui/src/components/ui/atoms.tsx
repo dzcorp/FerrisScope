@@ -1484,6 +1484,31 @@ function classifyDetailError(
       raw: trimmed,
     };
   }
+  // Auth / exec-credential plugin failures (gke-gcloud-auth-plugin,
+  // aws-iam-authenticator, kubelogin, …). MUST come before the generic 404
+  // branch: a missing plugin or its stderr often contains "not found" (e.g.
+  // "exec credential plugin 'gke-gcloud-auth-plugin' not found on PATH",
+  // "executable … not found", or gcloud printing "… not found"), which would
+  // otherwise be mis-read as "the cluster doesn't exist". A genuine apiserver
+  // 404 carries none of these exec/auth tokens, so it still falls through.
+  if (
+    /auth exec|exec credential plugin|exec plugin|not found on path|no such file or directory|executable .* not found|gke-gcloud-auth-plugin|aws-iam-authenticator|kubelogin/.test(
+      m,
+    )
+  ) {
+    const missing = /not found|no such file/.test(m);
+    const SHORT = 240;
+    return {
+      title: missing ? "Auth plugin not found" : "Auth plugin failed",
+      body:
+        trimmed.length <= SHORT && !trimmed.includes("\n")
+          ? trimmed
+          : missing
+            ? "A kubeconfig credential plugin (e.g. gke-gcloud-auth-plugin) isn't on the PATH the app sees. Install it and make sure it resolves — it may work in your terminal but not when the app is launched from Finder/Dock."
+            : "A kubeconfig credential plugin failed to produce credentials. Check that you're logged in (e.g. `gcloud auth login`) and that the plugin runs cleanly from your terminal.",
+      raw: trimmed,
+    };
+  }
   if (/\bnot ?found\b|\b404\b/.test(m)) {
     return {
       title: "Not found",
