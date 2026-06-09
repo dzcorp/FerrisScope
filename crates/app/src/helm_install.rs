@@ -4,9 +4,9 @@
 //! inherit the shell's `PATH` and `brew install helm` lives in
 //! `/opt/homebrew/bin`) often don't have `helm` resolvable to the
 //! FerrisScope process. This module manages a copy under
-//! `<config>/bin/helm[.exe]`. Combined with the macOS PATH augmentation in
-//! `main.rs::augment_macos_path` (which prepends the managed-bin dir to
-//! `$PATH`), every later `Command::new("helm")` resolves transparently.
+//! `<config>/bin/helm[.exe]`. Combined with the PATH recovery in
+//! `path_env::augment_path` (which prepends the managed-bin dir to `$PATH`),
+//! every later `Command::new("helm")` resolves transparently.
 //!
 //! Source: helm's official archive mirror at `get.helm.sh`. We:
 //!   1. Read `https://get.helm.sh/helm-latest-version` for the latest stable

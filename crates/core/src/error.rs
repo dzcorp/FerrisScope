@@ -14,6 +14,9 @@ pub enum Error {
     #[error("yaml: {0}")]
     Yaml(#[from] serde_yaml::Error),
 
+    #[error("exec credential plugin '{command}' not found on PATH — {hint}")]
+    ExecPluginNotFound { command: String, hint: String },
+
     #[error("context not found: {0}")]
     ContextNotFound(String),
 
