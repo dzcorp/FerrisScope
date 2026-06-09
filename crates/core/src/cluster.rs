@@ -46,6 +46,82 @@ fn build_compressed_client(config: Config) -> Result<Client> {
     Ok(builder.build())
 }
 
+/// The exec-credential plugin command configured for `context_name`'s user, if
+/// any (e.g. `gke-gcloud-auth-plugin`). Looked up off the parsed kubeconfig so
+/// an opaque ENOENT from kube-rs's `auth_exec` can be turned into an actionable
+/// "plugin X not found on PATH" message — kube-rs surfaces only the raw
+/// `io::Error`, not the command or an install hint.
+fn exec_plugin_for_context(kc: &Kubeconfig, context_name: &str) -> Option<String> {
+    let user = kc
+        .contexts
+        .iter()
+        .find(|c| c.name == context_name)
+        .and_then(|c| c.context.as_ref())
+        .and_then(|ctx| ctx.user.clone())?;
+    kc.auth_infos
+        .iter()
+        .find(|a| a.name == user)
+        .and_then(|a| a.auth_info.as_ref())
+        .and_then(|ai| ai.exec.as_ref())
+        .and_then(|e| e.command.clone())
+}
+
+/// If `err`'s source chain bottoms out in an `io::ErrorKind::NotFound` (the
+/// signature of a kubeconfig exec auth plugin missing from `PATH`) and we know
+/// the plugin command, replace the opaque kube error with an actionable one.
+/// Gated strictly on `NotFound` so a `PermissionDenied` plugin (a different
+/// failure) is never mislabelled as "not found".
+fn enrich_exec_error(err: Error, exec_command: Option<String>) -> Error {
+    match exec_command {
+        Some(command) if io_not_found_in_chain(&err) => {
+            let hint = exec_install_hint(&command);
+            Error::ExecPluginNotFound { command, hint }
+        }
+        _ => err,
+    }
+}
+
+/// Walk the [`std::error::Error`] source chain looking for an `io::Error` of
+/// kind `NotFound`. Depends only on the std error trait + an `io::Error`
+/// downcast, so it's robust to kube-rs's internal error-enum shape changing
+/// across versions.
+fn io_not_found_in_chain(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            if io.kind() == std::io::ErrorKind::NotFound {
+                return true;
+            }
+        }
+        cur = e.source();
+    }
+    false
+}
+
+/// Best-effort, actionable install hint keyed off the plugin command name.
+/// kube-rs's `ExecConfig` doesn't parse the kubeconfig `installHint`, so we
+/// synthesize guidance for the common providers and fall back to a generic
+/// PATH explanation.
+fn exec_install_hint(command: &str) -> String {
+    let base = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    if base.contains("gke-gcloud-auth-plugin") || base == "gcloud" {
+        "install the gcloud CLI and run `gcloud components install gke-gcloud-auth-plugin`, \
+         then ensure it is on your PATH"
+            .to_owned()
+    } else if base.contains("aws-iam-authenticator") {
+        "install aws-iam-authenticator and ensure it is on your PATH".to_owned()
+    } else if base.contains("aws") {
+        "install the AWS CLI v2 and ensure `aws` is on your PATH".to_owned()
+    } else if base.contains("kubelogin") {
+        "install Azure kubelogin (`az aks install-cli`) and ensure it is on your PATH".to_owned()
+    } else {
+        format!(
+            "ensure `{base}` is installed and on the PATH the app sees — it may resolve in \
+             your terminal but not when the app is launched from Finder/Dock"
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ClusterInfo {
     /// e.g. `v1.30.4`
@@ -112,12 +188,17 @@ impl Cluster {
             Some(p) => Kubeconfig::read_from(p)?,
             None => Kubeconfig::read()?,
         };
+        // Capture the context's exec-plugin command before `kubeconfig` is
+        // consumed, so a later ENOENT from that plugin can be turned into an
+        // actionable error instead of a raw "No such file or directory".
+        let exec_command = exec_plugin_for_context(&kubeconfig, context_name);
         let options = KubeConfigOptions {
             context: Some(context_name.to_owned()),
             ..Default::default()
         };
         let config = Config::from_custom_kubeconfig(kubeconfig, &options).await?;
-        let client = build_compressed_client(config.clone())?;
+        let client = build_compressed_client(config.clone())
+            .map_err(|e| enrich_exec_error(e, exec_command))?;
         Ok(Self {
             context_name: context_name.to_owned(),
             client,
@@ -213,12 +294,14 @@ impl Cluster {
         );
 
         // 6. Build the kube Config + Client off the rewritten kubeconfig.
+        let exec_command = exec_plugin_for_context(&kubeconfig, context_name);
         let options = KubeConfigOptions {
             context: Some(context_name.to_owned()),
             ..Default::default()
         };
         let config = Config::from_custom_kubeconfig(kubeconfig, &options).await?;
-        let client = build_compressed_client(config.clone())?;
+        let client = build_compressed_client(config.clone())
+            .map_err(|e| enrich_exec_error(e, exec_command))?;
 
         Ok(Self {
             context_name: context_name.to_owned(),
@@ -538,5 +621,117 @@ mod tests {
         );
         assert!(parse_server_url("ftp://nope:21").is_err());
         assert!(parse_server_url("https://:6443").is_err());
+    }
+
+    /// A synthetic error that wraps an `io::Error` in its source chain, to
+    /// exercise `io_not_found_in_chain` without depending on kube-rs internals.
+    #[derive(Debug)]
+    struct Wrap(std::io::Error);
+    impl std::fmt::Display for Wrap {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "wrap")
+        }
+    }
+    impl std::error::Error for Wrap {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn io_not_found_walks_the_source_chain() {
+        let not_found = Wrap(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(io_not_found_in_chain(&not_found));
+        // A different io error in the chain must not match.
+        let denied = Wrap(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(!io_not_found_in_chain(&denied));
+        // A non-io error with no io source must not match.
+        assert!(!io_not_found_in_chain(&Error::Invalid("nope".into())));
+    }
+
+    #[test]
+    fn enrich_exec_error_only_relabels_not_found_with_a_command() {
+        // NotFound + known command → actionable ExecPluginNotFound.
+        let e = enrich_exec_error(
+            Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            Some("gke-gcloud-auth-plugin".to_owned()),
+        );
+        match e {
+            Error::ExecPluginNotFound { command, hint } => {
+                assert_eq!(command, "gke-gcloud-auth-plugin");
+                assert!(hint.contains("gke-gcloud-auth-plugin"));
+            }
+            other => panic!("expected ExecPluginNotFound, got {other:?}"),
+        }
+        // PermissionDenied → left untouched (not relabelled as "not found").
+        assert!(!matches!(
+            enrich_exec_error(
+                Error::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                Some("gke-gcloud-auth-plugin".to_owned()),
+            ),
+            Error::ExecPluginNotFound { .. }
+        ));
+        // NotFound but no known plugin command → left untouched.
+        assert!(!matches!(
+            enrich_exec_error(
+                Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                None,
+            ),
+            Error::ExecPluginNotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn exec_install_hint_is_provider_specific() {
+        assert!(exec_install_hint("gke-gcloud-auth-plugin").contains("gcloud components install"));
+        assert!(exec_install_hint("gcloud").contains("gcloud components install"));
+        assert!(
+            exec_install_hint("/abs/path/aws-iam-authenticator").contains("aws-iam-authenticator")
+        );
+        assert!(exec_install_hint("kubelogin").contains("kubelogin"));
+        // Unknown plugin → generic PATH guidance naming the binary.
+        let generic = exec_install_hint("/opt/tools/my-custom-auth");
+        assert!(generic.contains("my-custom-auth"));
+        assert!(generic.contains("PATH"));
+    }
+
+    #[test]
+    fn exec_plugin_for_context_resolves_command_via_user() {
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+current-context: gke
+clusters:
+- name: c
+  cluster:
+    server: https://1.2.3.4
+contexts:
+- name: gke
+  context:
+    cluster: c
+    user: gke-user
+- name: no-exec
+  context:
+    cluster: c
+    user: token-user
+users:
+- name: gke-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: gke-gcloud-auth-plugin
+- name: token-user
+  user:
+    token: abc
+"#;
+        let kc = Kubeconfig::from_yaml(yaml).expect("parse kubeconfig");
+        assert_eq!(
+            exec_plugin_for_context(&kc, "gke"),
+            Some("gke-gcloud-auth-plugin".to_owned())
+        );
+        // A context whose user has no exec stanza → None.
+        assert_eq!(exec_plugin_for_context(&kc, "no-exec"), None);
+        // Unknown context → None.
+        assert_eq!(exec_plugin_for_context(&kc, "missing"), None);
     }
 }
