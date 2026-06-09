@@ -67,6 +67,8 @@ pub enum FetchError {
     UnsupportedRestart(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    Timeout(String),
 }
 
 pub async fn get_resource_yaml(
@@ -431,6 +433,38 @@ pub fn helm_available() -> bool {
     which::which("helm").is_ok()
 }
 
+// Hard ceilings on helm subprocess runtime. Helm has no internal deadline
+// for an unreachable repo or apiserver — without these, a hung `helm`
+// child pins its task forever and the UI never resolves.
+const HELM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const HELM_MUTATE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
+
+#[derive(Debug, thiserror::Error)]
+enum HelmRunError {
+    #[error("spawn helm: {0}")]
+    Spawn(std::io::Error),
+    #[error("helm timed out after {}s and was killed", .0.as_secs())]
+    TimedOut(std::time::Duration),
+}
+
+/// Run a prepared helm command with a hard deadline. Goes through
+/// `tokio::process` (not `spawn_blocking` + `std::process`) so that on
+/// timeout the child is actually killed via `kill_on_drop` — a blocking
+/// thread abandoned by `tokio::time::timeout` would leave helm running
+/// with its sockets open.
+async fn run_helm(
+    cmd: std::process::Command,
+    limit: std::time::Duration,
+) -> Result<std::process::Output, HelmRunError> {
+    let mut cmd = tokio::process::Command::from(cmd);
+    cmd.kill_on_drop(true);
+    match tokio::time::timeout(limit, cmd.output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(HelmRunError::Spawn(e)),
+        Err(_) => Err(HelmRunError::TimedOut(limit)),
+    }
+}
+
 /// Captured stderr + timing from a failed `helm dependency update` —
 /// shaped to map directly into `HelmUpgradeResult::Failed` /
 /// `HelmInstallResult::Failed` so the caller can surface the message in
@@ -458,31 +492,19 @@ pub async fn helm_dependency_update(
     chart_dir: &std::path::Path,
 ) -> Result<(), HelmDepUpdateFailure> {
     use std::process::Stdio;
-    let chart_dir = chart_dir.to_path_buf();
     let started = std::time::Instant::now();
-    let output = match tokio::task::spawn_blocking(move || {
-        std::process::Command::new("helm")
-            .arg("dependency")
-            .arg("update")
-            .arg(&chart_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    })
-    .await
-    {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            return Err(HelmDepUpdateFailure {
-                message: format!("spawn helm dependency update: {e}"),
-                helm_stderr: String::new(),
-                elapsed_ms: started.elapsed().as_millis() as u64,
-            });
-        }
+    let mut cmd = std::process::Command::new("helm");
+    cmd.arg("dependency")
+        .arg("update")
+        .arg(chart_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = match run_helm(cmd, HELM_MUTATE_TIMEOUT).await {
+        Ok(o) => o,
         Err(e) => {
             return Err(HelmDepUpdateFailure {
-                message: format!("join helm dependency update: {e}"),
+                message: format!("helm dependency update: {e}"),
                 helm_stderr: String::new(),
                 elapsed_ms: started.elapsed().as_millis() as u64,
             });
@@ -533,18 +555,16 @@ pub async fn helm_search_repo() -> Vec<HelmRepoChart> {
     if !helm_available() {
         return Vec::new();
     }
-    let output = match tokio::task::spawn_blocking(|| {
-        std::process::Command::new("helm")
-            .arg("search")
-            .arg("repo")
-            .arg("--output")
-            .arg("json")
-            .output()
-    })
-    .await
-    {
-        Ok(Ok(o)) => o,
-        _ => return Vec::new(),
+    let mut cmd = std::process::Command::new("helm");
+    cmd.arg("search").arg("repo").arg("--output").arg("json");
+    let output = match run_helm(cmd, HELM_READ_TIMEOUT).await {
+        Ok(o) => o,
+        Err(e) => {
+            // Best-effort source: an empty catalog beats a hard error,
+            // but a hung/missing helm shouldn't be invisible in logs.
+            tracing::warn!("helm search repo: {e}");
+            return Vec::new();
+        }
     };
     if !output.status.success() {
         // Common when no repos configured: helm exits with status 1 and
@@ -597,21 +617,18 @@ pub async fn helm_show_values(chart_ref: &str, version: &str) -> String {
     if !helm_available() {
         return String::new();
     }
-    let chart_ref = chart_ref.to_owned();
-    let version = version.to_owned();
-    let output = match tokio::task::spawn_blocking(move || {
-        std::process::Command::new("helm")
-            .arg("show")
-            .arg("values")
-            .arg(&chart_ref)
-            .arg("--version")
-            .arg(&version)
-            .output()
-    })
-    .await
-    {
-        Ok(Ok(o)) => o,
-        _ => return String::new(),
+    let mut cmd = std::process::Command::new("helm");
+    cmd.arg("show")
+        .arg("values")
+        .arg(chart_ref)
+        .arg("--version")
+        .arg(version);
+    let output = match run_helm(cmd, HELM_READ_TIMEOUT).await {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("helm show values {chart_ref}@{version}: {e}");
+            return String::new();
+        }
     };
     if !output.status.success() {
         return String::new();
@@ -762,13 +779,19 @@ pub async fn helm_upgrade(
     }
 
     let started = std::time::Instant::now();
-    // `Command::output` is sync; spawn on the blocking pool so we don't
-    // stall the Tokio runtime — helm install/upgrade can take many
-    // seconds on slow charts.
-    let output = tokio::task::spawn_blocking(move || cmd.output())
-        .await
-        .map_err(|e| FetchError::Conflict(format!("join: {e}")))?
-        .map_err(|e| FetchError::Conflict(format!("spawn helm: {e}")))?;
+    let output = match run_helm(cmd, HELM_MUTATE_TIMEOUT).await {
+        Ok(o) => o,
+        // Timeout lands in the same Failed banner as a helm error — the
+        // operator needs the message, not a generic command failure.
+        Err(e @ HelmRunError::TimedOut(_)) => {
+            return Ok(HelmUpgradeResult::Failed {
+                message: e.to_string(),
+                helm_stderr: String::new(),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+        Err(e) => return Err(FetchError::Conflict(e.to_string())),
+    };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1044,10 +1067,17 @@ pub async fn helm_install_chart(
     }
 
     let started = std::time::Instant::now();
-    let output = tokio::task::spawn_blocking(move || cmd.output())
-        .await
-        .map_err(|e| FetchError::Conflict(format!("join: {e}")))?
-        .map_err(|e| FetchError::Conflict(format!("spawn helm: {e}")))?;
+    let output = match run_helm(cmd, HELM_MUTATE_TIMEOUT).await {
+        Ok(o) => o,
+        Err(e @ HelmRunError::TimedOut(_)) => {
+            return Ok(HelmInstallResult::Failed {
+                message: e.to_string(),
+                helm_stderr: String::new(),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+        Err(e) => return Err(FetchError::Conflict(e.to_string())),
+    };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1095,18 +1125,18 @@ pub async fn helm_repo_update() -> Result<u64, FetchError> {
         ));
     }
     let started = std::time::Instant::now();
-    let output = tokio::task::spawn_blocking(|| {
-        std::process::Command::new("helm")
-            .arg("repo")
-            .arg("update")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    })
-    .await
-    .map_err(|e| FetchError::Conflict(format!("join: {e}")))?
-    .map_err(|e| FetchError::Conflict(format!("spawn helm: {e}")))?;
+    let mut cmd = std::process::Command::new("helm");
+    cmd.arg("repo")
+        .arg("update")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = run_helm(cmd, HELM_MUTATE_TIMEOUT)
+        .await
+        .map_err(|e| match e {
+            HelmRunError::TimedOut(_) => FetchError::Timeout(format!("helm repo update: {e}")),
+            e => FetchError::Conflict(e.to_string()),
+        })?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1192,10 +1222,14 @@ pub async fn helm_uninstall(
     if let Some(p) = kubeconfig_path {
         cmd.arg("--kubeconfig").arg(p);
     }
-    let output = tokio::task::spawn_blocking(move || cmd.output())
+    let output = run_helm(cmd, HELM_MUTATE_TIMEOUT)
         .await
-        .map_err(|e| FetchError::Conflict(format!("join: {e}")))?
-        .map_err(|e| FetchError::Conflict(format!("spawn helm: {e}")))?;
+        .map_err(|e| match e {
+            HelmRunError::TimedOut(_) => {
+                FetchError::Timeout(format!("helm uninstall {namespace}/{release_name}: {e}"))
+            }
+            e => FetchError::Conflict(e.to_string()),
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(FetchError::Conflict(format!(
@@ -2042,6 +2076,39 @@ pub async fn merge_patch_resource(
 /// through a pointless reload that can never resolve it.
 fn is_stale_conflict(status_code: u16, had_resource_version: bool) -> bool {
     status_code == 409 && had_resource_version
+}
+
+#[cfg(test)]
+mod run_helm_tests {
+    use super::{run_helm, HelmRunError};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn kills_and_reports_on_timeout() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("5");
+        let started = std::time::Instant::now();
+        let err = run_helm(cmd, Duration::from_millis(100)).await.unwrap_err();
+        assert!(matches!(err, HelmRunError::TimedOut(_)), "got {err:?}");
+        // The call must return at the deadline, not when sleep finishes.
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn passes_through_success_output() {
+        let mut cmd = std::process::Command::new("echo");
+        cmd.arg("hi");
+        let out = run_helm(cmd, Duration::from_secs(5)).await.unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+    }
+
+    #[tokio::test]
+    async fn surfaces_spawn_failure_for_missing_binary() {
+        let cmd = std::process::Command::new("ferrisscope-no-such-binary");
+        let err = run_helm(cmd, Duration::from_secs(1)).await.unwrap_err();
+        assert!(matches!(err, HelmRunError::Spawn(_)), "got {err:?}");
+    }
 }
 
 #[cfg(test)]
