@@ -340,6 +340,24 @@ pub(crate) struct ViewContextWire {
     /// rendered block to keep the prompt bounded.
     #[serde(default)]
     pub selected: Vec<ViewSelectedResource>,
+    /// Present when the operator has a multi-cluster (virtual context)
+    /// view active. The prompt block then lists the member clusters and
+    /// reminds the model that native tools target one cluster at a time
+    /// (switchable via `fs_configuration_use_context`), and the
+    /// single-cluster mismatch warning is suppressed — it would be
+    /// misleading when the UI is deliberately viewing several clusters.
+    #[serde(default)]
+    pub virtual_context: Option<VirtualContextWire>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VirtualContextWire {
+    /// Operator-given name of the virtual context (or ad-hoc view label).
+    pub name: String,
+    /// Physical cluster ids of every member currently in the view.
+    #[serde(default)]
+    pub member_cluster_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -349,4 +367,38 @@ pub(crate) struct ViewSelectedResource {
     #[serde(default)]
     pub namespace: Option<String>,
     pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_context_wire_tolerates_payload_without_virtual_context() {
+        // Frontend builds that predate the multi-cluster view send the old
+        // shape — `virtual_context` must default to None, not fail deser.
+        let legacy = r#"{
+            "clusterId": "default::a",
+            "kindId": "pods",
+            "namespaces": ["default"],
+            "selected": [{ "namespace": "default", "name": "api" }]
+        }"#;
+        let wire: ViewContextWire = serde_json::from_str(legacy).unwrap();
+        assert!(wire.virtual_context.is_none());
+        assert_eq!(wire.cluster_id.as_deref(), Some("default::a"));
+    }
+
+    #[test]
+    fn view_context_wire_parses_virtual_context_members() {
+        let payload = r#"{
+            "virtualContext": {
+                "name": "prod fleet",
+                "memberClusterIds": ["default::a", "default::b"]
+            }
+        }"#;
+        let wire: ViewContextWire = serde_json::from_str(payload).unwrap();
+        let vc = wire.virtual_context.expect("virtual context parsed");
+        assert_eq!(vc.name, "prod fleet");
+        assert_eq!(vc.member_cluster_ids, vec!["default::a", "default::b"]);
+    }
 }
