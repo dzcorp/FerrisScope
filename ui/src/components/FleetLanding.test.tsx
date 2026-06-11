@@ -18,7 +18,7 @@ afterEach(() => {
   resetMockInvoke();
   // Reset the slices these tests poke so they don't bleed across the file.
   act(() => {
-    useAppStore.setState({ metrics: null, tableCount: null });
+    useAppStore.setState({ metricsByCluster: {}, tableCount: null });
   });
 });
 
@@ -58,10 +58,146 @@ describe("FleetLanding store subscription", () => {
     // the component's selected slices are referentially unchanged, so it must
     // not re-render. (A bulk `useAppStore()` would re-render on each.)
     act(() => {
-      useAppStore.getState().setMetrics(null);
+      useAppStore.getState().setMetrics("c1", { pods: {}, cluster: null, pod_volumes: {}, pvcs: {}, available: false, volumes_available: false, fetched_at_unix_ms: 0 } as never);
       useAppStore.getState().setTableCount({ filtered: 5, total: 9 });
     });
 
     expect(commits).toBe(baseline);
+  });
+});
+
+// ─── Virtual context multi-select + CRUD ────────────────────────────────────
+
+import { fireEvent, screen } from "@testing-library/react";
+
+const fleetCtx = (id: string, name: string) => ({
+  id,
+  name,
+  cluster: name,
+  user: null,
+  namespace: null,
+  is_current: false,
+  group: "Default",
+  source_id: "default",
+  source_path: null,
+});
+
+const fleetMock = () =>
+  setMockInvoke((cmd) => {
+    switch (cmd) {
+      case "list_contexts":
+        return [fleetCtx("default::a", "alpha"), fleetCtx("default::b", "beta")];
+      case "get_fleet_cache":
+        return {};
+      case "refresh_fleet":
+        return undefined;
+      default:
+        return undefined;
+    }
+  });
+
+const resetVctxState = () =>
+  act(() => {
+    useAppStore.setState({
+      contexts: [],
+      virtualContexts: [],
+      selectedVirtualContextId: null,
+      selectedContext: null,
+      scopeExtras: [],
+    });
+  });
+
+describe("FleetLanding virtual-context flow", () => {
+  it("⌘-click picks cards, the bar gates on 2+ and a unique name, save writes the store", async () => {
+    resetVctxState();
+    fleetMock();
+    const onSelect = () => {};
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={onSelect} />);
+    });
+    await act(async () => {});
+
+    // ⌘-click the first card → picked, floating bar appears.
+    fireEvent.click(screen.getAllByText("alpha").at(-1)!, { metaKey: true });
+    expect(screen.getByText("selected")).toBeTruthy();
+    expect(
+      screen.getByPlaceholderText("Pick 2+ clusters…"),
+    ).toBeTruthy();
+
+    // Picking the second flips the placeholder to the name prompt.
+    fireEvent.click(screen.getAllByText("beta").at(-1)!, { metaKey: true });
+    const input = screen.getByLabelText("Virtual context name");
+    fireEvent.change(input, { target: { value: "prod fleet" } });
+    fireEvent.click(screen.getByText("Save virtual context"));
+
+    const s = useAppStore.getState();
+    expect(s.virtualContexts).toHaveLength(1);
+    expect(s.virtualContexts[0]!.name).toBe("prod fleet");
+    expect(new Set(s.virtualContexts[0]!.members)).toEqual(
+      new Set(["default::a", "default::b"]),
+    );
+    // Saving does not activate, and pick mode is cleared.
+    expect(s.selectedVirtualContextId).toBeNull();
+    expect(screen.queryByText("Save virtual context")).toBeNull();
+  });
+
+  it("refuses to save a duplicate name", async () => {
+    resetVctxState();
+    fleetMock();
+    act(() => {
+      useAppStore.setState({
+        virtualContexts: [
+          { id: "v0", name: "prod fleet", members: ["default::a", "default::b"] },
+        ],
+      });
+    });
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={() => {}} />);
+    });
+    await act(async () => {});
+
+    fireEvent.click(screen.getAllByText("alpha").at(-1)!, { metaKey: true });
+    fireEvent.click(screen.getAllByText("beta").at(-1)!, { metaKey: true });
+    const input = screen.getByLabelText("Virtual context name");
+    fireEvent.change(input, { target: { value: "PROD FLEET" } });
+    fireEvent.click(screen.getByText("Save virtual context"));
+    // Still just the pre-existing one.
+    expect(useAppStore.getState().virtualContexts).toHaveLength(1);
+  });
+
+  it("renders saved virtual contexts as cards and click activates them", async () => {
+    resetVctxState();
+    fleetMock();
+    act(() => {
+      useAppStore.setState({
+        virtualContexts: [
+          { id: "v1", name: "edge", members: ["default::a", "default::b"] },
+        ],
+      });
+    });
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={() => {}} />);
+    });
+    await act(async () => {});
+
+    expect(screen.getByText("Virtual contexts")).toBeTruthy();
+    expect(screen.getByText("2 clusters")).toBeTruthy();
+    fireEvent.click(screen.getByText("edge"));
+    const s = useAppStore.getState();
+    expect(s.selectedVirtualContextId).toBe("v1");
+    expect(s.selectedContext).toBeNull();
+  });
+
+  it("plain click still connects (single-select path untouched)", async () => {
+    resetVctxState();
+    fleetMock();
+    const picked: string[] = [];
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={(id) => picked.push(id)} />);
+    });
+    await act(async () => {});
+    fireEvent.click(screen.getAllByText("alpha").at(-1)!);
+    expect(picked).toEqual(["default::a"]);
+    expect(useAppStore.getState().virtualContexts).toHaveLength(0);
   });
 });

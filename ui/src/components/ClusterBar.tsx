@@ -77,6 +77,17 @@ export function ClusterBar({ mode, context, state, style }: Props) {
     return () => window.removeEventListener("mousedown", onDown);
   }, [addMenuOpen, setAddMenuOpen]);
 
+  // "Add cluster…" flips the dropdown into a context-picker list; appending
+  // a context widens this single-cluster view into an ad-hoc multi-cluster
+  // view (App switches to VirtualClusterPanel when the scope grows past 1).
+  const [addClusterMode, setAddClusterMode] = useState(false);
+  useEffect(() => {
+    if (!addMenuOpen) setAddClusterMode(false);
+  }, [addMenuOpen]);
+  const allContexts = useAppStore((s) => s.contexts);
+  const addScopeExtra = useAppStore((s) => s.addScopeExtra);
+  const addableContexts = allContexts.filter((c) => c.id !== context.id);
+
   return (
     <div
       ref={barRef}
@@ -230,6 +241,48 @@ export function ClusterBar({ mode, context, state, style }: Props) {
                   : "0 8px 24px rgba(15,20,30,0.12)",
             }}
           >
+            {addClusterMode ? (
+              <>
+                <div
+                  style={{
+                    padding: "6px 10px 4px",
+                    fontSize: FS_XS,
+                    fontWeight: 700,
+                    textTransform: "uppercase",
+                    letterSpacing: 0.5,
+                    color: t.textMuted,
+                    fontFamily: FF_MONO,
+                  }}
+                >
+                  Add cluster to this view
+                </div>
+                {addableContexts.length === 0 && (
+                  <div
+                    style={{
+                      padding: "8px 10px",
+                      fontSize: FS_MD,
+                      color: t.textMuted,
+                    }}
+                  >
+                    No other contexts in your kubeconfig.
+                  </div>
+                )}
+                {addableContexts.map((c) => (
+                  <AddMenuItem
+                    key={c.id}
+                    t={t}
+                    icon={Icons.cluster}
+                    title={c.name}
+                    subtitle={c.cluster}
+                    onClick={() => {
+                      addScopeExtra(c.id);
+                      setAddMenuOpen(false);
+                    }}
+                  />
+                ))}
+              </>
+            ) : (
+              <>
             <AddMenuItem
               t={t}
               icon={Icons.shell}
@@ -283,6 +336,15 @@ export function ClusterBar({ mode, context, state, style }: Props) {
                 }
               }}
             />
+            <AddMenuItem
+              t={t}
+              icon={Icons.plus}
+              title="Add cluster…"
+              subtitle="Merge another cluster into this view"
+              onClick={() => setAddClusterMode(true)}
+            />
+              </>
+            )}
           </div>
         )}
       </div>
@@ -473,7 +535,7 @@ function ClusterGauges({ clusterId }: { mode: ThemeMode; clusterId: string }) {
   // subscription here means future variants of the bar that hide the
   // gauges (e.g. a compact mode) don't pay for metrics polling either.
   useMetricsSubscription(clusterId);
-  const metrics = useAppStore((s) => s.metrics);
+  const metrics = useAppStore((s) => s.metricsByCluster[clusterId] ?? null);
   if (!metrics || !metrics.available || !metrics.cluster) return null;
   const c = metrics.cluster;
   if (c.cpu_capacity_milli === 0 || c.mem_capacity_mib === 0) return null;

@@ -31,8 +31,18 @@ import type {
   ResourceDelta,
   ResourceKind,
   ResourceRow,
+  SubscribeResult,
 } from "../types";
-import { tokens, FF_MONO, FONT_MONO, type ThemeMode, FS_MD, FS_SM, FS_XS } from "../theme";
+import {
+  tokens,
+  clusterAccent,
+  FF_MONO,
+  FONT_MONO,
+  type ThemeMode,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+} from "../theme";
 import { LogPanel } from "./LogPanel";
 import { DetailPanel, type DetailTarget } from "./DetailPanel";
 import { ContextMenu, type MenuPosition } from "./ContextMenu";
@@ -41,7 +51,13 @@ import { makeTerminalTab } from "./Dock";
 import { confirm, toast } from "../lib/dialog";
 import { latinLetter } from "../lib/keyboard";
 import { parseTableFilter } from "../lib/tableFilter";
-import { useMetricsSubscription } from "../lib/useMetricsSubscription";
+import { useMetricsSubscriptions } from "../lib/useMetricsSubscription";
+import {
+  applyScopedDelta,
+  mergeScopedSnapshots,
+  scopedUid,
+  type ScopedRow,
+} from "../lib/multiCluster";
 import {
   Checkbox,
   ContainerDots,
@@ -65,6 +81,16 @@ type LoadState =
 const SELECT_COL_ID = "__select__";
 const SELECT_COL_WIDTH = 40;
 const RESIZE_HANDLE_WIDTH = 6;
+
+// Synthetic per-row origin column, rendered only when the table merges 2+
+// clusters. The `__` prefix can't collide with backend column ids.
+const CLUSTER_COL_ID = "__cluster__";
+const CLUSTER_COL: ColumnDef = {
+  id: CLUSTER_COL_ID,
+  header: "Cluster",
+  kind: "text",
+};
+const EMPTY_CLUSTER_IDS: string[] = [];
 
 // "Now" flows through context so only components that *subscribe* (the
 // age cell) re-render on each 1 Hz tick. The table, rows, and other
@@ -97,6 +123,51 @@ const PHASE_WRAP: CSSProperties = {
   gap: 8,
   minWidth: 0,
 };
+const CLUSTER_CELL_WRAP: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 7,
+  minWidth: 0,
+  overflow: "hidden",
+};
+const CLUSTER_CELL_DOT: CSSProperties = {
+  width: 8,
+  height: 8,
+  borderRadius: "50%",
+  flexShrink: 0,
+  display: "inline-block",
+};
+const CLUSTER_CELL_TEXT: CSSProperties = {
+  fontSize: TABLE_FS_CELL,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+// Cell for the synthetic Cluster column: identity dot in the member's
+// accent + the context's display name. Module-level so the columns memo
+// keeps referential equality.
+function renderClusterCell(
+  cid: string,
+  meta: Record<string, { name: string; colorIdx: number }>,
+  t: ReturnType<typeof tokens>,
+) {
+  const m = meta[cid];
+  return (
+    <span style={CLUSTER_CELL_WRAP} title={cid}>
+      <span
+        aria-hidden
+        style={{
+          ...CLUSTER_CELL_DOT,
+          background: clusterAccent(m?.colorIdx ?? 0),
+        }}
+      />
+      <span style={{ ...CLUSTER_CELL_TEXT, color: t.textDim }}>
+        {m?.name ?? cid}
+      </span>
+    </span>
+  );
+}
 
 const AgeCell = memo(function AgeCell({
   value,
@@ -126,43 +197,61 @@ function NowProvider({ children }: { children: ReactNode }) {
   return <NowContext.Provider value={now}>{children}</NowContext.Provider>;
 }
 
-// Store selector for the pod-metrics map, gated on `isPods`. A connected
-// cluster keeps `metrics` ticking ~1 Hz (ClusterGauges holds a live
-// subscription), so an ungated read would re-render every non-Pod table
-// (ConfigMaps, Secrets, Deployments…) on each tick for data it never shows.
-// Returning a stable `null` for non-Pod kinds keeps those tables inert under
-// the metrics firehose. Exported for unit testing.
+// Store selector for the per-cluster metrics record, gated on `isPods`.
+// A connected cluster keeps its metrics entry ticking ~1 Hz (ClusterGauges
+// holds a live subscription), so an ungated read would re-render every
+// non-Pod table (ConfigMaps, Secrets, Deployments…) on each tick for data
+// it never shows. Returning a stable `null` for non-Pod kinds keeps those
+// tables inert under the metrics firehose. Exported for unit testing.
 export const selectPodMetrics =
   (isPods: boolean) =>
-  (s: { metrics: MetricsSnapshot | null }): MetricsSnapshot["pods"] | null =>
-    isPods ? s.metrics?.pods ?? null : null;
+  (s: {
+    metricsByCluster: Record<string, MetricsSnapshot>;
+  }): Record<string, MetricsSnapshot> | null =>
+    isPods ? s.metricsByCluster : null;
+
+/// One member of the view this table renders. `colorIdx` indexes the
+/// CLUSTER_ACCENTS palette (assignment is sorted-order-stable, see
+/// `clusterColorIndexMap`).
+export type TableCluster = { id: string; name: string; colorIdx: number };
 
 type Props = {
   mode: ThemeMode;
-  clusterId: string;
+  /// Member clusters to merge. Single-entry for the classic one-cluster
+  /// view; 2+ in a virtual context. MUST be referentially stable across
+  /// renders (parents memoize) — the subscription fan-out keys on it.
+  clusters: TableCluster[];
+  /// Key for persisted table views (sort state): the cluster id for a
+  /// single-cluster view, `vctx:<id>` for a virtual context.
+  viewScopeId: string;
   kind: ResourceKind;
 };
 
 // Resource table — the page is the data (P1). No skeleton on poll, no
 // spinner on re-fetch (R-01). Identifiers in mono (R-07), numbers tabular
-// (R-06), header labels uppercase mono.
-export function ResourceTable({ mode, clusterId, kind }: Props) {
+// (R-06), header labels uppercase mono. Merges rows from every cluster in
+// `clusters`; a synthetic Cluster column appears at 2+.
+export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   const t = useResolvedTheme().tokens;
-  const [rows, setRows] = useState<ResourceRow[]>([]);
+  const [rows, setRows] = useState<ScopedRow[]>([]);
   const [load, setLoad] = useState<LoadState>({ kind: "loading" });
+  // Per-cluster subscribe failures (cluster id → error). Non-empty while at
+  // least one member is serving rows → slim partial-data strip; every member
+  // failed → full-pane `load.kind === "error"` instead.
+  const [subErrors, setSubErrors] = useState<Record<string, string>>({});
   // Filter is driven by the global palette (Cmd+F / `/` / breadcrumb icon).
   // Lifted to the store so the AppHeader can render the active-filter chip
   // and so the palette in filter mode can edit it live without prop drilling.
   const tableFilter = useAppStore((s) => s.tableFilter);
   const setTableCount = useAppStore((s) => s.setTableCount);
-  const [logTarget, setLogTarget] = useState<ResourceRow | null>(null);
+  const [logTarget, setLogTarget] = useState<ScopedRow | null>(null);
   const [logDefaultContainer, setLogDefaultContainer] = useState<string | null>(
     null,
   );
   const [detailTarget, setDetailTarget] = useState<DetailTarget | null>(null);
   const [menu, setMenu] = useState<{
     pos: MenuPosition;
-    row: ResourceRow;
+    row: ScopedRow;
   } | null>(null);
 
   // Namespace filter is global (cluster-bar driven, persisted on the store).
@@ -180,35 +269,72 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
   const pushDetailEntry = useAppStore((s) => s.pushDetailEntry);
   const closeDetail = useAppStore((s) => s.closeDetail);
   const kinds = useAppStore((s) => s.kinds);
+  // Per-cluster heartbeat state — rows from an unavailable member render
+  // dimmed in a merged view (the single-cluster view dims the whole pane
+  // via ClusterPanel's UnavailableOverlay instead). Record identity only
+  // changes on health transitions, so this subscription is near-free.
+  const clusterHealth = useAppStore((s) => s.clusterHealth);
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
   const density = useAppStore((s) => s.settings.density);
   const monoTables = useAppStore((s) => s.settings.monoTables);
   const resolved = useResolvedTheme();
   const ROW_HEIGHT = resolved.sizing.rowHeights[density];
   const addDockTab = useAppStore((s) => s.addDockTab);
-  const contextLabel = useAppStore(
-    (s) => s.contexts.find((c) => c.id === s.selectedContext)?.name ?? null,
-  );
+  // Display name for a row's origin cluster (terminal tab titles, context
+  // menus). Reads the store imperatively — these run inside click handlers,
+  // so no subscription (and no table re-render on fleet refresh) is needed.
+  const clusterLabel = (cid: string) =>
+    useAppStore.getState().contexts.find((c) => c.id === cid)?.name ?? cid;
 
-  // Persisted (sort, column widths) per (cluster, kind). Hydrated at App
+  // Persisted (sort, column widths) per (view scope, kind). Hydrated at App
   // startup; the table writes back through `setTableView` which both updates
   // the store and the on-disk JSON file.
   const persistedView = useAppStore(
-    (s) => s.tableViews[`${clusterId}::${kind.id}`] ?? null,
+    (s) => s.tableViews[`${viewScopeId}::${kind.id}`] ?? null,
   );
   const setTableView = useAppStore((s) => s.setTableView);
 
   const isPods = kind.id === "pods";
 
-  // Pull cluster metrics only while the operator is on a kind that displays
-  // CPU/Mem (today: Pods). The hook no-ops if `clusterId` is null; we pass
-  // null for non-Pod kinds so we don't pay for metrics-server polling +
-  // kubelet stats fan-out when browsing ConfigMaps, Deployments, etc. The
-  // subscription is refcounted server-side so concurrent consumers (cluster
-  // bar gauges, MetricsTab) share one polling task.
-  useMetricsSubscription(isPods ? clusterId : null);
+  // Some kinds don't exist on every member of a virtual context (CRDs are
+  // cluster-local). The rail publishes `kindClusters` for dynamic kinds;
+  // intersect so we never subscribe a kind on a cluster that lacks it.
+  // Built-in kinds have no entry → all members.
+  const kindClusterIds = useAppStore((s) => s.kindClusters[kind.id]);
+  const effectiveClusters = useMemo(
+    () =>
+      kindClusterIds
+        ? clusters.filter((c) => kindClusterIds.includes(c.id))
+        : clusters,
+    [clusters, kindClusterIds],
+  );
+  const clusterIds = useMemo(
+    () => effectiveClusters.map((c) => c.id),
+    [effectiveClusters],
+  );
+  // NUL separator — cluster ids contain "::" and may contain spaces.
+  const clusterKey = clusterIds.join(String.fromCharCode(0));
+  // Per-cluster display metadata for the synthetic Cluster column. Flows
+  // through a ref so the columns memo never rebuilds on a name change.
+  const clusterMeta = useMemo(() => {
+    const out: Record<string, { name: string; colorIdx: number }> = {};
+    for (const c of clusters) out[c.id] = { name: c.name, colorIdx: c.colorIdx };
+    return out;
+  }, [clusters]);
+  const clusterMetaRef = useRef(clusterMeta);
+  clusterMetaRef.current = clusterMeta;
 
-  const rowsRef = useRef<Map<string, ResourceRow>>(new Map());
+  // Pull cluster metrics only while the operator is on a kind that displays
+  // CPU/Mem (today: Pods). We pass an empty list for non-Pod kinds so we
+  // don't pay for metrics-server polling + kubelet stats fan-out when
+  // browsing ConfigMaps, Deployments, etc. The subscription is refcounted
+  // server-side so concurrent consumers (cluster bar gauges, MetricsTab)
+  // share one polling task per cluster.
+  useMetricsSubscriptions(isPods ? clusterIds : EMPTY_CLUSTER_IDS);
+
+  // Keyed by scoped id (`${clusterId}::${uid}`) so rows from different
+  // clusters can never collide once tables merge across a virtual context.
+  const rowsRef = useRef<Map<string, ScopedRow>>(new Map());
 
   // Per-subscription namespace lists. Each entry becomes one backend
   // subscribe call → one `Api::namespaced(ns)` watcher → one event
@@ -250,7 +376,7 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
     // `rowsRef`, so a leaked listener from a prior kind/cluster can never
     // pollute the next kind's row set. (The shared ref is still updated for
     // detail/exec lookups, but only by the active effect.)
-    const localMap = new Map<string, ResourceRow>();
+    const localMap = new Map<string, ScopedRow>();
     rowsRef.current = localMap;
     setLoad({ kind: "loading" });
     setRows([]);
@@ -273,83 +399,108 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
       rafHandle = requestAnimationFrame(flushRows);
     };
 
-    const onDelta = (delta: ResourceDelta) => {
+    setSubErrors({});
+
+    const onDelta = (cid: string, delta: ResourceDelta) => {
       // Belt: closure-captured `cancelled` neutralises a listener whose
       // effect has been torn down. Suspenders: the rowsRef identity check
       // guards the case where a stale listener somehow outlives both
       // cleanup and the next mount.
       if (cancelled) return;
       if (rowsRef.current !== localMap) return;
-      if (delta.kind === "upsert") {
-        localMap.set(delta.row.uid, delta.row);
+      if (applyScopedDelta(localMap, cid, delta)) {
         scheduleFlush();
-        // First row counts as visual confirmation the watcher is alive
-        // even before the initial sync formally completes — drop the
-        // spinner so the table isn't fighting against rows already on
-        // screen.
-        setLoad((cur) => (cur.kind === "loading" ? { kind: "ready" } : cur));
-      } else if (delta.kind === "delete") {
-        localMap.delete(delta.uid);
-        scheduleFlush();
-      } else {
-        // init_done — watcher finished its initial sync. Safe to flip
-        // the load state to ready even if the snapshot was empty (the
-        // kind genuinely has no instances on this cluster).
+      }
+      if (delta.kind !== "delete") {
+        // First row counts as visual confirmation a watcher is alive even
+        // before the initial sync formally completes; init_done flips the
+        // state even when the snapshot was empty (the kind genuinely has no
+        // instances on that cluster).
         setLoad((cur) => (cur.kind === "loading" ? { kind: "ready" } : cur));
       }
     };
 
+    // The full fan: clusters × namespace scopes. One listener + one
+    // subscribe per pair; each pair is an independent backend slot.
+    const pairs = clusterIds.flatMap((cid) =>
+      subscribeScopes.map((scope) => ({ cid, scope })),
+    );
+
     (async () => {
-      try {
-        // Register listeners FIRST (before subscribe) so deltas emitted
-        // during the snapshot round-trip aren't missed. Listeners run in
-        // parallel; each owns its own scope event channel.
-        const listenerHandles = await Promise.all(
-          subscribeScopes.map((scope) =>
-            onResourceDelta(clusterId, kind.id, scope, onDelta),
-          ),
-        );
-        // If cleanup ran while we were awaiting registration, the cleanup
-        // saw `unlistens` empty and skipped the unsubscribe — tear down here.
-        if (cancelled) {
-          for (const u of listenerHandles) u();
-          return;
-        }
-        unlistens.push(...listenerHandles);
-
-        // Subscribe each scope in parallel. Backend lingers each
-        // (kind, ns) slot independently, so a flip from {foo} →
-        // {foo, bar} reuses foo's warm watcher and only pays a fresh
-        // LIST for bar.
-        const results = await Promise.all(
-          subscribeScopes.map((scope) =>
-            api.subscribeResource(clusterId, kind.id, scope),
-          ),
-        );
-        if (cancelled) return;
-
-        // Merge each scope's snapshot under any deltas already landed
-        // (deltas win, they're newer). Snapshots can't double-count: a
-        // pod has exactly one namespace and is only emitted by that
-        // namespace's watcher.
-        const merged = new Map<string, ResourceRow>();
-        for (const result of results) {
-          for (const row of result.rows) merged.set(row.uid, row);
-        }
-        for (const [uid, row] of localMap) merged.set(uid, row);
-        localMap.clear();
-        for (const [uid, row] of merged) localMap.set(uid, row);
-        setRows(Array.from(localMap.values()));
-        // Flip to ready when every scope has either completed its initial
-        // sync OR contributed a row (mirrors the single-scope heuristic).
-        const allInitDone = results.every((r) => r.init_done);
-        if (allInitDone || localMap.size > 0) {
-          setLoad({ kind: "ready" });
-        }
-      } catch (e) {
-        if (!cancelled) setLoad({ kind: "error", message: String(e) });
+      // Register listeners FIRST (before subscribe) so deltas emitted
+      // during the snapshot round-trip aren't missed. Listeners run in
+      // parallel; each owns its own (cluster, scope) event channel.
+      const listenerHandles = await Promise.all(
+        pairs.map(({ cid, scope }) =>
+          onResourceDelta(cid, kind.id, scope, (delta) => onDelta(cid, delta)),
+        ),
+      );
+      // If cleanup ran while we were awaiting registration, the cleanup
+      // saw `unlistens` empty and skipped the unsubscribe — tear down here.
+      if (cancelled) {
+        for (const u of listenerHandles) u();
+        return;
       }
-    })();
+      unlistens.push(...listenerHandles);
+
+      // Subscribe each (cluster, scope) in parallel, capturing per-pair
+      // failures instead of failing the whole view — one unreachable
+      // member of a virtual context must not blank the others' rows.
+      const settled = await Promise.all(
+        pairs.map(async ({ cid, scope }) => {
+          try {
+            const result = await api.subscribeResource(cid, kind.id, scope);
+            return { cid, result, error: null as string | null };
+          } catch (e) {
+            return { cid, result: null, error: String(e) };
+          }
+        }),
+      );
+      if (cancelled) return;
+
+      const ok = settled.filter(
+        (s): s is { cid: string; result: SubscribeResult; error: null } =>
+          s.result !== null,
+      );
+      // Last error per cluster — a cluster is "failed" only if every one
+      // of its scopes failed (a partially-permitted RBAC setup can fail
+      // one namespace and serve another).
+      const errs: Record<string, string> = {};
+      for (const s of settled) {
+        if (s.error !== null && !ok.some((o) => o.cid === s.cid)) {
+          errs[s.cid] = s.error;
+        }
+      }
+
+      // Merge each snapshot under any deltas already landed (deltas win,
+      // they're newer). Snapshots can't double-count: one namespace owns
+      // each object, and cross-cluster keys are scoped.
+      const merged = mergeScopedSnapshots(
+        ok.map((s) => ({ clusterId: s.cid, rows: s.result.rows })),
+        localMap,
+      );
+      localMap.clear();
+      for (const [sid, row] of merged) localMap.set(sid, row);
+      setRows(Array.from(localMap.values()));
+      setSubErrors(errs);
+
+      if (ok.length === 0 && pairs.length > 0) {
+        // Every cluster failed — full-pane error, same as the old
+        // single-cluster behaviour.
+        const first = settled.find((s) => s.error !== null);
+        setLoad({ kind: "error", message: first?.error ?? "subscribe failed" });
+        return;
+      }
+      // Flip to ready when every reachable scope has either completed its
+      // initial sync OR contributed a row (mirrors the single-scope
+      // heuristic). Failed clusters don't hold the view hostage.
+      const allInitDone = ok.every((s) => s.result.init_done);
+      if (allInitDone || localMap.size > 0) {
+        setLoad({ kind: "ready" });
+      }
+    })().catch((e) => {
+      if (!cancelled) setLoad({ kind: "error", message: String(e) });
+    });
 
     // The 1 Hz "now" tick lives inside `<NowProvider>` and only re-renders
     // <AgeCell> subscribers — the parent table no longer rebuilds for it.
@@ -364,17 +515,16 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
       // payloads alive on the JS heap. Belt for the rowsRef-identity
       // suspenders we already have.
       localMap.clear();
-      for (const scope of subscribeScopes) {
-        api
-          .unsubscribeResource(clusterId, kind.id, scope)
-          .catch(logErr("table"));
+      for (const { cid, scope } of pairs) {
+        api.unsubscribeResource(cid, kind.id, scope).catch(logErr("table"));
       }
     };
-    // `subscribeScopeKey` joins scope flips with the existing
-    // (cluster, kind) churn — when the operator changes their namespace
-    // selection (size or membership), we tear down the old subscriptions
-    // and open a new fan of them against the matching backend slots.
-  }, [clusterId, kind.id, subscribeScopeKey, subscribeScopes]);
+    // `subscribeScopeKey` joins scope flips with the (clusters, kind)
+    // churn — when the operator changes their namespace selection (size or
+    // membership) or the member set changes, we tear down the old
+    // subscriptions and open a new fan against the matching backend slots.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clusterKey, kind.id, subscribeScopeKey, subscribeScopes, clusterIds]);
 
   // Cross-kind navigation: if the operator clicked "Controlled By: …" on
   // another kind's detail panel, the store carries the (namespace, name) here.
@@ -382,15 +532,23 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
   useEffect(() => {
     if (!pendingDetail || pendingDetail.kindId !== kind.id) return;
     if (load.kind !== "ready") return;
-    const match = rows.find(
-      (r) =>
-        String(r.name ?? "") === pendingDetail.name &&
-        (pendingDetail.namespace == null ||
-          String(r.namespace ?? "") === pendingDetail.namespace),
-    );
+    const byNameNs = (r: ScopedRow) =>
+      String(r.name ?? "") === pendingDetail.name &&
+      (pendingDetail.namespace == null ||
+        String(r.namespace ?? "") === pendingDetail.namespace);
+    // Prefer a row from the link's origin cluster (same name can exist on
+    // several members of a virtual context); fall back to any-name match for
+    // entries without a cluster (palette / chat links).
+    const match =
+      (pendingDetail.clusterId != null
+        ? rows.find(
+            (r) => r.__clusterId === pendingDetail.clusterId && byNameNs(r),
+          )
+        : undefined) ?? rows.find(byNameNs);
     if (match) {
       const ns = match.namespace;
       setDetailTarget({
+        clusterId: match.__clusterId,
         uid: match.uid,
         namespace: typeof ns === "string" ? ns : null,
         name: String(match.name ?? ""),
@@ -436,8 +594,18 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
   // the read at this level lets every table row re-render together when a
   // new snapshot arrives instead of subscribing per-cell. `selectPodMetrics`
   // gates the read on `isPods` so non-Pod tables don't re-render on the
-  // ~1 Hz metrics tick (see the factory's doc comment).
-  const podMetrics = useAppStore(selectPodMetrics(isPods));
+  // ~1 Hz metrics tick (see the factory's doc comment). The per-cluster
+  // record is narrowed to a clusterId → pods-map join table for the cells.
+  const metricsRecord = useAppStore(selectPodMetrics(isPods));
+  const podMetricsByCluster = useMemo(() => {
+    if (!metricsRecord) return null;
+    const out: Record<string, MetricsSnapshot["pods"]> = {};
+    for (const cid of clusterIds) {
+      const snap = metricsRecord[cid];
+      if (snap) out[cid] = snap.pods;
+    }
+    return out;
+  }, [metricsRecord, clusterIds]);
 
   // Sort / sizing state. Initialized from the persisted view, falls back
   // to the project default (single column, name asc). Multi-column sort
@@ -455,33 +623,33 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
   // auto-fit owns the widths and recomputes on container resize.
   const userResizedRef = useRef(false);
 
-  // When the kind / cluster changes, reset to whatever was persisted for the
-  // new (cluster, kind). Without this the sort from kind A would leak onto
+  // When the kind / view scope changes, reset to whatever was persisted for
+  // the new (scope, kind). Without this the sort from kind A would leak onto
   // kind B until the operator clicked something.
   useEffect(() => {
     setSorting(sortingFromPersisted(persistedView?.sorting, kind));
     setColumnSizing({});
     userResizedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clusterId, kind.id]);
+  }, [viewScopeId, kind.id]);
 
   // Debounced persistence (sorting only — widths stay in memory).
   useEffect(() => {
     const timeout = setTimeout(() => {
       const view = { sorting, column_sizing: {} };
-      setTableView(clusterId, kind.id, view);
-      api.setTableView(clusterId, kind.id, view).catch(logErr("table"));
+      setTableView(viewScopeId, kind.id, view);
+      api.setTableView(viewScopeId, kind.id, view).catch(logErr("table"));
     }, 200);
     return () => clearTimeout(timeout);
-  }, [sorting, clusterId, kind.id, setTableView]);
+  }, [sorting, viewScopeId, kind.id, setTableView]);
 
   // Refs so the cell renderer can read fresh values without triggering a
   // columns-memo recompute (which invalidates TanStack's entire row model
   // and reallocates 2800-row internal structures on every change). `now`
   // doesn't need a ref — it's delivered to the age cell directly via
   // NowContext, so the parent doesn't need to re-render on its tick at all.
-  const podMetricsRef = useRef(podMetrics);
-  podMetricsRef.current = podMetrics;
+  const podMetricsRef = useRef(podMetricsByCluster);
+  podMetricsRef.current = podMetricsByCluster;
   const modeRef = useRef(mode);
   modeRef.current = mode;
   const tRef = useRef(t);
@@ -495,10 +663,44 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
   const setSelectedNamespacesRef = useRef(setSelectedNamespaces);
   setSelectedNamespacesRef.current = setSelectedNamespaces;
 
-  const columns = useMemo<TanColumnDef<ResourceRow>[]>(() => {
-    const cols: TanColumnDef<ResourceRow>[] = kind.columns
-      .filter((c) => !(singleNs && c.id === "namespace"))
-      .map((c) => ({
+  // The effective ColumnDef list: the kind's registered columns minus the
+  // namespace column when filtered to one namespace, plus the synthetic
+  // Cluster column right after namespace (or after name on cluster-scoped
+  // kinds) when this view merges 2+ clusters. EVERY consumer — TanStack
+  // columns, natural widths, auto-fit — iterates this list, never
+  // `kind.columns` directly.
+  const isMultiCluster = clusters.length > 1;
+  const visibleColumns = useMemo<ColumnDef[]>(() => {
+    const base = kind.columns.filter(
+      (c) => !(singleNs && c.id === "namespace"),
+    );
+    if (!isMultiCluster) return base;
+    const nsIdx = base.findIndex((c) => c.id === "namespace");
+    const insertAt = nsIdx >= 0 ? nsIdx + 1 : Math.min(1, base.length);
+    return [...base.slice(0, insertAt), CLUSTER_COL, ...base.slice(insertAt)];
+  }, [kind, singleNs, isMultiCluster]);
+
+  const columns = useMemo<TanColumnDef<ScopedRow>[]>(() => {
+    const cols: TanColumnDef<ScopedRow>[] = visibleColumns.map((c) => {
+      if (c.id === CLUSTER_COL_ID) {
+        return {
+          id: c.id,
+          header: c.header,
+          size: defaultWidth(c),
+          enableSorting: true,
+          // Sort by display name so the grouping the operator sees in the
+          // cell is the grouping the sort produces.
+          accessorFn: (r: ScopedRow) =>
+            clusterMetaRef.current[r.__clusterId]?.name ?? r.__clusterId,
+          cell: (ctx) =>
+            renderClusterCell(
+              ctx.row.original.__clusterId,
+              clusterMetaRef.current,
+              tRef.current,
+            ),
+        };
+      }
+      return {
         id: c.id,
         header: c.header,
         size: defaultWidth(c),
@@ -520,7 +722,8 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
             navigateToDetailRef.current,
             setSelectedNamespacesRef.current,
           ),
-      }));
+      };
+    });
     // Selection column applies to every kind now — operators copy names off
     // configmaps and secrets too. Bulk-action wiring still gates each action
     // by kind in `App.tsx`.
@@ -533,9 +736,10 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
       cell: () => null,
     });
     return cols;
-    // Only kind shape + namespace-column toggle drive a columns rebuild.
-    // `now`, `mode`, `t`, `podMetrics`, `monoTables` flow through refs.
-  }, [kind, isPods, singleNs]);
+    // Only the effective column list + kind shape drive a columns rebuild.
+    // `now`, `mode`, `t`, `podMetrics`, `monoTables`, cluster names flow
+    // through refs.
+  }, [visibleColumns, isPods]);
 
   const table = useReactTable({
     data: filtered,
@@ -553,7 +757,7 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
     enableColumnResizing: true,
     columnResizeMode: "onChange",
     enableMultiSort: false,
-    getRowId: (r) => r.uid,
+    getRowId: (r) => r.__sid,
   });
 
   // Selection-anchor for shift-range. Holds the uid the operator last
@@ -634,19 +838,21 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
     if (filtered.length === 0) return null;
     const sample = filtered.slice(0, 200);
     const result: Record<string, number> = {};
-    for (const c of kind.columns) {
-      if (singleNs && c.id === "namespace") continue;
-      result[c.id] = naturalContentWidth(c, sample);
+    for (const c of visibleColumns) {
+      // The cluster column's content isn't on the rows — measure the
+      // member display names directly (plus the 8px dot and its gap).
+      result[c.id] =
+        c.id === CLUSTER_COL_ID
+          ? clusterColumnNaturalWidth(c, clusters)
+          : naturalContentWidth(c, sample);
     }
     return result;
-  }, [filtered, kind, singleNs]);
+  }, [filtered, visibleColumns, clusters]);
 
   useEffect(() => {
     if (containerWidth === 0) return;
     if (userResizedRef.current) return;
-    const visible = kind.columns.filter(
-      (c) => !(singleNs && c.id === "namespace"),
-    );
+    const visible = visibleColumns;
     if (visible.length === 0) return;
     // Cells use box-sizing: content-box, so the configured column size
     // (TanStack `header.getSize()`) is laid out in addition to the cell's
@@ -746,7 +952,7 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
       }
       return next;
     });
-  }, [containerWidth, kind, singleNs, naturalWidths]);
+  }, [containerWidth, visibleColumns, naturalWidths]);
 
   const logPod = useMemo(() => {
     if (!logTarget) return null;
@@ -766,11 +972,12 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
   // keys (Slice 2) share the same code path.
   const onSelectClick = (
     e: React.MouseEvent,
-    row: TanRow<ResourceRow>,
+    row: TanRow<ScopedRow>,
   ) => {
     e.stopPropagation();
-    const uid = row.original.uid;
+    const sid = row.original.__sid;
     const meta = {
+      clusterId: row.original.__clusterId,
       namespace:
         typeof row.original.namespace === "string"
           ? row.original.namespace
@@ -778,9 +985,9 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
       name: String(row.original.name ?? ""),
     };
     if (e.shiftKey && anchorRef.current) {
-      const ids = sortedRows.map((r) => r.original.uid);
+      const ids = sortedRows.map((r) => r.original.__sid);
       const a = ids.indexOf(anchorRef.current);
-      const b = ids.indexOf(uid);
+      const b = ids.indexOf(sid);
       if (a !== -1 && b !== -1) {
         const [lo, hi] = a < b ? [a, b] : [b, a];
         // Range select extends the existing selection — matches Finder/Sheets
@@ -790,7 +997,8 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
         for (let i = lo; i <= hi; i++) {
           const r = sortedRows[i];
           if (!r) continue;
-          next.set(r.original.uid, {
+          next.set(r.original.__sid, {
+            clusterId: r.original.__clusterId,
             namespace:
               typeof r.original.namespace === "string"
                 ? r.original.namespace
@@ -802,8 +1010,8 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
         return;
       }
     }
-    anchorRef.current = uid;
-    toggleSelection(uid, meta);
+    anchorRef.current = sid;
+    toggleSelection(sid, meta);
   };
 
   // Ctrl/Cmd-A inside the table — select everything currently visible.
@@ -833,8 +1041,9 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
       setSelection(
         new Map(
           rows.map((r) => [
-            r.original.uid,
+            r.original.__sid,
             {
+              clusterId: r.original.__clusterId,
               namespace:
                 typeof r.original.namespace === "string"
                   ? r.original.namespace
@@ -890,16 +1099,17 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
             if (header.column.id === SELECT_COL_ID) {
               const all =
                 filtered.length > 0 &&
-                filtered.every((r) => selection.has(r.uid));
-              const some = filtered.some((r) => selection.has(r.uid));
+                filtered.every((r) => selection.has(r.__sid));
+              const some = filtered.some((r) => selection.has(r.__sid));
               const toggleAll = () => {
                 if (all) clearSelection();
                 else
                   setSelection(
                     new Map(
                       filtered.map((r) => [
-                        r.uid,
+                        r.__sid,
                         {
+                          clusterId: r.__clusterId,
                           namespace:
                             typeof r.namespace === "string" ? r.namespace : null,
                           name: String(r.name ?? ""),
@@ -1028,6 +1238,52 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
           })}
         </div>
 
+        {/* Partial-data strip: some members of a merged view failed to
+            subscribe but at least one is serving rows. Full failure goes
+            through load.kind === "error" below instead. */}
+        {Object.keys(subErrors).length > 0 && load.kind !== "error" && (
+          <div
+            role="alert"
+            style={{
+              flexShrink: 0,
+              padding: "6px 14px",
+              background: t.surfaceAlt,
+              borderBottom: `1px solid ${t.warn}`,
+              color: t.textDim,
+              fontSize: FS_SM,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              overflow: "hidden",
+              whiteSpace: "nowrap",
+              textOverflow: "ellipsis",
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                display: "inline-block",
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                background: t.warn,
+                flexShrink: 0,
+              }}
+            />
+            <span
+              style={{ overflow: "hidden", textOverflow: "ellipsis" }}
+              title={Object.entries(subErrors)
+                .map(([cid, msg]) => `${clusterMeta[cid]?.name ?? cid}: ${msg}`)
+                .join("\n")}
+            >
+              Partial data —{" "}
+              {Object.entries(subErrors)
+                .map(([cid, msg]) => `${clusterMeta[cid]?.name ?? cid}: ${msg}`)
+                .join("; ")}
+            </span>
+          </div>
+        )}
+
         <div
           ref={scrollRef}
           style={{ flex: 1, overflow: "auto", minHeight: 0 }}
@@ -1041,24 +1297,29 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
             const target = e.target as HTMLElement | null;
             const node = target?.closest<HTMLElement>("[data-uid]");
             if (!node) return;
-            const uid = node.dataset["uid"];
-            if (!uid) return;
-            const row = rowsRef.current.get(uid);
+            const sid = node.dataset["uid"];
+            if (!sid) return;
+            const row = rowsRef.current.get(sid);
             if (!row) return;
             const ns = row.namespace;
             const nsStr = typeof ns === "string" ? ns : null;
             const nm = String(row.name ?? "");
             setLogTarget(null);
-            setDetailTarget({ uid, namespace: nsStr, name: nm });
-            pushDetailEntry(kind.id, nsStr, nm);
+            setDetailTarget({
+              clusterId: row.__clusterId,
+              uid: row.uid,
+              namespace: nsStr,
+              name: nm,
+            });
+            pushDetailEntry(kind.id, nsStr, nm, row.__clusterId);
           }}
           onContextMenu={(e) => {
             const target = e.target as HTMLElement | null;
             const node = target?.closest<HTMLElement>("[data-uid]");
             if (!node) return;
-            const uid = node.dataset["uid"];
-            if (!uid) return;
-            const row = rowsRef.current.get(uid);
+            const sid = node.dataset["uid"];
+            if (!sid) return;
+            const row = rowsRef.current.get(sid);
             if (!row) return;
             e.preventDefault();
             setMenu({ pos: { x: e.clientX, y: e.clientY }, row });
@@ -1105,11 +1366,17 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
               return (
                 <EmptyState
                   t={t}
-                  title={`No ${kind.plural} in this cluster`}
+                  title={
+                    isMultiCluster
+                      ? `No ${kind.plural} in these clusters`
+                      : `No ${kind.plural} in this cluster`
+                  }
                   hint={
                     kind.namespaced
                       ? "Try a different cluster, or check that the right resources have been created."
-                      : "This cluster has nothing of this kind."
+                      : isMultiCluster
+                        ? "These clusters have nothing of this kind."
+                        : "This cluster has nothing of this kind."
                   }
                 />
               );
@@ -1120,15 +1387,25 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
                 const row = sortedRows[vi.index];
                 if (!row) return null;
                 const selected =
-                  detailTarget && detailTarget.uid === row.original.uid;
-                const checked = selection.has(row.original.uid);
+                  detailTarget &&
+                  scopedUid(detailTarget.clusterId, detailTarget.uid) ===
+                    row.original.__sid;
+                const checked = selection.has(row.original.__sid);
+                // In a merged view, rows from a member whose heartbeat
+                // declared it unavailable stay rendered but dimmed —
+                // stale data, honestly presented. Single-cluster views
+                // dim the whole pane via UnavailableOverlay instead.
+                const dimmed =
+                  isMultiCluster &&
+                  clusterHealth[row.original.__clusterId] === "unavailable";
                 return (
                   <Row
-                    key={row.original.uid}
-                    uid={row.original.uid}
+                    key={row.original.__sid}
+                    uid={row.original.__sid}
                     t={t}
                     selected={!!selected}
                     checked={checked}
+                    dimmed={dimmed}
                   >
                     {row.getVisibleCells().map((cell, ci) => {
                       if (cell.column.id === SELECT_COL_ID) {
@@ -1223,10 +1500,10 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
         </div>
       </div>
 
-      {logPod && (
+      {logPod && logTarget && (
         <LogPanel
           mode={mode}
-          clusterId={clusterId}
+          clusterId={logTarget.__clusterId}
           pod={logPod}
           defaultContainer={logDefaultContainer}
           onClose={() => setLogTarget(null)}
@@ -1236,7 +1513,7 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
       {detailTarget && (
         <DetailPanel
           mode={mode}
-          clusterId={clusterId}
+          clusterId={detailTarget.clusterId}
           kind={kind}
           target={detailTarget}
           // Detail's delta listener needs the channel that actually
@@ -1250,8 +1527,13 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
               : null
           }
           row={
-            rowsRef.current.get(detailTarget.uid) ??
-            filtered.find((r) => r.uid === detailTarget.uid) ??
+            rowsRef.current.get(
+              scopedUid(detailTarget.clusterId, detailTarget.uid),
+            ) ??
+            filtered.find(
+              (r) =>
+                r.__sid === scopedUid(detailTarget.clusterId, detailTarget.uid),
+            ) ??
             null
           }
           onClose={() => {
@@ -1262,9 +1544,11 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
             // Map a Kubernetes Kind name (e.g. "StatefulSet") to a registry
             // kind id ("stateful_sets") and navigate. Falls back silently if
             // the kind isn't browseable yet (e.g. a CRD we don't ship for).
+            // Cross-kind references (owner refs, node names…) are always
+            // objects on the same cluster as the detail being viewed.
             const target = kinds.find((k) => k.kind === targetKindName);
             if (!target) return;
-            navigateToDetail(target.id, namespace, name);
+            navigateToDetail(target.id, namespace, name, detailTarget.clusterId);
           }}
           onOpenExec={
             isPods
@@ -1273,7 +1557,9 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
                   // sourced from the detail panel's container picker so the
                   // operator can target an init/sidecar without round-
                   // tripping back to the table.
-                  const r = rowsRef.current.get(detailTarget.uid);
+                  const r = rowsRef.current.get(
+                    scopedUid(detailTarget.clusterId, detailTarget.uid),
+                  );
                   if (!r) return;
                   const ns =
                     typeof r.namespace === "string" ? r.namespace : null;
@@ -1285,12 +1571,12 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
                     makeTerminalTab(
                       {
                         mode: "exec",
-                        clusterId,
+                        clusterId: r.__clusterId,
                         namespace: ns,
                         pod: String(r.name ?? ""),
                         container: container ?? null,
                       },
-                      contextLabel ?? clusterId,
+                      clusterLabel(r.__clusterId),
                     ),
                   );
                   setDetailTarget(null);
@@ -1300,11 +1586,13 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
                     // Node "shell" is `kubectl debug node/<name>` — same path
                     // the row context menu uses. The container arg is
                     // irrelevant here; the debug pod is the shell.
-                    const r = rowsRef.current.get(detailTarget.uid);
+                    const r = rowsRef.current.get(
+                      scopedUid(detailTarget.clusterId, detailTarget.uid),
+                    );
                     if (!r) return;
                     openNodeDebugTab(
-                      clusterId,
-                      contextLabel ?? clusterId,
+                      r.__clusterId,
+                      clusterLabel(r.__clusterId),
                       String(r.name ?? ""),
                       addDockTab,
                     );
@@ -1325,8 +1613,8 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
             buildRowActionContext(
               kind,
               menu.row,
-              clusterId,
-              contextLabel ?? clusterId,
+              menu.row.__clusterId,
+              clusterLabel(menu.row.__clusterId),
               confirmDestructive,
               addDockTab,
               {
@@ -1336,11 +1624,12 @@ export function ResourceTable({ mode, clusterId, kind }: Props) {
                   const nm = String(menu.row.name ?? "");
                   setLogTarget(null);
                   setDetailTarget({
+                    clusterId: menu.row.__clusterId,
                     uid: menu.row.uid,
                     namespace: nsStr,
                     name: nm,
                   });
-                  pushDetailEntry(kind.id, nsStr, nm);
+                  pushDetailEntry(kind.id, nsStr, nm, menu.row.__clusterId);
                 },
                 openLogs: () => {
                   setDetailTarget(null);
@@ -1700,12 +1989,15 @@ const Row = memo(function Row({
   t,
   selected,
   checked,
+  dimmed,
   children,
 }: {
   uid: string;
   t: ReturnType<typeof tokens>;
   selected: boolean;
   checked?: boolean;
+  /// Origin cluster's heartbeat says unavailable — render stale data dimmed.
+  dimmed?: boolean;
   children: React.ReactNode;
 }) {
   const baseBg = checked ? t.accentSoft : selected ? t.hover : "transparent";
@@ -1725,6 +2017,7 @@ const Row = memo(function Row({
         background: baseBg,
         borderBottom: `1px solid ${t.borderSoft}`,
         color: t.text,
+        opacity: dimmed ? 0.45 : undefined,
       }}
     >
       {children}
@@ -1864,8 +2157,28 @@ function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
   return Math.ceil(Math.max(dataWidth, headerWidth)) + CHROME_PAD;
 }
 
+// Natural width for the synthetic Cluster column — the longest member
+// display name plus the identity dot (8px) and its gap (7px). Same
+// CHROME_PAD + header floor as `naturalContentWidth`.
+function clusterColumnNaturalWidth(
+  c: ColumnDef,
+  clusters: { name: string }[],
+): number {
+  const CHROME_PAD = 28;
+  const DOT_AND_GAP = 15;
+  const headerWidth =
+    measureText(String(c.header ?? "").toUpperCase(), HEADER_FONT) * 1.12;
+  let nameWidth = 0;
+  for (const cl of clusters) {
+    const w = measureText(cl.name, CELL_FONT_TEXT);
+    if (w > nameWidth) nameWidth = w;
+  }
+  return Math.ceil(Math.max(nameWidth + DOT_AND_GAP, headerWidth)) + CHROME_PAD;
+}
+
 function defaultWidth(c: ColumnDef): number {
   if (c.id === "name") return 320;
+  if (c.id === CLUSTER_COL_ID) return 150;
   if (c.id === "namespace") return 160;
   if (c.id === "node") return 180;
   if (c.id === "ready") return 80;
@@ -1890,6 +2203,7 @@ function defaultWidth(c: ColumnDef): number {
 // content is unreadable; the table prefers to overflow + horizontal-scroll.
 function minWidth(c: ColumnDef): number {
   if (c.id === "name") return 140;
+  if (c.id === CLUSTER_COL_ID) return 90;
   if (c.id === "namespace") return 90;
   if (c.id === "node") return 100;
   if (c.id === "ready") return 60;
@@ -1973,7 +2287,7 @@ export function sortingFnFor(
   podMetricsRef: {
     readonly current: Record<
       string,
-      { cpu_milli: number; mem_mib: number }
+      Record<string, { cpu_milli: number; mem_mib: number }>
     > | null;
   },
   isPods: boolean,
@@ -1986,12 +2300,22 @@ export function sortingFnFor(
     };
   }
   if (isPods && (c.id === "cpu" || c.id === "mem")) {
+    // The ref holds clusterId → ("ns/name" → metric); each row joins
+    // through its own origin cluster so a merged view sorts correctly.
+    const metricFor = (
+      r: TanRow<ResourceRow>,
+    ): { cpu_milli: number; mem_mib: number } | null => {
+      const byCluster = podMetricsRef.current;
+      if (!byCluster) return null;
+      const cid = typeof r.original.__clusterId === "string"
+        ? r.original.__clusterId
+        : "";
+      const key = `${r.original.namespace ?? ""}/${r.original.name ?? ""}`;
+      return byCluster[cid]?.[key] ?? null;
+    };
     return (a: TanRow<ResourceRow>, b: TanRow<ResourceRow>) => {
-      const podMetrics = podMetricsRef.current;
-      const ak = `${a.original.namespace ?? ""}/${a.original.name ?? ""}`;
-      const bk = `${b.original.namespace ?? ""}/${b.original.name ?? ""}`;
-      const av = podMetrics?.[ak] ?? null;
-      const bv = podMetrics?.[bk] ?? null;
+      const av = metricFor(a);
+      const bv = metricFor(b);
       const an = av ? (c.id === "cpu" ? av.cpu_milli : av.mem_mib) : -1;
       const bn = bv ? (c.id === "cpu" ? bv.cpu_milli : bv.mem_mib) : -1;
       return an - bn;
@@ -2037,12 +2361,16 @@ export function renderCell(
   mode: ThemeMode,
   t: ReturnType<typeof tokens>,
   isPods: boolean,
-  podMetrics: Record<string, { cpu_milli: number; mem_mib: number }> | null,
+  podMetricsByCluster: Record<
+    string,
+    Record<string, { cpu_milli: number; mem_mib: number }>
+  > | null,
   monoTables: boolean,
   navigateToDetail: (
     kindId: string,
     namespace: string | null,
     name: string,
+    clusterId?: string | null,
   ) => void,
   setSelectedNamespaces: (ns: Set<string>) => void,
 ) {
@@ -2055,6 +2383,8 @@ export function renderCell(
   if (isPods && (c.id === "cpu" || c.id === "mem")) {
     const ns = typeof row.namespace === "string" ? row.namespace : "";
     const name = typeof row.name === "string" ? row.name : "";
+    const cid = typeof row.__clusterId === "string" ? row.__clusterId : "";
+    const podMetrics = podMetricsByCluster?.[cid] ?? null;
     const live = podMetrics
       ? podMetrics[`${ns}/${name}`] ?? podMetrics[`/${name}`] ?? null
       : null;
@@ -2183,7 +2513,14 @@ export function renderCell(
             if (isNsLink) {
               setSelectedNamespaces(new Set([raw]));
             } else if (isNodeLink) {
-              navigateToDetail("nodes", null, raw);
+              // Node links resolve on the row's own cluster — in a merged
+              // multi-cluster table two members can have same-named nodes.
+              navigateToDetail(
+                "nodes",
+                null,
+                raw,
+                typeof row.__clusterId === "string" ? row.__clusterId : null,
+              );
             }
           }
         : undefined;

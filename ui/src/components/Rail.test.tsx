@@ -17,7 +17,7 @@ afterEach(() => {
   cleanup();
   resetMockInvoke();
   act(() => {
-    useAppStore.setState({ metrics: null, tableCount: null });
+    useAppStore.setState({ metricsByCluster: {}, tableCount: null });
   });
 });
 
@@ -50,10 +50,93 @@ describe("Rail store subscription", () => {
     // must absorb these high-frequency mutations with no re-render. (A bulk
     // `useAppStore()` would re-render the entire kind list on each.)
     act(() => {
-      useAppStore.getState().setMetrics(null);
+      useAppStore.getState().setMetrics("c1", { pods: {}, cluster: null, pod_volumes: {}, pvcs: {}, available: false, volumes_available: false, fetched_at_unix_ms: 0 } as never);
       useAppStore.getState().setTableCount({ filtered: 5, total: 9 });
     });
 
     expect(commits).toBe(baseline);
+  });
+});
+
+describe("Rail CRD discovery across active clusters", () => {
+  const crd = (id: string, kind: string) => ({
+    id,
+    group: "example.io",
+    version: "v1",
+    kind,
+    plural: `${kind.toLowerCase()}s`,
+    namespaced: true,
+    category: "CustomResources",
+    columns: [],
+  });
+
+  it("unions dynamic kinds across members and publishes kindClusters", async () => {
+    const A = "default::a";
+    const B = "default::b";
+    const shared = crd("crd:example.io|v1|widgets|Widget|ns", "Widget");
+    const onlyB = crd("crd:example.io|v1|gizmos|Gizmo|ns", "Gizmo");
+    setMockInvoke((cmd, args) => {
+      switch (cmd) {
+        case "list_resource_kinds":
+          return [];
+        case "list_custom_resource_kinds":
+          return args?.clusterId === A ? [shared] : [shared, onlyB];
+        default:
+          return undefined;
+      }
+    });
+    act(() => {
+      const ctx = (id: string) => ({
+        id,
+        name: id,
+        cluster: "c",
+        user: null,
+        namespace: null,
+        is_current: false,
+        group: "Default",
+        source_id: "default",
+        source_path: null,
+      });
+      useAppStore.setState({
+        contexts: [ctx(A), ctx(B)],
+        virtualContexts: [{ id: "v1", name: "both", members: [A, B] }],
+        selectedVirtualContextId: "v1",
+        selectedContext: null,
+        scopeExtras: [],
+      });
+    });
+
+    await act(async () => {
+      render(<Rail mode="dark" />);
+    });
+    await act(async () => {});
+
+    const s = useAppStore.getState();
+    const dynamicIds = s.kinds.map((k) => k.id);
+    expect(dynamicIds).toContain(shared.id);
+    expect(dynamicIds).toContain(onlyB.id);
+    // Availability: the shared CRD lives on both members, Gizmo only on B.
+    expect(s.kindClusters[shared.id]?.sort()).toEqual([A, B]);
+    expect(s.kindClusters[onlyB.id]).toEqual([B]);
+  });
+
+  it("clears dynamic kinds and kindClusters when no cluster is active", async () => {
+    setMockInvoke((cmd) => {
+      if (cmd === "list_resource_kinds") return [];
+      return undefined;
+    });
+    act(() => {
+      useAppStore.setState({
+        selectedContext: null,
+        selectedVirtualContextId: null,
+        scopeExtras: [],
+        kindClusters: { "crd:x": ["default::a"] },
+      });
+    });
+    await act(async () => {
+      render(<Rail mode="dark" />);
+    });
+    await act(async () => {});
+    expect(useAppStore.getState().kindClusters).toEqual({});
   });
 });

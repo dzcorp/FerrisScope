@@ -11,6 +11,7 @@ import type {
   ResourceKind,
   SettingsTarget,
   TableView,
+  VirtualContext,
 } from "./types";
 
 /// In-memory mirror of `crates/core/src/prefs.rs::UpdateState`. Persisted via
@@ -140,16 +141,55 @@ export type Notification = {
 
 export const NOTIFICATION_LOG_CAP = 50;
 
+/// Metadata carried with each selected row. `clusterId` is the row's origin
+/// cluster — rows from different clusters can share a Kubernetes uid, so the
+/// map key is the scoped id (`${clusterId}::${uid}`, see lib/multiCluster)
+/// and every bulk action routes through the entry's own cluster.
+export type SelectionMeta = {
+  clusterId: string;
+  namespace: string | null;
+  name: string;
+};
+
+/// One detail-history / pending-detail entry. `clusterId` is null when the
+/// origin cluster is unknown (palette search from a build that predates
+/// scoping, chat links) — resolution then falls back to name+namespace only.
+export type DetailEntry = {
+  clusterId: string | null;
+  kindId: string;
+  namespace: string | null;
+  name: string;
+};
+
 type AppState = {
   contexts: ContextInfo[];
   contextsStatus: Status;
   contextsError: string | null;
   selectedContext: string | null;
 
+  // Saved multi-cluster views (mirrors `prefs.virtual_contexts`). A virtual
+  // context opens all member clusters at once; resource tables merge rows
+  // across members. `selectedVirtualContextId` is mutually exclusive with
+  // `selectedContext` — selecting one clears the other. The data plane only
+  // ever sees member cluster ids, never the virtual id.
+  virtualContexts: VirtualContext[];
+  selectedVirtualContextId: string | null;
+  // Ephemeral additions to the active scope ("+" menu → Add cluster…).
+  // Appended to the active cluster set without saving anything; cleared on
+  // any scope switch; never persisted. Lets the operator widen a single
+  // cluster (or a saved virtual context) into an ad-hoc multi-cluster view.
+  scopeExtras: string[];
+
   kinds: ResourceKind[];
   kindsStatus: Status;
   kindsError: string | null;
   selectedKindId: string | null;
+  // Which member clusters actually serve a kind, keyed by kind id. Only
+  // populated for dynamic (CRD / well-known) kinds, which are cluster-local
+  // — the rail publishes it after per-member discovery so a merged table
+  // never subscribes a kind on a cluster that lacks it. Built-in kinds have
+  // no entry (= available everywhere).
+  kindClusters: Record<string, string[]>;
 
   themeMode: ThemeMode;
   /// Active theme id from the bundled registry (`default`, `lens`, `vscode`,
@@ -194,14 +234,14 @@ type AppState = {
   // Per-table multi-select. Keyed by uid (survives sort changes); the value
   // carries the (namespace, name) so the bulk-action bar can act on the
   // selection without round-tripping through the table's row map.
-  selection: Map<string, { namespace: string | null; name: string }>;
+  selection: Map<string, SelectionMeta>;
 
   // Cross-kind navigation slot. The detail panel sets this when the operator
   // clicks "Controlled By: StatefulSet foo" — it switches the visible kind via
   // selectKind() and parks the (namespace, name) here. The matching
   // ResourceTable picks it up after its subscription lands and resolves
   // namespace+name → uid against the just-arrived snapshot.
-  pendingDetail: { kindId: string; namespace: string | null; name: string } | null;
+  pendingDetail: DetailEntry | null;
 
   // Visible-row count of the active table. Pushed from ResourceTable so the
   // header breadcrumb can render "Pods · 232" without lifting the table's
@@ -238,7 +278,7 @@ type AppState = {
   // appends to this stack at `detailIndex+1` (truncating any forward branch),
   // mirroring browser back/forward. Cleared on rail kind-switch, cluster
   // switch, and explicit panel close — never persisted across those.
-  detailHistory: { kindId: string; namespace: string | null; name: string }[];
+  detailHistory: DetailEntry[];
   detailIndex: number;
 
   // Per-(cluster, kind) table view state. Hydrated once at startup from
@@ -247,11 +287,12 @@ type AppState = {
   // (debounced inside the table). Key: `${clusterId}::${kindId}`.
   tableViews: Record<string, TableView>;
 
-  // Latest metrics snapshot for the active cluster, if metrics-server is
-  // available. Refreshed every ~15s by a side-subscription mounted at the
-  // App level — both the cluster bar gauges and the pod table cells join
-  // off this single source.
-  metrics: MetricsSnapshot | null;
+  // Latest metrics snapshot per cluster, if metrics-server is available
+  // there. Refreshed every ~15s by the consumer-held subscriptions
+  // (`useMetricsSubscription`); cluster bar gauges and pod table cells join
+  // off this single source. Keyed by cluster id so a virtual context's
+  // members each carry their own snapshot.
+  metricsByCluster: Record<string, MetricsSnapshot>;
 
   // Per-cluster apiserver health. Absent or "healthy" means we have no
   // negative signal; "unavailable" means the backend's heartbeat probe
@@ -301,10 +342,30 @@ type AppState = {
   setContextsLoading: () => void;
   selectContext: (name: string | null) => void;
 
+  /// Activate a saved virtual context (or none). Clears `selectedContext`
+  /// and applies the same scope-change reset as `selectContext`.
+  selectVirtualContext: (id: string | null) => void;
+  /// Create a virtual context from a name + member cluster ids. Returns the
+  /// generated id. Does not activate it — callers decide.
+  saveVirtualContext: (name: string, members: string[]) => string;
+  renameVirtualContext: (id: string, name: string) => void;
+  setVirtualContextMembers: (id: string, members: string[]) => void;
+  /// Remove a virtual context; deactivates it first if it's active.
+  deleteVirtualContext: (id: string) => void;
+  /// Append a context to the active scope without saving. No-op when the id
+  /// is already in scope or doesn't resolve against `contexts`.
+  addScopeExtra: (contextId: string) => void;
+  /// Drop an ad-hoc scope addition. Clears row selection — selected rows may
+  /// belong to the removed cluster.
+  removeScopeExtra: (contextId: string) => void;
+
   setKinds: (ks: ResourceKind[]) => void;
   setKindsError: (err: string) => void;
   setKindsLoading: () => void;
   selectKind: (id: string) => void;
+  /// Replace the dynamic-kind availability map (rail publishes after
+  /// per-member CRD discovery).
+  setKindClusters: (m: Record<string, string[]>) => void;
 
   toggleTheme: () => void;
   /// Switch the active theme. Resets the palette to the new theme's
@@ -351,16 +412,13 @@ type AppState = {
   patchDockTabState: (id: string, patch: Record<string, unknown>) => void;
   patchDockTab: (id: string, patch: Partial<DockTab>) => void;
 
-  setSelection: (
-    sel: Map<string, { namespace: string | null; name: string }>,
-  ) => void;
-  toggleSelection: (
-    uid: string,
-    meta: { namespace: string | null; name: string },
-  ) => void;
+  setSelection: (sel: Map<string, SelectionMeta>) => void;
+  toggleSelection: (sid: string, meta: SelectionMeta) => void;
   clearSelection: () => void;
 
-  setMetrics: (snap: MetricsSnapshot | null) => void;
+  setMetrics: (clusterId: string, snap: MetricsSnapshot) => void;
+  /// Drop one cluster's snapshot, or all of them when no id is given.
+  clearMetrics: (clusterId?: string) => void;
 
   applyClusterHealth: (
     clusterId: string,
@@ -391,8 +449,18 @@ type AppState = {
   closeNotifications: () => void;
   clearNotifications: () => void;
 
-  navigateToDetail: (kindId: string, namespace: string | null, name: string) => void;
-  pushDetailEntry: (kindId: string, namespace: string | null, name: string) => void;
+  navigateToDetail: (
+    kindId: string,
+    namespace: string | null,
+    name: string,
+    clusterId?: string | null,
+  ) => void;
+  pushDetailEntry: (
+    kindId: string,
+    namespace: string | null,
+    name: string,
+    clusterId?: string | null,
+  ) => void;
   detailBack: () => void;
   detailForward: () => void;
   closeDetail: () => void;
@@ -409,16 +477,45 @@ type AppState = {
   patchUpdateState: (patch: Partial<UpdateStateSlice>) => void;
 };
 
+/// Reset slice applied whenever the cluster scope changes (single-context
+/// switch or virtual-context switch): selection, namespace filter, dock,
+/// metrics, detail history, and the table filter all reference the previous
+/// scope's objects and must drop together.
+function scopeResetSlice() {
+  return {
+    scopeExtras: [] as string[],
+    // Dynamic-kind availability is per-scope — the rail republishes after
+    // re-discovering CRDs on the new scope's members.
+    kindClusters: {} as Record<string, string[]>,
+    selection: new Map<string, SelectionMeta>(),
+    selectedNamespaces: new Set<string>(),
+    dockTabs: [] as DockTab[],
+    dockActiveId: null as string | null,
+    dockMin: { bottom: false, right: false } as Record<DockPlacement, boolean>,
+    metricsByCluster: {} as Record<string, MetricsSnapshot>,
+    detailHistory: [] as DetailEntry[],
+    detailIndex: -1,
+    pendingDetail: null,
+    tableFilter: "",
+    filterEditing: false,
+  };
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   contexts: [],
   contextsStatus: "idle",
   contextsError: null,
   selectedContext: null,
 
+  virtualContexts: [],
+  selectedVirtualContextId: null,
+  scopeExtras: [],
+
   kinds: [],
   kindsStatus: "idle",
   kindsError: null,
   selectedKindId: null,
+  kindClusters: {},
 
   themeMode: "dark",
   themeId: DEFAULT_THEME_ID,
@@ -439,7 +536,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   dockMin: { bottom: false, right: false },
   dockSize: { bottom: null, right: null },
 
-  selection: new Map<string, { namespace: string | null; name: string }>(),
+  selection: new Map<string, SelectionMeta>(),
 
   pendingDetail: null,
   tableCount: null,
@@ -455,7 +552,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   detailHistory: [],
   detailIndex: -1,
 
-  metrics: null,
+  metricsByCluster: {},
 
   clusterHealth: {},
   clusterHealthReason: {},
@@ -488,34 +585,97 @@ export const useAppStore = create<AppState>((set, get) => ({
   setContextsLoading: () =>
     set({ contextsStatus: "loading", contextsError: null }),
   setContexts: (cs) =>
-    set((s) => ({
-      contexts: cs,
-      contextsStatus: "ready",
-      contextsError: null,
-      selectedContext:
+    set((s) => {
+      // An active virtual context stays selected while at least one member
+      // still resolves against the refreshed context list — a temporarily
+      // missing kubeconfig shouldn't kick the operator back to the fleet.
+      const activeVctx = s.selectedVirtualContextId
+        ? s.virtualContexts.find((v) => v.id === s.selectedVirtualContextId)
+        : undefined;
+      const vctxAlive =
+        !!activeVctx && activeVctx.members.some((m) => cs.some((c) => c.id === m));
+      const selectedContext =
         s.selectedContext && cs.some((c) => c.id === s.selectedContext)
           ? s.selectedContext
-          : null,
-    })),
+          : null;
+      // Ad-hoc extras only make sense while their anchor scope survives;
+      // individually, an extra whose context vanished is pruned.
+      const anchorAlive = vctxAlive || selectedContext !== null;
+      return {
+        contexts: cs,
+        contextsStatus: "ready",
+        contextsError: null,
+        selectedContext,
+        selectedVirtualContextId: vctxAlive ? s.selectedVirtualContextId : null,
+        scopeExtras: anchorAlive
+          ? s.scopeExtras.filter((id) => cs.some((c) => c.id === id))
+          : [],
+      };
+    }),
   setContextsError: (err) =>
     set({ contextsStatus: "error", contextsError: err }),
   selectContext: (name) =>
     set({
       selectedContext: name,
+      selectedVirtualContextId: null,
       // Cluster scope changed: drop any selection / dock / ns filter / metrics.
-      selection: new Map<string, { namespace: string | null; name: string }>(),
-      selectedNamespaces: new Set<string>(),
-      dockTabs: [],
-      dockActiveId: null,
-      dockMin: { bottom: false, right: false },
-      metrics: null,
-      // Detail history references the previous cluster's objects — drop it.
-      detailHistory: [],
-      detailIndex: -1,
-      pendingDetail: null,
-      tableFilter: "",
-      filterEditing: false,
+      ...scopeResetSlice(),
     }),
+
+  selectVirtualContext: (id) =>
+    set((s) => {
+      // Reject ids that don't resolve — a stale palette entry or removed
+      // virtual context must not strand the app on an empty scope.
+      if (id !== null && !s.virtualContexts.some((v) => v.id === id)) return {};
+      return {
+        selectedVirtualContextId: id,
+        selectedContext: null,
+        ...scopeResetSlice(),
+      };
+    }),
+  saveVirtualContext: (name, members) => {
+    const id = crypto.randomUUID();
+    set((s) => ({
+      virtualContexts: [...s.virtualContexts, { id, name, members }],
+    }));
+    return id;
+  },
+  renameVirtualContext: (id, name) =>
+    set((s) => ({
+      virtualContexts: s.virtualContexts.map((v) =>
+        v.id === id ? { ...v, name } : v,
+      ),
+    })),
+  setVirtualContextMembers: (id, members) =>
+    set((s) => ({
+      virtualContexts: s.virtualContexts.map((v) =>
+        v.id === id ? { ...v, members } : v,
+      ),
+    })),
+  deleteVirtualContext: (id) =>
+    set((s) => ({
+      virtualContexts: s.virtualContexts.filter((v) => v.id !== id),
+      ...(s.selectedVirtualContextId === id
+        ? { selectedVirtualContextId: null, ...scopeResetSlice() }
+        : {}),
+    })),
+  addScopeExtra: (contextId) =>
+    set((s) => {
+      if (!s.contexts.some((c) => c.id === contextId)) return {};
+      // Extras extend an existing scope; without an anchor (selected
+      // context or virtual context) there is nothing to extend — matches
+      // the reconciliation in setContexts, which clears orphaned extras.
+      if (s.selectedContext === null && s.selectedVirtualContextId === null) {
+        return {};
+      }
+      if (selectActiveClusterIds(s).includes(contextId)) return {};
+      return { scopeExtras: [...s.scopeExtras, contextId] };
+    }),
+  removeScopeExtra: (contextId) =>
+    set((s) => ({
+      scopeExtras: s.scopeExtras.filter((id) => id !== contextId),
+      selection: new Map<string, SelectionMeta>(),
+    })),
 
   setKindsLoading: () => set({ kindsStatus: "loading", kindsError: null }),
   setKinds: (ks) =>
@@ -529,10 +689,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           : ks[0]?.id ?? null,
     })),
   setKindsError: (err) => set({ kindsStatus: "error", kindsError: err }),
+  setKindClusters: (m) => set({ kindClusters: m }),
   selectKind: (id) =>
     set({
       selectedKindId: id,
-      selection: new Map<string, { namespace: string | null; name: string }>(),
+      selection: new Map<string, SelectionMeta>(),
       // Explicit kind switch via the rail / palette is a context change —
       // back/forward history from the previous flow no longer makes sense.
       detailHistory: [],
@@ -607,7 +768,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSelectedNamespaces: (ns) =>
     set({
       selectedNamespaces: ns,
-      selection: new Map<string, { namespace: string | null; name: string }>(),
+      selection: new Map<string, SelectionMeta>(),
     }),
 
   openPalette: () => set({ paletteOpen: true }),
@@ -720,10 +881,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
   clearSelection: () =>
     set({
-      selection: new Map<string, { namespace: string | null; name: string }>(),
+      selection: new Map<string, SelectionMeta>(),
     }),
 
-  setMetrics: (snap) => set({ metrics: snap }),
+  setMetrics: (clusterId, snap) =>
+    set((s) => ({
+      metricsByCluster: { ...s.metricsByCluster, [clusterId]: snap },
+    })),
+  clearMetrics: (clusterId) =>
+    set((s) => {
+      if (clusterId === undefined) return { metricsByCluster: {} };
+      if (!(clusterId in s.metricsByCluster)) return {};
+      const next = { ...s.metricsByCluster };
+      delete next[clusterId];
+      return { metricsByCluster: next };
+    }),
 
   applyClusterHealth: (clusterId, status, reason) =>
     set((s) => ({
@@ -802,19 +974,33 @@ export const useAppStore = create<AppState>((set, get) => ({
             ? (ov as ThemeOverrides)
             : null;
       }
+      // Older prefs files predate virtual contexts; serde defaults the list
+      // server-side but tolerate an absent field from transitional builds.
+      const virtualContexts = prefs.virtual_contexts ?? [];
+      // A persisted virtual-context selection only survives if the virtual
+      // context itself still exists. Wins over `selected_context` when both
+      // are set (they're mutually exclusive; trust the virtual one).
+      const selectedVirtualContextId =
+        prefs.ui.selected_virtual_context &&
+        virtualContexts.some((v) => v.id === prefs.ui.selected_virtual_context)
+          ? prefs.ui.selected_virtual_context
+          : null;
       return {
       themeMode,
       themeId,
       paletteId,
       themeOverrides,
       railMode: prefs.ui.rail_mode,
+      virtualContexts,
+      selectedVirtualContextId,
       // Honor the persisted cluster/kind selection only if it's still present
       // in whatever the contexts/kinds list currently has. If not (file moved,
       // kind unknown), drop silently — better than dangling on a missing id.
-      selectedContext:
-        prefs.ui.selected_context &&
-        (s.contexts.length === 0 ||
-          s.contexts.some((c) => c.id === prefs.ui.selected_context))
+      selectedContext: selectedVirtualContextId
+        ? null
+        : prefs.ui.selected_context &&
+          (s.contexts.length === 0 ||
+            s.contexts.some((c) => c.id === prefs.ui.selected_context))
           ? prefs.ui.selected_context
           : s.selectedContext,
       selectedKindId:
@@ -902,9 +1088,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearNotifications: () =>
     set({ notifications: [], notificationsSeenAt: Date.now() }),
 
-  navigateToDetail: (kindId, namespace, name) =>
+  navigateToDetail: (kindId, namespace, name, clusterId = null) =>
     set((s) => {
-      const entry = { kindId, namespace, name };
+      const entry: DetailEntry = { clusterId, kindId, namespace, name };
       // Browser semantics: going back then sideways drops the forward branch.
       const head = s.detailHistory.slice(0, s.detailIndex + 1);
       const last = head[head.length - 1];
@@ -912,28 +1098,30 @@ export const useAppStore = create<AppState>((set, get) => ({
         !!last &&
         last.kindId === entry.kindId &&
         last.namespace === entry.namespace &&
-        last.name === entry.name;
+        last.name === entry.name &&
+        last.clusterId === entry.clusterId;
       const nextHistory = dup ? head : [...head, entry];
       return {
         // Switch kind in the same tick so the table re-mounts already knowing
         // it should auto-open this object's detail.
         selectedKindId: kindId,
-        selection: new Map<string, { namespace: string | null; name: string }>(),
+        selection: new Map<string, SelectionMeta>(),
         pendingDetail: entry,
         detailHistory: nextHistory,
         detailIndex: nextHistory.length - 1,
       };
     }),
-  pushDetailEntry: (kindId, namespace, name) =>
+  pushDetailEntry: (kindId, namespace, name, clusterId = null) =>
     set((s) => {
-      const entry = { kindId, namespace, name };
+      const entry: DetailEntry = { clusterId, kindId, namespace, name };
       const head = s.detailHistory.slice(0, s.detailIndex + 1);
       const last = head[head.length - 1];
       if (
         last &&
         last.kindId === entry.kindId &&
         last.namespace === entry.namespace &&
-        last.name === entry.name
+        last.name === entry.name &&
+        last.clusterId === entry.clusterId
       ) {
         return {};
       }
@@ -951,8 +1139,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       return {
         detailIndex: i,
         selectedKindId: e.kindId,
-        selection: new Map<string, { namespace: string | null; name: string }>(),
-        pendingDetail: { kindId: e.kindId, namespace: e.namespace, name: e.name },
+        selection: new Map<string, SelectionMeta>(),
+        pendingDetail: { ...e },
       };
     }),
   detailForward: () =>
@@ -963,8 +1151,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       return {
         detailIndex: i,
         selectedKindId: e.kindId,
-        selection: new Map<string, { namespace: string | null; name: string }>(),
-        pendingDetail: { kindId: e.kindId, namespace: e.namespace, name: e.name },
+        selection: new Map<string, SelectionMeta>(),
+        pendingDetail: { ...e },
       };
     }),
   closeDetail: () =>
@@ -993,6 +1181,104 @@ export const useAppStore = create<AppState>((set, get) => ({
   patchUpdateState: (patch) =>
     set((s) => ({ updateState: { ...s.updateState, ...patch } })),
 }));
+
+/// Build the full `Prefs` payload for `set_prefs` from store state. The
+/// backend overwrites prefs.json with exactly this object, so EVERY persisted
+/// field must round-trip through here — omitting one silently erases it on
+/// the next settings change. Pure and exported so the wipe hazard stays
+/// regression-testable.
+export function buildPrefsPayload(s: {
+  themeId: string;
+  paletteId: string;
+  themeMode: ThemeMode;
+  themeOverrides: ThemeOverrides | null;
+  settings: AppState["settings"];
+  selectedContext: string | null;
+  selectedVirtualContextId: string | null;
+  selectedKindId: string | null;
+  selectedNamespaces: Set<string>;
+  railMode: PrefsRailMode;
+  dockSize: Record<DockPlacement, number | null>;
+  updateState: UpdateStateSlice;
+  virtualContexts: VirtualContext[];
+}): Prefs {
+  return {
+    theme: {
+      id: s.themeId,
+      palette_id: s.paletteId,
+      mode: s.themeMode,
+      overrides: s.themeOverrides,
+    },
+    settings: {
+      refresh_sec: s.settings.refreshSec,
+      confirm_destructive: s.settings.confirmDestructive,
+      show_system_ns: s.settings.showSystemNs,
+      density: s.settings.density,
+      mono_tables: s.settings.monoTables,
+      refresh_on_launch: s.settings.refreshOnLaunch,
+      ui_scale: s.settings.uiScale,
+      fleet_view: s.settings.fleetView,
+      dark_console: s.settings.darkConsole,
+    },
+    ui: {
+      selected_context: s.selectedContext,
+      selected_virtual_context: s.selectedVirtualContextId,
+      selected_kind_id: s.selectedKindId,
+      selected_namespaces: Array.from(s.selectedNamespaces).sort(),
+      rail_mode: s.railMode,
+      dock_size_right: s.dockSize.right,
+      dock_size_bottom: s.dockSize.bottom,
+    },
+    update: {
+      last_known_version: s.updateState.lastKnownVersion,
+      last_seen_version: s.updateState.lastSeenVersion,
+      last_check_at: s.updateState.lastCheckAt,
+      auto_check_enabled: s.updateState.autoCheckEnabled,
+    },
+    virtual_contexts: s.virtualContexts,
+  };
+}
+
+/// The physical cluster ids the app is currently observing, in stable order.
+/// Virtual context active → its members (filtered to contexts that still
+/// exist); otherwise the single selected context; either way ad-hoc
+/// `scopeExtras` are appended (deduped, also filtered). Empty array = fleet
+/// landing. Pure — usable from reducers and tests; components prefer
+/// `useActiveClusterIds()` for a referentially-stable value.
+export function selectActiveClusterIds(s: {
+  contexts: ContextInfo[];
+  selectedContext: string | null;
+  virtualContexts: VirtualContext[];
+  selectedVirtualContextId: string | null;
+  scopeExtras: string[];
+}): string[] {
+  const exists = (id: string) =>
+    s.contexts.length === 0 || s.contexts.some((c) => c.id === id);
+  const base: string[] = [];
+  if (s.selectedVirtualContextId) {
+    const vctx = s.virtualContexts.find(
+      (v) => v.id === s.selectedVirtualContextId,
+    );
+    if (vctx) base.push(...vctx.members.filter(exists));
+  } else if (s.selectedContext) {
+    base.push(s.selectedContext);
+  }
+  for (const id of s.scopeExtras) {
+    if (exists(id) && !base.includes(id)) base.push(id);
+  }
+  return base;
+}
+
+/// Hook form of `selectActiveClusterIds` with a referentially-stable result:
+/// the array identity only changes when the joined id list changes, so
+/// effects keyed on it don't re-fire on unrelated store updates.
+export function useActiveClusterIds(): string[] {
+  const joined = useAppStore((s) => selectActiveClusterIds(s).join("\u0000"));
+  return useMemo(
+    () => (joined === "" ? [] : joined.split("\u0000")),
+    [joined],
+  );
+}
 
 /// Resolve the active theme into a ready-to-use bag of tokens, typography,
 /// sizing and display flags. Components subscribe to the four theme-relevant

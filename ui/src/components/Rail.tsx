@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useAppStore, useResolvedTheme } from "../store";
+import { useActiveClusterIds, useAppStore, useResolvedTheme } from "../store";
 import type { Category, PrefsRailMode, ResourceKind } from "../types";
 import {
   tokens,
@@ -55,8 +55,12 @@ export function Rail({}: Props) {
   const kindsStatus = useAppStore((s) => s.kindsStatus);
   const kindsError = useAppStore((s) => s.kindsError);
   const selectedKindId = useAppStore((s) => s.selectedKindId);
-  const selectedContext = useAppStore((s) => s.selectedContext);
+  // CRD discovery spans every active cluster (members of a virtual context
+  // or the single selection). NUL-joined key — ids contain "::"/spaces.
+  const activeClusterIds = useActiveClusterIds();
+  const activeClusterKey = activeClusterIds.join(String.fromCharCode(0));
   const setKinds = useAppStore((s) => s.setKinds);
+  const setKindClusters = useAppStore((s) => s.setKindClusters);
   const setKindsLoading = useAppStore((s) => s.setKindsLoading);
   const setKindsError = useAppStore((s) => s.setKindsError);
   const selectKind = useAppStore((s) => s.selectKind);
@@ -87,13 +91,22 @@ export function Rail({}: Props) {
       .catch((e: unknown) => setKindsError(String(e)));
   }, [setKinds, setKindsError, setKindsLoading]);
 
-  // Discover CRDs every time a cluster is selected. CRDs are cluster-local
-  // so the dynamic kinds reset on context switch — we don't keep a stale
-  // list visible. Failures are silent: the operator still has the well-
-  // known kinds and the standalone CustomResourceDefinition entry.
+  // Discover CRDs on every active cluster (one for the classic view, N for
+  // a virtual context). CRDs are cluster-local so the dynamic kinds reset
+  // on scope switch — we don't keep a stale list visible. The rail shows
+  // the UNION across members; `kindClusters` records which members serve
+  // each dynamic kind so the merged table never subscribes a kind on a
+  // cluster that lacks it. Failures only surface when EVERY member's
+  // discovery fails — the operator still has the well-known kinds and the
+  // standalone CustomResourceDefinition entry.
   useEffect(() => {
-    if (!selectedContext) {
+    const ids =
+      activeClusterKey === ""
+        ? []
+        : activeClusterKey.split(String.fromCharCode(0));
+    if (ids.length === 0) {
       setCustomError(null);
+      setKindClusters({});
       // Drop any dynamic kinds back to the static tail when no cluster is
       // selected — switching back to fleet view should clear the rail.
       const current = useAppStore.getState().kinds;
@@ -103,62 +116,90 @@ export function Rail({}: Props) {
       return;
     }
     let cancelled = false;
-    let attempts = 0;
-    const maxAttempts = 8;
     setCustomError(null);
+    const perMember = new Map<string, ResourceKind[]>();
+    let exhausted = 0;
+    let lastError = "";
 
-    const tryOnce = () => {
-      attempts += 1;
-      api
-        .listCustomResourceKinds(selectedContext)
-        .then((list) => {
-          if (cancelled) return;
-          setCustomError(null);
-          // Splice into the global kinds store so that ClusterPanel's
-          // `s.kinds.find(id => ...)` resolves dynamic ids to a real
-          // ResourceKind (and thus actually renders the table). Without
-          // this the rail shows the entry but clicking it produces an
-          // empty pane because the kind never reaches the renderer.
-          const current = useAppStore.getState().kinds;
-          const head = current.slice(0, staticKindsCount.current);
-          setKinds([...head, ...list]);
-          // eslint-disable-next-line no-console
-          console.info(
-            `[FerrisScope] discovered ${list.length} CRD-derived kinds for ${selectedContext}`,
-          );
-        })
-        .catch((e: unknown) => {
-          if (cancelled) return;
-          const msg = String(e);
-          // The cluster may not be connected yet — ClusterPanel kicks off
-          // its connect in parallel and discovery races it. Back off and
-          // retry a handful of times before giving up.
-          if (attempts < maxAttempts) {
-            const delay = Math.min(500 * 2 ** (attempts - 1), 4000);
-            setTimeout(() => {
-              if (!cancelled) tryOnce();
-            }, delay);
-            return;
+    // Recompute the union + availability map from whatever has landed so
+    // far. Members publish independently — a slow cluster doesn't hold the
+    // fast one's CRDs hostage. Union order follows the active id order;
+    // first member to surface a kind id wins the ResourceKind value
+    // (column sets for the same id are identical by construction — the id
+    // embeds group/version/plural).
+    const publish = () => {
+      if (cancelled) return;
+      const current = useAppStore.getState().kinds;
+      const head = current.slice(0, staticKindsCount.current);
+      const union: ResourceKind[] = [];
+      const availability: Record<string, string[]> = {};
+      for (const cid of ids) {
+        for (const k of perMember.get(cid) ?? []) {
+          if (!availability[k.id]) {
+            availability[k.id] = [];
+            union.push(k);
           }
-          // Drop any previously spliced dynamic kinds back to the static
-          // tail so a stale list doesn't linger after discovery failures.
-          const current = useAppStore.getState().kinds;
-          if (current.length > staticKindsCount.current) {
-            setKinds(current.slice(0, staticKindsCount.current));
-          }
-          setCustomError(msg);
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[FerrisScope] CRD discovery failed after ${attempts} attempts:`,
-            msg,
-          );
-        });
+          availability[k.id]!.push(cid);
+        }
+      }
+      setKinds([...head, ...union]);
+      setKindClusters(availability);
     };
-    tryOnce();
+
+    const discover = (cid: string) => {
+      let attempts = 0;
+      const maxAttempts = 8;
+      const tryOnce = () => {
+        attempts += 1;
+        api
+          .listCustomResourceKinds(cid)
+          .then((list) => {
+            if (cancelled) return;
+            perMember.set(cid, list);
+            publish();
+            // eslint-disable-next-line no-console
+            console.info(
+              `[FerrisScope] discovered ${list.length} CRD-derived kinds for ${cid}`,
+            );
+          })
+          .catch((e: unknown) => {
+            if (cancelled) return;
+            // The cluster may not be connected yet — the panel kicks off
+            // its connect in parallel and discovery races it. Back off and
+            // retry a handful of times before giving up on this member.
+            if (attempts < maxAttempts) {
+              const delay = Math.min(500 * 2 ** (attempts - 1), 4000);
+              setTimeout(() => {
+                if (!cancelled) tryOnce();
+              }, delay);
+              return;
+            }
+            lastError = String(e);
+            exhausted += 1;
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[FerrisScope] CRD discovery failed for ${cid} after ${attempts} attempts:`,
+              lastError,
+            );
+            if (exhausted === ids.length && perMember.size === 0) {
+              // Every member failed — same operator surface as the old
+              // single-cluster failure path.
+              const current = useAppStore.getState().kinds;
+              if (current.length > staticKindsCount.current) {
+                setKinds(current.slice(0, staticKindsCount.current));
+              }
+              setCustomError(lastError);
+            }
+          });
+      };
+      tryOnce();
+    };
+    for (const cid of ids) discover(cid);
+
     return () => {
       cancelled = true;
     };
-  }, [selectedContext]);
+  }, [activeClusterKey, setKinds, setKindClusters]);
 
   const grouped = useMemo(() => {
     const map = new Map<Category, ResourceKind[]>();

@@ -1169,3 +1169,30 @@ function toRgb(color: string): { r: number; g: number; b: number } | null {
     };
   return null;
 }
+
+// ── Cluster identity accents ────────────────────────────────────────────────
+// Deterministic per-cluster colors for multi-cluster (virtual context) views:
+// the dot in the merged table's Cluster column, member chips in the cluster
+// bar, detail-panel headers. Eight mid-saturation hues legible on both the
+// light and dark neutrals above, deliberately distinct from each other at a
+// glance. Assignment is by position in the SORTED member list (see
+// `clusterColorIndexMap` in lib/multiCluster.ts) so a cluster keeps its color
+// regardless of selection order; >8 members wrap around.
+export const CLUSTER_ACCENTS: readonly string[] = [
+  "#0ea5e9", // sky
+  "#8b5cf6", // violet
+  "#14b8a6", // teal
+  "#f97316", // orange
+  "#d946ef", // fuchsia
+  "#84cc16", // lime
+  "#6366f1", // indigo
+  "#ec4899", // pink
+];
+
+export function clusterAccent(index: number): string {
+  const n = CLUSTER_ACCENTS.length;
+  // Defensive modulo — negative or fractional indices clamp into range
+  // rather than producing `undefined` (a dot with no color reads as a bug).
+  const i = Number.isFinite(index) ? Math.abs(Math.trunc(index)) % n : 0;
+  return CLUSTER_ACCENTS[i]!;
+}

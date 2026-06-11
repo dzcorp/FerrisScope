@@ -17,12 +17,16 @@ type Props = {
   count: number;
   actions: Action[];
   onClear: () => void;
+  /// Optional extra content rendered between the count and the actions —
+  /// the fleet's save-virtual-context bar puts its name input here. Don't
+  /// fork the bar for new surfaces; extend through this slot.
+  children?: ReactNode;
 };
 
 // HV2BulkBar — floating dock-style bar pinned to bottom-center. Slides up on
 // first selection (R-03). Destructive actions sit at the trailing position
 // behind a divider per R-04.
-export function BulkBar({ count, actions, onClear }: Props) {
+export function BulkBar({ count, actions, onClear, children }: Props) {
   const t = useResolvedTheme().tokens;
   return (
     <div
@@ -72,6 +76,8 @@ export function BulkBar({ count, actions, onClear }: Props) {
         </span>
         <span>selected</span>
       </div>
+
+      {children}
 
       {actions.map((a, i) => (
         <span key={i} style={{ display: "contents" }}>

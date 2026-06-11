@@ -198,12 +198,25 @@ export type PrefsSettings = {
 };
 export type PrefsUiState = {
   selected_context: string | null;
+  /// Id of the active virtual context, mutually exclusive with
+  /// `selected_context`. Dropped at hydrate if no longer in
+  /// `Prefs.virtual_contexts`.
+  selected_virtual_context: string | null;
   selected_kind_id: string | null;
   selected_namespaces: string[];
   rail_mode: PrefsRailMode;
   /// Persisted dock pane sizes. `null` ⇒ use the first-launch default.
   dock_size_right: number | null;
   dock_size_bottom: number | null;
+};
+
+/// A saved multi-cluster view: a user-named set of kubeconfig contexts that
+/// open together. Members are `ContextInfo.id` composites. Mirrors
+/// `crates/core/src/prefs.rs::VirtualContext`.
+export type VirtualContext = {
+  id: string;
+  name: string;
+  members: string[];
 };
 /// Background update-check state. Mirrors `crates/core/src/prefs.rs::UpdateState`.
 /// Persisted so the "v… available" mark on Settings → About survives restarts,
@@ -241,6 +254,7 @@ export type Prefs = {
   settings: PrefsSettings;
   ui: PrefsUiState;
   update: PrefsUpdateState;
+  virtual_contexts: VirtualContext[];
 };
 
 /// Source of a cached Prometheus target. `User` choices are sticky across
@@ -2308,6 +2322,14 @@ export type ChatViewContext = {
   /// Multi-selected rows in the current table. Backend truncates to a
   /// fixed cap when rendering the block.
   selected?: ChatViewSelectedResource[];
+  /// Present when a multi-cluster (virtual context) view is active. The
+  /// prompt then lists the members and reminds the model it can switch
+  /// between them with `fs_configuration_use_context`; `clusterId` is
+  /// omitted in that case.
+  virtualContext?: {
+    name: string;
+    memberClusterIds: string[];
+  };
 };
 
 export type ChatViewSelectedResource = {

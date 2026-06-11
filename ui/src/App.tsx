@@ -1,10 +1,16 @@
 import { logErr, reportErr } from "./lib/log";
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { api, onPortForwardStatus, onResourceDelta } from "./api";
-import { useAppStore, useResolvedTheme } from "./store";
+import {
+  buildPrefsPayload,
+  useActiveClusterIds,
+  useAppStore,
+  useResolvedTheme,
+  type SelectionMeta,
+} from "./store";
 import type { AppInfo, ResourceKind } from "./types";
 import {
   FONT_SANS,
@@ -21,6 +27,7 @@ import {
 } from "./components/TitleBar";
 import { Rail } from "./components/Rail";
 import { ClusterPanel } from "./components/ClusterPanel";
+import { VirtualClusterPanel } from "./components/VirtualClusterPanel";
 import { FleetLanding } from "./components/FleetLanding";
 import { CommandPalette } from "./components/CommandPalette";
 import { NamespaceModal } from "./components/NamespaceModal";
@@ -31,6 +38,7 @@ import { ModalHost } from "./components/ModalHost";
 import { NotificationsPanel } from "./components/NotificationsPanel";
 import { PortForwardsPanel } from "./components/PortForwardsPanel";
 import { confirm, toast } from "./lib/dialog";
+import { bulkClusterPrefix } from "./lib/multiCluster";
 import { latinLetter, IS_MAC } from "./lib/keyboard";
 import { applyThemeCssVars } from "./lib/themeDom";
 import { Icons } from "./components/ui";
@@ -53,10 +61,38 @@ export default function App() {
   const themeOverrides = useAppStore((s) => s.themeOverrides);
   const toggleTheme = useAppStore((s) => s.toggleTheme);
   const selectedContextName = useAppStore((s) => s.selectedContext);
+  const selectedVirtualContextId = useAppStore(
+    (s) => s.selectedVirtualContextId,
+  );
+  const virtualContexts = useAppStore((s) => s.virtualContexts);
   const selectContext = useAppStore((s) => s.selectContext);
   const selectedContext = useAppStore(
     (s) => s.contexts.find((c) => c.id === s.selectedContext) ?? null,
   );
+  const contexts = useAppStore((s) => s.contexts);
+  // Physical cluster set the app is observing: virtual-context members (or
+  // the single selected context) plus any ad-hoc scope extras. Stable
+  // identity — effects key on it.
+  const activeClusterIds = useActiveClusterIds();
+  const activeClusterKey = activeClusterIds.join(String.fromCharCode(0));
+  const activeVirtualContext = useAppStore((s) =>
+    s.selectedVirtualContextId
+      ? s.virtualContexts.find((v) => v.id === s.selectedVirtualContextId) ??
+        null
+      : null,
+  );
+  // Resolved ContextInfos for the active multi-cluster scope, memoized so
+  // VirtualClusterPanel's member fan stays referentially stable.
+  const activeContexts = useMemo(
+    () =>
+      activeClusterIds
+        .map((id) => contexts.find((c) => c.id === id))
+        .filter((c): c is NonNullable<typeof c> => c != null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeClusterKey, contexts],
+  );
+  const multiClusterActive =
+    activeVirtualContext !== null || activeClusterIds.length > 1;
   const selectedKindLabel = useAppStore((s) => {
     const k = s.kinds.find((kk) => kk.id === s.selectedKindId);
     return k ? k.kind : null;
@@ -83,6 +119,10 @@ export default function App() {
   const selection = useAppStore((s) => s.selection);
   const clearSelection = useAppStore((s) => s.clearSelection);
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
+  // Display name for a cluster id in bulk-failure prefixes. Imperative read —
+  // resolved inside click handlers, so no store subscription is needed.
+  const clusterLabelFor = (cid: string) =>
+    useAppStore.getState().contexts.find((c) => c.id === cid)?.name ?? cid;
 
   const openNotifications = useAppStore((s) => s.openNotifications);
   const openForwardsPanel = useAppStore((s) => s.openForwardsPanel);
@@ -104,7 +144,7 @@ export default function App() {
   const addDockTab = useAppStore((s) => s.addDockTab);
   const railMode = useAppStore((s) => s.railMode);
   const dockSize = useAppStore((s) => s.dockSize);
-  const setMetrics = useAppStore((s) => s.setMetrics);
+  const clearMetrics = useAppStore((s) => s.clearMetrics);
   const hydrateForwards = useAppStore((s) => s.hydrateForwards);
   const applyForwardStatus = useAppStore((s) => s.applyForwardStatus);
   const hydrateTableViews = useAppStore((s) => s.hydrateTableViews);
@@ -193,40 +233,11 @@ export default function App() {
   useEffect(() => {
     if (!prefsLoaded) return;
     const t = setTimeout(() => {
+      // Full-object write: the payload builder round-trips every persisted
+      // field, so a field missing from the deps below would still be written
+      // with its current value (it would just not trigger the write).
       api
-        .setPrefs({
-          theme: {
-            id: themeId,
-            palette_id: paletteId,
-            mode: themeMode,
-            overrides: themeOverrides,
-          },
-          settings: {
-            refresh_sec: settings.refreshSec,
-            confirm_destructive: settings.confirmDestructive,
-            show_system_ns: settings.showSystemNs,
-            density: settings.density,
-            mono_tables: settings.monoTables,
-            refresh_on_launch: settings.refreshOnLaunch,
-            ui_scale: settings.uiScale,
-            fleet_view: settings.fleetView,
-            dark_console: settings.darkConsole,
-          },
-          ui: {
-            selected_context: selectedContextName,
-            selected_kind_id: selectedKindId,
-            selected_namespaces: Array.from(selectedNamespaces).sort(),
-            rail_mode: railMode,
-            dock_size_right: dockSize.right,
-            dock_size_bottom: dockSize.bottom,
-          },
-          update: {
-            last_known_version: updateState.lastKnownVersion,
-            last_seen_version: updateState.lastSeenVersion,
-            last_check_at: updateState.lastCheckAt,
-            auto_check_enabled: updateState.autoCheckEnabled,
-          },
-        })
+        .setPrefs(buildPrefsPayload(useAppStore.getState()))
         .catch(logErr("app"));
     }, 250);
     return () => clearTimeout(t);
@@ -238,6 +249,8 @@ export default function App() {
     themeOverrides,
     railMode,
     selectedContextName,
+    selectedVirtualContextId,
+    virtualContexts,
     selectedKindId,
     selectedNamespaces,
     settings,
@@ -304,45 +317,55 @@ export default function App() {
   // ConfigMaps, etc.) — which used to noticeably delay the first Pods
   // LIST on metrics-server-equipped clusters.
   useEffect(() => {
-    if (!selectedContextName) setMetrics(null);
-  }, [selectedContextName, setMetrics]);
+    if (activeClusterIds.length === 0) clearMetrics();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeClusterKey, clearMetrics]);
 
   // When the operator leaves a cluster, force-drop every still-running
   // watcher for it. Watchers normally linger ~60 s after their last
-  // subscriber unmounts so kind→kind navigation stays warm; on a context
-  // switch we don't want to carry that idle traffic on a cluster we're
-  // no longer viewing. Cleanup runs on the *previous* cluster only —
-  // `cleanup` of a useEffect captures the old value, then the new effect
-  // body runs for the new cluster.
+  // subscriber unmounts so kind→kind navigation stays warm; on a scope
+  // switch we don't want to carry that idle traffic on clusters we're
+  // no longer viewing. Diffed against the previous active set so growing
+  // a virtual context (or adding a scope extra) doesn't tear down the
+  // surviving members' warm watchers.
+  const prevActiveIdsRef = useRef<string[]>([]);
   useEffect(() => {
-    if (!selectedContextName) return;
-    const leaving = selectedContextName;
-    return () => {
-      api.dropClusterWatchers(leaving).catch(logErr("app"));
-    };
-  }, [selectedContextName]);
+    const prev = prevActiveIdsRef.current;
+    const departed = prev.filter((id) => !activeClusterIds.includes(id));
+    for (const cid of departed) {
+      api.dropClusterWatchers(cid).catch(logErr("app"));
+    }
+    prevActiveIdsRef.current = activeClusterIds;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeClusterKey]);
 
-  // Subscribe to namespaces on the active cluster so the modal lists what
-  // really exists. Side-subscription is cheap because reflectors dedupe.
+  // Subscribe to namespaces on every active cluster so the modal lists the
+  // union of what really exists. Side-subscriptions are cheap because
+  // reflectors dedupe; keys are cluster-scoped so same-named namespaces on
+  // two members collapse in the displayed union but track independently.
   useEffect(() => {
-    if (!selectedContextName) {
+    const ids =
+      activeClusterKey === ""
+        ? []
+        : activeClusterKey.split(String.fromCharCode(0));
+    if (ids.length === 0) {
       setDiscoveredNs([]);
       return;
     }
     let cancelled = false;
-    let unlisten: (() => void) | null = null;
+    const unlistens: Array<() => void> = [];
+    // Keyed `${clusterId}::${uid}` — two clusters can carry the same
+    // namespace uid only by coincidence, but scoping is free and exact.
     const seen = new Map<string, string>();
 
     const refresh = () =>
       setDiscoveredNs(Array.from(new Set(seen.values())).sort());
 
-    // Drop any selected namespaces that no longer exist in the cluster.
-    // Empty set means "all namespaces" — so a single-namespace filter
-    // whose target was just deleted naturally falls back to the
+    // Drop any selected namespaces that no longer exist in ANY active
+    // cluster. Empty set means "all namespaces" — so a single-namespace
+    // filter whose target was just deleted naturally falls back to the
     // all-namespaces view, and a multi-namespace filter simply loses
-    // the deleted entry. Called with the current `seen` snapshot from
-    // the delta handler (so we reconcile against the freshly-deleted
-    // state, not a stale read).
+    // the deleted entry.
     const reconcileFilter = () => {
       const live = new Set(seen.values());
       const sel = useAppStore.getState().selectedNamespaces;
@@ -356,55 +379,53 @@ export default function App() {
       if (changed) useAppStore.getState().setSelectedNamespaces(next);
     };
 
-    (async () => {
-      try {
-        unlisten = await onResourceDelta(
-          selectedContextName,
-          "namespaces",
-          null,
-          (delta) => {
+    for (const cid of ids) {
+      void (async () => {
+        try {
+          const un = await onResourceDelta(cid, "namespaces", null, (delta) => {
             if (cancelled) return;
             if (delta.kind === "upsert") {
               const name =
                 typeof delta.row.name === "string" ? delta.row.name : null;
-              if (name) seen.set(delta.row.uid, name);
+              if (name) seen.set(`${cid}::${delta.row.uid}`, name);
             } else if (delta.kind === "delete") {
-              seen.delete(delta.uid);
+              seen.delete(`${cid}::${delta.uid}`);
               reconcileFilter();
             } else {
               return; // init_done — nothing to update on the namespace map
             }
             refresh();
-          },
-        );
-        const snap = await api.subscribeResource(
-          selectedContextName,
-          "namespaces",
-          null,
-        );
-        if (cancelled) return;
-        for (const r of snap.rows) {
-          const name = typeof r.name === "string" ? r.name : null;
-          if (name) seen.set(r.uid, name);
+          });
+          if (cancelled) {
+            un();
+            return;
+          }
+          unlistens.push(un);
+          const snap = await api.subscribeResource(cid, "namespaces", null);
+          if (cancelled) return;
+          for (const r of snap.rows) {
+            const name = typeof r.name === "string" ? r.name : null;
+            if (name) seen.set(`${cid}::${r.uid}`, name);
+          }
+          // Initial snapshot might already lack a namespace the operator
+          // had filtered to (deleted while another scope was active).
+          reconcileFilter();
+          refresh();
+        } catch {
+          // Best-effort per member: if namespaces aren't available there
+          // the modal still works with the other members' union.
         }
-        // Initial snapshot might already lack a namespace the operator had
-        // filtered to (e.g. it was deleted while another cluster was active).
-        reconcileFilter();
-        refresh();
-      } catch {
-        // Best-effort: if namespaces aren't available the modal still works
-        // with an empty list.
-      }
-    })();
+      })();
+    }
 
     return () => {
       cancelled = true;
-      if (unlisten) unlisten();
-      api
-        .unsubscribeResource(selectedContextName, "namespaces")
-        .catch(logErr("app"));
+      for (const u of unlistens) u();
+      for (const cid of ids) {
+        api.unsubscribeResource(cid, "namespaces").catch(logErr("app"));
+      }
     };
-  }, [selectedContextName]);
+  }, [activeClusterKey]);
 
   // Suppress the webview's native context menu app-wide so the chrome reads as
   // a desktop app, not a webpage. Text-entry contexts (input, textarea,
@@ -516,19 +537,24 @@ export default function App() {
         resetUiScale();
         return;
       }
-      if (meta && e.key === "`" && selectedContextName) {
+      // Keyboard tab shortcuts bind to the FIRST active cluster — in a
+      // multi-cluster view the tab title carries the member name so it's
+      // obvious which cluster the terminal landed on; the "+" menu's member
+      // picker covers deliberate targeting.
+      if (meta && e.key === "`" && activeContexts.length > 0) {
         e.preventDefault();
+        const target = activeContexts[0]!;
         addDockTab(
           makeTerminalTab(
-            { mode: "shell", clusterId: selectedContextName, namespace: null },
-            selectedContext?.name ?? selectedContextName,
+            { mode: "shell", clusterId: target.id, namespace: null },
+            target.name,
           ),
         );
         return;
       }
-      if (meta && e.shiftKey && letter === "y" && selectedContextName) {
+      if (meta && e.shiftKey && letter === "y" && activeContexts.length > 0) {
         e.preventDefault();
-        addDockTab(makeYamlTab(selectedContextName));
+        addDockTab(makeYamlTab(activeContexts[0]!.id));
         return;
       }
 
@@ -569,6 +595,7 @@ export default function App() {
     nsModalOpen,
     selection,
     selectedContextName,
+    activeContexts,
     addDockTab,
     clearSelection,
     closeNsModal,
@@ -633,7 +660,21 @@ export default function App() {
       <ResizeEdges />
       <AppHeader
         mode={themeMode}
-        context={selectedContext}
+        // In a multi-cluster view there is no single selected context; feed
+        // the breadcrumb a synthetic one carrying the view's display name so
+        // "Clusters › <view> › <kind> · <count>" stays intact.
+        context={
+          selectedContext ??
+          (multiClusterActive && activeContexts.length > 0
+            ? {
+                ...activeContexts[0]!,
+                name:
+                  activeVirtualContext?.name ??
+                  `${activeContexts[0]!.name} +${activeContexts.length - 1}`,
+                namespace: null,
+              }
+            : null)
+        }
         selectedKindLabel={selectedKindLabel}
         unreadNotifications={unreadNotifications}
         activeForwards={activeForwards}
@@ -653,7 +694,39 @@ export default function App() {
           overflow: "hidden",
         }}
       >
-        {selectedContext ? (
+        {multiClusterActive && activeContexts.length > 0 ? (
+          <>
+            <Rail mode={themeMode} />
+            <main
+              style={{
+                flex: 1,
+                minWidth: 0,
+                minHeight: 0,
+                display: "flex",
+                flexDirection: "column",
+                background: t.bg,
+              }}
+            >
+              <VirtualClusterPanel
+                // Remount on virtual-context switch so per-member connection
+                // state never bleeds between virtual contexts.
+                key={activeVirtualContext?.id ?? selectedContextName ?? "adhoc"}
+                mode={themeMode}
+                title={
+                  activeVirtualContext
+                    ? activeVirtualContext.name
+                    : `${selectedContext?.name ?? "Ad-hoc"} +${activeContexts.length - 1}`
+                }
+                viewScopeId={
+                  activeVirtualContext
+                    ? `vctx:${activeVirtualContext.id}`
+                    : selectedContextName ?? "adhoc"
+                }
+                contexts={activeContexts}
+              />
+            </main>
+          </>
+        ) : selectedContext ? (
           <>
             <Rail mode={themeMode} />
             <main
@@ -689,20 +762,23 @@ export default function App() {
 
       {/* Bottom dock for terminals + YAML scratchpads. Right dock for AI
           chats. The Dock primitive filters its own placement; mounting two
-          instances keeps the primitive simple. */}
-      {selectedContext && dockTabs.length > 0 && (
+          instances keeps the primitive simple. Each tab carries its own
+          clusterId in its state; the Dock-level fallback is the first
+          active cluster (covers the multi-cluster view, where there is no
+          single `selectedContext`). */}
+      {activeContexts.length > 0 && dockTabs.length > 0 && (
         <>
           <Dock
             mode={themeMode}
-            clusterName={selectedContext.name}
-            clusterId={selectedContextName}
+            clusterName={activeContexts[0]!.name}
+            clusterId={activeContexts[0]!.id}
             leftInset={leftInset}
             placement="bottom"
           />
           <Dock
             mode={themeMode}
-            clusterName={selectedContext.name}
-            clusterId={selectedContextName}
+            clusterName={activeContexts[0]!.name}
+            clusterId={activeContexts[0]!.id}
             leftInset={leftInset}
             placement="right"
           />
@@ -711,30 +787,30 @@ export default function App() {
 
       {/* Bulk action bar — shows when rows are selected. Per-kind action sets
           (pods today, nodes for cordon/drain/delete). Shape per R-03. */}
-      {selectedKind?.id === "pods" && selectedContext && selection.size > 0 && (
+      {selectedKind?.id === "pods" && activeContexts.length > 0 && selection.size > 0 && (
         <BulkBar
           mode={themeMode}
           count={selection.size}
           onClear={clearSelection}
           actions={buildPodBulkActions(
-            selectedContext.id,
             selection,
             confirmDestructive,
             clearSelection,
+            clusterLabelFor,
           )}
         />
       )}
       {selectedKind?.id === "nodes" &&
-        selectedContext &&
+        activeContexts.length > 0 &&
         selection.size > 0 && (
           <BulkBar
             mode={themeMode}
             count={selection.size}
             onClear={clearSelection}
             actions={buildNodeBulkActions(
-              selectedContext.id,
               selection,
               clearSelection,
+              clusterLabelFor,
             )}
           />
         )}
@@ -744,18 +820,18 @@ export default function App() {
       {selectedKind &&
         selectedKind.id !== "pods" &&
         selectedKind.id !== "nodes" &&
-        selectedContext &&
+        activeContexts.length > 0 &&
         selection.size > 0 && (
           <BulkBar
             mode={themeMode}
             count={selection.size}
             onClear={clearSelection}
             actions={buildGenericBulkActions(
-              selectedContext.id,
               selectedKind,
               selection,
               confirmDestructive,
               clearSelection,
+              clusterLabelFor,
             )}
           />
         )}
@@ -764,7 +840,7 @@ export default function App() {
         <CommandPalette mode={themeMode} onClose={closePalette} />
       )}
 
-      {nsModalOpen && selectedContext && (
+      {nsModalOpen && activeContexts.length > 0 && (
         <NamespaceModal
           mode={themeMode}
           namespaces={discoveredNs}
@@ -823,33 +899,38 @@ export default function App() {
 
 // Pod-specific bulk actions. Logs / Edit YAML are intentionally absent until
 // we ship a multi-stream log view and an apply API — bulk actions need to be
-// reliable, idempotent, and obvious.
+// reliable, idempotent, and obvious. Every action routes through each
+// entry's own cluster — a virtual-context selection can span several.
 function buildPodBulkActions(
-  clusterId: string,
-  selection: Map<string, { namespace: string | null; name: string }>,
+  selection: Map<string, SelectionMeta>,
   confirmDestructive: boolean,
   clearSelection: () => void,
+  labelFor: (clusterId: string) => string,
 ) {
   const entries = Array.from(selection.entries());
   const count = entries.length;
+  const prefix = bulkClusterPrefix(entries, labelFor);
   const summary = entries
     .slice(0, 5)
-    .map(([, m]) => (m.namespace ? `${m.namespace}/${m.name}` : m.name))
+    .map(
+      ([, m]) =>
+        `${prefix(m)}${m.namespace ? `${m.namespace}/${m.name}` : m.name}`,
+    )
     .join("\n");
   const more = count > 5 ? `\n…and ${count - 5} more` : "";
 
   const runForAll = async (
     label: string,
-    op: (ns: string | null, name: string) => Promise<unknown>,
+    op: (m: SelectionMeta) => Promise<unknown>,
   ) => {
     const failures: string[] = [];
     await Promise.all(
       entries.map(async ([, m]) => {
         try {
-          await op(m.namespace, m.name);
+          await op(m);
         } catch (e) {
           failures.push(
-            `${m.namespace ? `${m.namespace}/` : ""}${m.name}: ${String(e)}`,
+            `${prefix(m)}${m.namespace ? `${m.namespace}/` : ""}${m.name}: ${String(e)}`,
           );
         }
       }),
@@ -883,38 +964,58 @@ function buildPodBulkActions(
             });
             if (!ok) return;
           }
-          const pairs: [string, string][] = entries
-            .filter(
-              (e): e is [string, { namespace: string; name: string }] =>
-                e[1].namespace != null,
-            )
-            .map(([, m]) => [m.namespace, m.name]);
-          const noNs = entries.length - pairs.length;
-          try {
-            const report = await api.restartPods(clusterId, pairs);
-            const patchedSummary = report.patched
-              .map(
-                (w) =>
-                  `${w.kind} ${w.namespace}/${w.name} (${w.pods.length} pod${w.pods.length === 1 ? "" : "s"})`,
-              )
-              .join("\n");
-            const failureLines = [
-              ...(noNs > 0 ? [`${noNs} selected pod(s) had no namespace`] : []),
-              ...report.failures.map(
-                (f) => `${f.namespace}/${f.pod}: ${f.error}`,
-              ),
-            ];
-            if (failureLines.length > 0) {
-              toast.bad(
-                `Restarted ${report.patched.length} workload(s)${patchedSummary ? `:\n${patchedSummary}` : ""}\n\nFailures (${failureLines.length}):\n${failureLines.slice(0, 8).join("\n")}${failureLines.length > 8 ? `\n…and ${failureLines.length - 8} more` : ""}`,
-              );
-            } else {
-              toast.ok(
-                `Restarted ${report.patched.length} workload${report.patched.length === 1 ? "" : "s"}${patchedSummary ? `:\n${patchedSummary}` : ""}`,
-              );
+          // One restart_pods call per origin cluster — the backend resolves
+          // pod → owning workload within a single cluster.
+          const byCluster = new Map<string, [string, string][]>();
+          let noNs = 0;
+          for (const [, m] of entries) {
+            if (m.namespace == null) {
+              noNs += 1;
+              continue;
             }
-          } catch (e) {
-            toast.bad(`Restart failed: ${String(e)}`);
+            const bucket = byCluster.get(m.clusterId);
+            const pair: [string, string] = [m.namespace, m.name];
+            if (bucket) bucket.push(pair);
+            else byCluster.set(m.clusterId, [pair]);
+          }
+          const multi = byCluster.size > 1;
+          const cidPrefix = (cid: string) =>
+            multi ? `[${labelFor(cid)}] ` : "";
+          const patchedLines: string[] = [];
+          const failureLines: string[] =
+            noNs > 0 ? [`${noNs} selected pod(s) had no namespace`] : [];
+          let patchedCount = 0;
+          await Promise.all(
+            Array.from(byCluster.entries()).map(async ([cid, pairs]) => {
+              try {
+                const report = await api.restartPods(cid, pairs);
+                patchedCount += report.patched.length;
+                for (const w of report.patched) {
+                  patchedLines.push(
+                    `${cidPrefix(cid)}${w.kind} ${w.namespace}/${w.name} (${w.pods.length} pod${w.pods.length === 1 ? "" : "s"})`,
+                  );
+                }
+                for (const f of report.failures) {
+                  failureLines.push(
+                    `${cidPrefix(cid)}${f.namespace}/${f.pod}: ${f.error}`,
+                  );
+                }
+              } catch (e) {
+                failureLines.push(
+                  `${cidPrefix(cid)}restart failed: ${String(e)}`,
+                );
+              }
+            }),
+          );
+          const patchedSummary = patchedLines.join("\n");
+          if (failureLines.length > 0) {
+            toast.bad(
+              `Restarted ${patchedCount} workload(s)${patchedSummary ? `:\n${patchedSummary}` : ""}\n\nFailures (${failureLines.length}):\n${failureLines.slice(0, 8).join("\n")}${failureLines.length > 8 ? `\n…and ${failureLines.length - 8} more` : ""}`,
+            );
+          } else {
+            toast.ok(
+              `Restarted ${patchedCount} workload${patchedCount === 1 ? "" : "s"}${patchedSummary ? `:\n${patchedSummary}` : ""}`,
+            );
           }
           clearSelection();
         })();
@@ -951,8 +1052,8 @@ function buildPodBulkActions(
             });
             if (!ok) return;
           }
-          await runForAll("Delete", (ns, name) =>
-            api.deleteResource(clusterId, "pods", ns, name, null),
+          await runForAll("Delete", (m) =>
+            api.deleteResource(m.clusterId, "pods", m.namespace, m.name, null),
           );
         })();
       },
@@ -966,29 +1067,30 @@ function buildPodBulkActions(
 // unconditionally — they have real-world consequences a `confirmDestructive`
 // toggle shouldn't be able to silence.
 function buildNodeBulkActions(
-  clusterId: string,
-  selection: Map<string, { namespace: string | null; name: string }>,
+  selection: Map<string, SelectionMeta>,
   clearSelection: () => void,
+  labelFor: (clusterId: string) => string,
 ) {
   const entries = Array.from(selection.entries());
   const count = entries.length;
+  const prefix = bulkClusterPrefix(entries, labelFor);
   const summary = entries
     .slice(0, 5)
-    .map(([, m]) => m.name)
+    .map(([, m]) => `${prefix(m)}${m.name}`)
     .join("\n");
   const more = count > 5 ? `\n…and ${count - 5} more` : "";
 
   const runForAll = async (
     label: string,
-    op: (name: string) => Promise<unknown>,
+    op: (m: SelectionMeta) => Promise<unknown>,
   ) => {
     const failures: string[] = [];
     await Promise.all(
       entries.map(async ([, m]) => {
         try {
-          await op(m.name);
+          await op(m);
         } catch (e) {
-          failures.push(`${m.name}: ${String(e)}`);
+          failures.push(`${prefix(m)}${m.name}: ${String(e)}`);
         }
       }),
     );
@@ -1012,15 +1114,15 @@ function buildNodeBulkActions(
     await Promise.all(
       entries.map(async ([, m]) => {
         try {
-          const r = await api.drainNode(clusterId, m.name, false);
+          const r = await api.drainNode(m.clusterId, m.name, false);
           reports.push({
-            node: m.name,
+            node: `${prefix(m)}${m.name}`,
             ev: r.evicted.length,
             sk: r.skipped.length,
             fl: r.failures.length,
           });
         } catch (e) {
-          failures.push(`${m.name}: ${String(e)}`);
+          failures.push(`${prefix(m)}${m.name}: ${String(e)}`);
         }
       }),
     );
@@ -1049,8 +1151,8 @@ function buildNodeBulkActions(
             confirmLabel: "Cordon",
           });
           if (!ok) return;
-          await runForAll("Cordon", (name) =>
-            api.cordonNode(clusterId, name, true),
+          await runForAll("Cordon", (m) =>
+            api.cordonNode(m.clusterId, m.name, true),
           );
         })();
       },
@@ -1059,8 +1161,8 @@ function buildNodeBulkActions(
       icon: Icons.check,
       label: "Uncordon",
       onClick: () => {
-        void runForAll("Uncordon", (name) =>
-          api.cordonNode(clusterId, name, false),
+        void runForAll("Uncordon", (m) =>
+          api.cordonNode(m.clusterId, m.name, false),
         );
       },
     },
@@ -1107,8 +1209,8 @@ function buildNodeBulkActions(
             tone: "danger",
           });
           if (!ok) return;
-          await runForAll("Delete", (name) =>
-            api.deleteResource(clusterId, "nodes", null, name, null),
+          await runForAll("Delete", (m) =>
+            api.deleteResource(m.clusterId, "nodes", null, m.name, null),
           );
         })();
       },
@@ -1128,19 +1230,23 @@ const BULK_RESTARTABLE_KINDS = new Set([
 ]);
 
 function buildGenericBulkActions(
-  clusterId: string,
   kind: ResourceKind,
-  selection: Map<string, { namespace: string | null; name: string }>,
+  selection: Map<string, SelectionMeta>,
   confirmDestructive: boolean,
   clearSelection: () => void,
+  labelFor: (clusterId: string) => string,
 ) {
   const entries = Array.from(selection.entries());
   const count = entries.length;
+  const prefix = bulkClusterPrefix(entries, labelFor);
   const kindLabel = kind.kind.toLowerCase();
   const plural = kind.plural.toLowerCase();
   const summary = entries
     .slice(0, 5)
-    .map(([, m]) => (m.namespace ? `${m.namespace}/${m.name}` : m.name))
+    .map(
+      ([, m]) =>
+        `${prefix(m)}${m.namespace ? `${m.namespace}/${m.name}` : m.name}`,
+    )
     .join("\n");
   const more = count > 5 ? `\n…and ${count - 5} more` : "";
 
@@ -1171,13 +1277,15 @@ function buildGenericBulkActions(
               }
               try {
                 await api.restartWorkload(
-                  clusterId,
+                  m.clusterId,
                   kind.kind,
                   m.namespace,
                   m.name,
                 );
               } catch (e) {
-                failures.push(`${m.namespace}/${m.name}: ${String(e)}`);
+                failures.push(
+                  `${prefix(m)}${m.namespace}/${m.name}: ${String(e)}`,
+                );
               }
             }),
           );
@@ -1243,7 +1351,7 @@ function buildGenericBulkActions(
             entries.map(async ([, m]) => {
               try {
                 await api.deleteResource(
-                  clusterId,
+                  m.clusterId,
                   kind.id,
                   m.namespace,
                   m.name,
@@ -1251,7 +1359,7 @@ function buildGenericBulkActions(
                 );
               } catch (e) {
                 failures.push(
-                  `${m.namespace ? `${m.namespace}/` : ""}${m.name}: ${String(e)}`,
+                  `${prefix(m)}${m.namespace ? `${m.namespace}/` : ""}${m.name}: ${String(e)}`,
                 );
               }
             }),

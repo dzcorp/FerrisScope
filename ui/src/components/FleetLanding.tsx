@@ -2,17 +2,33 @@ import { logErr } from "../lib/log";
 import { useEffect, useState } from "react";
 import { api, onFleetProbe, onKubeconfigChanged } from "../api";
 import { useAppStore, useResolvedTheme } from "../store";
-import type { ClusterProbe, ContextInfo } from "../types";
-import { FF_MONO, type ThemeMode, R_LG, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XL, FS_XS } from "../theme";
+import type { ClusterProbe, ContextInfo, VirtualContext } from "../types";
+import {
+  FF_MONO,
+  type ThemeMode,
+  clusterAccent,
+  R_LG,
+  R_MD,
+  R_SM,
+  FS_LG,
+  FS_MD,
+  FS_SM,
+  FS_XL,
+  FS_XS,
+} from "../theme";
+import { clusterColorIndexMap } from "../lib/multiCluster";
 import {
   Btn,
+  Checkbox,
   EmptyState,
   ErrorBlock,
   Eyebrow,
   Gauge,
+  Icons,
   LoadingLine,
   Tooltip,
 } from "./ui";
+import { BulkBar } from "./BulkBar";
 import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
 import { confirm, toast } from "../lib/dialog";
 
@@ -45,6 +61,76 @@ export function FleetLanding({ mode, onSelect }: Props) {
 
   const [probes, setProbes] = useState<Record<string, ClusterProbe>>({});
   const [menu, setMenu] = useState<{ pos: MenuPosition; ctx: ContextInfo } | null>(null);
+  const [vctxMenu, setVctxMenu] = useState<{
+    pos: MenuPosition;
+    vctx: VirtualContext;
+  } | null>(null);
+
+  // Multi-select for "save as virtual context": ⌘/Ctrl-click a card to
+  // toggle it; once anything is picked every card grows a checkbox. Esc
+  // clears. `editingVctx` re-enters this mode seeded with an existing
+  // virtual context's members (the Edit flow).
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [editingVctx, setEditingVctx] = useState<string | null>(null);
+  const [vctxName, setVctxName] = useState("");
+  const virtualContexts = useAppStore((s) => s.virtualContexts);
+  const saveVirtualContext = useAppStore((s) => s.saveVirtualContext);
+  const renameVirtualContext = useAppStore((s) => s.renameVirtualContext);
+  const setVirtualContextMembers = useAppStore(
+    (s) => s.setVirtualContextMembers,
+  );
+  const deleteVirtualContext = useAppStore((s) => s.deleteVirtualContext);
+  const selectVirtualContext = useAppStore((s) => s.selectVirtualContext);
+
+  const clearPick = () => {
+    setPicked(new Set());
+    setEditingVctx(null);
+    setVctxName("");
+  };
+  const togglePick = (id: string) =>
+    setPicked((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  useEffect(() => {
+    if (picked.size === 0 && editingVctx === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const target = e.target as HTMLElement | null;
+      // Let an open input clear itself first.
+      if (target && target.tagName === "INPUT") return;
+      clearPick();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [picked.size, editingVctx]);
+
+  const trimmedName = vctxName.trim();
+  const duplicateName = virtualContexts.some(
+    (v) =>
+      v.id !== editingVctx &&
+      v.name.toLowerCase() === trimmedName.toLowerCase(),
+  );
+  const canSaveVctx =
+    picked.size >= 2 && trimmedName.length > 0 && !duplicateName;
+  const onSaveVctx = () => {
+    if (!canSaveVctx) return;
+    const members = Array.from(picked);
+    if (editingVctx) {
+      renameVirtualContext(editingVctx, trimmedName);
+      setVirtualContextMembers(editingVctx, members);
+      toast.ok(`Updated virtual context "${trimmedName}".`);
+    } else {
+      saveVirtualContext(trimmedName, members);
+      toast.ok(
+        `Saved virtual context "${trimmedName}" (${members.length} clusters).`,
+      );
+    }
+    clearPick();
+  };
 
   useEffect(() => {
     setContextsLoading();
@@ -204,12 +290,24 @@ export function FleetLanding({ mode, onSelect }: Props) {
             Cluster fleet
           </div>
           <div style={{ fontSize: FS_MD, color: t.textDim }}>
-            Pick a context to connect. {contexts.length} loaded across{" "}
+            Pick a context to connect, or ⌘-click two or more to save them as
+            a virtual context. {contexts.length} loaded across{" "}
             {orderedGroups.length} group{orderedGroups.length === 1 ? "" : "s"}.
           </div>
         </div>
         <ViewToggle mode={mode} />
       </div>
+
+      {virtualContexts.length > 0 && (
+        <VirtualContextSection
+          mode={mode}
+          virtualContexts={virtualContexts}
+          contexts={contexts}
+          probes={probes}
+          onOpen={(id) => selectVirtualContext(id)}
+          onMenu={(pos, vctx) => setVctxMenu({ pos, vctx })}
+        />
+      )}
 
       {orderedGroups.map((g) => (
         <FleetGroup
@@ -219,6 +317,8 @@ export function FleetLanding({ mode, onSelect }: Props) {
           list={groups.get(g) ?? []}
           probes={probes}
           view={fleetView}
+          picked={picked}
+          onTogglePick={togglePick}
           onSelect={onSelect}
           onMenu={(pos, ctx) => setMenu({ pos, ctx })}
         />
@@ -230,8 +330,100 @@ export function FleetLanding({ mode, onSelect }: Props) {
           position={menu.pos}
           onClose={() => setMenu(null)}
           rowName={primaryLabel(menu.ctx)}
-          items={fleetMenuItems(menu.ctx, onSelect)}
+          items={fleetMenuItems(menu.ctx, onSelect, togglePick)}
         />
+      )}
+
+      {vctxMenu && (
+        <ContextMenu
+          mode={mode}
+          position={vctxMenu.pos}
+          onClose={() => setVctxMenu(null)}
+          rowName={vctxMenu.vctx.name}
+          items={[
+            {
+              kind: "item",
+              label: "Open",
+              onClick: () => selectVirtualContext(vctxMenu.vctx.id),
+            },
+            {
+              kind: "item",
+              label: "Edit name & members",
+              onClick: () => {
+                // Re-enter pick mode seeded with the saved definition; the
+                // floating bar becomes "Save changes".
+                setPicked(new Set(vctxMenu.vctx.members));
+                setEditingVctx(vctxMenu.vctx.id);
+                setVctxName(vctxMenu.vctx.name);
+              },
+            },
+            { kind: "separator" },
+            {
+              kind: "item",
+              label: "Delete virtual context",
+              danger: true,
+              onClick: async () => {
+                const ok = await confirm({
+                  title: `Delete virtual context "${vctxMenu.vctx.name}"?`,
+                  body: "Only the saved grouping is removed — the member clusters and their kubeconfig entries are untouched.",
+                  confirmLabel: "Delete",
+                  tone: "danger",
+                });
+                if (!ok) return;
+                deleteVirtualContext(vctxMenu.vctx.id);
+                toast.ok(`Deleted virtual context ${vctxMenu.vctx.name}.`);
+              },
+            },
+          ]}
+        />
+      )}
+
+      {(picked.size > 0 || editingVctx !== null) && (
+        <BulkBar
+          mode={mode}
+          count={picked.size}
+          onClear={clearPick}
+          actions={[
+            {
+              icon: Icons.layers,
+              label: editingVctx ? "Save changes" : "Save virtual context",
+              onClick: onSaveVctx,
+            },
+          ]}
+        >
+          <input
+            value={vctxName}
+            onChange={(e) => setVctxName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onSaveVctx();
+              if (e.key === "Escape") clearPick();
+            }}
+            placeholder={
+              picked.size < 2
+                ? "Pick 2+ clusters…"
+                : duplicateName
+                  ? "Name already in use"
+                  : "Virtual context name"
+            }
+            aria-label="Virtual context name"
+            style={{
+              height: 28,
+              padding: "0 10px",
+              borderRadius: R_MD,
+              border: `1px solid ${
+                duplicateName && trimmedName.length > 0
+                  ? t.bad
+                  : "rgba(255,255,255,0.2)"
+              }`,
+              background: "rgba(255,255,255,0.08)",
+              color: "#fff",
+              fontSize: FS_MD,
+              fontFamily: "inherit",
+              outline: "none",
+              width: 220,
+            }}
+          />
+        </BulkBar>
       )}
     </div>
   );
@@ -243,13 +435,22 @@ export function FleetLanding({ mode, onSelect }: Props) {
 // allow deleting the file itself. `source_path` carries the on-disk path —
 // when it's missing we still allow context-level edits because the backend
 // resolves the default kubeconfig path on its own.
-function fleetMenuItems(c: ContextInfo, onSelect: (id: string) => void): MenuItem[] {
+function fleetMenuItems(
+  c: ContextInfo,
+  onSelect: (id: string) => void,
+  onTogglePick: (id: string) => void,
+): MenuItem[] {
   const isDefault = c.source_id === "default";
   const items: MenuItem[] = [
     {
       kind: "item",
       label: "Connect",
       onClick: () => onSelect(c.id),
+    },
+    {
+      kind: "item",
+      label: "Toggle in selection (⌘-click)",
+      onClick: () => onTogglePick(c.id),
     },
   ];
   if (isDefault) {
@@ -313,12 +514,225 @@ function fleetMenuItems(c: ContextInfo, onSelect: (id: string) => void): MenuIte
   return items;
 }
 
+// Saved virtual contexts — rendered as a distinct card section above the
+// kubeconfig groups. A card opens all members at once; right-click offers
+// Edit (re-enters pick mode seeded) and Delete.
+function VirtualContextSection({
+  mode,
+  virtualContexts,
+  contexts,
+  probes,
+  onOpen,
+  onMenu,
+}: {
+  mode: ThemeMode;
+  virtualContexts: VirtualContext[];
+  contexts: ContextInfo[];
+  probes: Record<string, ClusterProbe>;
+  onOpen: (id: string) => void;
+  onMenu: (pos: MenuPosition, vctx: VirtualContext) => void;
+}) {
+  const t = useResolvedTheme().tokens;
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          marginBottom: 12,
+        }}
+      >
+        <Eyebrow t={t}>Virtual contexts</Eyebrow>
+        <div style={{ flex: 1, height: 1, background: t.border }} />
+        <div
+          style={{
+            fontSize: FS_SM,
+            color: t.textMuted,
+            fontVariantNumeric: "tabular-nums",
+            fontFamily: FF_MONO,
+          }}
+        >
+          {virtualContexts.length}
+        </div>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 12,
+          alignItems: "stretch",
+        }}
+      >
+        {virtualContexts.map((v) => (
+          <VirtualContextCard
+            key={v.id}
+            mode={mode}
+            vctx={v}
+            contexts={contexts}
+            probes={probes}
+            onOpen={() => onOpen(v.id)}
+            onMenu={(pos) => onMenu(pos, v)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function VirtualContextCard({
+
+  vctx,
+  contexts,
+  probes,
+  onOpen,
+  onMenu,
+}: {
+  mode: ThemeMode;
+  vctx: VirtualContext;
+  contexts: ContextInfo[];
+  probes: Record<string, ClusterProbe>;
+  onOpen: () => void;
+  onMenu: (pos: MenuPosition) => void;
+}) {
+  const t = useResolvedTheme().tokens;
+  const colorIdx = clusterColorIndexMap(vctx.members);
+  const resolved = vctx.members.map((id) => ({
+    id,
+    ctx: contexts.find((c) => c.id === id) ?? null,
+    probe: probes[id] ?? null,
+  }));
+  const live = resolved.filter((m) => m.ctx !== null);
+  // Aggregate health: any explicit failure → red; all probed healthy →
+  // green; otherwise grey (mixed unknowns / not yet probed).
+  const anyBad =
+    live.some((m) => m.probe?.healthy === false) ||
+    resolved.some((m) => m.ctx === null);
+  const allGood =
+    live.length > 0 && live.every((m) => m.probe?.healthy === true);
+  const dotColor = anyBad ? t.bad : allGood ? t.good : t.unknown;
+
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onMenu({ x: e.clientX, y: e.clientY });
+      }}
+      style={{
+        border: `1px solid ${t.border}`,
+        borderRadius: R_LG,
+        background: t.surface,
+        padding: "12px 14px",
+        textAlign: "left",
+        cursor: "pointer",
+        fontFamily: "inherit",
+        color: "inherit",
+        transition: "border-color .15s, background .15s",
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        minWidth: 240,
+        maxWidth: 420,
+        flex: "0 1 auto",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = t.accent;
+        e.currentTarget.style.background = t.accentSoft;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = t.border;
+        e.currentTarget.style.background = t.surface;
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          aria-hidden
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: "50%",
+            background: dotColor,
+            flexShrink: 0,
+          }}
+        />
+        <span
+          style={{
+            fontSize: FS_LG,
+            fontWeight: 600,
+            letterSpacing: -0.3,
+            color: t.text,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            minWidth: 0,
+          }}
+        >
+          {vctx.name}
+        </span>
+        <span
+          style={{
+            marginLeft: "auto",
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
+            color: t.textMuted,
+            flexShrink: 0,
+            paddingLeft: 8,
+          }}
+        >
+          {vctx.members.length} clusters
+        </span>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          flexWrap: "wrap",
+        }}
+      >
+        {resolved.map((m) => (
+          <span
+            key={m.id}
+            title={m.ctx ? m.ctx.name : `${m.id} (missing from kubeconfig)`}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
+              color: m.ctx ? t.textDim : t.bad,
+              textDecoration: m.ctx ? undefined : "line-through",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                background: clusterAccent(colorIdx[m.id] ?? 0),
+                flexShrink: 0,
+              }}
+            />
+            {m.ctx?.name ?? m.id}
+          </span>
+        ))}
+      </div>
+    </button>
+  );
+}
+
 function FleetGroup({
   mode,
   label,
   list,
   probes,
   view,
+  picked,
+  onTogglePick,
   onSelect,
   onMenu,
 }: {
@@ -327,10 +741,18 @@ function FleetGroup({
   list: ContextInfo[];
   probes: Record<string, ClusterProbe>;
   view: FleetView;
+  picked: Set<string>;
+  onTogglePick: (id: string) => void;
   onSelect: (id: string) => void;
   onMenu: (pos: MenuPosition, ctx: ContextInfo) => void;
 }) {
   const t = useResolvedTheme().tokens;
+  const anyPicked = picked.size > 0;
+  // ⌘/Ctrl-click toggles multi-select; plain click connects.
+  const cardClick = (c: ContextInfo) => (e: React.MouseEvent) => {
+    if (e.metaKey || e.ctrlKey) onTogglePick(c.id);
+    else onSelect(c.id);
+  };
   const header = (
     <div
       style={{
@@ -374,7 +796,10 @@ function FleetGroup({
               context={c}
               probe={probes[c.id] ?? null}
               isLast={i === list.length - 1}
-              onSelect={() => onSelect(c.id)}
+              picked={picked.has(c.id)}
+              showPick={anyPicked}
+              onTogglePick={() => onTogglePick(c.id)}
+              onSelect={cardClick(c)}
               onMenu={(pos) => onMenu(pos, c)}
             />
           ))}
@@ -416,7 +841,10 @@ function FleetGroup({
                   mode={mode}
                   context={c}
                   probe={probes[c.id] ?? null}
-                  onSelect={() => onSelect(c.id)}
+                  picked={picked.has(c.id)}
+                  showPick={anyPicked}
+                  onTogglePick={() => onTogglePick(c.id)}
+                  onSelect={cardClick(c)}
                   onMenu={(pos) => onMenu(pos, c)}
                 />
               ) : (
@@ -425,7 +853,10 @@ function FleetGroup({
                   context={c}
                   probe={probes[c.id] ?? null}
                   wide={visibleLen > 36}
-                  onSelect={() => onSelect(c.id)}
+                  picked={picked.has(c.id)}
+                  showPick={anyPicked}
+                  onTogglePick={() => onTogglePick(c.id)}
+                  onSelect={cardClick(c)}
                   onMenu={(pos) => onMenu(pos, c)}
                 />
               )}
@@ -442,6 +873,9 @@ function FleetCard({
   context,
   probe,
   wide,
+  picked,
+  showPick,
+  onTogglePick,
   onSelect,
   onMenu,
 }: {
@@ -449,7 +883,10 @@ function FleetCard({
   context: ContextInfo;
   probe: ClusterProbe | null;
   wide: boolean;
-  onSelect: () => void;
+  picked: boolean;
+  showPick: boolean;
+  onTogglePick: () => void;
+  onSelect: (e: React.MouseEvent) => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
   const t = useResolvedTheme().tokens;
@@ -494,9 +931,9 @@ function FleetCard({
       }}
       style={{
         width: "100%",
-        border: `1px solid ${t.border}`,
+        border: `1px solid ${picked ? t.accent : t.border}`,
         borderRadius: R_LG,
-        background: t.surface,
+        background: picked ? t.accentSoft : t.surface,
         padding: cardPad,
         textAlign: "left",
         cursor: "pointer",
@@ -512,10 +949,21 @@ function FleetCard({
         e.currentTarget.style.background = t.accentSoft;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = t.border;
-        e.currentTarget.style.background = t.surface;
+        e.currentTarget.style.borderColor = picked ? t.accent : t.border;
+        e.currentTarget.style.background = picked ? t.accentSoft : t.surface;
       }}
     >
+      {showPick && (
+        <span
+          onClick={(e) => {
+            e.stopPropagation();
+            onTogglePick();
+          }}
+          style={{ display: "inline-flex", flexShrink: 0 }}
+        >
+          <Checkbox t={t} checked={picked} />
+        </span>
+      )}
       <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
         <GaugeWithLabel
           mode={mode}
@@ -791,16 +1239,22 @@ function GaugeWithLabel({
 // gauges, no summary line. Used when the operator wants to scan a large
 // fleet without per-card load info.
 function MiniCard({
-  
+
   context,
   probe,
+  picked,
+  showPick,
+  onTogglePick,
   onSelect,
   onMenu,
 }: {
   mode: ThemeMode;
   context: ContextInfo;
   probe: ClusterProbe | null;
-  onSelect: () => void;
+  picked: boolean;
+  showPick: boolean;
+  onTogglePick: () => void;
+  onSelect: (e: React.MouseEvent) => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
   const t = useResolvedTheme().tokens;
@@ -823,9 +1277,9 @@ function MiniCard({
       style={{
         width: "100%",
         height: "100%",
-        border: `1px solid ${t.border}`,
+        border: `1px solid ${picked ? t.accent : t.border}`,
         borderRadius: R_LG,
-        background: t.surface,
+        background: picked ? t.accentSoft : t.surface,
         padding: "8px 10px",
         textAlign: "left",
         cursor: "pointer",
@@ -841,10 +1295,21 @@ function MiniCard({
         e.currentTarget.style.background = t.accentSoft;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = t.border;
-        e.currentTarget.style.background = t.surface;
+        e.currentTarget.style.borderColor = picked ? t.accent : t.border;
+        e.currentTarget.style.background = picked ? t.accentSoft : t.surface;
       }}
     >
+      {showPick && (
+        <span
+          onClick={(e) => {
+            e.stopPropagation();
+            onTogglePick();
+          }}
+          style={{ display: "inline-flex", flexShrink: 0 }}
+        >
+          <Checkbox t={t} checked={picked} />
+        </span>
+      )}
       <Tooltip
         label={
           probe?.healthy === true
@@ -938,10 +1403,13 @@ function MiniCard({
 // gauges, no card frame — meant for operators with dozens of clusters who
 // want to scan top-to-bottom.
 function FleetRow({
-  
+
   context,
   probe,
   isLast,
+  picked,
+  showPick,
+  onTogglePick,
   onSelect,
   onMenu,
 }: {
@@ -949,7 +1417,10 @@ function FleetRow({
   context: ContextInfo;
   probe: ClusterProbe | null;
   isLast: boolean;
-  onSelect: () => void;
+  picked: boolean;
+  showPick: boolean;
+  onTogglePick: () => void;
+  onSelect: (e: React.MouseEvent) => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
   const t = useResolvedTheme().tokens;
@@ -978,7 +1449,7 @@ function FleetRow({
         width: "100%",
         border: "none",
         borderBottom: isLast ? "none" : `1px solid ${t.border}`,
-        background: "transparent",
+        background: picked ? t.accentSoft : "transparent",
         padding: "8px 14px",
         textAlign: "left",
         cursor: "pointer",
@@ -993,9 +1464,20 @@ function FleetRow({
         e.currentTarget.style.background = t.accentSoft;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.background = picked ? t.accentSoft : "transparent";
       }}
     >
+      {showPick && (
+        <span
+          onClick={(e) => {
+            e.stopPropagation();
+            onTogglePick();
+          }}
+          style={{ display: "inline-flex", flexShrink: 0 }}
+        >
+          <Checkbox t={t} checked={picked} />
+        </span>
+      )}
       <Tooltip
         label={
           probe?.healthy === true

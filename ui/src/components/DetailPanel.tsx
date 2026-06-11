@@ -280,6 +280,10 @@ const RESTARTABLE_WORKLOAD_KINDS = new Set([
 ]);
 
 export type DetailTarget = {
+  /// Origin cluster of the object. The panel fetches detail from this
+  /// cluster (the `clusterId` prop mirrors it) — in a merged multi-cluster
+  /// table the row's cluster, not "the" selected cluster.
+  clusterId: string;
   uid: string;
   namespace: string | null;
   name: string;
