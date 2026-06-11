@@ -1068,15 +1068,34 @@ export function statusFill(
           : bucket === "info"
             ? t.info
             : t.unknown;
-  const dark = mode === "dark";
+  return tintPair(color, mode === "dark");
+}
+
+// Soft tinted background + legible foreground for an arbitrary accent/status
+// color. `bg` is the color at low alpha; `fg` is the raw color in dark mode
+// (already vivid on a dark surface) and a darkened mix in light mode — the
+// raw hue over its own pale tint loses contrast, amber being the worst case.
+// `statusFill` and the port-forward chip both build on this so every tinted
+// chip stays legible across all palettes and both modes.
+export function tintPair(
+  color: string,
+  dark: boolean,
+): { bg: string; fg: string } {
   return {
-    // 16% alpha on the bucket color — same intensity the old hand-tuned
-    // RGB tints had, but now follows the palette.
     bg: hexWithAlpha(color, dark ? 0.16 : 0.14),
-    // Light theme darkens for legibility on the tinted pill; dark theme
-    // leaves the bucket color as-is (already vivid on a dark backdrop).
     fg: dark ? color : mixWithBlack(color, 0.55),
   };
+}
+
+// Whether a token set is a dark-mode palette. Components that only receive
+// `Tokens` (not the active `mode`) use this to pick the legible variant of a
+// tint — light text on a dark surface means a dark theme. Robust across every
+// palette since text must contrast its own background.
+export function tokensAreDark(t: Tokens): boolean {
+  const rgb = toRgb(t.text);
+  if (!rgb) return true;
+  // Rec. 601 luma; > 0.5 means light text ⇒ dark theme.
+  return (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255 > 0.5;
 }
 
 /// Append an alpha channel to a hex / rgb-ish color. Tolerates `#rrggbb`,

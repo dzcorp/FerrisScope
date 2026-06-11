@@ -17,7 +17,15 @@
 import { useState } from "react";
 import { api } from "../../api";
 import { useAppStore } from "../../store";
-import { type Tokens, FF_MONO, R_SM, FS_SM } from "../../theme";
+import {
+  type Tokens,
+  FF_MONO,
+  R_SM,
+  FS_SM,
+  hexWithAlpha,
+  tintPair,
+  tokensAreDark,
+} from "../../theme";
 import type { ForwardTarget } from "../../types";
 import { toast } from "../../lib/dialog";
 import { Icons, Tooltip } from "../ui";
@@ -39,6 +47,9 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
   const upsertForward = useAppStore((s) => s.upsertForward);
   const removeForward = useAppStore((s) => s.removeForward);
   const [busy, setBusy] = useState(false);
+  // Hover only drives the idle affordance's fill — it's a call-to-action, so
+  // it brightens to accentSoft on hover to read as a clickable button.
+  const [hover, setHover] = useState(false);
 
   if (protocol && protocol.toUpperCase() !== "TCP") {
     return null;
@@ -92,7 +103,9 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
           type="button"
           onClick={onStart}
           disabled={busy}
-          style={chipButton(t, false, busy)}
+          onMouseEnter={() => setHover(true)}
+          onMouseLeave={() => setHover(false)}
+          style={chipButton(t, null, busy, hover)}
         >
           <span style={{ display: "inline-flex" }}>{Icons.forward}</span>
           <span style={{ fontFamily: FF_MONO }}>forward</span>
@@ -104,7 +117,10 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
   const live = entry.status.kind === "listening" || entry.status.kind === "active";
   const reconnecting = entry.status.kind === "reconnecting";
   const failed = entry.status.kind === "failed";
-  const dot = failed
+  // The whole chip is tinted by the forward's status color so an active
+  // tunnel reads at a glance: active → good (green), listening → info
+  // (blue), reconnecting → warn (amber, pulsing), failed → bad (red).
+  const tone = failed
     ? t.bad
     : reconnecting
       ? t.warn
@@ -125,15 +141,16 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
         type="button"
         onClick={onStop}
         disabled={busy || !live}
-        style={chipButton(t, true, busy)}
+        style={chipButton(t, tone, busy)}
       >
         <span
           aria-hidden
+          className={reconnecting ? "fs-pulse-dot" : undefined}
           style={{
-            width: 6,
-            height: 6,
+            width: 7,
+            height: 7,
             borderRadius: "50%",
-            background: dot,
+            background: tone,
             display: "inline-block",
           }}
         />
@@ -196,7 +213,34 @@ function iconButton(t: Tokens, busy: boolean) {
   } as const;
 }
 
-function chipButton(t: Tokens, live: boolean, busy: boolean) {
+// `tone` is the status color for an existing forward (good/info/warn/bad),
+// or `null` for the idle "start a forward" affordance. A live chip paints
+// its border + text in the tone and floods the background with a 16% tint
+// of the same color so the running tunnel stands out. The idle chip is a
+// call-to-action: it wears the brand accent (border + text) so the operator
+// can spot where to port-forward, and fills with accentSoft on hover.
+function chipButton(t: Tokens, tone: string | null, busy: boolean, hover = false) {
+  if (tone === null) {
+    return {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 5,
+      fontSize: FS_SM,
+      padding: "1px 7px",
+      borderRadius: R_SM,
+      border: `1px solid ${hover ? t.accent : hexWithAlpha(t.accent, 0.45)}`,
+      background: hover ? t.accentSoft : "transparent",
+      color: t.accent,
+      fontWeight: 600,
+      cursor: busy ? "wait" : "pointer",
+      fontFamily: "inherit",
+      opacity: busy ? 0.6 : 1,
+    } as const;
+  }
+  // Live chip: tinted fill + a foreground that statusFill's rule keeps legible
+  // (raw tone in dark mode, darkened in light mode so amber/green don't wash
+  // out on their own pale tint). The border keeps the full-saturation tone.
+  const fill = tintPair(tone, tokensAreDark(t));
   return {
     display: "inline-flex",
     alignItems: "center",
@@ -204,10 +248,10 @@ function chipButton(t: Tokens, live: boolean, busy: boolean) {
     fontSize: FS_SM,
     padding: "1px 7px",
     borderRadius: R_SM,
-    border: `1px solid ${live ? t.accent : t.borderSoft}`,
-    background: live ? t.accentSoft : "transparent",
-    color: live ? t.accent : t.textDim,
-    fontWeight: 500,
+    border: `1px solid ${tone}`,
+    background: fill.bg,
+    color: fill.fg,
+    fontWeight: 600,
     cursor: busy ? "wait" : "pointer",
     fontFamily: "inherit",
     opacity: busy ? 0.6 : 1,
