@@ -863,8 +863,11 @@ export default function App() {
       )}
 
       {/* Bulk action bar — shows when rows are selected. Per-kind action sets
-          (pods today, nodes for cordon/drain/delete). Shape per R-03. */}
-      {selectedKind?.id === "pods" && activeContexts.length > 0 && selection.size > 0 && (
+          (pods today, nodes for cordon/drain/delete). Shape per R-03.
+          Hidden (zIndex 35 > drawer 31) while the compare drawer is open —
+          the selection itself survives so the operator can act on the same
+          rows after closing the diff. */}
+      {!compareTarget && selectedKind?.id === "pods" && activeContexts.length > 0 && selection.size > 0 && (
         <BulkBar
           mode={themeMode}
           count={selection.size}
@@ -880,7 +883,8 @@ export default function App() {
           ]}
         />
       )}
-      {selectedKind?.id === "nodes" &&
+      {!compareTarget &&
+        selectedKind?.id === "nodes" &&
         activeContexts.length > 0 &&
         selection.size > 0 && (
           <BulkBar
@@ -900,7 +904,8 @@ export default function App() {
       {/* Generic bulk bar for everything that isn't pods or nodes. Copy +
           Delete only — both ride the dynamic API so no per-kind plumbing is
           needed. Restart / cordon / drain stay pod- and node-specific. */}
-      {selectedKind &&
+      {!compareTarget &&
+        selectedKind &&
         selectedKind.id !== "pods" &&
         selectedKind.id !== "nodes" &&
         activeContexts.length > 0 &&
