@@ -18,6 +18,7 @@ import {
   UI_SCALE_DEFAULT,
   R_LG,
   FS_MD,
+  clusterAccent,
 } from "./theme";
 import { AppHeader } from "./components/AppHeader";
 import {
@@ -33,12 +34,21 @@ import { CommandPalette } from "./components/CommandPalette";
 import { NamespaceModal } from "./components/NamespaceModal";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { BulkBar, type BulkAction } from "./components/BulkBar";
+import {
+  ComparePanel,
+  compareTargetFromSelection,
+  type CompareTarget,
+} from "./components/ComparePanel";
 import { Dock, makeTerminalTab, makeYamlTab } from "./components/Dock";
 import { ModalHost } from "./components/ModalHost";
 import { NotificationsPanel } from "./components/NotificationsPanel";
 import { PortForwardsPanel } from "./components/PortForwardsPanel";
 import { confirm, toast } from "./lib/dialog";
-import { bulkClusterPrefix } from "./lib/multiCluster";
+import {
+  bulkClusterPrefix,
+  clusterColorIndexMap,
+  namespaceClusterTags,
+} from "./lib/multiCluster";
 import { latinLetter, IS_MAC } from "./lib/keyboard";
 import { applyThemeCssVars } from "./lib/themeDom";
 import { Icons } from "./components/ui";
@@ -51,9 +61,15 @@ const RAIL_OPEN_W = 220;
 export default function App() {
   const [, setInfo] = useState<AppInfo | null>(null);
   const [, setReady] = useState(false);
-  // Discovered namespaces in the live cluster — used by the ns modal so the
-  // operator picks from a real list instead of a free-text field.
-  const [discoveredNs, setDiscoveredNs] = useState<string[]>([]);
+  // Discovered namespaces across the active clusters, keyed by namespace
+  // name → cluster ids that have it. The ns modal lists the sorted union;
+  // in multi-cluster views it also labels namespaces that exist on only a
+  // subset of the members.
+  const [nsClusters, setNsClusters] = useState<Record<string, string[]>>({});
+  const discoveredNs = useMemo(
+    () => Object.keys(nsClusters).sort(),
+    [nsClusters],
+  );
 
   const themeMode = useAppStore((s) => s.themeMode);
   const themeId = useAppStore((s) => s.themeId);
@@ -93,6 +109,26 @@ export default function App() {
   );
   const multiClusterActive =
     activeVirtualContext !== null || activeClusterIds.length > 1;
+  // Origin labels for the namespace modal: a namespace that exists on only
+  // a subset of the active members gets compressed cluster-name chips in
+  // the member's accent color. undefined in single-cluster views and when
+  // every namespace is everywhere — the modal renders nothing extra then.
+  const nsTags = useMemo(() => {
+    if (activeContexts.length < 2) return undefined;
+    const tags = namespaceClusterTags(
+      nsClusters,
+      activeContexts.map((c) => ({ id: c.id, name: c.name })),
+    );
+    const colorIdx = clusterColorIndexMap(activeContexts.map((c) => c.id));
+    const out: Record<string, { label: string; color: string }[]> = {};
+    for (const [ns, entries] of Object.entries(tags)) {
+      out[ns] = entries.map((e) => ({
+        label: e.label,
+        color: clusterAccent(colorIdx[e.clusterId] ?? 0),
+      }));
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  }, [activeContexts, nsClusters]);
   const selectedKindLabel = useAppStore((s) => {
     const k = s.kinds.find((kk) => kk.id === s.selectedKindId);
     return k ? k.kind : null;
@@ -123,6 +159,33 @@ export default function App() {
   // resolved inside click handlers, so no store subscription is needed.
   const clusterLabelFor = (cid: string) =>
     useAppStore.getState().contexts.find((c) => c.id === cid)?.name ?? cid;
+
+  // YAML compare drawer — armed from the bulk bar when exactly two rows of
+  // one kind are selected (any kind; the killer use is the same object on
+  // two members of a virtual context).
+  const [compareTarget, setCompareTarget] = useState<CompareTarget | null>(
+    null,
+  );
+  const compareActions = (): BulkAction[] => {
+    if (!selectedKind || selection.size !== 2) return [];
+    return [
+      {
+        icon: Icons.yaml,
+        label: "Compare YAML",
+        onClick: () => {
+          const colorIdx = clusterColorIndexMap(activeClusterIds);
+          const target = compareTargetFromSelection(
+            selection,
+            selectedKind.id,
+            selectedKind.kind,
+            clusterLabelFor,
+            (cid) => colorIdx[cid] ?? 0,
+          );
+          if (target) setCompareTarget(target);
+        },
+      },
+    ];
+  };
 
   const openNotifications = useAppStore((s) => s.openNotifications);
   const openForwardsPanel = useAppStore((s) => s.openForwardsPanel);
@@ -349,17 +412,29 @@ export default function App() {
         ? []
         : activeClusterKey.split(String.fromCharCode(0));
     if (ids.length === 0) {
-      setDiscoveredNs([]);
+      setNsClusters({});
       return;
     }
     let cancelled = false;
     const unlistens: Array<() => void> = [];
     // Keyed `${clusterId}::${uid}` — two clusters can carry the same
     // namespace uid only by coincidence, but scoping is free and exact.
-    const seen = new Map<string, string>();
+    // The value keeps the origin cluster so the modal can label
+    // namespaces that exist on only a subset of the members.
+    const seen = new Map<string, { cid: string; name: string }>();
 
-    const refresh = () =>
-      setDiscoveredNs(Array.from(new Set(seen.values())).sort());
+    const refresh = () => {
+      const next: Record<string, string[]> = {};
+      for (const { cid, name } of seen.values()) {
+        const bucket = next[name];
+        if (bucket) {
+          if (!bucket.includes(cid)) bucket.push(cid);
+        } else {
+          next[name] = [cid];
+        }
+      }
+      setNsClusters(next);
+    };
 
     // Drop any selected namespaces that no longer exist in ANY active
     // cluster. Empty set means "all namespaces" — so a single-namespace
@@ -367,7 +442,9 @@ export default function App() {
     // all-namespaces view, and a multi-namespace filter simply loses
     // the deleted entry.
     const reconcileFilter = () => {
-      const live = new Set(seen.values());
+      const live = new Set(
+        Array.from(seen.values(), (v) => v.name),
+      );
       const sel = useAppStore.getState().selectedNamespaces;
       if (sel.size === 0) return;
       let changed = false;
@@ -387,7 +464,7 @@ export default function App() {
             if (delta.kind === "upsert") {
               const name =
                 typeof delta.row.name === "string" ? delta.row.name : null;
-              if (name) seen.set(`${cid}::${delta.row.uid}`, name);
+              if (name) seen.set(`${cid}::${delta.row.uid}`, { cid, name });
             } else if (delta.kind === "delete") {
               seen.delete(`${cid}::${delta.uid}`);
               reconcileFilter();
@@ -405,7 +482,7 @@ export default function App() {
           if (cancelled) return;
           for (const r of snap.rows) {
             const name = typeof r.name === "string" ? r.name : null;
-            if (name) seen.set(`${cid}::${r.uid}`, name);
+            if (name) seen.set(`${cid}::${r.uid}`, { cid, name });
           }
           // Initial snapshot might already lack a namespace the operator
           // had filtered to (deleted while another scope was active).
@@ -792,12 +869,15 @@ export default function App() {
           mode={themeMode}
           count={selection.size}
           onClear={clearSelection}
-          actions={buildPodBulkActions(
-            selection,
-            confirmDestructive,
-            clearSelection,
-            clusterLabelFor,
-          )}
+          actions={[
+            ...compareActions(),
+            ...buildPodBulkActions(
+              selection,
+              confirmDestructive,
+              clearSelection,
+              clusterLabelFor,
+            ),
+          ]}
         />
       )}
       {selectedKind?.id === "nodes" &&
@@ -807,11 +887,14 @@ export default function App() {
             mode={themeMode}
             count={selection.size}
             onClear={clearSelection}
-            actions={buildNodeBulkActions(
-              selection,
-              clearSelection,
-              clusterLabelFor,
-            )}
+            actions={[
+              ...compareActions(),
+              ...buildNodeBulkActions(
+                selection,
+                clearSelection,
+                clusterLabelFor,
+              ),
+            ]}
           />
         )}
       {/* Generic bulk bar for everything that isn't pods or nodes. Copy +
@@ -826,15 +909,26 @@ export default function App() {
             mode={themeMode}
             count={selection.size}
             onClear={clearSelection}
-            actions={buildGenericBulkActions(
-              selectedKind,
-              selection,
-              confirmDestructive,
-              clearSelection,
-              clusterLabelFor,
-            )}
+            actions={[
+              ...compareActions(),
+              ...buildGenericBulkActions(
+                selectedKind,
+                selection,
+                confirmDestructive,
+                clearSelection,
+                clusterLabelFor,
+              ),
+            ]}
           />
         )}
+
+      {compareTarget && (
+        <ComparePanel
+          mode={themeMode}
+          target={compareTarget}
+          onClose={() => setCompareTarget(null)}
+        />
+      )}
 
       {paletteOpen && (
         <CommandPalette mode={themeMode} onClose={closePalette} />
@@ -844,6 +938,7 @@ export default function App() {
         <NamespaceModal
           mode={themeMode}
           namespaces={discoveredNs}
+          clusterTags={nsTags}
           initial={selectedNamespaces}
           onApply={(next) => {
             setSelectedNamespaces(next);
