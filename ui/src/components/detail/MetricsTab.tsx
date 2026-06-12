@@ -16,6 +16,8 @@ import type {
   PromCacheEntry,
   VolumeMetric,
 } from "../../types";
+import { useObservedPods } from "../LogPanel";
+import { MetricsPane } from "../log/MetricsPane";
 
 // The active TSDB for the surface body — Prom / VM / Thanos / etc. Each
 // surface's outer render wraps its tree in a Provider once the cached
@@ -1114,32 +1116,47 @@ function WorkloadMetrics({
   const [range, setRange] = useState<RangeOption>(findRange("1h"));
   const rateWindow = `${Math.max(120, range.stepSec * 4)}s`;
 
-  // Owner-ref join expression. For controllers that directly own pods this
-  // is a one-step join; for Deployments we chain through ReplicaSet.
-  // Returned expression has shape `<expr>` and is meant to be the
-  // right-hand side of `* on(namespace,pod) group_left()`.
-  const ownerJoin =
-    controllerKind === "Deployment"
-      ? `(kube_pod_owner{namespace="${namespace}",owner_kind="ReplicaSet"} * on(namespace,owner_name) group_left() label_replace(kube_replicaset_owner{namespace="${namespace}",owner_kind="Deployment",owner_name="${name}"},"owner_name","$1","replicaset","(.+)"))`
-      : `kube_pod_owner{namespace="${namespace}",owner_kind="${controllerKind}",owner_name="${name}"}`;
-
-  const cpuQuery = target
-    ? `sum(rate(container_cpu_usage_seconds_total{namespace="${namespace}",container!="",container!="POD"}[${rateWindow}]) * on(namespace,pod) group_left() ${ownerJoin}) * 1000`
-    : null;
-  const memQuery = target
-    ? `sum(container_memory_working_set_bytes{namespace="${namespace}",container!="",container!="POD"} * on(namespace,pod) group_left() ${ownerJoin}) / (1024*1024)`
-    : null;
-  const rxQuery = target
-    ? `sum(rate(container_network_receive_bytes_total{namespace="${namespace}"}[${rateWindow}]) * on(namespace,pod) group_left() ${ownerJoin}) / 1024`
-    : null;
-  const txQuery = target
-    ? `sum(rate(container_network_transmit_bytes_total{namespace="${namespace}"}[${rateWindow}]) * on(namespace,pod) group_left() ${ownerJoin}) / 1024`
-    : null;
+  const q = workloadQueries(controllerKind, namespace, name, rateWindow);
+  const cpuQuery = target ? q.cpu : null;
+  const memQuery = target ? q.mem : null;
+  const rxQuery = target ? q.rx : null;
+  const txQuery = target ? q.tx : null;
+  // Heuristic pod-name fallbacks for clusters whose Prometheus lacks
+  // kube-state-metrics (the owner join multiplies by KSM series, so it
+  // returns nothing there while the pod tab — plain cAdvisor — works).
+  const cpuFbQuery = target ? q.cpuFallback : null;
+  const memFbQuery = target ? q.memFallback : null;
+  const rxFbQuery = target ? q.rxFallback : null;
+  const txFbQuery = target ? q.txFallback : null;
 
   const cpu = usePromRange(clusterId, cpuQuery, range.windowMin, range.stepSec);
   const mem = usePromRange(clusterId, memQuery, range.windowMin, range.stepSec);
   const rx = usePromRange(clusterId, rxQuery, range.windowMin, range.stepSec);
   const tx = usePromRange(clusterId, txQuery, range.windowMin, range.stepSec);
+  const cpuFb = usePromRange(
+    clusterId,
+    cpuFbQuery,
+    range.windowMin,
+    range.stepSec,
+  );
+  const memFb = usePromRange(
+    clusterId,
+    memFbQuery,
+    range.windowMin,
+    range.stepSec,
+  );
+  const rxFb = usePromRange(
+    clusterId,
+    rxFbQuery,
+    range.windowMin,
+    range.stepSec,
+  );
+  const txFb = usePromRange(
+    clusterId,
+    txFbQuery,
+    range.windowMin,
+    range.stepSec,
+  );
 
   // Replica chart — per-kind series.
   const replicas = replicaSeries(controllerKind, namespace, name, target != null);
@@ -1158,53 +1175,70 @@ function WorkloadMetrics({
     );
   }
   if (!target) {
+    // No Prometheus → no history charts, but the live picture is still
+    // available: resolve the workload's pods and render the same
+    // metrics-server snapshot pane the aggregated logs panel uses.
     return (
-      <UnavailableBanner t={t}>
-        Prometheus is not detected on this cluster — workload metrics
-        require Prometheus scraping cAdvisor + kube-state-metrics. Install
-        it or configure a target in settings.
-      </UnavailableBanner>
+      <>
+        <UnavailableBanner t={t}>
+          Prometheus is not detected on this cluster — history charts
+          require Prometheus scraping cAdvisor + kube-state-metrics.
+          Showing the live metrics-server snapshot instead.
+        </UnavailableBanner>
+        <div style={{ marginTop: 18 }}>
+          <WorkloadSnapshotFallback
+            t={t}
+            clusterId={clusterId}
+            controllerKind={controllerKind}
+            namespace={namespace}
+            name={name}
+          />
+        </div>
+      </>
     );
   }
   return (
     <PromBackendContext.Provider value={target.backend}>
       <RangePicker t={t} value={range} onChange={setRange} />
-      <MetricSection
+      {/* Owner-join (kube-state-metrics) is authoritative; the pod-name
+          regex source kicks in on clusters whose Prometheus has cAdvisor
+          but no KSM — where the join returns nothing forever. */}
+      <FallbackChart
         t={t}
         title="CPU"
-        state={cpu}
-        unit="m"
         stroke={t.accent}
         windowLabel={range.label}
+        primary={{ state: cpu, unit: "m", source: "owner refs" }}
+        fallback={{ state: cpuFb, unit: "m", source: "name match" }}
       />
       <div style={{ marginTop: 22 }}>
-        <MetricSection
+        <FallbackChart
           t={t}
           title="Memory"
-          state={mem}
-          unit="MiB"
           stroke={t.good}
           windowLabel={range.label}
+          primary={{ state: mem, unit: "MiB", source: "owner refs" }}
+          fallback={{ state: memFb, unit: "MiB", source: "name match" }}
         />
       </div>
       <div style={{ marginTop: 22 }}>
-        <MetricSection
+        <FallbackChart
           t={t}
           title="Network RX"
-          state={rx}
-          unit="KiB/s"
           stroke={t.info}
           windowLabel={range.label}
+          primary={{ state: rx, unit: "KiB/s", source: "owner refs" }}
+          fallback={{ state: rxFb, unit: "KiB/s", source: "name match" }}
         />
       </div>
       <div style={{ marginTop: 22 }}>
-        <MetricSection
+        <FallbackChart
           t={t}
           title="Network TX"
-          state={tx}
-          unit="KiB/s"
           stroke={t.warn}
           windowLabel={range.label}
+          primary={{ state: tx, unit: "KiB/s", source: "owner refs" }}
+          fallback={{ state: txFb, unit: "KiB/s", source: "name match" }}
         />
       </div>
       <div style={{ marginTop: 22 }}>
@@ -1225,6 +1259,160 @@ function WorkloadMetrics({
       </div>
     </PromBackendContext.Provider>
   );
+}
+
+/// Owner-ref join expression. For controllers that directly own pods this
+/// is a one-step join through kube-state-metrics' `kube_pod_owner`; for
+/// Deployments we chain through `kube_replicaset_owner` (pods are owned by
+/// the ReplicaSet, which is owned by the Deployment). The returned
+/// expression is the right-hand side of `* on(namespace,pod) group_left()`.
+export function workloadOwnerJoin(
+  controllerKind: WorkloadKind,
+  namespace: string,
+  name: string,
+): string {
+  return controllerKind === "Deployment"
+    ? `(kube_pod_owner{namespace="${namespace}",owner_kind="ReplicaSet"} * on(namespace,owner_name) group_left() label_replace(kube_replicaset_owner{namespace="${namespace}",owner_kind="Deployment",owner_name="${name}"},"owner_name","$1","replicaset","(.+)"))`
+    : `kube_pod_owner{namespace="${namespace}",owner_kind="${controllerKind}",owner_name="${name}"}`;
+}
+
+/// Heuristic pod-name regex for the no-kube-state-metrics fallback,
+/// following the kubelet's generated-name conventions:
+///   Deployment   name-<rs-hash>-<5-char suffix>
+///   StatefulSet  name-<ordinal>
+///   others       name-<5-char suffix>
+/// Anchored, and the workload name is regex-escaped (doubled backslashes —
+/// PromQL string literals unescape once before the regex engine sees it).
+/// Can over-match a sibling workload whose name embeds this one
+/// (`api` vs `api-canary-xyz12` matches `^api-[a-z0-9]+-[a-z0-9]{5}$`) —
+/// acceptable for a fallback; the owner join stays authoritative.
+export function workloadPodNamePattern(
+  controllerKind: WorkloadKind,
+  name: string,
+): string {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\\\$&");
+  switch (controllerKind) {
+    case "Deployment":
+      return `^${esc}-[a-z0-9]+-[a-z0-9]{5}$`;
+    case "StatefulSet":
+      return `^${esc}-[0-9]+$`;
+    default:
+      return `^${esc}-[a-z0-9]{5}$`;
+  }
+}
+
+/// The workload tab's PromQL set: authoritative owner-join queries plus the
+/// pod-name-regex fallbacks. Pure — exported for tests.
+export function workloadQueries(
+  controllerKind: WorkloadKind,
+  namespace: string,
+  name: string,
+  rateWindow: string,
+): {
+  cpu: string;
+  mem: string;
+  rx: string;
+  tx: string;
+  cpuFallback: string;
+  memFallback: string;
+  rxFallback: string;
+  txFallback: string;
+} {
+  const join = workloadOwnerJoin(controllerKind, namespace, name);
+  const podRe = workloadPodNamePattern(controllerKind, name);
+  return {
+    cpu: `sum(rate(container_cpu_usage_seconds_total{namespace="${namespace}",container!="",container!="POD"}[${rateWindow}]) * on(namespace,pod) group_left() ${join}) * 1000`,
+    mem: `sum(container_memory_working_set_bytes{namespace="${namespace}",container!="",container!="POD"} * on(namespace,pod) group_left() ${join}) / (1024*1024)`,
+    rx: `sum(rate(container_network_receive_bytes_total{namespace="${namespace}"}[${rateWindow}]) * on(namespace,pod) group_left() ${join}) / 1024`,
+    tx: `sum(rate(container_network_transmit_bytes_total{namespace="${namespace}"}[${rateWindow}]) * on(namespace,pod) group_left() ${join}) / 1024`,
+    cpuFallback: `sum(rate(container_cpu_usage_seconds_total{namespace="${namespace}",pod=~"${podRe}",container!="",container!="POD"}[${rateWindow}])) * 1000`,
+    memFallback: `sum(container_memory_working_set_bytes{namespace="${namespace}",pod=~"${podRe}",container!="",container!="POD"}) / (1024*1024)`,
+    rxFallback: `sum(rate(container_network_receive_bytes_total{namespace="${namespace}",pod=~"${podRe}"}[${rateWindow}])) / 1024`,
+    txFallback: `sum(rate(container_network_transmit_bytes_total{namespace="${namespace}",pod=~"${podRe}"}[${rateWindow}])) / 1024`,
+  };
+}
+
+// Registry kind ids for the workload controller kinds — what
+// `resolve_log_pods` expects.
+const KIND_ID_BY_CONTROLLER: Record<WorkloadKind, string> = {
+  Deployment: "deployments",
+  StatefulSet: "statefulsets",
+  DaemonSet: "daemonsets",
+  ReplicaSet: "replicasets",
+  Job: "jobs",
+};
+
+// Live metrics-server view for a workload — the no-Prometheus fallback.
+// Resolves the workload's pods via its label selector, then renders the
+// shared per-pod snapshot pane (embedded: this tab already owns scroll +
+// padding). Metrics-server absence is handled inside MetricsPane.
+function WorkloadSnapshotFallback({
+  t,
+  clusterId,
+  controllerKind,
+  namespace,
+  name,
+}: {
+  t: Tokens;
+  clusterId: string;
+  controllerKind: WorkloadKind;
+  namespace: string;
+  name: string;
+}) {
+  const targets = useMemo(
+    () => [
+      {
+        clusterId,
+        kindId: KIND_ID_BY_CONTROLLER[controllerKind],
+        namespace,
+        name,
+      },
+    ],
+    [clusterId, controllerKind, namespace, name],
+  );
+  const { state, retry } = useObservedPods(targets);
+  if (state.kind === "loading") {
+    return (
+      <Mute t={t}>
+        <span style={{ fontSize: FS_MD }}>Resolving pods…</span>
+      </Mute>
+    );
+  }
+  if (state.kind === "error") {
+    return (
+      <>
+        <ErrorBlock t={t} message={state.message} kindLabel="pods" verb="load" />
+        <button
+          type="button"
+          onClick={retry}
+          style={{
+            marginTop: 10,
+            padding: "4px 12px",
+            border: `1px solid ${t.border}`,
+            borderRadius: 4,
+            background: t.surface,
+            color: t.text,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
+            cursor: "pointer",
+          }}
+        >
+          Retry
+        </button>
+      </>
+    );
+  }
+  if (state.pods.length === 0) {
+    return (
+      <Mute t={t}>
+        <span style={{ fontSize: FS_MD }}>
+          {state.warnings[0] ??
+            "The workload's selector matched no running pods."}
+        </span>
+      </Mute>
+    );
+  }
+  return <MetricsPane pods={state.pods} embedded />;
 }
 
 type ReplicaTone = "desired" | "ready" | "bad";

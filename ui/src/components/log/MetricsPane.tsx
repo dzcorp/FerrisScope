@@ -48,7 +48,15 @@ export function formatMemMib(n: number): string {
   return n >= 1024 ? `${(n / 1024).toFixed(1)} Gi` : `${n} Mi`;
 }
 
-export function MetricsPane({ pods }: { pods: ObservedPod[] }) {
+export function MetricsPane({
+  pods,
+  embedded = false,
+}: {
+  pods: ObservedPod[];
+  // True when the pane renders inside an already-padded scroll surface
+  // (detail-panel Metrics tab fallback) — drops the own scroll + padding.
+  embedded?: boolean;
+}) {
   const t = useResolvedTheme().tokens;
   const clusterIds = useMemo(
     () => [...new Set(pods.map((p) => p.clusterId))].sort(),
@@ -118,7 +126,13 @@ export function MetricsPane({ pods }: { pods: ObservedPod[] }) {
   }
 
   return (
-    <div style={{ height: "100%", overflowY: "auto", padding: "14px 22px" }}>
+    <div
+      style={
+        embedded
+          ? undefined
+          : { height: "100%", overflowY: "auto", padding: "14px 22px" }
+      }
+    >
       {unavailable.length > 0 && (
         <div
           style={{

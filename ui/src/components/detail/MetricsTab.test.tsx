@@ -1,5 +1,15 @@
-import { describe, it, expect } from "vitest";
-import { clientXToSvgX } from "./MetricsTab";
+import { describe, it, expect, afterEach } from "vitest";
+import { render, act, cleanup } from "@testing-library/react";
+import {
+  clientXToSvgX,
+  MetricsTab,
+  workloadOwnerJoin,
+  workloadPodNamePattern,
+  workloadQueries,
+} from "./MetricsTab";
+import { setMockInvoke, resetMockInvoke } from "../../test/tauri-mock";
+import { useAppStore } from "../../store";
+import type { ContextInfo, MetricsSnapshot } from "../../types";
 
 // Build a minimal SVGSVGElement-shaped stub. The chart renders the SVG
 // with width=viewBoxWidth, then native page zoom rescales layout + paint
@@ -109,5 +119,201 @@ describe("clientXToSvgX", () => {
     } finally {
       document.documentElement.style.zoom = prevZoom;
     }
+  });
+});
+
+// ── Workload Metrics tab: metrics-server fallback ─────────────────────────
+// Without Prometheus the workload tab used to render only the "not
+// detected" banner — pods got live snapshot data, workloads got nothing.
+// These tests pin the fallback: resolve the workload's pods via
+// `resolve_log_pods_cmd` and render the live per-pod snapshot pane.
+
+const ctx: ContextInfo = {
+  id: "kc::prod-eu",
+  name: "prod-eu",
+  cluster: "prod-eu",
+  user: null,
+  namespace: null,
+  is_current: false,
+  group: "",
+  source_id: "kc",
+  source_path: null,
+};
+
+function snapshotWith(
+  pods: Record<string, { cpu_milli: number; mem_mib: number }>,
+): MetricsSnapshot {
+  return {
+    pods: Object.fromEntries(
+      Object.entries(pods).map(([k, v]) => {
+        const [namespace = "", name = ""] = k.split("/");
+        return [k, { namespace, name, ...v }];
+      }),
+    ),
+    cluster: null,
+    pod_volumes: {},
+    pvcs: {},
+    available: true,
+    volumes_available: false,
+    fetched_at_unix_ms: 1,
+  };
+}
+
+afterEach(() => {
+  cleanup();
+  resetMockInvoke();
+  act(() => {
+    useAppStore.setState({ contexts: [], metricsByCluster: {} });
+  });
+});
+
+describe("MetricsTab workload fallback (no Prometheus)", () => {
+  it("resolves the workload's pods and shows live snapshot usage", async () => {
+    const calls: string[] = [];
+    setMockInvoke((cmd) => {
+      calls.push(cmd);
+      // No cached Prometheus entry and no detection — reject so the hook
+      // commits `null` (the "missing" state) without the watchdog wait.
+      if (cmd === "get_prometheus_target") throw new Error("no prom");
+      if (cmd === "resolve_log_pods_cmd") {
+        return {
+          pods: [
+            { namespace: "default", name: "api-7f-a1", containers: ["app"] },
+            { namespace: "default", name: "api-7f-b2", containers: ["app"] },
+          ],
+          warnings: [],
+        };
+      }
+      if (cmd === "subscribe_metrics") return null;
+      return undefined;
+    });
+    act(() => {
+      useAppStore.setState({
+        contexts: [ctx],
+        metricsByCluster: {
+          [ctx.id]: snapshotWith({
+            "default/api-7f-a1": { cpu_milli: 250, mem_mib: 100 },
+            "default/api-7f-b2": { cpu_milli: 50, mem_mib: 30 },
+          }),
+        },
+      });
+    });
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <MetricsTab
+          mode="dark"
+          clusterId={ctx.id}
+          kind="workload"
+          controllerKind="Deployment"
+          namespace="default"
+          name="api"
+        />,
+      );
+    });
+    expect(calls).toContain("resolve_log_pods_cmd");
+    expect(
+      utils.getByText(/Showing the live metrics-server snapshot instead/),
+    ).toBeInTheDocument();
+    expect(utils.getByText("Total CPU")).toBeInTheDocument();
+    expect(utils.getByText("250m")).toBeInTheDocument();
+    expect(utils.getByText("50m")).toBeInTheDocument();
+    expect(utils.getByText("2/2")).toBeInTheDocument();
+  });
+
+  it("explains an empty selector match instead of a blank pane", async () => {
+    setMockInvoke((cmd) => {
+      if (cmd === "get_prometheus_target") throw new Error("no prom");
+      if (cmd === "resolve_log_pods_cmd") {
+        return {
+          pods: [],
+          warnings: ["Deployment default/api: no pods matched its selector"],
+        };
+      }
+      if (cmd === "subscribe_metrics") return null;
+      return undefined;
+    });
+    act(() => {
+      useAppStore.setState({ contexts: [ctx] });
+    });
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <MetricsTab
+          mode="dark"
+          clusterId={ctx.id}
+          kind="workload"
+          controllerKind="Deployment"
+          namespace="default"
+          name="api"
+        />,
+      );
+    });
+    expect(
+      utils.getByText(/no pods matched its selector/),
+    ).toBeInTheDocument();
+  });
+});
+
+// ── Workload PromQL builders ───────────────────────────────────────────────
+// Pins the query text: the kube-state-metrics owner joins (authoritative)
+// and the pod-name-regex fallbacks (clusters with cAdvisor but no KSM).
+
+describe("workload PromQL builders", () => {
+  it("Deployment owner join chains pod → ReplicaSet → Deployment", () => {
+    const j = workloadOwnerJoin("Deployment", "prod", "api");
+    expect(j).toContain('kube_pod_owner{namespace="prod",owner_kind="ReplicaSet"}');
+    expect(j).toContain(
+      'kube_replicaset_owner{namespace="prod",owner_kind="Deployment",owner_name="api"}',
+    );
+    expect(j).toContain('label_replace(');
+    expect(j).toContain("* on(namespace,owner_name) group_left()");
+  });
+
+  it("direct owners join kube_pod_owner one step", () => {
+    expect(workloadOwnerJoin("StatefulSet", "prod", "db")).toBe(
+      'kube_pod_owner{namespace="prod",owner_kind="StatefulSet",owner_name="db"}',
+    );
+    expect(workloadOwnerJoin("Job", "prod", "sync")).toBe(
+      'kube_pod_owner{namespace="prod",owner_kind="Job",owner_name="sync"}',
+    );
+  });
+
+  it("pod-name patterns follow the kubelet naming conventions", () => {
+    expect(workloadPodNamePattern("Deployment", "api")).toBe(
+      "^api-[a-z0-9]+-[a-z0-9]{5}$",
+    );
+    expect(workloadPodNamePattern("StatefulSet", "db")).toBe("^db-[0-9]+$");
+    expect(workloadPodNamePattern("DaemonSet", "agent")).toBe(
+      "^agent-[a-z0-9]{5}$",
+    );
+    expect(workloadPodNamePattern("Job", "sync")).toBe("^sync-[a-z0-9]{5}$");
+  });
+
+  it("escapes regex metacharacters in workload names (PromQL double-escape)", () => {
+    // "api.v2" → the dot must reach the regex engine escaped; PromQL string
+    // literals unescape once, so the query text carries a doubled backslash.
+    expect(workloadPodNamePattern("StatefulSet", "api.v2")).toBe(
+      "^api\\\\.v2-[0-9]+$",
+    );
+  });
+
+  it("workloadQueries: primary joins on (namespace,pod), fallback filters by name", () => {
+    const q = workloadQueries("Deployment", "prod", "api", "120s");
+    expect(q.cpu).toContain(
+      'rate(container_cpu_usage_seconds_total{namespace="prod",container!="",container!="POD"}[120s])',
+    );
+    expect(q.cpu).toContain("* on(namespace,pod) group_left()");
+    expect(q.cpu.endsWith("* 1000")).toBe(true);
+    expect(q.mem).toContain("container_memory_working_set_bytes");
+    expect(q.mem).toContain("/ (1024*1024)");
+    // Fallbacks never touch kube-state-metrics series.
+    for (const fb of [q.cpuFallback, q.memFallback, q.rxFallback, q.txFallback]) {
+      expect(fb).not.toContain("kube_pod_owner");
+      expect(fb).toContain('pod=~"^api-[a-z0-9]+-[a-z0-9]{5}$"');
+    }
+    expect(q.rxFallback).toContain(
+      "container_network_receive_bytes_total",
+    );
   });
 });
