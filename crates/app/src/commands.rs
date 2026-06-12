@@ -3114,18 +3114,21 @@ pub(crate) async fn get_prefs() -> Result<Prefs, String> {
     Ok(prefs::load().await)
 }
 
-/// Save user prefs. Merges with the existing on-disk file rather than
-/// overwriting it — the frontend's debounced setPrefs only carries
-/// theme/settings/ui, and a naive overwrite would clobber the
-/// `prometheus_targets` map written by `set_prometheus_target`. Each call
-/// site is authoritative for its own subtree.
+/// Save user prefs. Full-document overwrite: every `Prefs` subtree (theme,
+/// settings, ui, update, virtual_contexts) is frontend-authoritative — the
+/// debounced setPrefs builds the complete payload via `buildPrefsPayload`.
+/// Prometheus targets live in their own `prometheus.json`, so there is no
+/// backend-owned subtree left to protect.
+///
+/// History: this used to merge field-by-field into the on-disk copy to
+/// protect a backend-written subtree. That merge silently dropped any field
+/// added later — `virtual_contexts` and `update` never reached disk, which
+/// is exactly how "saved virtual contexts vanish on restart" happened. If a
+/// backend-owned subtree ever returns, give it its own file or its own
+/// command; do NOT reintroduce a partial merge here.
 #[tauri::command]
 pub(crate) async fn set_prefs(prefs: Prefs) -> Result<(), String> {
-    let mut existing = prefs::load().await;
-    existing.theme = prefs.theme;
-    existing.settings = prefs.settings;
-    existing.ui = prefs.ui;
-    prefs::save(&existing).await.map_err(|e| e.to_string())?;
+    prefs::save(&prefs).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
