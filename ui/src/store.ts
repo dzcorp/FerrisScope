@@ -8,6 +8,7 @@ import type {
   MetricsSnapshot,
   Prefs,
   PrefsRailMode,
+  PrefsStartupScope,
   ResourceKind,
   SettingsTarget,
   TableView,
@@ -335,6 +336,10 @@ type AppState = {
     // Force the logs + terminal surfaces to a dark, console-style palette even
     // under a light theme. Default on; toggled in Settings → Appearance.
     darkConsole: boolean;
+    // What scope opens after a restart: the full last view (cluster /
+    // virtual context / unsaved ad-hoc set), only the last single cluster,
+    // or always the fleet landing. Settings → General.
+    startupScope: PrefsStartupScope;
   };
 
   setContexts: (cs: ContextInfo[]) => void;
@@ -576,6 +581,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     uiScale: UI_SCALE_DEFAULT,
     fleetView: "tiles",
     darkConsole: true,
+    startupScope: "latest_view",
   },
 
   appVersion: null,
@@ -999,14 +1005,45 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Older prefs files predate virtual contexts; serde defaults the list
       // server-side but tolerate an absent field from transitional builds.
       const virtualContexts = prefs.virtual_contexts ?? [];
+      // Restore-on-launch behaviour (Settings → General): "latest_view"
+      // reopens everything (virtual context + ad-hoc extras), "latest_cluster"
+      // only the anchor cluster, "fleet" starts fresh. The persisted
+      // selection fields stay in the file either way — only the restore is
+      // gated, so flipping the setting back restores the old behaviour.
+      const startupScope = prefs.settings.startup_scope ?? "latest_view";
       // A persisted virtual-context selection only survives if the virtual
       // context itself still exists. Wins over `selected_context` when both
       // are set (they're mutually exclusive; trust the virtual one).
       const selectedVirtualContextId =
+        startupScope === "latest_view" &&
         prefs.ui.selected_virtual_context &&
         virtualContexts.some((v) => v.id === prefs.ui.selected_virtual_context)
           ? prefs.ui.selected_virtual_context
           : null;
+      // Honor the persisted cluster selection only if it's still present in
+      // whatever the contexts list currently has. If not (file moved), drop
+      // silently — better than dangling on a missing id.
+      const selectedContext =
+        startupScope === "fleet"
+          ? null
+          : selectedVirtualContextId
+            ? null
+            : prefs.ui.selected_context &&
+                (s.contexts.length === 0 ||
+                  s.contexts.some((c) => c.id === prefs.ui.selected_context))
+              ? prefs.ui.selected_context
+              : s.selectedContext;
+      // Ad-hoc extras (an unsaved multi-cluster view) come back only under
+      // "latest_view" and only with an anchor to extend. setContexts prunes
+      // members that no longer resolve once the kubeconfig list lands.
+      const scopeExtras =
+        startupScope === "latest_view" &&
+        (selectedVirtualContextId !== null || selectedContext !== null)
+          ? [...new Set(prefs.ui.scope_extras ?? [])].filter(
+              (e) =>
+                s.contexts.length === 0 || s.contexts.some((c) => c.id === e),
+            )
+          : [];
       return {
       themeMode,
       themeId,
@@ -1015,16 +1052,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       railMode: prefs.ui.rail_mode,
       virtualContexts,
       selectedVirtualContextId,
-      // Honor the persisted cluster/kind selection only if it's still present
-      // in whatever the contexts/kinds list currently has. If not (file moved,
-      // kind unknown), drop silently — better than dangling on a missing id.
-      selectedContext: selectedVirtualContextId
-        ? null
-        : prefs.ui.selected_context &&
-          (s.contexts.length === 0 ||
-            s.contexts.some((c) => c.id === prefs.ui.selected_context))
-          ? prefs.ui.selected_context
-          : s.selectedContext,
+      selectedContext,
+      scopeExtras,
       selectedKindId:
         prefs.ui.selected_kind_id &&
         (s.kinds.length === 0 ||
@@ -1050,6 +1079,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         // Older prefs predate dark_console; default on so a light-theme user
         // gets the console treatment without re-opting.
         darkConsole: prefs.settings.dark_console ?? true,
+        startupScope,
       },
       // `prefs.update` lands populated by `#[serde(default)]` on the Rust side
       // for prefs.json files written before this block existed.
@@ -1219,6 +1249,7 @@ export function buildPrefsPayload(s: {
   selectedVirtualContextId: string | null;
   selectedKindId: string | null;
   selectedNamespaces: Set<string>;
+  scopeExtras: string[];
   railMode: PrefsRailMode;
   dockSize: Record<DockPlacement, number | null>;
   updateState: UpdateStateSlice;
@@ -1241,12 +1272,14 @@ export function buildPrefsPayload(s: {
       ui_scale: s.settings.uiScale,
       fleet_view: s.settings.fleetView,
       dark_console: s.settings.darkConsole,
+      startup_scope: s.settings.startupScope,
     },
     ui: {
       selected_context: s.selectedContext,
       selected_virtual_context: s.selectedVirtualContextId,
       selected_kind_id: s.selectedKindId,
       selected_namespaces: Array.from(s.selectedNamespaces).sort(),
+      scope_extras: s.scopeExtras,
       rail_mode: s.railMode,
       dock_size_right: s.dockSize.right,
       dock_size_bottom: s.dockSize.bottom,

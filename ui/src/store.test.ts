@@ -1084,3 +1084,94 @@ describe("absorbScopeExtras", () => {
     ]);
   });
 });
+
+describe("startup scope restore behaviour", () => {
+  const seedPrefs = () => {
+    useAppStore.setState({
+      contexts: [vctxCtx("default::a"), vctxCtx("default::b"), vctxCtx("default::c")],
+    });
+    const id = useAppStore
+      .getState()
+      .saveVirtualContext("prod", ["default::a", "default::b"]);
+    return id;
+  };
+
+  it("latest_view restores an ad-hoc view: anchor + scope extras", () => {
+    seedPrefs();
+    useAppStore.getState().selectContext("default::a");
+    useAppStore.getState().addScopeExtra("default::c");
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    expect(prefs.ui.scope_extras).toEqual(["default::c"]);
+    expect(prefs.settings.startup_scope).toBe("latest_view");
+
+    // Simulate a fresh boot: clear the selection, hydrate from the file.
+    useAppStore.setState({ selectedContext: null, scopeExtras: [] });
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.selectedContext).toBe("default::a");
+    expect(s.scopeExtras).toEqual(["default::c"]);
+  });
+
+  it("latest_view restores the virtual-context selection", () => {
+    const id = seedPrefs();
+    useAppStore.getState().selectVirtualContext(id);
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    useAppStore.setState({ selectedVirtualContextId: null });
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().selectedVirtualContextId).toBe(id);
+  });
+
+  it("latest_cluster restores only the anchor cluster — no vctx, no extras", () => {
+    const id = seedPrefs();
+    useAppStore.getState().selectContext("default::a");
+    useAppStore.getState().addScopeExtra("default::c");
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.settings.startup_scope = "latest_cluster";
+    prefs.ui.selected_virtual_context = id; // even if a vctx was active…
+    useAppStore.setState({ selectedContext: null, scopeExtras: [] });
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.selectedVirtualContextId).toBeNull();
+    expect(s.selectedContext).toBe("default::a");
+    expect(s.scopeExtras).toEqual([]);
+  });
+
+  it("fleet restores nothing — lands on the fleet screen", () => {
+    const id = seedPrefs();
+    useAppStore.getState().selectVirtualContext(id);
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.settings.startup_scope = "fleet";
+    prefs.ui.selected_context = "default::a";
+    prefs.ui.scope_extras = ["default::c"];
+    useAppStore.setState({ selectedContext: null, selectedVirtualContextId: null, scopeExtras: [] });
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.selectedContext).toBeNull();
+    expect(s.selectedVirtualContextId).toBeNull();
+    expect(s.scopeExtras).toEqual([]);
+    // The saved virtual contexts themselves are untouched by the setting.
+    expect(s.virtualContexts).toHaveLength(1);
+    expect(s.settings.startupScope).toBe("fleet");
+  });
+
+  it("drops persisted extras whose contexts no longer exist", () => {
+    seedPrefs();
+    useAppStore.getState().selectContext("default::a");
+    useAppStore.getState().addScopeExtra("default::c");
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.ui.scope_extras = ["default::c", "default::gone", "default::c"];
+    useAppStore.setState({ scopeExtras: [] });
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().scopeExtras).toEqual(["default::c"]);
+  });
+
+  it("drops extras entirely when there is no anchor to extend", () => {
+    seedPrefs();
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.ui.selected_context = null;
+    prefs.ui.selected_virtual_context = null;
+    prefs.ui.scope_extras = ["default::c"];
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().scopeExtras).toEqual([]);
+  });
+});

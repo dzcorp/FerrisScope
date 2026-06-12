@@ -185,6 +185,10 @@ export type PrefsTheme = PrefsThemeRecord | PrefsThemeMode;
 export type PrefsDensity = "compact" | "comfortable" | "spacious";
 export type PrefsFleetView = "tiles" | "mini" | "rows";
 export type PrefsRailMode = "auto" | "pinned" | "collapsed";
+/// Restore-on-launch behaviour: reopen the full last view (cluster,
+/// virtual context, or unsaved ad-hoc set), only the last single cluster,
+/// or always start at the fleet landing.
+export type PrefsStartupScope = "latest_view" | "latest_cluster" | "fleet";
 export type PrefsSettings = {
   refresh_sec: number;
   confirm_destructive: boolean;
@@ -195,6 +199,8 @@ export type PrefsSettings = {
   ui_scale: number;
   fleet_view: PrefsFleetView;
   dark_console: boolean;
+  /// Optional for payloads from transitional builds; absent ⇒ "latest_view".
+  startup_scope?: PrefsStartupScope;
 };
 export type PrefsUiState = {
   selected_context: string | null;
@@ -204,6 +210,10 @@ export type PrefsUiState = {
   selected_virtual_context: string | null;
   selected_kind_id: string | null;
   selected_namespaces: string[];
+  /// Ad-hoc clusters appended to the current view — persisted so an
+  /// unsaved multi-cluster view survives a restart (restored only under
+  /// `startup_scope: "latest_view"`). Optional for transitional payloads.
+  scope_extras?: string[];
   rail_mode: PrefsRailMode;
   /// Persisted dock pane sizes. `null` ⇒ use the first-launch default.
   dock_size_right: number | null;

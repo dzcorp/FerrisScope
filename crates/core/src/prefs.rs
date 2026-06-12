@@ -174,6 +174,23 @@ pub struct Settings {
     /// terminal to look like a terminal. Toggleable in Settings → Appearance.
     #[serde(default = "default_dark_console")]
     pub dark_console: bool,
+    /// What scope the app opens with after a restart. Settings → General.
+    #[serde(default)]
+    pub startup_scope: StartupScope,
+}
+
+/// Restore-on-launch behaviour. `LatestView` reopens exactly what was on
+/// screen at quit — single cluster, virtual context, or an unsaved ad-hoc
+/// multi-cluster view (via `UiState::scope_extras`). `LatestCluster`
+/// restores only the anchor cluster (no virtual context, no extras).
+/// `Fleet` always starts at the fleet landing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupScope {
+    #[default]
+    LatestView,
+    LatestCluster,
+    Fleet,
 }
 
 impl Default for Settings {
@@ -188,6 +205,7 @@ impl Default for Settings {
             ui_scale: default_ui_scale(),
             fleet_view: FleetView::default(),
             dark_console: default_dark_console(),
+            startup_scope: StartupScope::default(),
         }
     }
 }
@@ -256,6 +274,12 @@ pub struct UiState {
     /// `Prefs::virtual_contexts`.
     #[serde(default)]
     pub selected_virtual_context: Option<String>,
+    /// Ad-hoc clusters appended to the current view ("Add cluster…" /
+    /// "Open without saving") — persisted so an unsaved multi-cluster view
+    /// survives a restart. Restored only under `StartupScope::LatestView`;
+    /// members that no longer resolve are filtered at hydrate.
+    #[serde(default)]
+    pub scope_extras: Vec<String>,
     #[serde(default)]
     pub selected_kind_id: Option<String>,
     #[serde(default)]
@@ -467,6 +491,28 @@ mod tests {
             prefs.ui.selected_context,
             Some("default::minikube".to_string())
         );
+    }
+
+    #[test]
+    fn legacy_prefs_without_startup_scope_defaults_to_latest_view() {
+        // Files written before the startup-scope setting / persisted scope
+        // extras existed must load with the restore-everything default.
+        let legacy = r#"{ "theme": "dark", "ui": { "selected_context": "default::minikube" } }"#;
+        let prefs = parse(legacy);
+        assert_eq!(prefs.settings.startup_scope, StartupScope::LatestView);
+        assert!(prefs.ui.scope_extras.is_empty());
+    }
+
+    #[test]
+    fn startup_scope_and_scope_extras_round_trip() {
+        let mut prefs = Prefs::default();
+        prefs.settings.startup_scope = StartupScope::Fleet;
+        prefs.ui.scope_extras = vec!["default::edge".to_string()];
+        let json = serde_json::to_string(&prefs).unwrap();
+        assert!(json.contains(r#""startup_scope":"fleet""#));
+        let back = parse(&json);
+        assert_eq!(back.settings.startup_scope, StartupScope::Fleet);
+        assert_eq!(back.ui.scope_extras, vec!["default::edge".to_string()]);
     }
 
     #[test]

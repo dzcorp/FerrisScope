@@ -3,7 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, onPrometheusChanged } from "../api";
-import type { ReleaseInfo, SettingsSectionId, UpdaterInfo } from "../types";
+import type {
+  PrefsStartupScope,
+  ReleaseInfo,
+  SettingsSectionId,
+  UpdaterInfo,
+} from "../types";
 import { useAppStore, selectUpdateAvailable, semverGt, useResolvedTheme } from "../store";
 import {
   tokens,
@@ -319,6 +324,22 @@ function GeneralSection({}: { mode: ThemeMode }) {
             { value: 15, label: "Every 15 seconds" },
             { value: 30, label: "Every 30 seconds" },
             { value: 60, label: "Every minute" },
+          ]}
+        />
+      </Field>
+      <Field
+        t={t}
+        label="On launch"
+        hint="What opens after a restart: the exact last view (including virtual contexts and unsaved multi-cluster sets), just the last single cluster, or always the cluster fleet."
+      >
+        <Select<PrefsStartupScope>
+          t={t}
+          value={settings.startupScope}
+          onChange={(v) => patchSettings({ startupScope: v })}
+          options={[
+            { value: "latest_view", label: "Last view" },
+            { value: "latest_cluster", label: "Last cluster only" },
+            { value: "fleet", label: "Cluster fleet" },
           ]}
         />
       </Field>

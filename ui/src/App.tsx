@@ -81,6 +81,7 @@ export default function App() {
     (s) => s.selectedVirtualContextId,
   );
   const virtualContexts = useAppStore((s) => s.virtualContexts);
+  const scopeExtras = useAppStore((s) => s.scopeExtras);
   const selectContext = useAppStore((s) => s.selectContext);
   const selectedContext = useAppStore(
     (s) => s.contexts.find((c) => c.id === s.selectedContext) ?? null,
@@ -314,6 +315,7 @@ export default function App() {
     selectedContextName,
     selectedVirtualContextId,
     virtualContexts,
+    scopeExtras,
     selectedKindId,
     selectedNamespaces,
     settings,
