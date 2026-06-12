@@ -19,6 +19,7 @@ export default defineConfig({
       // can render without a real Tauri runtime.
       "@tauri-apps/api/core": "/src/test/tauri-mock.ts",
       "@tauri-apps/api/event": "/src/test/tauri-event-mock.ts",
+      "@tauri-apps/plugin-dialog": "/src/test/tauri-dialog-mock.ts",
     },
   },
 });

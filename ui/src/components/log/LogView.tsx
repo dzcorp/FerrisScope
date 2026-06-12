@@ -9,33 +9,53 @@ import {
   useState,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
-import { FF_MONO, FS_SM, FS_XS, hexWithAlpha, type Tokens } from "../../theme";
-import { ErrorBlock } from "../ui";
+import {
+  clusterAccent,
+  FF_MONO,
+  FS_SM,
+  FS_XS,
+  hexWithAlpha,
+  type Tokens,
+} from "../../theme";
+import { ErrorBlock, Select } from "../ui";
 import { ansiToReact, stripAnsi } from "../../lib/ansi";
 import { splitTimestamp } from "../../lib/logFormat";
 import { findLogMatches, splitHighlight } from "../../lib/logSearch";
 import { latinLetter } from "../../lib/keyboard";
+import { toast } from "../../lib/dialog";
+import {
+  aggregateLogStatus,
+  formatLogExport,
+  suggestedLogFileName,
+  type LogStatus,
+  type LogViewSource,
+} from "../../lib/logSources";
 
-// Pod-log surface body. Both surfaces (`InlineLogTab` — detail-panel Logs
+// Pod-log surface body. All surfaces (`InlineLogTab` — detail-panel Logs
 // tab; `LogPanel` — slide-in overlay) render their own chrome around this
 // component. Everything below the parent's header — scroll body, gutter,
 // pause/auto-scroll/timestamps toggles, status callbacks — lives here so
-// both surfaces stay in sync without duplicated streaming logic.
+// all surfaces stay in sync without duplicated streaming logic.
+//
+// The view streams one backend log stream per entry in `sources` and
+// interleaves the lines in arrival order. With more than one source every
+// line carries a colored source label (stern-style) and the parent's status
+// pill shows the aggregate (see `aggregateLogStatus`).
 
-const MAX_LINES = 5000;
+// Ring-buffer caps the operator can pick in the footer. Default keeps the
+// historical 5k; the bigger windows trade memory for history (a 100k-line
+// ring at ~200 B/line is ~20 MB — acceptable, not free).
+const LINE_CAPS = [5_000, 20_000, 100_000] as const;
+const DEFAULT_MAX_LINES: number = LINE_CAPS[0];
 // Single-line row height seed for the virtualizer. Wrapped rows get
 // re-measured via `measureElement`.
 const LOG_ROW_HEIGHT = Math.round(11.5 * 1.65);
 
-export type LogStatus =
-  | { kind: "starting" }
-  | { kind: "streaming" }
-  // Backend is polling for a container that's still initializing — the
-  // stream is live, just not producing lines yet.
-  | { kind: "waiting"; reason: string }
-  | { kind: "ended"; reason: string }
-  | { kind: "error"; message: string };
+// Status union lives in lib/logSources (pure, testable aggregation); kept
+// re-exported here so the chrome components keep their import path.
+export type { LogStatus, LogViewSource };
 
 export type LogViewState = {
   status: LogStatus;
@@ -51,6 +71,9 @@ type LineEntry = {
   text: string;
   ts: string | null;
   system: boolean;
+  // Index into the active sources array — drives the per-line label/color
+  // when more than one source streams into the view.
+  src: number;
 };
 
 // Ring buffer over a fixed-capacity array. Append is O(1) (overwrites the
@@ -92,36 +115,40 @@ class LineRing {
 
 type Props = {
   t: Tokens;
-  clusterId: string;
-  namespace: string;
-  pod: string;
-  // Active container — selected by the parent's chrome (Select). The
-  // stream restarts on every change. Null when there are no containers
-  // (e.g. pod still pending).
-  container: string | null;
+  // The streams to run — one per (cluster, namespace, pod, container)
+  // tuple, built by the parent (see `lib/logSources.buildLogSources`).
+  // Streams restart whenever the key set changes. Empty while the parent
+  // is still resolving (e.g. pod has no containers yet).
+  sources: LogViewSource[];
   // Optional state callback. Should be wrapped in `useCallback` by the
   // parent so we don't fire it on every render.
   onStateChange?: (state: LogViewState) => void;
 };
 
-export function LogView({
-  t,
-  clusterId,
-  namespace,
-  pod,
-  container,
-  onStateChange,
-}: Props) {
+export function LogView({ t, sources, onStateChange }: Props) {
   const [lines, setLines] = useState<LineEntry[]>([]);
   const [status, setStatus] = useState<LogStatus>({ kind: "starting" });
   const [autoScroll, setAutoScroll] = useState(true);
   const [paused, setPaused] = useState(false);
   const [showTs, setShowTs] = useState(false);
   const [bufferedCount, setBufferedCount] = useState(0);
+  const [lineCap, setLineCap] = useState<number>(DEFAULT_MAX_LINES);
+  const [downloading, setDownloading] = useState(false);
   const lineSeq = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const ringRef = useRef<LineRing>(new LineRing(MAX_LINES));
+  const ringRef = useRef<LineRing>(new LineRing(DEFAULT_MAX_LINES));
+  const capRef = useRef<number>(DEFAULT_MAX_LINES);
   const pausedRef = useRef(false);
+  // Per-source stream statuses, keyed by source key. The aggregate is what
+  // lands in `status`.
+  const statusesRef = useRef<Map<string, LogStatus>>(new Map());
+  // Latest sources, readable from stable callbacks (download) and from the
+  // stream effect (which keys off the joined source keys, not the array
+  // identity, so label-only changes don't restart streams).
+  const sourcesRef = useRef<LogViewSource[]>(sources);
+  useLayoutEffect(() => {
+    sourcesRef.current = sources;
+  });
   // Set whenever we issue a programmatic scroll (tail-follow). The
   // resulting `scroll` event would otherwise be observed by
   // `handleScroll` mid-measurement and could flip `autoScroll` off if
@@ -212,18 +239,30 @@ export function LogView({
     });
   }, [status, paused, bufferedCount, lines.length, onStateChange]);
 
+  // One backend stream per source. Restarts only when the *key set*
+  // changes — the NUL join is the same effect-key pattern the multi-cluster
+  // table subscriptions use.
+  const sourcesEffectKey = sources.map((s) => s.key).join("\u0000");
   useEffect(() => {
-    if (!container) return;
+    const active = sourcesRef.current;
+    if (active.length === 0) return;
     let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    let activeStreamId: string | null = null;
+    const handles: { streamId: string; close: () => void }[] = [];
     let rafHandle: number | null = null;
     ringRef.current.clear();
     setLines([]);
+    statusesRef.current = new Map(
+      active.map((s) => [s.key, { kind: "starting" } as LogStatus]),
+    );
     setStatus({ kind: "starting" });
     setBufferedCount(0);
     setPaused(false);
     pausedRef.current = false;
+    const multi = active.length > 1;
+    const updateStatus = (key: string, st: LogStatus) => {
+      statusesRef.current.set(key, st);
+      setStatus(aggregateLogStatus([...statusesRef.current.values()]));
+    };
     // Coalesce per-line state writes into one render per animation
     // frame. High-volume log streams used to trigger N React renders +
     // N array allocations per second; with the ring buffer + rAF gate
@@ -239,103 +278,121 @@ export function LogView({
         setLines(ringRef.current.toArray());
       });
     };
-    (async () => {
-      try {
-        const handle = await api.startLogStream(
-          clusterId,
-          namespace,
-          pod,
-          container,
-          (evt) => {
-            if (cancelled) return;
-            // `waiting` carries no line — the container just isn't up yet.
-            // Reflect it in the status only; the backend keeps the stream
-            // live and switches to `line`/`batch` once it starts.
-            if (evt.kind === "waiting") {
-              setStatus({ kind: "waiting", reason: evt.reason });
-              return;
-            }
-            // First real output after a `waiting` (or the initial
-            // optimistic `streaming`): pin the status to streaming.
-            const markStreaming = () =>
-              setStatus((s) =>
-                s.kind === "waiting" || s.kind === "starting"
-                  ? { kind: "streaming" }
-                  : s,
-              );
-            if (evt.kind === "batch") {
-              for (const raw of evt.lines) {
-                const { ts, text } = splitTimestamp(raw);
+    const pushSystem = (srcIdx: number, text: string) => {
+      ringRef.current.push({
+        id: ++lineSeq.current,
+        text,
+        ts: null,
+        system: true,
+        src: srcIdx,
+      });
+    };
+    active.forEach((src, srcIdx) => {
+      // System-line prefix so per-source lifecycle markers stay
+      // attributable in an aggregated view; redundant for a lone source.
+      const sysLabel = multi && src.label ? `[${src.label}] ` : "";
+      (async () => {
+        try {
+          const handle = await api.startLogStream(
+            src.clusterId,
+            src.namespace,
+            src.pod,
+            src.container,
+            (evt) => {
+              if (cancelled) return;
+              // `waiting` carries no line — the container just isn't up
+              // yet. Reflect it in the status only; the backend keeps the
+              // stream live and switches to `line`/`batch` once it starts.
+              if (evt.kind === "waiting") {
+                updateStatus(src.key, { kind: "waiting", reason: evt.reason });
+                return;
+              }
+              // First real output after a `waiting` (or the initial
+              // optimistic `streaming`): pin this source to streaming.
+              const markStreaming = () => {
+                const cur = statusesRef.current.get(src.key);
+                if (!cur || cur.kind === "waiting" || cur.kind === "starting") {
+                  updateStatus(src.key, { kind: "streaming" });
+                }
+              };
+              if (evt.kind === "batch") {
+                for (const raw of evt.lines) {
+                  const { ts, text } = splitTimestamp(raw);
+                  ringRef.current.push({
+                    id: ++lineSeq.current,
+                    text,
+                    ts,
+                    system: false,
+                    src: srcIdx,
+                  });
+                }
+                if (pausedRef.current) {
+                  setBufferedCount((c) =>
+                    Math.min(capRef.current, c + evt.lines.length),
+                  );
+                }
+                markStreaming();
+                scheduleFlush();
+                return;
+              }
+              if (evt.kind === "line") {
+                const { ts, text } = splitTimestamp(evt.text);
                 ringRef.current.push({
                   id: ++lineSeq.current,
                   text,
                   ts,
                   system: false,
+                  src: srcIdx,
                 });
-              }
-              if (pausedRef.current) {
-                setBufferedCount((c) =>
-                  Math.min(MAX_LINES, c + evt.lines.length),
+                markStreaming();
+                if (pausedRef.current) {
+                  setBufferedCount((c) => Math.min(capRef.current, c + 1));
+                }
+              } else if (evt.kind === "lagged") {
+                pushSystem(
+                  srcIdx,
+                  `… ${sysLabel}${evt.dropped} lines dropped (frontend lagged)`,
                 );
+              } else {
+                pushSystem(srcIdx, `— ${sysLabel}stream ended: ${evt.reason}`);
               }
-              markStreaming();
               scheduleFlush();
-              return;
-            }
-            const id = ++lineSeq.current;
-            let entry: LineEntry;
-            if (evt.kind === "line") {
-              const { ts, text } = splitTimestamp(evt.text);
-              entry = { id, text, ts, system: false };
-            } else if (evt.kind === "lagged") {
-              entry = {
-                id,
-                text: `… ${evt.dropped} lines dropped (frontend lagged)`,
-                ts: null,
-                system: true,
-              };
-            } else {
-              entry = {
-                id,
-                text: `— stream ended: ${evt.reason}`,
-                ts: null,
-                system: true,
-              };
-            }
-            ringRef.current.push(entry);
-            if (evt.kind === "line") {
-              markStreaming();
-              if (pausedRef.current) {
-                setBufferedCount((c) => Math.min(MAX_LINES, c + 1));
+              if (evt.kind === "ended") {
+                updateStatus(src.key, { kind: "ended", reason: evt.reason });
               }
-            }
+            },
+          );
+          if (cancelled) {
+            handle.close();
+            api.stopLogStream(handle.streamId).catch(logErr("logs"));
+            return;
+          }
+          handles.push(handle);
+          const cur = statusesRef.current.get(src.key);
+          if (cur && cur.kind === "starting") {
+            updateStatus(src.key, { kind: "streaming" });
+          }
+        } catch (e) {
+          if (cancelled) return;
+          updateStatus(src.key, { kind: "error", message: String(e) });
+          // In an aggregated view a single failed stream must be visible in
+          // the body, not just averaged into the status pill.
+          if (multi) {
+            pushSystem(srcIdx, `— ${sysLabel}stream failed: ${String(e)}`);
             scheduleFlush();
-            if (evt.kind === "ended") {
-              setStatus({ kind: "ended", reason: evt.reason });
-            }
-          },
-        );
-        if (cancelled) {
-          handle.close();
-          api.stopLogStream(handle.streamId).catch(logErr("logs"));
-          return;
+          }
         }
-        activeStreamId = handle.streamId;
-        unlisten = handle.close;
-        setStatus({ kind: "streaming" });
-      } catch (e) {
-        if (!cancelled) setStatus({ kind: "error", message: String(e) });
-      }
-    })();
+      })();
+    });
     return () => {
       cancelled = true;
       if (rafHandle != null) cancelAnimationFrame(rafHandle);
-      if (unlisten) unlisten();
-      if (activeStreamId) {
-        api.stopLogStream(activeStreamId).catch(logErr("logs"));
+      for (const h of handles) {
+        h.close();
+        api.stopLogStream(h.streamId).catch(logErr("logs"));
       }
     };
-  }, [clusterId, namespace, pod, container]);
+  }, [sourcesEffectKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useLayoutEffect(() => {
     if (!autoScroll) return;
@@ -377,6 +434,39 @@ export function LogView({
       }
       return !p;
     });
+  }, []);
+
+  // Swap the ring for one of the new capacity, preserving the newest lines.
+  // Shrinking drops the oldest overflow — same semantics as normal rollover.
+  const changeLineCap = useCallback((next: number) => {
+    if (next === capRef.current) return;
+    const old = ringRef.current.toArray();
+    const ring = new LineRing(next);
+    for (const e of old.slice(-next)) ring.push(e);
+    ringRef.current = ring;
+    capRef.current = next;
+    setLineCap(next);
+    setLines(ring.toArray());
+  }, []);
+
+  // Export the buffered lines (all of them, paused or not) to a user-chosen
+  // file. The path always comes from the OS save dialog.
+  const onDownload = useCallback(async () => {
+    const entries = ringRef.current.toArray();
+    if (entries.length === 0) return;
+    setDownloading(true);
+    try {
+      const path = await saveDialog({
+        defaultPath: suggestedLogFileName(sourcesRef.current, new Date()),
+      });
+      if (!path) return;
+      await api.saveTextFile(path, formatLogExport(entries, sourcesRef.current));
+      toast.ok(`Saved ${entries.length.toLocaleString()} log lines`);
+    } catch (e) {
+      toast.bad(`Saving logs failed: ${String(e)}`);
+    } finally {
+      setDownloading(false);
+    }
   }, []);
 
   const openFind = useCallback(() => {
@@ -468,6 +558,7 @@ export function LogView({
   const matchBg = hexWithAlpha(t.warn, 0.38);
   const activeMatchBg = hexWithAlpha(t.accent, 0.55);
   const activeRowBg = hexWithAlpha(t.accent, 0.12);
+  const multiSource = sources.length > 1;
 
   return (
     <div
@@ -552,6 +643,7 @@ export function LogView({
             {virtualItems.map((vi) => {
               const l = lines[vi.index];
               if (!l) return null;
+              const src = multiSource ? sources[l.src] : undefined;
               return (
                 <div
                   key={l.id}
@@ -566,6 +658,8 @@ export function LogView({
                     gutterDim={t.textDim}
                     divider={t.borderSoft}
                     showTs={showTs}
+                    srcLabel={src && !l.system ? src.label : null}
+                    srcColor={src ? clusterAccent(src.colorIdx) : ""}
                     query={findOpen ? query : ""}
                     active={findOpen && vi.index === activeLineIndex}
                     matchBg={matchBg}
@@ -667,8 +761,52 @@ export function LogView({
         >
           Find
         </button>
-        <span style={{ marginLeft: "auto" }}>
-          drops oldest beyond {MAX_LINES.toLocaleString()}
+        <button
+          type="button"
+          onClick={() => void onDownload()}
+          disabled={lines.length === 0 || downloading}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "2px 10px",
+            border: `1px solid ${t.border}`,
+            borderRadius: 4,
+            background: t.surface,
+            color: lines.length === 0 || downloading ? t.textMuted : t.text,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
+            cursor: lines.length === 0 || downloading ? "default" : "pointer",
+          }}
+          title="Save the buffered lines to one file"
+        >
+          {downloading ? "Saving…" : "Download"}
+        </button>
+        <span
+          style={{
+            marginLeft: "auto",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          keep
+          <Select
+            t={t}
+            fullWidth={false}
+            value={String(lineCap)}
+            onChange={(v) => changeLineCap(Number(v))}
+            options={LINE_CAPS.map((c) => ({
+              value: String(c),
+              label: `${(c / 1000).toLocaleString()}k lines`,
+            }))}
+            style={{
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
+              height: 22,
+              padding: "1px 24px 1px 8px",
+            }}
+          />
         </span>
       </div>
     </div>
@@ -692,6 +830,8 @@ const LogLine = memo(function LogLine({
   gutterDim,
   divider,
   showTs,
+  srcLabel,
+  srcColor,
   query,
   active,
   matchBg,
@@ -705,6 +845,10 @@ const LogLine = memo(function LogLine({
   gutterDim: string;
   divider: string;
   showTs: boolean;
+  // Source label rendered inline before the body (stern-style) when the
+  // view aggregates several streams; null hides the prefix entirely.
+  srcLabel: string | null;
+  srcColor: string;
   // Active find query ("" when the find bar is closed). Highlighting only
   // kicks in for a non-empty query.
   query: string;
@@ -774,6 +918,14 @@ const LogLine = memo(function LogLine({
           wordBreak: "break-all",
         }}
       >
+        {srcLabel != null && srcLabel.length > 0 && (
+          <span
+            className="fs-log-src"
+            style={{ color: srcColor, fontWeight: 600 }}
+          >
+            {srcLabel}{" "}
+          </span>
+        )}
         {renderLineBody(entry, query, active, matchBg, activeMatchBg)}
       </div>
     </div>
