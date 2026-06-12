@@ -39,6 +39,12 @@ import {
   compareTargetFromSelection,
   type CompareTarget,
 } from "./components/ComparePanel";
+import {
+  LogPanel,
+  OBSERVABLE_KIND_IDS,
+  type ObserveTab,
+  type ObserveTarget,
+} from "./components/LogPanel";
 import { Dock, makeTerminalTab, makeYamlTab } from "./components/Dock";
 import { ModalHost } from "./components/ModalHost";
 import { NotificationsPanel } from "./components/NotificationsPanel";
@@ -185,6 +191,44 @@ export default function App() {
           if (target) setCompareTarget(target);
         },
       },
+    ];
+  };
+
+  // Aggregated logs/metrics drawer — armed from the bulk bar for pods and
+  // pod-bearing workloads (deployments, statefulsets, daemonsets,
+  // replicasets, jobs). The selection may span clusters; the panel groups
+  // its resolve calls per cluster.
+  const [observeTarget, setObserveTarget] = useState<{
+    targets: ObserveTarget[];
+    initialTab: ObserveTab;
+  } | null>(null);
+  const observeActions = (): BulkAction[] => {
+    if (
+      !selectedKind ||
+      !OBSERVABLE_KIND_IDS.has(selectedKind.id) ||
+      selection.size === 0
+    ) {
+      return [];
+    }
+    const open = (initialTab: ObserveTab) => () => {
+      const targets: ObserveTarget[] = [];
+      for (const meta of selection.values()) {
+        // Pods and the observable workloads are all namespaced; a null
+        // namespace means a malformed row — skip it rather than send a
+        // request the backend will 404.
+        if (!meta.namespace) continue;
+        targets.push({
+          clusterId: meta.clusterId,
+          kindId: selectedKind.id,
+          namespace: meta.namespace,
+          name: meta.name,
+        });
+      }
+      if (targets.length > 0) setObserveTarget({ targets, initialTab });
+    };
+    return [
+      { icon: Icons.logs, label: "Logs", onClick: open("logs") },
+      { icon: Icons.gauge, label: "Metrics", onClick: open("metrics") },
     ];
   };
 
@@ -869,12 +913,13 @@ export default function App() {
           Hidden (zIndex 35 > drawer 31) while the compare drawer is open —
           the selection itself survives so the operator can act on the same
           rows after closing the diff. */}
-      {!compareTarget && selectedKind?.id === "pods" && activeContexts.length > 0 && selection.size > 0 && (
+      {!compareTarget && !observeTarget && selectedKind?.id === "pods" && activeContexts.length > 0 && selection.size > 0 && (
         <BulkBar
           mode={themeMode}
           count={selection.size}
           onClear={clearSelection}
           actions={[
+            ...observeActions(),
             ...compareActions(),
             ...buildPodBulkActions(
               selection,
@@ -886,6 +931,7 @@ export default function App() {
         />
       )}
       {!compareTarget &&
+        !observeTarget &&
         selectedKind?.id === "nodes" &&
         activeContexts.length > 0 &&
         selection.size > 0 && (
@@ -907,6 +953,7 @@ export default function App() {
           Delete only — both ride the dynamic API so no per-kind plumbing is
           needed. Restart / cordon / drain stay pod- and node-specific. */}
       {!compareTarget &&
+        !observeTarget &&
         selectedKind &&
         selectedKind.id !== "pods" &&
         selectedKind.id !== "nodes" &&
@@ -917,6 +964,7 @@ export default function App() {
             count={selection.size}
             onClear={clearSelection}
             actions={[
+              ...observeActions(),
               ...compareActions(),
               ...buildGenericBulkActions(
                 selectedKind,
@@ -934,6 +982,15 @@ export default function App() {
           mode={themeMode}
           target={compareTarget}
           onClose={() => setCompareTarget(null)}
+        />
+      )}
+
+      {observeTarget && (
+        <LogPanel
+          mode={themeMode}
+          targets={observeTarget.targets}
+          initialTab={observeTarget.initialTab}
+          onClose={() => setObserveTarget(null)}
         />
       )}
 

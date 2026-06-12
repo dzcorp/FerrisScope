@@ -974,18 +974,34 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     });
   }, [containerWidth, visibleColumns, naturalWidths]);
 
-  const logPod = useMemo(() => {
+  // The row action opens the panel for the one row under the cursor. Pod
+  // rows already carry their container list so no resolve round-trip runs;
+  // workload rows resolve to their pods inside the panel.
+  const logTargets = useMemo(() => {
     if (!logTarget) return null;
-    const containers = Array.isArray(logTarget.containers)
-      ? (logTarget.containers as string[])
-      : [];
-    return {
-      uid: logTarget.uid,
-      namespace: String(logTarget.namespace ?? ""),
-      name: String(logTarget.name ?? ""),
-      containers,
-    };
-  }, [logTarget]);
+    if (kind.id === "pods") {
+      const containers = Array.isArray(logTarget.containers)
+        ? (logTarget.containers as string[])
+        : [];
+      return [
+        {
+          clusterId: logTarget.__clusterId,
+          kindId: "pods",
+          namespace: String(logTarget.namespace ?? ""),
+          name: String(logTarget.name ?? ""),
+          containers,
+        },
+      ];
+    }
+    return [
+      {
+        clusterId: logTarget.__clusterId,
+        kindId: kind.id,
+        namespace: String(logTarget.namespace ?? ""),
+        name: String(logTarget.name ?? ""),
+      },
+    ];
+  }, [logTarget, kind.id]);
 
   // Click handler for the select-column. Pulls range / additive logic into
   // one place so both the cell-wide click target (Slice 1) and modifier
@@ -1520,11 +1536,10 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         </div>
       </div>
 
-      {logPod && logTarget && (
+      {logTargets && (
         <LogPanel
           mode={mode}
-          clusterId={logTarget.__clusterId}
-          pod={logPod}
+          targets={logTargets}
           defaultContainer={logDefaultContainer}
           onClose={() => setLogTarget(null)}
         />

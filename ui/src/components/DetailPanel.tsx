@@ -14,7 +14,7 @@ import type {
   ResourceKind,
   ResourceRow,
 } from "../types";
-import { tokens, FF_MONO, type ThemeMode, type Tokens, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
+import { FF_MONO, type ThemeMode, type Tokens, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
 import {
   Chip,
   ContainerDots,
@@ -25,6 +25,7 @@ import {
   LoadingLine,
   Section,
   StatusPill,
+  TabButton,
 } from "./ui";
 import type { ContainerLite } from "./ui";
 import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
@@ -76,7 +77,7 @@ import {
   NamespaceSummary,
   NodeSummary,
 } from "./detail/cluster";
-import { InlineLogTab } from "./detail/InlineLogTab";
+import { InlineLogTab, InlineWorkloadLogTab } from "./detail/InlineLogTab";
 import { YamlTab, type YamlStale } from "./detail/YamlTab";
 import { MetricsTab } from "./detail/MetricsTab";
 import {
@@ -1110,7 +1111,7 @@ export function DetailPanel({
               Related
             </TabButton>
           )}
-          {isPod && podContainers.length > 0 && (
+          {((isPod && podContainers.length > 0) || isWorkload) && (
             <TabButton
               t={t}
               active={tab === "logs"}
@@ -1229,6 +1230,15 @@ export function DetailPanel({
               namespace={target.namespace}
               name={target.name}
               containers={podContainers}
+            />
+          ) : null}
+          {tab === "logs" && isWorkload && target.namespace ? (
+            <InlineWorkloadLogTab
+              mode={mode}
+              clusterId={clusterId}
+              kindId={kind.id}
+              namespace={target.namespace}
+              name={target.name}
             />
           ) : null}
           {tab === "metrics" &&
@@ -1509,42 +1519,6 @@ function ownerChain(
       targetName: ref.name,
     },
   ];
-}
-
-function TabButton({
-  t,
-  active,
-  onClick,
-  children,
-}: {
-  t: ReturnType<typeof tokens>;
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      style={{
-        fontSize: FS_SM,
-        fontWeight: 600,
-        fontFamily: FF_MONO,
-        textTransform: "uppercase",
-        letterSpacing: 0.6,
-        padding: "10px 14px",
-        marginBottom: -1,
-        border: "none",
-        background: "transparent",
-        cursor: "pointer",
-        color: active ? t.accent : t.textMuted,
-        borderBottom: `2px solid ${active ? t.accent : "transparent"}`,
-        transition: "color .12s, border-color .12s",
-      }}
-    >
-      {children}
-    </button>
-  );
 }
 
 type EventState =

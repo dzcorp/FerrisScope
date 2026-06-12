@@ -1036,6 +1036,45 @@ export type ContainerLite = {
   ready?: boolean;
 };
 
+// Underlined-tab strip button (detail panel, logs/metrics panel). Uppercase
+// mono caption with a 2px accent underline when active; sits on a strip with
+// a bottom border (hence `marginBottom: -1`).
+export function TabButton({
+  t,
+  active,
+  onClick,
+  children,
+}: {
+  t: Tokens;
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        fontSize: FS_SM,
+        fontWeight: 600,
+        fontFamily: FF_MONO,
+        textTransform: "uppercase",
+        letterSpacing: 0.6,
+        padding: "10px 14px",
+        marginBottom: -1,
+        border: "none",
+        background: "transparent",
+        cursor: "pointer",
+        color: active ? t.accent : t.textMuted,
+        borderBottom: `2px solid ${active ? t.accent : "transparent"}`,
+        transition: "color .12s, border-color .12s",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function ContainerDots({
   containers,
   t,

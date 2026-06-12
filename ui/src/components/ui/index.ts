@@ -19,6 +19,7 @@ export {
   Select,
   Field,
   SectionHeader,
+  TabButton,
   ContainerDots,
 } from "./atoms";
 export type { ContainerLite } from "./atoms";

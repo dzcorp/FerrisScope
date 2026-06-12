@@ -67,8 +67,16 @@ export function actionsForRow(ctx: RowActionContext): MenuItem[] {
         onClick: openPortForward,
       });
   } else if (kind.id === "deployments" || kind.id === "statefulsets") {
+    // Aggregated logs over the workload's pods (resolved via its selector).
+    items.push({ kind: "item", label: "View logs", onClick: openLogs });
     if (openYamlEdit)
       items.push({ kind: "item", label: "Edit YAML", onClick: openYamlEdit });
+  } else if (
+    kind.id === "daemonsets" ||
+    kind.id === "replicasets" ||
+    kind.id === "jobs"
+  ) {
+    items.push({ kind: "item", label: "View logs", onClick: openLogs });
   } else if (kind.id === "nodes") {
     if (openExec)
       items.push({ kind: "item", label: "Node shell (debug)", onClick: openExec });

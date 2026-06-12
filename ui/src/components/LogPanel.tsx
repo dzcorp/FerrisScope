@@ -1,54 +1,212 @@
-import { useCallback, useState } from "react";
-import { useConsoleTokens, useResolvedTheme } from "../store";
-import { tokens, FF_MONO, type ThemeMode, FS_LG, FS_SM } from "../theme";
 import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useAppStore, useConsoleTokens, useResolvedTheme } from "../store";
+import { tokens, FF_MONO, type ThemeMode, FS_LG, FS_SM, FS_XS } from "../theme";
+import {
+  EmptyState,
+  ErrorBlock,
   Eyebrow,
   IconBtn,
   Icons,
+  LoadingLine,
   Select,
   StatusPill,
+  TabButton,
   Tooltip,
 } from "./ui";
 import { LogView, type LogStatus, type LogViewState } from "./log/LogView";
+import { MetricsPane } from "./log/MetricsPane";
 import { streamStatusDetail, streamStatusLabel } from "./log/status";
+import { api } from "../api";
+import {
+  buildLogSources,
+  sourceKey,
+  type LogViewSource,
+  type ObservedPod,
+} from "../lib/logSources";
+import type { LogPodTarget } from "../types";
 
-export type LogTarget = {
-  uid: string;
+// One requested observation — a pod or a pod-bearing workload on a specific
+// cluster. Workloads expand to their pods via `resolve_log_pods`; pod
+// targets that already carry their container list skip the round-trip.
+export type ObserveTarget = {
+  clusterId: string;
+  kindId: string;
   namespace: string;
   name: string;
-  containers: string[];
+  containers?: string[];
 };
+
+export type ObserveTab = "logs" | "metrics";
+
+const KIND_LABELS: Record<string, string> = {
+  pods: "Pod",
+  deployments: "Deployment",
+  statefulsets: "StatefulSet",
+  daemonsets: "DaemonSet",
+  replicasets: "ReplicaSet",
+  jobs: "Job",
+};
+
+/// Kinds the logs/metrics panel can observe — pods plus everything
+/// `resolve_log_pods` expands. Shared by the bulk bar and row actions.
+export const OBSERVABLE_KIND_IDS = new Set(Object.keys(KIND_LABELS));
+
+/// Cap on the targets one panel resolves. A 100+-row bulk selection would
+/// otherwise turn into 100+ backend lookups before a single line streams —
+/// and the stream fan-out is capped (MAX_LOG_SOURCES) far below that
+/// anyway. Overflow is surfaced as a warning, not an error.
+export const MAX_OBSERVE_TARGETS = 50;
+
+type ResolveState =
+  | { kind: "loading" }
+  | { kind: "ready"; pods: ObservedPod[]; warnings: string[] }
+  | { kind: "error"; message: string };
+
+// Resolve observe-targets to concrete pods, one backend call per involved
+// cluster. Re-runs when the target set changes; `retry` re-runs in place.
+// Best-effort across clusters: a cluster that fails outright becomes a
+// warning while the others' pods still stream — unless *everything* failed,
+// which surfaces as the error state.
+export function useObservedPods(targets: ObserveTarget[]): {
+  state: ResolveState;
+  retry: () => void;
+} {
+  const [state, setState] = useState<ResolveState>({ kind: "loading" });
+  const [attempt, setAttempt] = useState(0);
+  const key = targets
+    .map((t) => [t.clusterId, t.kindId, t.namespace, t.name].join("\u0000"))
+    .join("\u0001");
+  const targetsRef = useRef(targets);
+  useLayoutEffect(() => {
+    targetsRef.current = targets;
+  });
+  useEffect(() => {
+    const all = targetsRef.current;
+    const reqs = all.slice(0, MAX_OBSERVE_TARGETS);
+    const skipped = all.length - reqs.length;
+    const capWarnings =
+      skipped > 0
+        ? [
+            `selection capped — observing the first ${MAX_OBSERVE_TARGETS} of ${all.length} targets (narrow the selection for the rest)`,
+          ]
+        : [];
+    if (reqs.length === 0) {
+      setState({ kind: "ready", pods: [], warnings: [] });
+      return;
+    }
+    // Fast path: a pods-only request with known container lists (the table
+    // row already carries them) needs no backend round-trip.
+    if (reqs.every((t) => t.kindId === "pods" && t.containers != null)) {
+      setState({
+        kind: "ready",
+        pods: reqs.map((t) => ({
+          clusterId: t.clusterId,
+          namespace: t.namespace,
+          name: t.name,
+          containers: t.containers ?? [],
+        })),
+        warnings: capWarnings,
+      });
+      return;
+    }
+    let cancelled = false;
+    setState({ kind: "loading" });
+    void (async () => {
+      const byCluster = new Map<string, ObserveTarget[]>();
+      for (const t of reqs) {
+        const list = byCluster.get(t.clusterId) ?? [];
+        list.push(t);
+        byCluster.set(t.clusterId, list);
+      }
+      const entries = [...byCluster.entries()];
+      const results = await Promise.allSettled(
+        entries.map(([cid, ts]) =>
+          api.resolveLogPods(
+            cid,
+            ts.map(
+              (t): LogPodTarget => ({
+                kind_id: t.kindId,
+                namespace: t.namespace,
+                name: t.name,
+              }),
+            ),
+          ),
+        ),
+      );
+      if (cancelled) return;
+      const clusterName = (cid: string) =>
+        useAppStore.getState().contexts.find((c) => c.id === cid)?.name ?? cid;
+      const pods: ObservedPod[] = [];
+      const warnings: string[] = [...capWarnings];
+      results.forEach((res, i) => {
+        const cid = entries[i]![0];
+        if (res.status === "fulfilled") {
+          for (const p of res.value.pods) {
+            pods.push({ clusterId: cid, ...p });
+          }
+          warnings.push(...res.value.warnings);
+        } else {
+          warnings.push(`${clusterName(cid)}: ${String(res.reason)}`);
+        }
+      });
+      if (pods.length === 0 && results.every((r) => r.status === "rejected")) {
+        setState({
+          kind: "error",
+          message: warnings.join("\n") || "pod resolution failed",
+        });
+        return;
+      }
+      setState({ kind: "ready", pods, warnings });
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, attempt]);
+  const retry = useCallback(() => setAttempt((a) => a + 1), []);
+  return { state, retry };
+}
 
 type Props = {
   mode: ThemeMode;
-  clusterId: string;
-  pod: LogTarget;
-  // Optional starting container. Falls back to `pod.containers[0]` so the
-  // existing call sites that don't preselect keep working.
+  targets: ObserveTarget[];
+  // Optional starting container — only meaningful when the request resolves
+  // to exactly one pod (the single-pod surface keeps its container Select).
   defaultContainer?: string | null;
+  initialTab?: ObserveTab;
   onClose: () => void;
 };
 
-// Logs panel — slides in from the right (R-09 prefers panels over modals).
-// All streaming + virtualization + footer toggles live in the shared
-// `LogView` component; this file owns the slide-in chrome (backdrop,
-// title bar, container Select, status pill, close button).
+// Logs & metrics panel — slides in from the right (R-09 prefers panels over
+// modals). Streams every resolved pod's containers in one aggregated view
+// (single pod keeps the per-container Select); the Metrics tab shows the
+// live metrics-server snapshot for the same pod set. All streaming +
+// virtualization + footer toggles live in the shared `LogView`; this file
+// owns the slide-in chrome, target resolution, and the tab strip.
 export function LogPanel({
   mode,
-  clusterId,
-  pod,
+  targets,
   defaultContainer,
+  initialTab,
   onClose,
 }: Props) {
   const t = useResolvedTheme().tokens;
-  // Panel chrome (title bar, container Select) follows the theme; the log
-  // body + footer render as a console (dark by default).
+  // Panel chrome (title bar, tabs, Selects) follows the theme; the log body
+  // + footer render as a console (dark by default).
   const consoleT = useConsoleTokens();
-  const initialContainer =
-    (defaultContainer && pod.containers.includes(defaultContainer)
-      ? defaultContainer
-      : pod.containers[0]) ?? null;
-  const [container, setContainer] = useState<string | null>(initialContainer);
+  const contexts = useAppStore((s) => s.contexts);
+  const [tab, setTab] = useState<ObserveTab>(initialTab ?? "logs");
+  const { state, retry } = useObservedPods(targets);
+  const [container, setContainer] = useState<string | null>(
+    defaultContainer ?? null,
+  );
   const [view, setView] = useState<LogViewState>({
     status: { kind: "starting" },
     paused: false,
@@ -56,6 +214,71 @@ export function LogPanel({
     lineCount: 0,
   });
   const onStateChange = useCallback((s: LogViewState) => setView(s), []);
+
+  // Esc closes the panel. The LogView find bar's own Esc stops propagation
+  // before this fires, so dismissing a search never also closes the panel.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const clusterNameFor = useCallback(
+    (cid: string) => contexts.find((c) => c.id === cid)?.name ?? cid,
+    [contexts],
+  );
+
+  const singlePod =
+    state.kind === "ready" && state.pods.length === 1 ? state.pods[0]! : null;
+  const activeContainer = singlePod
+    ? container && singlePod.containers.includes(container)
+      ? container
+      : singlePod.containers[0] ?? null
+    : null;
+
+  const built = useMemo((): { sources: LogViewSource[]; dropped: number } => {
+    if (state.kind !== "ready") return { sources: [], dropped: 0 };
+    if (singlePod) {
+      if (!activeContainer) return { sources: [], dropped: 0 };
+      return {
+        sources: [
+          {
+            key: sourceKey(
+              singlePod.clusterId,
+              singlePod.namespace,
+              singlePod.name,
+              activeContainer,
+            ),
+            clusterId: singlePod.clusterId,
+            namespace: singlePod.namespace,
+            pod: singlePod.name,
+            container: activeContainer,
+            label: "",
+            colorIdx: 0,
+          },
+        ],
+        dropped: 0,
+      };
+    }
+    return buildLogSources(state.pods, clusterNameFor);
+  }, [state, singlePod, activeContainer, clusterNameFor]);
+
+  if (targets.length === 0) return null;
+
+  const kindLabel = KIND_LABELS[targets[0]!.kindId] ?? "Resource";
+  const multi = targets.length > 1;
+  const eyebrowText = multi
+    ? `${targets.length} ${kindLabel}s · aggregated`
+    : `${kindLabel} logs & metrics`;
+  const title = multi
+    ? targets
+        .slice(0, 3)
+        .map((x) => x.name)
+        .join(", ") + (targets.length > 3 ? ` +${targets.length - 3}` : "")
+    : targets[0]!.name;
+  const warnings = state.kind === "ready" ? state.warnings : [];
 
   return (
     <>
@@ -78,8 +301,8 @@ export function LogPanel({
           top: "var(--fs-titlebar-h, 0px)",
           right: 0,
           bottom: 0,
-          width: 680,
-          maxWidth: "92vw",
+          width: multi ? 860 : 680,
+          maxWidth: "94vw",
           background: t.surface,
           borderLeft: `1px solid ${t.border}`,
           boxShadow:
@@ -94,8 +317,7 @@ export function LogPanel({
       >
         <header
           style={{
-            padding: "16px 22px 12px",
-            borderBottom: `1px solid ${t.borderSoft}`,
+            padding: "16px 22px 0",
             display: "flex",
             alignItems: "flex-start",
             gap: 12,
@@ -111,17 +333,21 @@ export function LogPanel({
                 marginBottom: 6,
               }}
             >
-              <Eyebrow t={t}>Pod logs</Eyebrow>
-              <span style={{ color: t.textMuted, fontSize: FS_SM }}>·</span>
-              <span
-                style={{
-                  fontFamily: FF_MONO,
-                  fontSize: FS_SM,
-                  color: t.textDim,
-                }}
-              >
-                {pod.namespace}
-              </span>
+              <Eyebrow t={t}>{eyebrowText}</Eyebrow>
+              {!multi && targets[0]!.namespace && (
+                <>
+                  <span style={{ color: t.textMuted, fontSize: FS_SM }}>·</span>
+                  <span
+                    style={{
+                      fontFamily: FF_MONO,
+                      fontSize: FS_SM,
+                      color: t.textDim,
+                    }}
+                  >
+                    {targets[0]!.namespace}
+                  </span>
+                </>
+              )}
             </div>
             <div
               style={{
@@ -133,7 +359,7 @@ export function LogPanel({
                 color: t.text,
               }}
             >
-              {pod.name}
+              {title}
             </div>
             <div
               style={{
@@ -144,13 +370,16 @@ export function LogPanel({
                 flexWrap: "wrap",
               }}
             >
-              {pod.containers.length > 1 ? (
+              {singlePod && singlePod.containers.length > 1 ? (
                 <Select
                   t={t}
                   fullWidth={false}
-                  value={container ?? ""}
+                  value={activeContainer ?? ""}
                   onChange={(v) => setContainer(v)}
-                  options={pod.containers.map((c) => ({ value: c, label: c }))}
+                  options={singlePod.containers.map((c) => ({
+                    value: c,
+                    label: c,
+                  }))}
                   style={{
                     fontFamily: FF_MONO,
                     fontSize: FS_SM,
@@ -158,7 +387,7 @@ export function LogPanel({
                     padding: "3px 28px 3px 8px",
                   }}
                 />
-              ) : (
+              ) : singlePod ? (
                 <span
                   style={{
                     fontSize: FS_SM,
@@ -166,16 +395,29 @@ export function LogPanel({
                     fontFamily: FF_MONO,
                   }}
                 >
-                  container: {container ?? "—"}
+                  container: {activeContainer ?? "—"}
                 </span>
+              ) : state.kind === "ready" ? (
+                <span
+                  style={{
+                    fontSize: FS_SM,
+                    color: t.textMuted,
+                    fontFamily: FF_MONO,
+                  }}
+                >
+                  {state.pods.length} pods · {built.sources.length} streams
+                  {built.dropped > 0 ? ` (+${built.dropped} over cap)` : ""}
+                </span>
+              ) : null}
+              {tab === "logs" && state.kind === "ready" && (
+                <StreamStatus
+                  status={view.status}
+                  paused={view.paused}
+                  bufferedCount={view.bufferedCount}
+                  t={t}
+                  mode={mode}
+                />
               )}
-              <StreamStatus
-                status={view.status}
-                paused={view.paused}
-                bufferedCount={view.bufferedCount}
-                t={t}
-                mode={mode}
-              />
             </div>
           </div>
           <IconBtn t={t} title="Close (Esc)" onClick={onClose}>
@@ -183,14 +425,102 @@ export function LogPanel({
           </IconBtn>
         </header>
 
-        <LogView
-          t={consoleT}
-          clusterId={clusterId}
-          namespace={pod.namespace}
-          pod={pod.name}
-          container={container}
-          onStateChange={onStateChange}
-        />
+        {warnings.length > 0 && (
+          <div
+            style={{
+              margin: "8px 22px 0",
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
+              color: t.warn,
+              flexShrink: 0,
+            }}
+          >
+            {warnings.slice(0, 4).map((w, i) => (
+              <div key={i} style={{ wordBreak: "break-all" }}>
+                {w}
+              </div>
+            ))}
+            {warnings.length > 4 && <div>+{warnings.length - 4} more</div>}
+          </div>
+        )}
+
+        <div
+          style={{
+            display: "flex",
+            borderBottom: `1px solid ${t.borderSoft}`,
+            padding: "4px 12px 0",
+            flexShrink: 0,
+          }}
+        >
+          <TabButton t={t} active={tab === "logs"} onClick={() => setTab("logs")}>
+            Logs
+          </TabButton>
+          <TabButton
+            t={t}
+            active={tab === "metrics"}
+            onClick={() => setTab("metrics")}
+          >
+            Metrics
+          </TabButton>
+        </div>
+
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column",
+            background: t.surfaceAlt,
+          }}
+        >
+          {state.kind === "loading" ? (
+            <LoadingLine t={t} label="Resolving pods…" />
+          ) : state.kind === "error" ? (
+            <div style={{ padding: 18 }}>
+              <ErrorBlock
+                t={t}
+                message={state.message}
+                kindLabel="pods"
+                verb="load"
+              />
+              <button
+                type="button"
+                onClick={retry}
+                style={{
+                  marginTop: 10,
+                  padding: "4px 12px",
+                  border: `1px solid ${t.border}`,
+                  borderRadius: 4,
+                  background: t.surface,
+                  color: t.text,
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
+                  cursor: "pointer",
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          ) : state.pods.length === 0 ? (
+            <EmptyState
+              t={t}
+              title="No pods to observe"
+              hint={
+                warnings.length > 0
+                  ? "Nothing in the selection resolved to a pod — see the notes above."
+                  : "Nothing in the selection resolved to a pod."
+              }
+            />
+          ) : tab === "logs" ? (
+            <LogView
+              t={consoleT}
+              sources={built.sources}
+              onStateChange={onStateChange}
+            />
+          ) : (
+            <MetricsPane pods={state.pods} />
+          )}
+        </div>
       </div>
     </>
   );
