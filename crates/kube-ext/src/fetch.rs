@@ -63,6 +63,8 @@ pub enum FetchError {
     Yaml(#[from] serde_yaml::Error),
     #[error("{0} has no controller — use Delete to remove it")]
     NoController(String),
+    #[error("{0} has no equality-based label selector — can't list its pods")]
+    NoSelector(String),
     #[error("{0} doesn't support rollout restart — use Delete to recreate")]
     UnsupportedRestart(String),
     #[error("{0}")]

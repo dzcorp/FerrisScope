@@ -2126,6 +2126,28 @@ pub(crate) async fn stop_log_stream(
     Ok(())
 }
 
+/// Expand a mixed pod/workload selection into the concrete pods the
+/// aggregated logs/metrics panel should observe. One call per cluster — the
+/// frontend groups its selection by `clusterId` and merges the results.
+#[tauri::command]
+pub(crate) async fn resolve_log_pods_cmd(
+    cluster_id: String,
+    targets: Vec<ferrisscope_kube_ext::LogPodTarget>,
+    state: State<'_, AppState>,
+) -> Result<ferrisscope_kube_ext::ResolvedLogPods, String> {
+    let entry = state.entry(&cluster_id).await?;
+    Ok(ferrisscope_kube_ext::resolve_log_pods(entry.cluster.client(), &targets).await)
+}
+
+/// Write `contents` to `path`. Used by the log panel's "Download" action —
+/// the path always comes from the OS save dialog, so it's user-chosen.
+#[tauri::command]
+pub(crate) async fn save_text_file(path: String, contents: String) -> Result<(), String> {
+    tokio::fs::write(&path, contents)
+        .await
+        .map_err(|e| format!("write {path}: {e}"))
+}
+
 /// Maximum lines to coalesce into a single `LogEvent::Batch` frame.
 /// Caps allocation + IPC payload size; on a noisy pod we expect to hit
 /// this rather than the time-bound.

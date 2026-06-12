@@ -7,6 +7,7 @@
 pub mod bootstrap;
 pub mod fetch;
 pub mod kinds;
+pub mod log_pods;
 pub mod portforward;
 pub mod registry;
 pub mod watcher;
@@ -35,6 +36,7 @@ pub use fetch::{
     HelmUpgradeResult, MergePatchResult, RestartFailure, RestartPodsReport, RestartedWorkload,
     FIELD_MANAGER, HELM_CLUSTER_SOURCE,
 };
+pub use log_pods::{resolve_log_pods, LogPodTarget, ResolvedLogPod, ResolvedLogPods};
 pub use portforward::{
     new_status_channel, snapshot as forward_snapshot, start as start_forward, ForwardEntry,
     ForwardHandle, ForwardStatus, PortForwardError,

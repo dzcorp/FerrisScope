@@ -426,6 +426,32 @@ describe("pod / workload restart", () => {
       name: "api",
     });
   });
+
+  it("resolveLogPods forwards targets verbatim", async () => {
+    const cap = captureNext({ pods: [], warnings: [] });
+    await api.resolveLogPods("ctx", [
+      { kind_id: "deployments", namespace: "default", name: "api" },
+      { kind_id: "pods", namespace: "default", name: "api-0" },
+    ]);
+    expect(cap.calls[0]?.cmd).toBe("resolve_log_pods_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      clusterId: "ctx",
+      targets: [
+        { kind_id: "deployments", namespace: "default", name: "api" },
+        { kind_id: "pods", namespace: "default", name: "api-0" },
+      ],
+    });
+  });
+
+  it("saveTextFile carries path + contents", async () => {
+    const cap = captureNext(undefined);
+    await api.saveTextFile("/tmp/x.log", "hello\n");
+    expect(cap.calls[0]?.cmd).toBe("save_text_file");
+    expect(cap.calls[0]?.args).toEqual({
+      path: "/tmp/x.log",
+      contents: "hello\n",
+    });
+  });
 });
 
 describe("helm", () => {

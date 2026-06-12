@@ -194,6 +194,8 @@ fn main() {
             commands::restart_workload_cmd,
             commands::start_log_stream,
             commands::stop_log_stream,
+            commands::resolve_log_pods_cmd,
+            commands::save_text_file,
             commands::subscribe_metrics,
             commands::unsubscribe_metrics,
             commands::get_fleet_cache,

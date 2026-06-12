@@ -382,6 +382,28 @@ export type LogEvent =
   | { kind: "waiting"; reason: string }
   | { kind: "ended"; reason: string };
 
+// One entry of a logs/metrics observation request — a pod or a pod-bearing
+// workload (deployments, statefulsets, daemonsets, replicasets, jobs). The
+// backend expands workloads to their pods via the label selector.
+export type LogPodTarget = {
+  kind_id: string;
+  namespace: string;
+  name: string;
+};
+
+export type ResolvedLogPod = {
+  namespace: string;
+  name: string;
+  containers: string[];
+};
+
+export type ResolvedLogPods = {
+  pods: ResolvedLogPod[];
+  // Per-target resolution problems (missing object, selector mismatch). The
+  // pods list stays usable alongside these.
+  warnings: string[];
+};
+
 // Terminal sessions stream PTY output over a per-session Channel<TerminalEvent>
 // (no global event bus). `data` chunks are base64-encoded raw PTY bytes; `exit`
 // fires once when the child process closes.
