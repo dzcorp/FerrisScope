@@ -378,8 +378,8 @@ export function FleetLanding({ mode, onSelect }: Props) {
               kind: "item",
               label: "Edit name & members",
               onClick: () => {
-                // Re-enter pick mode seeded with the saved definition; the
-                // floating bar becomes "Save changes".
+                // Re-enter pick mode seeded with the saved definition;
+                // Save in the floating bar then updates in place.
                 setPicked(new Set(vctxMenu.vctx.members));
                 setEditingVctx(vctxMenu.vctx.id);
                 setVctxName(vctxMenu.vctx.name);
@@ -416,14 +416,14 @@ export function FleetLanding({ mode, onSelect }: Props) {
               ? [
                   {
                     icon: Icons.cluster,
-                    label: "Open without saving",
+                    label: "Open",
                     onClick: onOpenTemporary,
                   },
                 ]
               : []),
             {
               icon: Icons.layers,
-              label: editingVctx ? "Save changes" : "Save virtual context",
+              label: "Save",
               onClick: onSaveVctx,
             },
           ]}

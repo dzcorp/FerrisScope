@@ -128,7 +128,7 @@ describe("FleetLanding virtual-context flow", () => {
     fireEvent.click(screen.getAllByText("beta").at(-1)!, { metaKey: true });
     const input = screen.getByLabelText("Virtual context name");
     fireEvent.change(input, { target: { value: "prod fleet" } });
-    fireEvent.click(screen.getByText("Save virtual context"));
+    fireEvent.click(screen.getByText("Save"));
 
     const s = useAppStore.getState();
     expect(s.virtualContexts).toHaveLength(1);
@@ -138,7 +138,7 @@ describe("FleetLanding virtual-context flow", () => {
     );
     // Saving does not activate, and pick mode is cleared.
     expect(s.selectedVirtualContextId).toBeNull();
-    expect(screen.queryByText("Save virtual context")).toBeNull();
+    expect(screen.queryByText("Save")).toBeNull();
   });
 
   it("refuses to save a duplicate name", async () => {
@@ -160,7 +160,7 @@ describe("FleetLanding virtual-context flow", () => {
     fireEvent.click(screen.getAllByText("beta").at(-1)!, { metaKey: true });
     const input = screen.getByLabelText("Virtual context name");
     fireEvent.change(input, { target: { value: "PROD FLEET" } });
-    fireEvent.click(screen.getByText("Save virtual context"));
+    fireEvent.click(screen.getByText("Save"));
     // Still just the pre-existing one.
     expect(useAppStore.getState().virtualContexts).toHaveLength(1);
   });
@@ -216,7 +216,7 @@ describe("FleetLanding generated names + temporary open", () => {
     // The placeholder previews exactly what Save will use.
     const input = screen.getByLabelText("Virtual context name");
     expect(input.getAttribute("placeholder")).toBe("alpha + beta");
-    fireEvent.click(screen.getByText("Save virtual context"));
+    fireEvent.click(screen.getByText("Save"));
 
     const s = useAppStore.getState();
     expect(s.virtualContexts).toHaveLength(1);
@@ -240,14 +240,14 @@ describe("FleetLanding generated names + temporary open", () => {
 
     fireEvent.click(screen.getAllByText("alpha").at(-1)!, { metaKey: true });
     fireEvent.click(screen.getAllByText("beta").at(-1)!, { metaKey: true });
-    fireEvent.click(screen.getByText("Save virtual context"));
+    fireEvent.click(screen.getByText("Save"));
 
     const s = useAppStore.getState();
     expect(s.virtualContexts).toHaveLength(2);
     expect(s.virtualContexts[1]!.name).toBe("alpha + beta (2)");
   });
 
-  it("'Open without saving' anchors the first pick and rides the rest as extras", async () => {
+  it("'Open' anchors the first pick and rides the rest as extras", async () => {
     resetVctxState();
     fleetMock();
     await act(async () => {
@@ -257,9 +257,9 @@ describe("FleetLanding generated names + temporary open", () => {
 
     fireEvent.click(screen.getAllByText("alpha").at(-1)!, { metaKey: true });
     // Not offered below 2 picks.
-    expect(screen.queryByText("Open without saving")).toBeNull();
+    expect(screen.queryByText("Open")).toBeNull();
     fireEvent.click(screen.getAllByText("beta").at(-1)!, { metaKey: true });
-    fireEvent.click(screen.getByText("Open without saving"));
+    fireEvent.click(screen.getByText("Open"));
 
     const s = useAppStore.getState();
     expect(s.selectedContext).toBe("default::a");
@@ -267,6 +267,6 @@ describe("FleetLanding generated names + temporary open", () => {
     // Nothing persisted, pick mode cleared.
     expect(s.virtualContexts).toHaveLength(0);
     expect(s.selectedVirtualContextId).toBeNull();
-    expect(screen.queryByText("Open without saving")).toBeNull();
+    expect(screen.queryByText("Open")).toBeNull();
   });
 });
