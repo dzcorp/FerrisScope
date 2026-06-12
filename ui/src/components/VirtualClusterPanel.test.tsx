@@ -248,3 +248,111 @@ describe("VirtualClusterBar '+' menu", () => {
     expect(useAppStore.getState().scopeExtras).toEqual([]);
   });
 });
+
+describe("VirtualClusterBar save affordances", () => {
+  const connectOk = () =>
+    setMockInvoke((cmd) => {
+      switch (cmd) {
+        case "connect_context":
+          return { server_version: "1.30", node_count: 1 };
+        case "subscribe_resource":
+          return { rows: [], init_done: true };
+        default:
+          return undefined;
+      }
+    });
+  const EXTRA = ctx("default::edge", "edge");
+  const adHocState = () =>
+    act(() => {
+      useAppStore.setState({
+        contexts: [...MEMBERS, EXTRA],
+        selectedContext: "default::prod-eu",
+        selectedVirtualContextId: null,
+        virtualContexts: [],
+        scopeExtras: ["default::edge"],
+      });
+    });
+
+  it("temporary views surface a standing 'Save view…' button; saved views don't", async () => {
+    connectOk();
+    adHocState();
+    const { unmount } = render(
+      <VirtualClusterPanel
+        mode="dark"
+        title="prod-eu +1"
+        viewScopeId="default::prod-eu"
+        contexts={[MEMBERS[0]!, EXTRA]}
+      />,
+    );
+    await act(async () => {});
+    expect(screen.getByText("Save view…")).toBeTruthy();
+    unmount();
+
+    act(() => {
+      useAppStore.setState({
+        scopeExtras: [],
+        virtualContexts: [
+          { id: "t1", name: "prod fleet", members: MEMBERS.map((m) => m.id) },
+        ],
+        selectedVirtualContextId: "t1",
+        selectedContext: null,
+      });
+    });
+    render(
+      <VirtualClusterPanel
+        mode="dark"
+        title="prod fleet"
+        viewScopeId="vctx:t1"
+        contexts={MEMBERS}
+      />,
+    );
+    await act(async () => {});
+    expect(screen.queryByText("Save view…")).toBeNull();
+  });
+
+  it("saves with the pregenerated placeholder name when the input stays empty", async () => {
+    connectOk();
+    adHocState();
+    render(
+      <VirtualClusterPanel
+        mode="dark"
+        title="prod-eu +1"
+        viewScopeId="default::prod-eu"
+        contexts={[MEMBERS[0]!, EXTRA]}
+      />,
+    );
+    await act(async () => {});
+
+    fireEvent.click(screen.getByText("Save view…"));
+    const input = screen.getByLabelText("Virtual context name");
+    expect(input.getAttribute("placeholder")).toBe("prod-eu + edge");
+    fireEvent.click(screen.getByText("Save"));
+
+    const s = useAppStore.getState();
+    expect(s.virtualContexts).toHaveLength(1);
+    expect(s.virtualContexts[0]!.name).toBe("prod-eu + edge");
+    expect(s.virtualContexts[0]!.members).toEqual([
+      "default::prod-eu",
+      "default::edge",
+    ]);
+    // Saving activates the new virtual context (extras become members).
+    expect(s.selectedVirtualContextId).toBe(s.virtualContexts[0]!.id);
+  });
+
+  it("renders the same namespace control as the single-cluster bar", async () => {
+    connectOk();
+    adHocState();
+    render(
+      <VirtualClusterPanel
+        mode="dark"
+        title="prod-eu +1"
+        viewScopeId="default::prod-eu"
+        contexts={[MEMBERS[0]!, EXTRA]}
+      />,
+    );
+    await act(async () => {});
+    // Shared NamespaceButton anatomy: caption + summary + ⌘I hint.
+    expect(screen.getByText("Namespace")).toBeTruthy();
+    expect(screen.getByText("All namespaces")).toBeTruthy();
+  });
+});

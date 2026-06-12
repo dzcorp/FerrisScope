@@ -1,5 +1,5 @@
 import { logErr } from "../lib/log";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, onFleetProbe, onKubeconfigChanged } from "../api";
 import { useAppStore, useResolvedTheme } from "../store";
 import type { ClusterProbe, ContextInfo, VirtualContext } from "../types";
@@ -16,7 +16,10 @@ import {
   FS_XL,
   FS_XS,
 } from "../theme";
-import { clusterColorIndexMap } from "../lib/multiCluster";
+import {
+  clusterColorIndexMap,
+  defaultVirtualContextName,
+} from "../lib/multiCluster";
 import {
   Btn,
   Checkbox,
@@ -114,21 +117,46 @@ export function FleetLanding({ mode, onSelect }: Props) {
       v.id !== editingVctx &&
       v.name.toLowerCase() === trimmedName.toLowerCase(),
   );
+  // Empty input is fine — we fall back to a pregenerated "a + b" / "a +N"
+  // name (already deduped against existing virtual contexts), shown as the
+  // input placeholder so the operator sees exactly what Save will use.
+  const generatedName = useMemo(() => {
+    const pickedNames = Array.from(picked).map(
+      (id) => contexts.find((c) => c.id === id)?.name ?? id,
+    );
+    return defaultVirtualContextName(
+      pickedNames,
+      virtualContexts.filter((v) => v.id !== editingVctx).map((v) => v.name),
+    );
+  }, [picked, contexts, virtualContexts, editingVctx]);
   const canSaveVctx =
-    picked.size >= 2 && trimmedName.length > 0 && !duplicateName;
+    picked.size >= 2 && !(trimmedName.length > 0 && duplicateName);
   const onSaveVctx = () => {
     if (!canSaveVctx) return;
+    const name = trimmedName.length > 0 ? trimmedName : generatedName;
     const members = Array.from(picked);
     if (editingVctx) {
-      renameVirtualContext(editingVctx, trimmedName);
+      renameVirtualContext(editingVctx, name);
       setVirtualContextMembers(editingVctx, members);
-      toast.ok(`Updated virtual context "${trimmedName}".`);
+      toast.ok(`Updated virtual context "${name}".`);
     } else {
-      saveVirtualContext(trimmedName, members);
+      saveVirtualContext(name, members);
       toast.ok(
-        `Saved virtual context "${trimmedName}" (${members.length} clusters).`,
+        `Saved virtual context "${name}" (${members.length} clusters).`,
       );
     }
+    clearPick();
+  };
+  // Temporary multi-cluster view: connect the picked clusters without
+  // persisting anything. First pick anchors the scope, the rest ride as
+  // ad-hoc extras — the VirtualClusterBar offers Save if it grows on you.
+  const onOpenTemporary = () => {
+    if (picked.size < 2) return;
+    const [first, ...rest] = Array.from(picked);
+    if (!first) return;
+    const s = useAppStore.getState();
+    s.selectContext(first);
+    for (const id of rest) s.addScopeExtra(id);
     clearPick();
   };
 
@@ -384,6 +412,15 @@ export function FleetLanding({ mode, onSelect }: Props) {
           count={picked.size}
           onClear={clearPick}
           actions={[
+            ...(editingVctx === null && picked.size >= 2
+              ? [
+                  {
+                    icon: Icons.cluster,
+                    label: "Open without saving",
+                    onClick: onOpenTemporary,
+                  },
+                ]
+              : []),
             {
               icon: Icons.layers,
               label: editingVctx ? "Save changes" : "Save virtual context",
@@ -399,11 +436,7 @@ export function FleetLanding({ mode, onSelect }: Props) {
               if (e.key === "Escape") clearPick();
             }}
             placeholder={
-              picked.size < 2
-                ? "Pick 2+ clusters…"
-                : duplicateName
-                  ? "Name already in use"
-                  : "Virtual context name"
+              picked.size < 2 ? "Pick 2+ clusters…" : generatedName
             }
             aria-label="Virtual context name"
             style={{

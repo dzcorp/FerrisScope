@@ -6,12 +6,16 @@ import {
   useClusterConnection,
   type ConnectState,
 } from "../lib/useClusterConnection";
-import { clusterColorIndexMap } from "../lib/multiCluster";
+import {
+  clusterColorIndexMap,
+  defaultVirtualContextName,
+} from "../lib/multiCluster";
 import { ReconnectBanner } from "./ClusterPanel";
+import { AddMenuTrigger, NamespaceButton } from "./ClusterBar";
 import { ResourceTable, type TableCluster } from "./ResourceTable";
 import { makeChatTab, makeTerminalTab, makeYamlTab } from "./Dock";
 import { toast } from "../lib/dialog";
-import { EmptyState, Icons, LoadingLine, Tooltip } from "./ui";
+import { EmptyState, LoadingLine, Tooltip } from "./ui";
 
 type MemberConn = {
   state: ConnectState;
@@ -222,8 +226,6 @@ function VirtualClusterBar({
   colorIdx: Record<string, number>;
 }) {
   const t = useResolvedTheme().tokens;
-  const selectedNamespaces = useAppStore((s) => s.selectedNamespaces);
-  const openNsModal = useAppStore((s) => s.openNsModal);
   const clusterHealth = useAppStore((s) => s.clusterHealth);
   const scopeExtras = useAppStore((s) => s.scopeExtras);
   const removeScopeExtra = useAppStore((s) => s.removeScopeExtra);
@@ -281,24 +283,24 @@ function VirtualClusterBar({
   const saveDup = virtualContexts.some(
     (v) => v.name.toLowerCase() === trimmedSave.toLowerCase(),
   );
-  const canSave = trimmedSave.length > 0 && !saveDup && memberIds.length >= 2;
+  // Empty input falls back to a pregenerated "a + b" / "a +N" name
+  // (deduped against existing virtual contexts) shown as the placeholder.
+  const generatedName = defaultVirtualContextName(
+    contexts.map((c) => c.name),
+    virtualContexts.map((v) => v.name),
+  );
+  const canSave =
+    memberIds.length >= 2 && !(trimmedSave.length > 0 && saveDup);
   const onSaveView = () => {
     if (!canSave) return;
-    const id = saveVirtualContext(trimmedSave, memberIds);
-    toast.ok(`Saved virtual context "${trimmedSave}".`);
+    const name = trimmedSave.length > 0 ? trimmedSave : generatedName;
+    const id = saveVirtualContext(name, memberIds);
+    toast.ok(`Saved virtual context "${name}".`);
     setMenuOpen(false);
     // Switching to the saved virtual context keeps the same member set but
     // clears the ad-hoc extras (they're now part of the definition).
     selectVirtualContext(id);
   };
-
-  const nsCount = selectedNamespaces.size;
-  const nsSummary =
-    nsCount === 0
-      ? "All namespaces"
-      : nsCount === 1
-        ? Array.from(selectedNamespaces)[0]
-        : `${nsCount} namespaces`;
 
   const stateDot = (c: ContextInfo): { color: string; label: string } => {
     const st = conns[c.id]?.state.status;
@@ -319,9 +321,12 @@ function VirtualClusterBar({
         display: "flex",
         alignItems: "center",
         gap: 10,
-        padding: "8px 14px",
+        // Same vertical rhythm as the single-cluster ClusterBar — the two
+        // bars swap in for each other when the scope grows/shrinks, so a
+        // height or chrome jump reads as a glitch.
+        padding: "12px 22px",
         borderBottom: `1px solid ${t.border}`,
-        background: t.header,
+        background: t.headerAlt,
         flexShrink: 0,
         minWidth: 0,
       }}
@@ -428,29 +433,48 @@ function VirtualClusterBar({
         })}
       </div>
 
+      {/* Temporary (ad-hoc) views get a standing Save affordance — the
+          same save flow the "+" menu offers, surfaced so the operator
+          doesn't have to discover it behind the menu. */}
+      {scopeExtras.length > 0 && (
+        <Tooltip label="Save these clusters as a virtual context">
+          <button
+            type="button"
+            onClick={() => {
+              setMenuOpen(true);
+              setMenuMode("save");
+            }}
+            style={{
+              border: `1px solid ${t.accent}`,
+              background: t.accentSoft,
+              color: t.accent,
+              height: 36,
+              padding: "0 12px",
+              borderRadius: R_MD,
+              fontSize: FS_MD,
+              fontWeight: 600,
+              fontFamily: "inherit",
+              cursor: "pointer",
+              outline: "none",
+              whiteSpace: "nowrap",
+              flexShrink: 0,
+            }}
+          >
+            Save view…
+          </button>
+        </Tooltip>
+      )}
+
       {/* "+" menu — dock tabs bind to ONE cluster, so terminal/YAML go
           through a member picker; chat opens on the first member (the
           agent can switch clusters itself). */}
       <div ref={menuRef} style={{ position: "relative" }}>
-        <button
-          type="button"
-          aria-label="Add tab or cluster"
+        <AddMenuTrigger
+          open={menuOpen}
           onClick={() => setMenuOpen((v) => !v)}
-          style={{
-            border: `1px solid ${t.border}`,
-            background: menuOpen ? t.btnHover : "transparent",
-            color: t.text,
-            width: 28,
-            height: 28,
-            borderRadius: R_MD,
-            cursor: "pointer",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          {Icons.plus}
-        </button>
+          tooltip="New tab, add cluster, or save this view"
+          ariaLabel="Add tab or cluster"
+        />
         {menuOpen && (
           <div
             style={{
@@ -464,6 +488,10 @@ function VirtualClusterBar({
               minWidth: 240,
               zIndex: 22,
               boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+              // Long context lists (Add cluster / member pickers) must
+              // scroll, not run off the viewport.
+              maxHeight: "min(420px, 60vh)",
+              overflowY: "auto",
             }}
           >
             {menuMode === "root" && (
@@ -566,7 +594,7 @@ function VirtualClusterBar({
                   onKeyDown={(e) => {
                     if (e.key === "Enter") onSaveView();
                   }}
-                  placeholder={saveDup ? "Name already in use" : "Name"}
+                  placeholder={generatedName}
                   aria-label="Virtual context name"
                   style={{
                     flex: 1,
@@ -603,26 +631,7 @@ function VirtualClusterBar({
         )}
       </div>
 
-      <button
-        onClick={openNsModal}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          padding: "4px 10px",
-          borderRadius: R_MD,
-          border: `1px solid ${t.border}`,
-          background: "transparent",
-          color: t.textDim,
-          fontSize: FS_XS,
-          cursor: "pointer",
-          whiteSpace: "nowrap",
-        }}
-        title="Filter namespaces"
-      >
-        {Icons.layers}
-        {nsSummary}
-      </button>
+      <NamespaceButton />
     </div>
   );
 }

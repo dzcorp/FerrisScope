@@ -201,3 +201,72 @@ describe("FleetLanding virtual-context flow", () => {
     expect(useAppStore.getState().virtualContexts).toHaveLength(0);
   });
 });
+
+describe("FleetLanding generated names + temporary open", () => {
+  it("saves with the pregenerated name when the input is left empty", async () => {
+    resetVctxState();
+    fleetMock();
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={() => {}} />);
+    });
+    await act(async () => {});
+
+    fireEvent.click(screen.getAllByText("alpha").at(-1)!, { metaKey: true });
+    fireEvent.click(screen.getAllByText("beta").at(-1)!, { metaKey: true });
+    // The placeholder previews exactly what Save will use.
+    const input = screen.getByLabelText("Virtual context name");
+    expect(input.getAttribute("placeholder")).toBe("alpha + beta");
+    fireEvent.click(screen.getByText("Save virtual context"));
+
+    const s = useAppStore.getState();
+    expect(s.virtualContexts).toHaveLength(1);
+    expect(s.virtualContexts[0]!.name).toBe("alpha + beta");
+  });
+
+  it("dedupes the pregenerated name against existing virtual contexts", async () => {
+    resetVctxState();
+    fleetMock();
+    act(() => {
+      useAppStore.setState({
+        virtualContexts: [
+          { id: "v0", name: "alpha + beta", members: ["default::a", "default::b"] },
+        ],
+      });
+    });
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={() => {}} />);
+    });
+    await act(async () => {});
+
+    fireEvent.click(screen.getAllByText("alpha").at(-1)!, { metaKey: true });
+    fireEvent.click(screen.getAllByText("beta").at(-1)!, { metaKey: true });
+    fireEvent.click(screen.getByText("Save virtual context"));
+
+    const s = useAppStore.getState();
+    expect(s.virtualContexts).toHaveLength(2);
+    expect(s.virtualContexts[1]!.name).toBe("alpha + beta (2)");
+  });
+
+  it("'Open without saving' anchors the first pick and rides the rest as extras", async () => {
+    resetVctxState();
+    fleetMock();
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={() => {}} />);
+    });
+    await act(async () => {});
+
+    fireEvent.click(screen.getAllByText("alpha").at(-1)!, { metaKey: true });
+    // Not offered below 2 picks.
+    expect(screen.queryByText("Open without saving")).toBeNull();
+    fireEvent.click(screen.getAllByText("beta").at(-1)!, { metaKey: true });
+    fireEvent.click(screen.getByText("Open without saving"));
+
+    const s = useAppStore.getState();
+    expect(s.selectedContext).toBe("default::a");
+    expect(s.scopeExtras).toEqual(["default::b"]);
+    // Nothing persisted, pick mode cleared.
+    expect(s.virtualContexts).toHaveLength(0);
+    expect(s.selectedVirtualContextId).toBeNull();
+    expect(screen.queryByText("Open without saving")).toBeNull();
+  });
+});
