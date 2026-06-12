@@ -56,6 +56,7 @@ import {
   applyScopedDelta,
   mergeScopedSnapshots,
   scopedUid,
+  shortClusterNames,
   type ScopedRow,
 } from "../lib/multiCluster";
 import {
@@ -145,16 +146,17 @@ const CLUSTER_CELL_TEXT: CSSProperties = {
 };
 
 // Cell for the synthetic Cluster column: identity dot in the member's
-// accent + the context's display name. Module-level so the columns memo
-// keeps referential equality.
+// accent + the compressed sibling-distinguishing name (full context name
+// in the tooltip). Module-level so the columns memo keeps referential
+// equality.
 function renderClusterCell(
   cid: string,
-  meta: Record<string, { name: string; colorIdx: number }>,
+  meta: Record<string, { name: string; short: string; colorIdx: number }>,
   t: ReturnType<typeof tokens>,
 ) {
   const m = meta[cid];
   return (
-    <span style={CLUSTER_CELL_WRAP} title={cid}>
+    <span style={CLUSTER_CELL_WRAP} title={m?.name ?? cid}>
       <span
         aria-hidden
         style={{
@@ -163,7 +165,7 @@ function renderClusterCell(
         }}
       />
       <span style={{ ...CLUSTER_CELL_TEXT, color: t.textDim }}>
-        {m?.name ?? cid}
+        {m?.short ?? m?.name ?? cid}
       </span>
     </span>
   );
@@ -316,9 +318,21 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   const clusterKey = clusterIds.join(String.fromCharCode(0));
   // Per-cluster display metadata for the synthetic Cluster column. Flows
   // through a ref so the columns memo never rebuilds on a name change.
+  // `short` is the compressed sibling-distinguishing name (common prefix /
+  // suffix tokens stripped across the member set) the cell displays; the
+  // full name stays in the tooltip and the failure strips.
   const clusterMeta = useMemo(() => {
-    const out: Record<string, { name: string; colorIdx: number }> = {};
-    for (const c of clusters) out[c.id] = { name: c.name, colorIdx: c.colorIdx };
+    const shorts = shortClusterNames(clusters.map((c) => c.name));
+    const out: Record<
+      string,
+      { name: string; short: string; colorIdx: number }
+    > = {};
+    for (const c of clusters)
+      out[c.id] = {
+        name: c.name,
+        short: shorts[c.name] ?? c.name,
+        colorIdx: c.colorIdx,
+      };
     return out;
   }, [clusters]);
   const clusterMetaRef = useRef(clusterMeta);
@@ -688,10 +702,12 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
           header: c.header,
           size: defaultWidth(c),
           enableSorting: true,
-          // Sort by display name so the grouping the operator sees in the
-          // cell is the grouping the sort produces.
-          accessorFn: (r: ScopedRow) =>
-            clusterMetaRef.current[r.__clusterId]?.name ?? r.__clusterId,
+          // Sort by the displayed (compressed) name so the grouping the
+          // operator sees in the cell is the grouping the sort produces.
+          accessorFn: (r: ScopedRow) => {
+            const m = clusterMetaRef.current[r.__clusterId];
+            return m?.short ?? m?.name ?? r.__clusterId;
+          },
           cell: (ctx) =>
             renderClusterCell(
               ctx.row.original.__clusterId,
@@ -840,14 +856,18 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     const result: Record<string, number> = {};
     for (const c of visibleColumns) {
       // The cluster column's content isn't on the rows — measure the
-      // member display names directly (plus the 8px dot and its gap).
+      // displayed (compressed) member names directly (plus the 8px dot
+      // and its gap).
       result[c.id] =
         c.id === CLUSTER_COL_ID
-          ? clusterColumnNaturalWidth(c, clusters)
+          ? clusterColumnNaturalWidth(
+              c,
+              clusters.map((cl) => clusterMeta[cl.id]?.short ?? cl.name),
+            )
           : naturalContentWidth(c, sample);
     }
     return result;
-  }, [filtered, visibleColumns, clusters]);
+  }, [filtered, visibleColumns, clusters, clusterMeta]);
 
   useEffect(() => {
     if (containerWidth === 0) return;
@@ -2157,20 +2177,17 @@ function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
   return Math.ceil(Math.max(dataWidth, headerWidth)) + CHROME_PAD;
 }
 
-// Natural width for the synthetic Cluster column — the longest member
-// display name plus the identity dot (8px) and its gap (7px). Same
-// CHROME_PAD + header floor as `naturalContentWidth`.
-function clusterColumnNaturalWidth(
-  c: ColumnDef,
-  clusters: { name: string }[],
-): number {
+// Natural width for the synthetic Cluster column — the longest *displayed*
+// (compressed) member name plus the identity dot (8px) and its gap (7px).
+// Same CHROME_PAD + header floor as `naturalContentWidth`.
+function clusterColumnNaturalWidth(c: ColumnDef, names: string[]): number {
   const CHROME_PAD = 28;
   const DOT_AND_GAP = 15;
   const headerWidth =
     measureText(String(c.header ?? "").toUpperCase(), HEADER_FONT) * 1.12;
   let nameWidth = 0;
-  for (const cl of clusters) {
-    const w = measureText(cl.name, CELL_FONT_TEXT);
+  for (const name of names) {
+    const w = measureText(name, CELL_FONT_TEXT);
     if (w > nameWidth) nameWidth = w;
   }
   return Math.ceil(Math.max(nameWidth + DOT_AND_GAP, headerWidth)) + CHROME_PAD;

@@ -20,6 +20,11 @@ type Props = {
   namespaces: string[];
   // Pod counts per namespace, optional. Used to give a quick context number.
   counts?: Record<string, number>;
+  // Multi-cluster views only: origin chips for namespaces that exist on a
+  // subset of the active members (label = compressed cluster name, color =
+  // the member's identity accent). Namespaces present everywhere have no
+  // entry and render unchanged.
+  clusterTags?: Record<string, { label: string; color: string }[]>;
   initial: Set<string>;
   onApply: (next: Set<string>) => void;
   onClose: () => void;
@@ -29,9 +34,9 @@ type Props = {
 // Empty selection means "all" (matches HV2 semantics). Apply is the canonical
 // action (P2); Clear is secondary; Esc cancels.
 export function NamespaceModal({
-  
   namespaces,
   counts,
+  clusterTags,
   initial,
   onApply,
   onClose,
@@ -347,7 +352,6 @@ export function NamespaceModal({
                     style={{
                       fontSize: FS_MD,
                       fontFamily: FF_MONO,
-                      flex: 1,
                       minWidth: 0,
                       overflow: "hidden",
                       textOverflow: "ellipsis",
@@ -355,6 +359,52 @@ export function NamespaceModal({
                     }}
                   >
                     {ns}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      overflow: "hidden",
+                    }}
+                  >
+                    {clusterTags?.[ns]?.map((tag) => (
+                      <span
+                        key={tag.label}
+                        title={`Only in ${tag.label}`}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          padding: "1px 6px",
+                          borderRadius: R_MD,
+                          border: `1px solid ${t.borderSoft}`,
+                          background: t.chip,
+                          color: t.textDim,
+                          fontSize: FS_XS,
+                          fontFamily: FF_MONO,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          maxWidth: 110,
+                          flexShrink: 0,
+                        }}
+                      >
+                        <span
+                          aria-hidden
+                          style={{
+                            width: 6,
+                            height: 6,
+                            borderRadius: "50%",
+                            background: tag.color,
+                            flexShrink: 0,
+                          }}
+                        />
+                        {tag.label}
+                      </span>
+                    ))}
                   </span>
                   <span
                     style={{

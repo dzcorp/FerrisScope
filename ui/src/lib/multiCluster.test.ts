@@ -9,6 +9,9 @@ import {
   groupByCluster,
   bulkClusterPrefix,
   mergeSearchHits,
+  shortClusterNames,
+  defaultVirtualContextName,
+  namespaceClusterTags,
   type ScopedRow,
 } from "./multiCluster";
 import { CLUSTER_ACCENTS, clusterAccent } from "../theme";
@@ -170,5 +173,144 @@ describe("mergeSearchHits", () => {
     );
     expect(merged.map((m) => m.clusterId)).toEqual([CID_A, CID_B]);
     expect(merged.map((m) => m.hit.score)).toEqual([-3, -2]);
+  });
+});
+
+describe("shortClusterNames", () => {
+  it("strips the common token prefix from sibling names", () => {
+    const shorts = shortClusterNames([
+      "myproject-mystage-prod-07",
+      "myproject-mystage-prod-08",
+    ]);
+    expect(shorts["myproject-mystage-prod-07"]).toBe("07");
+    expect(shorts["myproject-mystage-prod-08"]).toBe("08");
+  });
+
+  it("strips common prefix AND suffix, keeping the differing middle", () => {
+    const shorts = shortClusterNames([
+      "gke_myproject_europe-west1_prod-07",
+      "gke_myproject_us-east1_prod-07",
+    ]);
+    expect(shorts["gke_myproject_europe-west1_prod-07"]).toBe("europe-west1");
+    expect(shorts["gke_myproject_us-east1_prod-07"]).toBe("us-east1");
+  });
+
+  it("keeps at least one token when a name is a prefix of a sibling", () => {
+    const shorts = shortClusterNames(["prod", "prod-eu"]);
+    expect(shorts["prod"]).toBe("prod");
+    expect(shorts["prod-eu"]).toBe("prod-eu");
+  });
+
+  it("returns names untouched when nothing is common", () => {
+    const shorts = shortClusterNames(["alpha", "beta-edge"]);
+    expect(shorts["alpha"]).toBe("alpha");
+    expect(shorts["beta-edge"]).toBe("beta-edge");
+  });
+
+  it("returns a single name untouched", () => {
+    expect(shortClusterNames(["myproject-prod-07"])).toEqual({
+      "myproject-prod-07": "myproject-prod-07",
+    });
+  });
+
+  it("falls back to full names when shorts would collide", () => {
+    // "a-b" and "a_b" tokenize identically — both must stay full.
+    const shorts = shortClusterNames(["pre-a-b", "pre-a_b", "pre-c"]);
+    expect(shorts["pre-a-b"]).toBe("pre-a-b");
+    expect(shorts["pre-a_b"]).toBe("pre-a_b");
+    expect(shorts["pre-c"]).toBe("c");
+  });
+
+  it("compresses 3+ siblings against the shared prefix only", () => {
+    const shorts = shortClusterNames([
+      "fleet-edge-paris",
+      "fleet-edge-berlin",
+      "fleet-edge-madrid",
+    ]);
+    expect(shorts["fleet-edge-paris"]).toBe("paris");
+    expect(shorts["fleet-edge-berlin"]).toBe("berlin");
+    expect(shorts["fleet-edge-madrid"]).toBe("madrid");
+  });
+});
+
+describe("defaultVirtualContextName", () => {
+  it("joins two member names with ' + '", () => {
+    expect(defaultVirtualContextName(["prod-eu", "prod-us"], [])).toBe(
+      "prod-eu + prod-us",
+    );
+  });
+
+  it("uses '+N' beyond two members", () => {
+    expect(defaultVirtualContextName(["a", "b", "c", "d"], [])).toBe("a +3");
+  });
+
+  it("dedupes against taken names case-insensitively", () => {
+    expect(
+      defaultVirtualContextName(["prod-eu", "prod-us"], ["PROD-EU + prod-us"]),
+    ).toBe("prod-eu + prod-us (2)");
+    expect(
+      defaultVirtualContextName(
+        ["prod-eu", "prod-us"],
+        ["prod-eu + prod-us", "prod-eu + prod-us (2)"],
+      ),
+    ).toBe("prod-eu + prod-us (3)");
+  });
+});
+
+describe("namespaceClusterTags", () => {
+  const MEMBERS = [
+    { id: "default::fleet-prod-eu", name: "fleet-prod-eu" },
+    { id: "default::fleet-prod-us", name: "fleet-prod-us" },
+  ];
+
+  it("tags only namespaces missing from some reporting member", () => {
+    const tags = namespaceClusterTags(
+      {
+        default: ["default::fleet-prod-eu", "default::fleet-prod-us"],
+        "eu-only": ["default::fleet-prod-eu"],
+      },
+      MEMBERS,
+    );
+    expect(tags["default"]).toBeUndefined();
+    expect(tags["eu-only"]).toEqual([
+      { clusterId: "default::fleet-prod-eu", label: "eu" },
+    ]);
+  });
+
+  it("returns no tags for single-member views", () => {
+    expect(
+      namespaceClusterTags({ a: ["default::fleet-prod-eu"] }, [MEMBERS[0]!]),
+    ).toEqual({});
+  });
+
+  it("ignores a member that reported nothing (down cluster)", () => {
+    // prod-us never reported a namespace — nothing should be flagged as
+    // partial just because it is unreachable.
+    const tags = namespaceClusterTags(
+      {
+        default: ["default::fleet-prod-eu"],
+        web: ["default::fleet-prod-eu"],
+      },
+      MEMBERS,
+    );
+    expect(tags).toEqual({});
+  });
+
+  it("drops cluster ids that are no longer members", () => {
+    const tags = namespaceClusterTags(
+      {
+        default: [
+          "default::fleet-prod-eu",
+          "default::fleet-prod-us",
+          "default::gone",
+        ],
+        "us-only": ["default::fleet-prod-us", "default::gone"],
+      },
+      MEMBERS,
+    );
+    expect(tags["default"]).toBeUndefined();
+    expect(tags["us-only"]).toEqual([
+      { clusterId: "default::fleet-prod-us", label: "us" },
+    ]);
   });
 });

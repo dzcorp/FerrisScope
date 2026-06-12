@@ -108,6 +108,117 @@ export function clusterColorIndexMap(members: string[]): Record<string, number> 
   return out;
 }
 
+/// Word-ish boundaries cluster names are tokenized on. Covers kebab/snake
+/// conventions plus the `_`/`/`-heavy GKE and EKS context-name formats.
+const NAME_TOKEN_SEP = /[-_./:\s]+/;
+
+/// Compact display names for a set of member clusters: strips the token
+/// prefix and suffix common to ALL names so siblings like
+/// `myproject-mystage-prod-07` / `myproject-mystage-prod-08` render as
+/// `07` / `08` in tight surfaces (table cells, namespace labels). Keyed by
+/// the full name. Guarantees:
+/// - every name keeps at least one token (a name that is a token-prefix of
+///   a sibling never compresses to "");
+/// - results stay unique — on a collision (e.g. `a-b` vs `a_b` tokenize
+///   identically) the colliding names fall back to their full form;
+/// - a single name (or empty input) is returned untouched — compression
+///   only makes sense against siblings.
+export function shortClusterNames(names: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const n of names) out[n] = n;
+  if (names.length < 2) return out;
+
+  const tokens = names.map((n) => n.split(NAME_TOKEN_SEP).filter(Boolean));
+  if (tokens.some((t) => t.length === 0)) return out;
+  const minLen = Math.min(...tokens.map((t) => t.length));
+
+  // Greedy common prefix, capped so the shortest name keeps ≥1 token.
+  let prefix = 0;
+  while (
+    prefix < minLen - 1 &&
+    tokens.every((t) => t[prefix] === tokens[0]![prefix])
+  ) {
+    prefix++;
+  }
+  // Common suffix out of the remaining budget.
+  let suffix = 0;
+  while (
+    prefix + suffix < minLen - 1 &&
+    tokens.every(
+      (t) => t[t.length - 1 - suffix] === tokens[0]![tokens[0]!.length - 1 - suffix],
+    )
+  ) {
+    suffix++;
+  }
+  if (prefix === 0 && suffix === 0) return out;
+
+  const shorts = tokens.map((t) => t.slice(prefix, t.length - suffix).join("-"));
+  // Uniqueness check: identical inputs or separator-only differences can
+  // collapse to the same short — those keep their full names.
+  const counts = new Map<string, number>();
+  for (const s of shorts) counts.set(s, (counts.get(s) ?? 0) + 1);
+  names.forEach((n, i) => {
+    const s = shorts[i]!;
+    if (s.length > 0 && counts.get(s) === 1) out[n] = s;
+  });
+  return out;
+}
+
+/// Per-namespace origin labels for the namespace modal in multi-cluster
+/// views. A namespace present on EVERY reporting member needs no label —
+/// only the ones that exist on a subset get tagged with the (compressed)
+/// names of the members that have them. Members that reported no
+/// namespaces at all (down, or namespaces listing forbidden) are excluded
+/// from the "present everywhere" comparison so one dead cluster doesn't
+/// flag every namespace as partial.
+export function namespaceClusterTags(
+  nsClusters: Record<string, string[]>,
+  members: { id: string; name: string }[],
+): Record<string, { clusterId: string; label: string }[]> {
+  if (members.length < 2) return {};
+  const memberIds = new Set(members.map((m) => m.id));
+  const reporting = new Set<string>();
+  for (const cids of Object.values(nsClusters)) {
+    for (const cid of cids) if (memberIds.has(cid)) reporting.add(cid);
+  }
+  if (reporting.size < 2) return {};
+  const shorts = shortClusterNames(members.map((m) => m.name));
+  const nameOf = new Map(members.map((m) => [m.id, m.name]));
+  const out: Record<string, { clusterId: string; label: string }[]> = {};
+  for (const [ns, cids] of Object.entries(nsClusters)) {
+    const present = [...new Set(cids.filter((cid) => reporting.has(cid)))];
+    if (present.length === 0 || present.length >= reporting.size) continue;
+    out[ns] = present.sort().map((cid) => {
+      const full = nameOf.get(cid);
+      return { clusterId: cid, label: (full && shorts[full]) ?? full ?? cid };
+    });
+  }
+  return out;
+}
+
+/// Pregenerated name for a virtual context the operator didn't bother to
+/// name: "a + b" for two members, "a +N" beyond — same shape as the ad-hoc
+/// view title. Deduped against existing names (case-insensitive) with a
+/// " (2)", " (3)"… suffix so saving twice never trips the duplicate guard.
+export function defaultVirtualContextName(
+  memberNames: string[],
+  takenNames: string[],
+): string {
+  const first = memberNames[0] ?? "virtual context";
+  const base =
+    memberNames.length === 2
+      ? `${first} + ${memberNames[1]}`
+      : memberNames.length > 2
+        ? `${first} +${memberNames.length - 1}`
+        : first;
+  const taken = new Set(takenNames.map((n) => n.toLowerCase()));
+  if (!taken.has(base.toLowerCase())) return base;
+  for (let i = 2; ; i++) {
+    const candidate = `${base} (${i})`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
 /// Merge per-cluster full-text search results into one relevance-ordered
 /// list. Backend scores are FTS5 bm25 — LOWER is more relevant — and the
 /// scale is comparable across indexes, so a plain global sort works.
