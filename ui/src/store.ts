@@ -350,6 +350,10 @@ type AppState = {
   saveVirtualContext: (name: string, members: string[]) => string;
   renameVirtualContext: (id: string, name: string) => void;
   setVirtualContextMembers: (id: string, members: string[]) => void;
+  /// Fold the current ad-hoc scope extras into virtual context `id`'s
+  /// member list (deduped) and clear the extras. No-op when there are no
+  /// extras or the id is unknown.
+  absorbScopeExtras: (id: string) => void;
   /// Remove a virtual context; deactivates it first if it's active.
   deleteVirtualContext: (id: string) => void;
   /// Append a context to the active scope without saving. No-op when the id
@@ -652,6 +656,24 @@ export const useAppStore = create<AppState>((set, get) => ({
         v.id === id ? { ...v, members } : v,
       ),
     })),
+  absorbScopeExtras: (id) =>
+    set((s) => {
+      // Fold the ad-hoc extras into a saved virtual context's definition:
+      // the temporary widening becomes permanent and the view is no longer
+      // "dirty". No-op without extras or for an unknown id.
+      const vctx = s.virtualContexts.find((v) => v.id === id);
+      if (!vctx || s.scopeExtras.length === 0) return {};
+      const members = [
+        ...vctx.members,
+        ...s.scopeExtras.filter((e) => !vctx.members.includes(e)),
+      ];
+      return {
+        virtualContexts: s.virtualContexts.map((v) =>
+          v.id === id ? { ...v, members } : v,
+        ),
+        scopeExtras: [],
+      };
+    }),
   deleteVirtualContext: (id) =>
     set((s) => ({
       virtualContexts: s.virtualContexts.filter((v) => v.id !== id),

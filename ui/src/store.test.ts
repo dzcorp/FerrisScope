@@ -1032,3 +1032,55 @@ describe("buildPrefsPayload", () => {
     expect(p2).toEqual(p1);
   });
 });
+
+describe("absorbScopeExtras", () => {
+  const seed = () => {
+    useAppStore.setState({
+      contexts: [vctxCtx("default::a"), vctxCtx("default::b"), vctxCtx("default::c")],
+    });
+    const id = useAppStore
+      .getState()
+      .saveVirtualContext("prod", ["default::a", "default::b"]);
+    useAppStore.getState().selectVirtualContext(id);
+    useAppStore.getState().addScopeExtra("default::c");
+    return id;
+  };
+
+  it("folds extras into the virtual context's members and clears them", () => {
+    const id = seed();
+    expect(useAppStore.getState().scopeExtras).toEqual(["default::c"]);
+    useAppStore.getState().absorbScopeExtras(id);
+    const s = useAppStore.getState();
+    expect(s.virtualContexts[0]!.members).toEqual([
+      "default::a",
+      "default::b",
+      "default::c",
+    ]);
+    expect(s.scopeExtras).toEqual([]);
+    // Still on the same virtual context — no scope reset.
+    expect(s.selectedVirtualContextId).toBe(id);
+  });
+
+  it("dedupes an extra that is already a member", () => {
+    const id = seed();
+    useAppStore.setState({ scopeExtras: ["default::b", "default::c"] });
+    useAppStore.getState().absorbScopeExtras(id);
+    expect(useAppStore.getState().virtualContexts[0]!.members).toEqual([
+      "default::a",
+      "default::b",
+      "default::c",
+    ]);
+  });
+
+  it("no-ops for an unknown id or without extras", () => {
+    const id = seed();
+    useAppStore.getState().absorbScopeExtras("nope");
+    expect(useAppStore.getState().scopeExtras).toEqual(["default::c"]);
+    useAppStore.setState({ scopeExtras: [] });
+    useAppStore.getState().absorbScopeExtras(id);
+    expect(useAppStore.getState().virtualContexts[0]!.members).toEqual([
+      "default::a",
+      "default::b",
+    ]);
+  });
+});

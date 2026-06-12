@@ -11,11 +11,11 @@ import {
   defaultVirtualContextName,
 } from "../lib/multiCluster";
 import { ReconnectBanner } from "./ClusterPanel";
-import { AddMenuTrigger, NamespaceButton } from "./ClusterBar";
+import { AddMenuItem, AddMenuTrigger, NamespaceButton } from "./ClusterBar";
 import { ResourceTable, type TableCluster } from "./ResourceTable";
 import { makeChatTab, makeTerminalTab, makeYamlTab } from "./Dock";
 import { toast } from "../lib/dialog";
-import { EmptyState, LoadingLine, Tooltip } from "./ui";
+import { EmptyState, Icons, LoadingLine, Tooltip } from "./ui";
 
 type MemberConn = {
   state: ConnectState;
@@ -235,6 +235,15 @@ function VirtualClusterBar({
   const virtualContexts = useAppStore((s) => s.virtualContexts);
   const saveVirtualContext = useAppStore((s) => s.saveVirtualContext);
   const selectVirtualContext = useAppStore((s) => s.selectVirtualContext);
+  const absorbScopeExtras = useAppStore((s) => s.absorbScopeExtras);
+  // The saved virtual context this view extends, if any — drives the
+  // "Add to <name>" option in save mode (vs. always creating a new one).
+  const activeVctx = useAppStore((s) =>
+    s.selectedVirtualContextId
+      ? s.virtualContexts.find((v) => v.id === s.selectedVirtualContextId) ??
+        null
+      : null,
+  );
 
   const memberIds = contexts.map((c) => c.id);
   const addable = allContexts.filter((c) => !memberIds.includes(c.id));
@@ -496,9 +505,11 @@ function VirtualClusterBar({
           >
             {menuMode === "root" && (
               <>
-                <MenuRow
-                  label="Terminal…"
-                  hint="pick a cluster"
+                <AddMenuItem
+                  t={t}
+                  icon={Icons.shell}
+                  title="Terminal…"
+                  subtitle="Run kubectl — pick a cluster"
                   onClick={() =>
                     contexts.length === 1 && contexts[0]
                       ? (addDockTab(
@@ -515,9 +526,11 @@ function VirtualClusterBar({
                       : setMenuMode("terminal")
                   }
                 />
-                <MenuRow
-                  label="YAML scratchpad…"
-                  hint="pick a cluster"
+                <AddMenuItem
+                  t={t}
+                  icon={Icons.yaml}
+                  title="YAML scratchpad…"
+                  subtitle="Edit and apply — pick a cluster"
                   onClick={() =>
                     contexts.length === 1 && contexts[0]
                       ? (addDockTab(makeYamlTab(contexts[0].id)),
@@ -525,19 +538,20 @@ function VirtualClusterBar({
                       : setMenuMode("yaml")
                   }
                 />
-                <MenuRow label="AI chat" hint="" onClick={openChat} />
-                <MenuRow
-                  label="Add cluster…"
-                  hint=""
+                <AddMenuItem
+                  t={t}
+                  icon={Icons.chat}
+                  title="AI chat"
+                  subtitle="Talk to the cluster-aware assistant"
+                  onClick={openChat}
+                />
+                <AddMenuItem
+                  t={t}
+                  icon={Icons.plus}
+                  title="Add cluster…"
+                  subtitle="Merge another cluster into this view"
                   onClick={() => setMenuMode("add")}
                 />
-                {scopeExtras.length > 0 && (
-                  <MenuRow
-                    label="Save as virtual context…"
-                    hint=""
-                    onClick={() => setMenuMode("save")}
-                  />
-                )}
               </>
             )}
             {(menuMode === "terminal" || menuMode === "yaml") &&
@@ -574,11 +588,15 @@ function VirtualClusterBar({
                   Every context is already in this view.
                 </div>
               ) : (
+                // Same row anatomy as ClusterBar's "Add cluster to this
+                // view" list — the two menus must read identically.
                 addable.map((c) => (
-                  <MenuRow
+                  <AddMenuItem
                     key={c.id}
-                    label={c.name}
-                    hint={c.cluster}
+                    t={t}
+                    icon={Icons.cluster}
+                    title={c.name}
+                    subtitle={c.cluster}
                     onClick={() => {
                       addScopeExtra(c.id);
                       setMenuOpen(false);
@@ -586,6 +604,21 @@ function VirtualClusterBar({
                   />
                 ))
               ))}
+            {menuMode === "save" && activeVctx && scopeExtras.length > 0 && (
+              <AddMenuItem
+                t={t}
+                icon={Icons.layers}
+                title={`Add to "${activeVctx.name}"`}
+                subtitle="Fold the added clusters into this virtual context"
+                onClick={() => {
+                  absorbScopeExtras(activeVctx.id);
+                  toast.ok(
+                    `Added ${scopeExtras.length} cluster${scopeExtras.length === 1 ? "" : "s"} to "${activeVctx.name}".`,
+                  );
+                  setMenuOpen(false);
+                }}
+              />
+            )}
             {menuMode === "save" && (
               <div style={{ display: "flex", gap: 6, padding: 6 }}>
                 <input
@@ -621,9 +654,10 @@ function VirtualClusterBar({
                     padding: "0 10px",
                     fontSize: FS_XS,
                     cursor: canSave ? "pointer" : "default",
+                    whiteSpace: "nowrap",
                   }}
                 >
-                  Save
+                  {activeVctx ? "Save as new" : "Save"}
                 </button>
               </div>
             )}

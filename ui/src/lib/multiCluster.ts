@@ -198,18 +198,24 @@ export function namespaceClusterTags(
 
 /// Pregenerated name for a virtual context the operator didn't bother to
 /// name: "a + b" for two members, "a +N" beyond — same shape as the ad-hoc
-/// view title. Deduped against existing names (case-insensitive) with a
-/// " (2)", " (3)"… suffix so saving twice never trips the duplicate guard.
+/// view title. Member names are compressed first with the same
+/// `shortClusterNames` logic the table and namespace labels use, so
+/// sibling clusters like `myproject-prod-07` / `-08` generate "07 + 08"
+/// instead of two full names glued together. Deduped against existing
+/// names (case-insensitive) with a " (2)", " (3)"… suffix so saving twice
+/// never trips the duplicate guard.
 export function defaultVirtualContextName(
   memberNames: string[],
   takenNames: string[],
 ): string {
-  const first = memberNames[0] ?? "virtual context";
+  const shorts = shortClusterNames(memberNames);
+  const display = memberNames.map((n) => shorts[n] ?? n);
+  const first = display[0] ?? "virtual context";
   const base =
-    memberNames.length === 2
-      ? `${first} + ${memberNames[1]}`
-      : memberNames.length > 2
-        ? `${first} +${memberNames.length - 1}`
+    display.length === 2
+      ? `${first} + ${display[1]}`
+      : display.length > 2
+        ? `${first} +${display.length - 1}`
         : first;
   const taken = new Set(takenNames.map((n) => n.toLowerCase()));
   if (!taken.has(base.toLowerCase())) return base;

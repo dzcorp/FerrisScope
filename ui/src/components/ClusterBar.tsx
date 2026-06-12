@@ -479,7 +479,9 @@ export function NamespaceButton() {
   );
 }
 
-function AddMenuItem({
+// Shared with VirtualClusterPanel's "+" menu — same row anatomy (icon chip +
+// title + subtitle + optional kbd) so the two menus read identically.
+export function AddMenuItem({
   t,
   icon,
   title,

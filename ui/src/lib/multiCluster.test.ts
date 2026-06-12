@@ -234,26 +234,44 @@ describe("shortClusterNames", () => {
 });
 
 describe("defaultVirtualContextName", () => {
-  it("joins two member names with ' + '", () => {
-    expect(defaultVirtualContextName(["prod-eu", "prod-us"], [])).toBe(
-      "prod-eu + prod-us",
+  it("joins two dissimilar member names with ' + ' untouched", () => {
+    expect(defaultVirtualContextName(["alpha", "beta-edge"], [])).toBe(
+      "alpha + beta-edge",
     );
+  });
+
+  it("compresses sibling names with the table's shortClusterNames logic", () => {
+    expect(defaultVirtualContextName(["prod-eu", "prod-us"], [])).toBe(
+      "eu + us",
+    );
+    expect(
+      defaultVirtualContextName(
+        ["myproject-mystage-prod-07", "myproject-mystage-prod-08"],
+        [],
+      ),
+    ).toBe("07 + 08");
   });
 
   it("uses '+N' beyond two members", () => {
     expect(defaultVirtualContextName(["a", "b", "c", "d"], [])).toBe("a +3");
+    expect(
+      defaultVirtualContextName(
+        ["fleet-edge-paris", "fleet-edge-berlin", "fleet-edge-madrid"],
+        [],
+      ),
+    ).toBe("paris +2");
   });
 
   it("dedupes against taken names case-insensitively", () => {
-    expect(
-      defaultVirtualContextName(["prod-eu", "prod-us"], ["PROD-EU + prod-us"]),
-    ).toBe("prod-eu + prod-us (2)");
+    expect(defaultVirtualContextName(["prod-eu", "prod-us"], ["EU + us"])).toBe(
+      "eu + us (2)",
+    );
     expect(
       defaultVirtualContextName(
         ["prod-eu", "prod-us"],
-        ["prod-eu + prod-us", "prod-eu + prod-us (2)"],
+        ["eu + us", "eu + us (2)"],
       ),
-    ).toBe("prod-eu + prod-us (3)");
+    ).toBe("eu + us (3)");
   });
 });
 

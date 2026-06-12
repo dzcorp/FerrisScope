@@ -356,3 +356,104 @@ describe("VirtualClusterBar save affordances", () => {
     expect(screen.getByText("All namespaces")).toBeTruthy();
   });
 });
+
+describe("VirtualClusterBar save mode with an active virtual context", () => {
+  const connectOk = () =>
+    setMockInvoke((cmd) => {
+      switch (cmd) {
+        case "connect_context":
+          return { server_version: "1.30", node_count: 1 };
+        case "subscribe_resource":
+          return { rows: [], init_done: true };
+        default:
+          return undefined;
+      }
+    });
+  const EXTRA = ctx("default::edge", "edge");
+  const seedVctxWithExtra = () =>
+    act(() => {
+      useAppStore.setState({
+        contexts: [...MEMBERS, EXTRA],
+        virtualContexts: [
+          { id: "t1", name: "prod fleet", members: MEMBERS.map((m) => m.id) },
+        ],
+        selectedVirtualContextId: "t1",
+        selectedContext: null,
+        scopeExtras: ["default::edge"],
+      });
+    });
+
+  it("offers 'Add to' the active virtual context; absorbing folds the extra in", async () => {
+    connectOk();
+    seedVctxWithExtra();
+    render(
+      <VirtualClusterPanel
+        mode="dark"
+        title="prod fleet +1"
+        viewScopeId="vctx:t1"
+        contexts={[...MEMBERS, EXTRA]}
+      />,
+    );
+    await act(async () => {});
+
+    fireEvent.click(screen.getByText("Save view…"));
+    fireEvent.click(screen.getByText('Add to "prod fleet"'));
+
+    const s = useAppStore.getState();
+    expect(s.virtualContexts[0]!.members).toEqual([
+      "default::prod-eu",
+      "default::prod-us",
+      "default::edge",
+    ]);
+    expect(s.scopeExtras).toEqual([]);
+    expect(s.selectedVirtualContextId).toBe("t1");
+  });
+
+  it("'Save as new' creates a second virtual context instead of touching the active one", async () => {
+    connectOk();
+    seedVctxWithExtra();
+    render(
+      <VirtualClusterPanel
+        mode="dark"
+        title="prod fleet +1"
+        viewScopeId="vctx:t1"
+        contexts={[...MEMBERS, EXTRA]}
+      />,
+    );
+    await act(async () => {});
+
+    fireEvent.click(screen.getByText("Save view…"));
+    fireEvent.click(screen.getByText("Save as new"));
+
+    const s = useAppStore.getState();
+    expect(s.virtualContexts).toHaveLength(2);
+    expect(s.virtualContexts[0]!.members).toEqual(MEMBERS.map((m) => m.id));
+    expect(s.virtualContexts[1]!.members).toEqual([
+      "default::prod-eu",
+      "default::prod-us",
+      "default::edge",
+    ]);
+    expect(s.selectedVirtualContextId).toBe(s.virtualContexts[1]!.id);
+  });
+
+  it("the '+' menu root no longer duplicates the save entry", async () => {
+    connectOk();
+    seedVctxWithExtra();
+    render(
+      <VirtualClusterPanel
+        mode="dark"
+        title="prod fleet +1"
+        viewScopeId="vctx:t1"
+        contexts={[...MEMBERS, EXTRA]}
+      />,
+    );
+    await act(async () => {});
+
+    fireEvent.click(screen.getByLabelText("Add tab or cluster"));
+    expect(screen.queryByText("Save as virtual context…")).toBeNull();
+    // Root entries now carry the same icon-row anatomy as the
+    // single-cluster menu (subtitles present).
+    expect(screen.getByText("Talk to the cluster-aware assistant")).toBeTruthy();
+    expect(screen.getByText("Merge another cluster into this view")).toBeTruthy();
+  });
+});
