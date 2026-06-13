@@ -23,7 +23,7 @@ import { ErrorBlock, Select } from "../ui";
 import { ansiToReact, stripAnsi } from "../../lib/ansi";
 import { splitTimestamp } from "../../lib/logFormat";
 import { findLogMatches, splitHighlight } from "../../lib/logSearch";
-import { latinLetter } from "../../lib/keyboard";
+import { chordLabel, latinLetter } from "../../lib/keyboard";
 import { toast } from "../../lib/dialog";
 import {
   aggregateLogStatus,
@@ -757,7 +757,7 @@ export function LogView({ t, sources, onStateChange }: Props) {
             fontSize: FS_SM,
             cursor: "pointer",
           }}
-          title="Find in logs (Ctrl/⌘+F)"
+          title={`Find in logs (${chordLabel("Mod", "F")})`}
         >
           Find
         </button>

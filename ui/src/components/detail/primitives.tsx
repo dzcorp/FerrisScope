@@ -14,6 +14,7 @@ import {
   type ReactNode,
 } from "react";
 import { FF_MONO, type Tokens, R_SM, R_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { MOD_KEY } from "../../lib/keyboard";
 import { Chip, Icons, Tooltip } from "../ui";
 
 // ── Cross-kind navigation ──────────────────────────────────────────────────
@@ -469,7 +470,7 @@ export function LinkValue({
     <Tooltip
       label={
         enabled
-          ? `Open detail · ${copyText} (⌘/Ctrl-click to copy)`
+          ? `Open detail · ${copyText} (${MOD_KEY}-click to copy)`
           : `Click to copy · ${copyText}`
       }
     >

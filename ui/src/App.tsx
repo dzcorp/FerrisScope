@@ -55,7 +55,8 @@ import {
   clusterColorIndexMap,
   namespaceClusterTags,
 } from "./lib/multiCluster";
-import { latinLetter, IS_MAC } from "./lib/keyboard";
+import { IS_MAC } from "./lib/keyboard";
+import { hotkeyIntent, intentPreventsDefault } from "./lib/hotkeys";
 import { applyThemeCssVars } from "./lib/themeDom";
 import { Icons } from "./components/ui";
 
@@ -585,128 +586,87 @@ export default function App() {
   // themselves; this handler runs first only when the deeper layers are open.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const meta = e.metaKey || e.ctrlKey;
-
-      // `latinLetter` resolves the physical Latin letter regardless of
-      // active keyboard layout — Cmd+F on a Russian / Greek / Hebrew /
-      // Arabic layout otherwise misses because `e.key` is the localized
-      // character (`а` / `φ` / `כ` / …) not "f".
-      const letter = latinLetter(e);
-      if (meta && letter === "k") {
-        e.preventDefault();
-        if (paletteOpen) closePalette();
-        else openPalette();
-        return;
-      }
-      // Cmd/Ctrl+F — open the inline filter input in the breadcrumb.
-      // Mirrors browsers' "find on page"; only fires when a kind table is
-      // mounted (otherwise the input has nothing to filter).
-      if (meta && letter === "f" && selectedContextName) {
-        e.preventDefault();
-        openFilterEditor();
-        return;
-      }
-      // `/` (vim-style) — same as Cmd+F. Only fires outside an input so
-      // typing slashes in text fields keeps working.
-      if (
-        e.key === "/" &&
-        !e.metaKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        selectedContextName
-      ) {
-        const tgt = e.target as HTMLElement | null;
-        if (
-          !tgt ||
-          !tgt.closest(
+      // Chord → intent resolution lives in lib/hotkeys.ts (pure, tested
+      // for both modifier conventions and non-Latin layouts); this handler
+      // only maps intents onto store actions.
+      const tgt = e.target as HTMLElement | null;
+      const intent = hotkeyIntent(e, {
+        scopeActive: activeContexts.length > 0,
+        paletteOpen,
+        addMenuOpen,
+        settingsOpen,
+        nsModalOpen,
+        filterEditing,
+        hasSelection: selection.size > 0,
+        inTextInput:
+          tgt != null &&
+          tgt.closest(
             "input, textarea, [contenteditable=''], [contenteditable='true']",
-          )
-        ) {
-          e.preventDefault();
+          ) != null,
+      });
+      if (!intent) return;
+      if (intentPreventsDefault(intent)) e.preventDefault();
+      switch (intent) {
+        case "toggle-palette":
+          if (paletteOpen) closePalette();
+          else openPalette();
+          return;
+        case "open-filter":
           openFilterEditor();
           return;
+        case "open-ns-modal":
+          openNsModal();
+          return;
+        case "open-settings":
+          openSettings();
+          return;
+        case "toggle-theme":
+          toggleTheme();
+          return;
+        case "zoom-in":
+          bumpUiScale(1);
+          return;
+        case "zoom-out":
+          bumpUiScale(-1);
+          return;
+        case "zoom-reset":
+          resetUiScale();
+          return;
+        // Keyboard tab shortcuts bind to the FIRST active cluster — in a
+        // multi-cluster view the tab title carries the member name so it's
+        // obvious which cluster the terminal landed on; the "+" menu's
+        // member picker covers deliberate targeting.
+        case "new-terminal": {
+          const target = activeContexts[0]!;
+          addDockTab(
+            makeTerminalTab(
+              { mode: "shell", clusterId: target.id, namespace: null },
+              target.name,
+            ),
+          );
+          return;
         }
-      }
-      if (meta && letter === "i" && selectedContextName) {
-        e.preventDefault();
-        openNsModal();
-        return;
-      }
-      if (meta && e.key === ",") {
-        e.preventDefault();
-        openSettings();
-        return;
-      }
-      if (meta && e.shiftKey && letter === "l") {
-        e.preventDefault();
-        toggleTheme();
-        return;
-      }
-      // Global UI scale. Cmd/Ctrl + and Cmd/Ctrl - nudge by one step;
-      // Cmd/Ctrl 0 resets. `=` is matched alongside `+` because `+` requires
-      // Shift on most layouts and platform keymaps surface the unshifted key.
-      if (meta && (e.key === "+" || e.key === "=")) {
-        e.preventDefault();
-        bumpUiScale(1);
-        return;
-      }
-      if (meta && (e.key === "-" || e.key === "_")) {
-        e.preventDefault();
-        bumpUiScale(-1);
-        return;
-      }
-      if (meta && e.key === "0") {
-        e.preventDefault();
-        resetUiScale();
-        return;
-      }
-      // Keyboard tab shortcuts bind to the FIRST active cluster — in a
-      // multi-cluster view the tab title carries the member name so it's
-      // obvious which cluster the terminal landed on; the "+" menu's member
-      // picker covers deliberate targeting.
-      if (meta && e.key === "`" && activeContexts.length > 0) {
-        e.preventDefault();
-        const target = activeContexts[0]!;
-        addDockTab(
-          makeTerminalTab(
-            { mode: "shell", clusterId: target.id, namespace: null },
-            target.name,
-          ),
-        );
-        return;
-      }
-      if (meta && e.shiftKey && letter === "y" && activeContexts.length > 0) {
-        e.preventDefault();
-        addDockTab(makeYamlTab(activeContexts[0]!.id));
-        return;
-      }
-
-      if (e.key === "Escape") {
-        if (addMenuOpen) {
+        case "new-yaml":
+          addDockTab(makeYamlTab(activeContexts[0]!.id));
+          return;
+        case "esc-add-menu":
           setAddMenuOpen(false);
           return;
-        }
-        if (paletteOpen) {
+        case "esc-palette":
           closePalette();
           return;
-        }
-        if (filterEditing) {
+        case "esc-filter":
           closeFilterEditor();
           return;
-        }
-        if (settingsOpen) {
+        case "esc-settings":
           closeSettings();
           return;
-        }
-        if (nsModalOpen) {
+        case "esc-ns-modal":
           closeNsModal();
           return;
-        }
-        // DetailPanel and LogPanel register their own Esc to close.
-        if (selection.size > 0) {
+        case "esc-selection":
           clearSelection();
           return;
-        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -717,7 +677,6 @@ export default function App() {
     settingsOpen,
     nsModalOpen,
     selection,
-    selectedContextName,
     activeContexts,
     addDockTab,
     clearSelection,
