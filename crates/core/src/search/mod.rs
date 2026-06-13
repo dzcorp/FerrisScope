@@ -56,9 +56,6 @@ pub struct SearchHit {
     pub uid: String,
     pub namespace: Option<String>,
     pub name: String,
-    /// The original projected row JSON the watcher emitted. The frontend uses
-    /// this to render age / status columns inline next to the result.
-    pub blob: Value,
     /// FTS5 bm25 score. Lower is more relevant (FTS5's sign convention).
     pub score: f64,
 }
@@ -80,6 +77,13 @@ pub(crate) enum WriteOp {
     Delete {
         kind_id: String,
         uid: String,
+    },
+    /// Tombstone every live row of `kind_id` whose uid is NOT in `keep_uids`.
+    /// Emitted after a complete bootstrap LIST so objects deleted while no
+    /// watcher was running stop matching searches.
+    Retain {
+        kind_id: String,
+        keep_uids: Vec<String>,
     },
 }
 
@@ -157,6 +161,17 @@ impl SearchIndex {
         }));
     }
 
+    /// Reconcile a kind against a complete listing: soft-delete every live
+    /// row of `kind_id` whose uid is not in `keep_uids`. Only call with the
+    /// uid set of a *complete* LIST — a truncated listing would tombstone
+    /// rows that still exist. Cheap and non-blocking like `upsert`.
+    pub fn retain(&self, kind_id: &str, keep_uids: Vec<String>) {
+        let _ = self.tx.send(IndexCommand::Write(WriteOp::Retain {
+            kind_id: kind_id.to_owned(),
+            keep_uids,
+        }));
+    }
+
     /// Run a search. Returns up to `limit` hits, sorted by FTS5 bm25 score
     /// (lower = more relevant). Queries shorter than 2 chars return empty
     /// without round-tripping to the writer.
@@ -226,4 +241,27 @@ fn extract_ns_name(row: &Value) -> (Option<String>, Option<String>) {
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
     (ns, name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_ns_name_reads_both_fields() {
+        let (ns, name) = extract_ns_name(&json!({ "namespace": "default", "name": "api-0" }));
+        assert_eq!(ns.as_deref(), Some("default"));
+        assert_eq!(name.as_deref(), Some("api-0"));
+    }
+
+    #[test]
+    fn extract_ns_name_treats_empty_and_missing_as_none() {
+        let (ns, name) = extract_ns_name(&json!({ "namespace": "", "name": "node-1" }));
+        assert_eq!(ns, None);
+        assert_eq!(name.as_deref(), Some("node-1"));
+        let (ns, name) = extract_ns_name(&json!({ "namespace": 7, "name": null }));
+        assert_eq!(ns, None);
+        assert_eq!(name, None);
+    }
 }

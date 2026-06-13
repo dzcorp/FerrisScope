@@ -556,6 +556,11 @@ pub(crate) async fn connect_context(
                 // If the open fails (DB locked, disk full…) we log and
                 // continue — search is a non-essential overlay; cluster
                 // browsing still works without it.
+                // Drop any handle left from a previous entry (reconnect_cluster
+                // keeps the index registered across the teardown) BEFORE
+                // reopening, so two writer connections never target the same
+                // file beyond the brief window the busy_timeout covers.
+                let _ = state.remove_search_index(&name).await;
                 match ferrisscope_core::search::SearchIndex::open(&name) {
                     Ok(index) => {
                         state.insert_search_index(name.clone(), index.clone()).await;
@@ -643,13 +648,18 @@ fn spawn_search_bootstrap(
         }
 
         let client = entry.cluster.client();
-        // Sink closure feeds rows directly into the search-index writer.
+        // Sink closures feed rows directly into the search-index writer.
         // The writer batches internally so we don't need our own buffering
-        // at the bootstrap layer.
+        // at the bootstrap layer. `retain` fires per completely-listed kind
+        // and tombstones rows missing from the listing — objects deleted
+        // while nothing was watching stop matching searches.
         let upsert = |kind_id: &str, uid: &str, row: &serde_json::Value| {
             index.upsert(kind_id, uid, row);
         };
-        let n = ferrisscope_kube_ext::bootstrap::bootstrap_default(client, &upsert).await;
+        let retain = |kind_id: &str, uids: Vec<String>| {
+            index.retain(kind_id, uids);
+        };
+        let n = ferrisscope_kube_ext::bootstrap::bootstrap_default(client, &upsert, &retain).await;
         tracing::info!(
             cluster_id = %cluster_id,
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -718,8 +728,7 @@ fn pin_cluster_namespaces(app: &AppHandle, cluster_id: &str) {
             return;
         }
         if let Err(e) =
-            subscribe_resource_with_entry(&cluster_id, "namespaces", None, &app, &state, entry)
-                .await
+            subscribe_resource_with_entry(&cluster_id, "namespaces", None, &app, entry).await
         {
             // Lazy-failure rather than hard-failure: the frontend's
             // belt-and-braces App.tsx subscribe will still try its own
@@ -916,7 +925,7 @@ pub(crate) async fn subscribe_resource_inner(
     state: &AppState,
 ) -> Result<SubscribeResult, String> {
     let entry = state.entry(cluster_id).await?;
-    subscribe_resource_with_entry(cluster_id, kind_id, namespaces, app, state, entry).await
+    subscribe_resource_with_entry(cluster_id, kind_id, namespaces, app, entry).await
 }
 
 /// Slot-bump / forwarder-spawn for an already-resolved
@@ -931,7 +940,6 @@ pub(crate) async fn subscribe_resource_with_entry(
     kind_id: &str,
     namespaces: Option<&[String]>,
     app: &AppHandle,
-    state: &AppState,
     entry: Arc<crate::state::ClusterEntry>,
 ) -> Result<SubscribeResult, String> {
     let started = std::time::Instant::now();
@@ -991,14 +999,12 @@ pub(crate) async fn subscribe_resource_with_entry(
         // fully-browsed UI. The pool is the middle ground.
         let client = entry.cluster.watcher_client();
         let w = (kind.start)(client, scope.clone(), strategy);
-        let search_index = state.search_index_for(cluster_id).await;
         spawn_resource_forwarder(
             app.clone(),
             cluster_id.to_owned(),
             kind_id.to_owned(),
             scope.clone(),
             w.clone(),
-            search_index,
         );
         slot.watcher = Some(w.clone());
         started_watcher = true;
@@ -1388,7 +1394,6 @@ fn spawn_resource_forwarder(
     kind_id: String,
     scope: ferrisscope_kube_ext::NsScope,
     watcher: Arc<ferrisscope_kube_ext::ResourceWatcher>,
-    search_index: Option<Arc<ferrisscope_core::search::SearchIndex>>,
 ) {
     // Take exclusive drain access. Single-consumer by design — the
     // previous broadcast-based pipe lost events under load and is gone.
@@ -1449,6 +1454,14 @@ fn spawn_resource_forwarder(
 
             let window = if steady { STEADY_WINDOW } else { INIT_WINDOW };
             tokio::time::sleep(window).await;
+
+            // Resolve the search index per wake, not once at spawn: watchers
+            // can start before `connect_context` registers the index (eager
+            // namespaces subscribe, the pinned-namespaces watcher, lazy
+            // connects), and a reconnect can replace the handle — a captured
+            // `Option` would keep this forwarder feeding nothing (or a dead
+            // writer) for its whole lifetime.
+            let search_index = app.state::<AppState>().search_index_for(&cluster_id).await;
 
             // Drain-and-emit in bounded chunks. One wake can have accumulated
             // far more than MAX_EMIT_DELTAS during init; `drain_capped` slices
