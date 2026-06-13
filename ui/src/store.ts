@@ -510,6 +510,22 @@ function scopeResetSlice() {
   };
 }
 
+/// Make sure a detail-navigation target's namespace is visible. An active
+/// namespace filter that excludes it would keep the target's row out of the
+/// table (the subscription is namespace-scoped at the apiserver), so the
+/// navigation would silently never resolve. Extending — not replacing — the
+/// filter keeps the operator's other selections intact. Returns the same Set
+/// when nothing changes so referential equality holds.
+function namespacesIncluding(
+  current: Set<string>,
+  namespace: string | null,
+): Set<string> {
+  if (namespace == null || current.size === 0 || current.has(namespace)) {
+    return current;
+  }
+  return new Set([...current, namespace]);
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   contexts: [],
   contextsStatus: "idle",
@@ -1161,6 +1177,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         pendingDetail: entry,
         detailHistory: nextHistory,
         detailIndex: nextHistory.length - 1,
+        selectedNamespaces: namespacesIncluding(
+          s.selectedNamespaces,
+          namespace,
+        ),
       };
     }),
   pushDetailEntry: (kindId, namespace, name, clusterId = null) =>
@@ -1193,6 +1213,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         selectedKindId: e.kindId,
         selection: new Map<string, SelectionMeta>(),
         pendingDetail: { ...e },
+        selectedNamespaces: namespacesIncluding(
+          s.selectedNamespaces,
+          e.namespace,
+        ),
       };
     }),
   detailForward: () =>
@@ -1205,6 +1229,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         selectedKindId: e.kindId,
         selection: new Map<string, SelectionMeta>(),
         pendingDetail: { ...e },
+        selectedNamespaces: namespacesIncluding(
+          s.selectedNamespaces,
+          e.namespace,
+        ),
       };
     }),
   closeDetail: () =>

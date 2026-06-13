@@ -190,6 +190,13 @@ const AgeCell = memo(function AgeCell({
 // (1s → 2s → 3s); the cost is bounded to AgeCell instances, not the
 // rest of the table.
 const NOW_TICK_MS = 1000;
+
+// How long an unresolved cross-kind navigation (palette hit, detail link)
+// waits for its row before giving up with a "not found" toast. Generous —
+// a slow member of a virtual context can take a few seconds to finish its
+// initial LIST.
+const PENDING_DETAIL_TIMEOUT_MS = 6_000;
+
 function NowProvider({ children }: { children: ReactNode }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -550,15 +557,16 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       String(r.name ?? "") === pendingDetail.name &&
       (pendingDetail.namespace == null ||
         String(r.namespace ?? "") === pendingDetail.namespace);
-    // Prefer a row from the link's origin cluster (same name can exist on
-    // several members of a virtual context); fall back to any-name match for
-    // entries without a cluster (palette / chat links).
+    // Entries with an origin cluster match ONLY that cluster — falling back
+    // to an any-cluster name match would open the wrong member's same-named
+    // object while the origin cluster is still listing. The any-name path is
+    // reserved for entries without a cluster (older chat links).
     const match =
-      (pendingDetail.clusterId != null
+      pendingDetail.clusterId != null
         ? rows.find(
             (r) => r.__clusterId === pendingDetail.clusterId && byNameNs(r),
           )
-        : undefined) ?? rows.find(byNameNs);
+        : rows.find(byNameNs);
     if (match) {
       const ns = match.namespace;
       setDetailTarget({
@@ -571,6 +579,26 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       consumePendingDetail();
     }
   }, [pendingDetail, kind.id, rows, load.kind, consumePendingDetail]);
+
+  // A pendingDetail that never resolves (object deleted since the search
+  // index / link was built, or its cluster member is gone) must not dangle
+  // silently — tell the operator and clear it. The timer restarts whenever
+  // the entry changes; a successful resolve above consumes the entry and
+  // cancels via cleanup.
+  useEffect(() => {
+    if (!pendingDetail || pendingDetail.kindId !== kind.id) return;
+    if (load.kind !== "ready") return;
+    const entry = pendingDetail;
+    const handle = window.setTimeout(() => {
+      // Re-check against the live store — rows may have resolved (and
+      // consumed) the entry between scheduling and firing.
+      if (useAppStore.getState().pendingDetail !== entry) return;
+      consumePendingDetail();
+      const where = entry.namespace ? `${entry.namespace}/` : "";
+      toast.warn(`${where}${entry.name} not found — it may have been deleted`);
+    }, PENDING_DETAIL_TIMEOUT_MS);
+    return () => window.clearTimeout(handle);
+  }, [pendingDetail, kind.id, load.kind, consumePendingDetail]);
 
   const filtered = useMemo(() => {
     const parsed = parseTableFilter(tableFilter);

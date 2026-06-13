@@ -360,16 +360,15 @@ export type SubscribeResult = {
   init_done: boolean;
 };
 
-// Result row from the per-cluster search index. `blob` is the original
-// projected row (same shape as `ResourceRow`) so the palette can render
-// inline metadata (status, age) without a second round-trip. `score` is
-// FTS5 bm25; lower = more relevant.
+// Result row from the per-cluster search index. Deliberately lean — the
+// palette renders name / namespace / kind only, so the backend doesn't ship
+// the full projected row over IPC. `score` is FTS5 bm25; lower = more
+// relevant.
 export type SearchHit = {
   kind_id: string;
   uid: string;
   namespace: string | null;
   name: string;
-  blob: ResourceRow;
   score: number;
 };
 

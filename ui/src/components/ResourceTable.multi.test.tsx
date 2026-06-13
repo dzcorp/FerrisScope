@@ -5,7 +5,7 @@
 // assertions go through the header DOM and the store's tableCount, which
 // reflects the merged row map.
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, cleanup, act, screen } from "@testing-library/react";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
 import { resetEventMock } from "../test/tauri-event-mock";
@@ -201,5 +201,123 @@ describe("ResourceTable — multi-cluster merge", () => {
     });
     await act(async () => {});
     expect(calls).toEqual([CID_A]);
+  });
+});
+
+describe("ResourceTable — pendingDetail resolution", () => {
+  const entry = (clusterId: string | null, name: string) => ({
+    clusterId,
+    kindId: "configmaps",
+    namespace: "default",
+    name,
+  });
+
+  it("cluster-bearing entries never fall back to a same-named row on another member", async () => {
+    // Only prod-us has cm-x; the entry points at prod-eu. Opening prod-us's
+    // object here would be the wrong-cluster bug.
+    mockSubscribe({
+      [CID_A]: [],
+      [CID_B]: [{ uid: "u9", name: "cm-x", namespace: "default" }],
+    });
+    act(() => {
+      useAppStore.setState({ pendingDetail: entry(CID_A, "cm-x") });
+    });
+    await act(async () => {
+      render(
+        <ResourceTable
+          mode="dark"
+          clusters={TWO}
+          viewScopeId="vctx:test"
+          kind={configMapsKind}
+        />,
+      );
+    });
+    await act(async () => {});
+    // Not consumed — the origin cluster has no such row.
+    expect(useAppStore.getState().pendingDetail).not.toBeNull();
+  });
+
+  it("resolves against the origin cluster when its row is present", async () => {
+    // Resolution opens the DetailPanel, which fetches the ConfigMap detail —
+    // serve a minimal one so the panel renders instead of crashing.
+    setMockInvoke((cmd, args) => {
+      switch (cmd) {
+        case "subscribe_resource": {
+          const cid = String(args?.clusterId ?? "");
+          const uid = cid === CID_A ? "u1" : "u9";
+          return {
+            rows: [{ uid, name: "cm-x", namespace: "default" }],
+            init_done: true,
+          };
+        }
+        case "get_config_map_detail_cmd":
+          return {
+            meta: {
+              name: "cm-x",
+              namespace: "default",
+              uid: "u9",
+              created_at: null,
+              labels: [],
+              annotations: [],
+              controlled_by: null,
+              generation: null,
+              managers: [],
+            },
+            immutable: false,
+            data: [],
+          };
+        default:
+          return undefined;
+      }
+    });
+    act(() => {
+      useAppStore.setState({ pendingDetail: entry(CID_B, "cm-x") });
+    });
+    await act(async () => {
+      render(
+        <ResourceTable
+          mode="dark"
+          clusters={TWO}
+          viewScopeId="vctx:test"
+          kind={configMapsKind}
+        />,
+      );
+    });
+    await act(async () => {});
+    expect(useAppStore.getState().pendingDetail).toBeNull();
+  });
+
+  it("times out an unresolvable navigation with a warning toast", async () => {
+    vi.useFakeTimers();
+    try {
+      mockSubscribe({
+        [CID_A]: [{ uid: "u1", name: "cm-a", namespace: "default" }],
+      });
+      act(() => {
+        useAppStore.setState({ pendingDetail: entry(CID_A, "ghost") });
+      });
+      await act(async () => {
+        render(
+          <ResourceTable
+            mode="dark"
+            clusters={ONE}
+            viewScopeId={CID_A}
+            kind={configMapsKind}
+          />,
+        );
+      });
+      await act(async () => {});
+      expect(useAppStore.getState().pendingDetail).not.toBeNull();
+
+      await act(async () => {
+        vi.advanceTimersByTime(6_500);
+      });
+      const s = useAppStore.getState();
+      expect(s.pendingDetail).toBeNull();
+      const warn = s.toasts.find((t) => t.tone === "warn");
+      expect(warn?.text).toContain("default/ghost not found");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

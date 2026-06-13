@@ -293,6 +293,46 @@ describe("navigateToDetail", () => {
     expect(s.detailHistory.map((e) => e.name)).toEqual(["a", "x"]);
     expect(s.detailIndex).toBe(1);
   });
+
+  it("extends an active namespace filter to include the target namespace", () => {
+    // Without this, the table's apiserver-scoped subscription would never
+    // see the target's row and the navigation would silently no-op.
+    useAppStore.setState({ selectedNamespaces: new Set(["default"]) });
+    useAppStore.getState().navigateToDetail("pods", "kube-system", "coredns");
+    expect([...useAppStore.getState().selectedNamespaces].sort()).toEqual([
+      "default",
+      "kube-system",
+    ]);
+  });
+
+  it("leaves an empty (all-namespaces) filter and cluster-scoped targets alone", () => {
+    useAppStore.getState().navigateToDetail("pods", "kube-system", "coredns");
+    expect(useAppStore.getState().selectedNamespaces.size).toBe(0);
+    useAppStore.setState({ selectedNamespaces: new Set(["default"]) });
+    useAppStore.getState().navigateToDetail("nodes", null, "node-1");
+    expect([...useAppStore.getState().selectedNamespaces]).toEqual(["default"]);
+  });
+
+  it("keeps the same Set instance when the namespace is already visible", () => {
+    const ns = new Set(["default"]);
+    useAppStore.setState({ selectedNamespaces: ns });
+    useAppStore.getState().navigateToDetail("pods", "default", "a");
+    expect(useAppStore.getState().selectedNamespaces).toBe(ns);
+  });
+
+  it("detailBack re-extends the filter for the restored entry", () => {
+    useAppStore.setState({ selectedNamespaces: new Set(["default"]) });
+    useAppStore.getState().navigateToDetail("pods", "default", "a");
+    useAppStore.getState().navigateToDetail("pods", "kube-system", "b");
+    // Operator narrows the filter after navigating away…
+    useAppStore.setState({ selectedNamespaces: new Set(["kube-system"]) });
+    useAppStore.getState().detailBack();
+    // …going back to the default-namespace entry makes it visible again.
+    expect([...useAppStore.getState().selectedNamespaces].sort()).toEqual([
+      "default",
+      "kube-system",
+    ]);
+  });
 });
 
 describe("semverGt", () => {

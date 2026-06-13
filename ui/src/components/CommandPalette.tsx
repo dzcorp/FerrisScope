@@ -59,6 +59,11 @@ export function CommandPalette({ mode, onClose }: Props) {
   const [hits, setHits] = useState<{ clusterId: string; hit: SearchHit }[]>(
     [],
   );
+  // Members whose search call failed for the current query. Their absence
+  // from the results is shown, not silently swallowed — in a multi-cluster
+  // view "no hits from prod-eu" and "prod-eu unreachable" are different
+  // answers.
+  const [searchFailures, setSearchFailures] = useState<string[]>([]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -79,6 +84,7 @@ export function CommandPalette({ mode, onClose }: Props) {
     const trimmed = q.trim();
     if (activeClusterIds.length === 0 || trimmed.length < 2) {
       setHits([]);
+      setSearchFailures([]);
       return;
     }
     let cancelled = false;
@@ -87,13 +93,15 @@ export function CommandPalette({ mode, onClose }: Props) {
         activeClusterIds.map(async (cid) => {
           try {
             const res = await api.searchClusterIndex(cid, trimmed, 30);
-            return { clusterId: cid, hits: res };
+            return { clusterId: cid, hits: res, ok: true };
           } catch {
-            return { clusterId: cid, hits: [] as SearchHit[] };
+            return { clusterId: cid, hits: [] as SearchHit[], ok: false };
           }
         }),
       ).then((results) => {
-        if (!cancelled) setHits(mergeSearchHits(results, 30));
+        if (cancelled) return;
+        setHits(mergeSearchHits(results, 30));
+        setSearchFailures(results.filter((r) => !r.ok).map((r) => r.clusterId));
       });
     }, 100);
     return () => {
@@ -287,7 +295,15 @@ export function CommandPalette({ mode, onClose }: Props) {
     const multi = activeClusterIds.length > 1;
     const clusterName = (cid: string) =>
       contexts.find((c) => c.id === cid)?.name ?? cid;
-    return hits.map(({ clusterId, hit: h }) => {
+    // Index rows can outlive their kind id — e.g. a CRD upgraded to a new
+    // version leaves `crd:`/`wkcrd:` ids no rail entry matches until GC
+    // sweeps them. Navigating to a dead kind id is a guaranteed no-op, so
+    // drop those hits. Only filter once kinds are known: right after
+    // connect the rail hasn't published yet and everything would vanish.
+    const known = hits.filter(
+      ({ hit }) => kinds.length === 0 || kindByIdAttempt.has(hit.kind_id),
+    );
+    return known.map(({ clusterId, hit: h }) => {
       const kind = kindByIdAttempt.get(h.kind_id);
       const kindLabel = kind?.kind ?? h.kind_id;
       const where = h.namespace ? ` · ns:${h.namespace}` : "";
@@ -547,6 +563,21 @@ export function CommandPalette({ mode, onClose }: Props) {
                 })}
               </div>
             ))
+          )}
+          {searchFailures.length > 0 && (
+            <div
+              style={{
+                padding: "8px 18px 4px",
+                fontSize: FS_XS,
+                fontFamily: FF_MONO,
+                color: t.warn,
+              }}
+            >
+              search unavailable on{" "}
+              {searchFailures
+                .map((cid) => contexts.find((c) => c.id === cid)?.name ?? cid)
+                .join(", ")}
+            </div>
           )}
         </div>
 
