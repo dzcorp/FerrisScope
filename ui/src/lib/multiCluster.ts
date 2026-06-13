@@ -9,7 +9,12 @@
 // Every merged row therefore gets a scoped id `${clusterId}::${uid}` and
 // carries its origin cluster in `__clusterId`.
 
-import type { ResourceDelta, ResourceRow, SubscribeResult } from "../types";
+import type {
+  ClusterProbe,
+  ResourceDelta,
+  ResourceRow,
+  SubscribeResult,
+} from "../types";
 
 /// A resource row tagged with its origin cluster. `__sid` is the scoped uid
 /// (`${clusterId}::${uid}`) used as the table row id and selection key; the
@@ -106,6 +111,93 @@ export function clusterColorIndexMap(members: string[]): Record<string, number> 
     out[id] = i;
   });
   return out;
+}
+
+/// Fleet info for a virtual context, aggregated across its members so the
+/// fleet card can render the same anatomy as a single-cluster card (load
+/// gauges, node/pod counts, health dot) in every fleet view style.
+export type VirtualContextAggregate = {
+  /// Members no longer present in any kubeconfig source.
+  missing: number;
+  /// Members whose last probe explicitly failed.
+  unreachable: number;
+  /// Σ nodes across members reporting a count; null when none have data.
+  nodes: number | null;
+  /// Σ pods across members reporting a count; null when none have data.
+  pods: number | null;
+  /// Σ used / Σ capacity across members reporting BOTH sides; null when
+  /// none do. Per-member partial data (used without capacity) is excluded
+  /// so one lopsided probe can't skew the fleet-wide ratio.
+  cpuRatio: number | null;
+  /// Same contract as `cpuRatio` for memory.
+  memRatio: number | null;
+  /// Mirrors the single-card dot semantics: any missing or unreachable
+  /// member → "bad"; every present member probed healthy → "good";
+  /// otherwise "unknown" (mixed unknowns / not yet probed).
+  health: "good" | "bad" | "unknown";
+};
+
+export function aggregateVirtualContext(
+  members: string[],
+  knownContextIds: ReadonlySet<string>,
+  probes: Record<string, ClusterProbe>,
+): VirtualContextAggregate {
+  let missing = 0;
+  let unreachable = 0;
+  let present = 0;
+  let probedHealthy = 0;
+  let nodes: number | null = null;
+  let pods: number | null = null;
+  let cpuUsed = 0;
+  let cpuCap = 0;
+  let memUsed = 0;
+  let memCap = 0;
+  for (const id of members) {
+    if (!knownContextIds.has(id)) {
+      // A stale probe for a member that left the kubeconfig must not keep
+      // contributing numbers — skip it entirely.
+      missing++;
+      continue;
+    }
+    present++;
+    const p = probes[id];
+    if (!p) continue;
+    if (p.healthy === false) unreachable++;
+    if (p.healthy === true) probedHealthy++;
+    if (p.nodes != null) nodes = (nodes ?? 0) + p.nodes;
+    if (p.pods != null) pods = (pods ?? 0) + p.pods;
+    if (
+      p.cpu_used_milli != null &&
+      p.cpu_capacity_milli != null &&
+      p.cpu_capacity_milli > 0
+    ) {
+      cpuUsed += p.cpu_used_milli;
+      cpuCap += p.cpu_capacity_milli;
+    }
+    if (
+      p.mem_used_mib != null &&
+      p.mem_capacity_mib != null &&
+      p.mem_capacity_mib > 0
+    ) {
+      memUsed += p.mem_used_mib;
+      memCap += p.mem_capacity_mib;
+    }
+  }
+  const health =
+    missing > 0 || unreachable > 0
+      ? "bad"
+      : present > 0 && probedHealthy === present
+        ? "good"
+        : "unknown";
+  return {
+    missing,
+    unreachable,
+    nodes,
+    pods,
+    cpuRatio: cpuCap > 0 ? cpuUsed / cpuCap : null,
+    memRatio: memCap > 0 ? memUsed / memCap : null,
+    health,
+  };
 }
 
 /// Word-ish boundaries cluster names are tokenized on. Covers kebab/snake

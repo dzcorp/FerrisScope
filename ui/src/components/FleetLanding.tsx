@@ -6,6 +6,7 @@ import type { ClusterProbe, ContextInfo, VirtualContext } from "../types";
 import {
   FF_MONO,
   type ThemeMode,
+  type Tokens,
   clusterAccent,
   R_LG,
   R_MD,
@@ -16,9 +17,12 @@ import {
   FS_XL,
   FS_XS,
 } from "../theme";
+import { MOD_KEY } from "../lib/keyboard";
 import {
+  aggregateVirtualContext,
   clusterColorIndexMap,
   defaultVirtualContextName,
+  type VirtualContextAggregate,
 } from "../lib/multiCluster";
 import {
   Btn,
@@ -318,8 +322,8 @@ export function FleetLanding({ mode, onSelect }: Props) {
             Cluster fleet
           </div>
           <div style={{ fontSize: FS_MD, color: t.textDim }}>
-            Pick a context to connect, or ⌘-click two or more to save them as
-            a virtual context. {contexts.length} loaded across{" "}
+            Pick a context to connect, or {MOD_KEY}-click two or more to save
+            them as a virtual context. {contexts.length} loaded across{" "}
             {orderedGroups.length} group{orderedGroups.length === 1 ? "" : "s"}.
           </div>
         </div>
@@ -332,6 +336,7 @@ export function FleetLanding({ mode, onSelect }: Props) {
           virtualContexts={virtualContexts}
           contexts={contexts}
           probes={probes}
+          view={fleetView}
           onOpen={(id) => selectVirtualContext(id)}
           onMenu={(pos, vctx) => setVctxMenu({ pos, vctx })}
         />
@@ -482,7 +487,7 @@ function fleetMenuItems(
     },
     {
       kind: "item",
-      label: "Toggle in selection (⌘-click)",
+      label: `Toggle in selection (${MOD_KEY}-click)`,
       onClick: () => onTogglePick(c.id),
     },
   ];
@@ -547,14 +552,16 @@ function fleetMenuItems(
   return items;
 }
 
-// Saved virtual contexts — rendered as a distinct card section above the
-// kubeconfig groups. A card opens all members at once; right-click offers
-// Edit (re-enters pick mode seeded) and Delete.
+// Saved virtual contexts — rendered as a distinct section above the
+// kubeconfig groups, following the same fleet-view style (tiles / mini /
+// rows) as single-cluster cards. A card opens all members at once;
+// right-click offers Edit (re-enters pick mode seeded) and Delete.
 function VirtualContextSection({
   mode,
   virtualContexts,
   contexts,
   probes,
+  view,
   onOpen,
   onMenu,
 }: {
@@ -562,38 +569,72 @@ function VirtualContextSection({
   virtualContexts: VirtualContext[];
   contexts: ContextInfo[];
   probes: Record<string, ClusterProbe>;
+  view: FleetView;
   onOpen: (id: string) => void;
   onMenu: (pos: MenuPosition, vctx: VirtualContext) => void;
 }) {
   const t = useResolvedTheme().tokens;
-  return (
-    <div style={{ marginBottom: 28 }}>
+  const header = (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        marginBottom: 12,
+      }}
+    >
+      <Eyebrow t={t}>Virtual contexts</Eyebrow>
+      <div style={{ flex: 1, height: 1, background: t.border }} />
       <div
         style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 12,
+          fontSize: FS_SM,
+          color: t.textMuted,
+          fontVariantNumeric: "tabular-nums",
+          fontFamily: FF_MONO,
         }}
       >
-        <Eyebrow t={t}>Virtual contexts</Eyebrow>
-        <div style={{ flex: 1, height: 1, background: t.border }} />
+        {virtualContexts.length}
+      </div>
+    </div>
+  );
+
+  if (view === "rows") {
+    return (
+      <div style={{ marginBottom: 28 }}>
+        {header}
         <div
           style={{
-            fontSize: FS_SM,
-            color: t.textMuted,
-            fontVariantNumeric: "tabular-nums",
-            fontFamily: FF_MONO,
+            border: `1px solid ${t.border}`,
+            borderRadius: R_LG,
+            background: t.surface,
+            overflow: "hidden",
           }}
         >
-          {virtualContexts.length}
+          {virtualContexts.map((v, i) => (
+            <VirtualContextRow
+              key={v.id}
+              mode={mode}
+              vctx={v}
+              contexts={contexts}
+              probes={probes}
+              isLast={i === virtualContexts.length - 1}
+              onOpen={() => onOpen(v.id)}
+              onMenu={(pos) => onMenu(pos, v)}
+            />
+          ))}
         </div>
       </div>
+    );
+  }
+
+  return (
+    <div style={{ marginBottom: 28 }}>
+      {header}
       <div
         style={{
           display: "flex",
           flexWrap: "wrap",
-          gap: 12,
+          gap: view === "mini" ? 8 : 12,
           alignItems: "stretch",
         }}
       >
@@ -604,6 +645,7 @@ function VirtualContextSection({
             vctx={v}
             contexts={contexts}
             probes={probes}
+            view={view}
             onOpen={() => onOpen(v.id)}
             onMenu={(pos) => onMenu(pos, v)}
           />
@@ -613,11 +655,111 @@ function VirtualContextSection({
   );
 }
 
-function VirtualContextCard({
+// Per-member resolution shared by every virtual-context variant: chip data
+// (name + stable color) plus the aggregated fleet numbers.
+function resolveVctx(
+  vctx: VirtualContext,
+  contexts: ContextInfo[],
+  probes: Record<string, ClusterProbe>,
+): {
+  resolved: { id: string; ctx: ContextInfo | null }[];
+  colorIdx: Record<string, number>;
+  agg: VirtualContextAggregate;
+} {
+  const colorIdx = clusterColorIndexMap(vctx.members);
+  const resolved = vctx.members.map((id) => ({
+    id,
+    ctx: contexts.find((c) => c.id === id) ?? null,
+  }));
+  const known = new Set(contexts.map((c) => c.id));
+  const agg = aggregateVirtualContext(vctx.members, known, probes);
+  return { resolved, colorIdx, agg };
+}
 
+// Aggregated stat fragments for the summary line / row stats. Missing and
+// unreachable members are called out by count — the chips carry the
+// per-member detail.
+function vctxStats(agg: VirtualContextAggregate): string[] {
+  const bits: string[] = [];
+  if (agg.nodes != null) bits.push(`${agg.nodes} nodes`);
+  if (agg.pods != null) bits.push(`${agg.pods} pods`);
+  if (agg.missing > 0) bits.push(`${agg.missing} missing`);
+  if (agg.unreachable > 0) bits.push(`${agg.unreachable} unreachable`);
+  return bits;
+}
+
+function vctxDotColor(t: Tokens, agg: VirtualContextAggregate): string {
+  return agg.health === "bad"
+    ? t.bad
+    : agg.health === "good"
+      ? t.good
+      : t.unknown;
+}
+
+// One colored dot + name per member; missing members render struck-through
+// in the bad color. `dotsOnly` drops the names for the Mini layout.
+function VctxMemberChips({
+  resolved,
+  colorIdx,
+  dotsOnly,
+}: {
+  resolved: { id: string; ctx: ContextInfo | null }[];
+  colorIdx: Record<string, number>;
+  dotsOnly?: boolean;
+}) {
+  const t = useResolvedTheme().tokens;
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: dotsOnly ? 4 : 8,
+        flexWrap: "wrap",
+        minWidth: 0,
+      }}
+    >
+      {resolved.map((m) => (
+        <span
+          key={m.id}
+          title={m.ctx ? m.ctx.name : `${m.id} (missing from kubeconfig)`}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
+            color: m.ctx ? t.textDim : t.bad,
+            textDecoration: m.ctx ? undefined : "line-through",
+            whiteSpace: "nowrap",
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: clusterAccent(colorIdx[m.id] ?? 0),
+              flexShrink: 0,
+              outline: m.ctx ? undefined : `1px solid ${t.bad}`,
+            }}
+          />
+          {!dotsOnly && (m.ctx?.name ?? m.id)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+// Tile + Mini variants. Tiles mirror FleetCard's anatomy — aggregated
+// CPU/Mem gauges, title row, mono summary line — plus the member chips.
+// Mini drops gauges and stats and shows just dot + name + member dots.
+function VirtualContextCard({
+  mode,
   vctx,
   contexts,
   probes,
+  view,
   onOpen,
   onMenu,
 }: {
@@ -625,61 +767,57 @@ function VirtualContextCard({
   vctx: VirtualContext;
   contexts: ContextInfo[];
   probes: Record<string, ClusterProbe>;
+  view: "tiles" | "mini";
   onOpen: () => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
   const t = useResolvedTheme().tokens;
-  const colorIdx = clusterColorIndexMap(vctx.members);
-  const resolved = vctx.members.map((id) => ({
-    id,
-    ctx: contexts.find((c) => c.id === id) ?? null,
-    probe: probes[id] ?? null,
-  }));
-  const live = resolved.filter((m) => m.ctx !== null);
-  // Aggregate health: any explicit failure → red; all probed healthy →
-  // green; otherwise grey (mixed unknowns / not yet probed).
-  const anyBad =
-    live.some((m) => m.probe?.healthy === false) ||
-    resolved.some((m) => m.ctx === null);
-  const allGood =
-    live.length > 0 && live.every((m) => m.probe?.healthy === true);
-  const dotColor = anyBad ? t.bad : allGood ? t.good : t.unknown;
+  const { resolved, colorIdx, agg } = resolveVctx(vctx, contexts, probes);
+  const dotColor = vctxDotColor(t, agg);
 
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        onMenu({ x: e.clientX, y: e.clientY });
-      }}
-      style={{
-        border: `1px solid ${t.border}`,
-        borderRadius: R_LG,
-        background: t.surface,
-        padding: "12px 14px",
-        textAlign: "left",
-        cursor: "pointer",
-        fontFamily: "inherit",
-        color: "inherit",
-        transition: "border-color .15s, background .15s",
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-        minWidth: 240,
-        maxWidth: 420,
-        flex: "0 1 auto",
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.borderColor = t.accent;
-        e.currentTarget.style.background = t.accentSoft;
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = t.border;
-        e.currentTarget.style.background = t.surface;
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+  const buttonBase: React.CSSProperties = {
+    border: `1px solid ${t.border}`,
+    borderRadius: R_LG,
+    background: t.surface,
+    textAlign: "left",
+    cursor: "pointer",
+    fontFamily: "inherit",
+    color: "inherit",
+    transition: "border-color .15s, background .15s",
+  };
+  const hoverHandlers = {
+    onMouseEnter: (e: React.MouseEvent<HTMLButtonElement>) => {
+      e.currentTarget.style.borderColor = t.accent;
+      e.currentTarget.style.background = t.accentSoft;
+    },
+    onMouseLeave: (e: React.MouseEvent<HTMLButtonElement>) => {
+      e.currentTarget.style.borderColor = t.border;
+      e.currentTarget.style.background = t.surface;
+    },
+  };
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    onMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  if (view === "mini") {
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        onContextMenu={onContextMenu}
+        style={{
+          ...buttonBase,
+          padding: "8px 10px",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          minWidth: 180,
+          maxWidth: 420,
+          flex: "0 1 auto",
+        }}
+        {...hoverHandlers}
+      >
         <span
           aria-hidden
           style={{
@@ -692,9 +830,9 @@ function VirtualContextCard({
         />
         <span
           style={{
-            fontSize: FS_LG,
+            fontSize: FS_MD,
             fontWeight: 600,
-            letterSpacing: -0.3,
+            letterSpacing: -0.2,
             color: t.text,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -704,6 +842,7 @@ function VirtualContextCard({
         >
           {vctx.name}
         </span>
+        <VctxMemberChips resolved={resolved} colorIdx={colorIdx} dotsOnly />
         <span
           style={{
             marginLeft: "auto",
@@ -716,43 +855,211 @@ function VirtualContextCard({
         >
           {vctx.members.length} clusters
         </span>
+      </button>
+    );
+  }
+
+  const colorFor = (r: number) =>
+    r > 0.8 ? t.bad : r > 0.65 ? t.warn : t.good;
+  const stats = vctxStats(agg);
+
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      onContextMenu={onContextMenu}
+      style={{
+        ...buttonBase,
+        padding: "12px 14px",
+        display: "flex",
+        alignItems: "center",
+        gap: 14,
+        minWidth: 300,
+        maxWidth: 560,
+        flex: "0 1 auto",
+      }}
+      {...hoverHandlers}
+    >
+      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+        <GaugeWithLabel
+          mode={mode}
+          ratio={agg.cpuRatio}
+          color={agg.cpuRatio != null ? colorFor(agg.cpuRatio) : t.unknown}
+          label="cpu"
+        />
+        <GaugeWithLabel
+          mode={mode}
+          ratio={agg.memRatio}
+          color={agg.memRatio != null ? colorFor(agg.memRatio) : t.unknown}
+          label="mem"
+        />
       </div>
       <div
         style={{
+          flex: 1,
+          minWidth: 0,
           display: "flex",
-          alignItems: "center",
-          gap: 8,
-          flexWrap: "wrap",
+          flexDirection: "column",
+          gap: 6,
         }}
       >
-        {resolved.map((m) => (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span
-            key={m.id}
-            title={m.ctx ? m.ctx.name : `${m.id} (missing from kubeconfig)`}
+            aria-hidden
             style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 5,
-              fontSize: FS_XS,
-              fontFamily: FF_MONO,
-              color: m.ctx ? t.textDim : t.bad,
-              textDecoration: m.ctx ? undefined : "line-through",
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: dotColor,
+              flexShrink: 0,
+            }}
+          />
+          <span
+            style={{
+              fontSize: FS_LG,
+              fontWeight: 600,
+              letterSpacing: -0.3,
+              color: t.text,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              minWidth: 0,
             }}
           >
-            <span
-              aria-hidden
-              style={{
-                width: 7,
-                height: 7,
-                borderRadius: "50%",
-                background: clusterAccent(colorIdx[m.id] ?? 0),
-                flexShrink: 0,
-              }}
-            />
-            {m.ctx?.name ?? m.id}
+            {vctx.name}
           </span>
-        ))}
+          <span
+            style={{
+              marginLeft: "auto",
+              fontFamily: FF_MONO,
+              fontSize: FS_XS,
+              color: t.textMuted,
+              flexShrink: 0,
+              paddingLeft: 8,
+            }}
+          >
+            {vctx.members.length} clusters
+          </span>
+        </div>
+        <div
+          style={{
+            fontSize: FS_SM,
+            color: t.textMuted,
+            fontVariantNumeric: "tabular-nums",
+            fontFamily: FF_MONO,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {stats.length > 0 ? stats.join(" · ") : "probing…"}
+        </div>
+        <VctxMemberChips resolved={resolved} colorIdx={colorIdx} />
+      </div>
+    </button>
+  );
+}
+
+// Row variant: one line per virtual context inside the bordered list, same
+// anatomy as FleetRow — dot, name, member chips, right-aligned mono stats.
+function VirtualContextRow({
+  vctx,
+  contexts,
+  probes,
+  isLast,
+  onOpen,
+  onMenu,
+}: {
+  mode: ThemeMode;
+  vctx: VirtualContext;
+  contexts: ContextInfo[];
+  probes: Record<string, ClusterProbe>;
+  isLast: boolean;
+  onOpen: () => void;
+  onMenu: (pos: MenuPosition) => void;
+}) {
+  const t = useResolvedTheme().tokens;
+  const { resolved, colorIdx, agg } = resolveVctx(vctx, contexts, probes);
+  const dotColor = vctxDotColor(t, agg);
+  const stats = [`${vctx.members.length} clusters`, ...vctxStats(agg)];
+
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onMenu({ x: e.clientX, y: e.clientY });
+      }}
+      style={{
+        width: "100%",
+        border: "none",
+        borderBottom: isLast ? "none" : `1px solid ${t.border}`,
+        background: "transparent",
+        padding: "8px 14px",
+        textAlign: "left",
+        cursor: "pointer",
+        fontFamily: "inherit",
+        color: "inherit",
+        transition: "background .12s",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = t.accentSoft;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "transparent";
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: dotColor,
+          flexShrink: 0,
+        }}
+      />
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          overflow: "hidden",
+        }}
+      >
+        <span
+          style={{
+            fontSize: FS_MD,
+            fontWeight: 600,
+            letterSpacing: -0.2,
+            color: t.text,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+            flexShrink: 1,
+          }}
+        >
+          {vctx.name}
+        </span>
+        <VctxMemberChips resolved={resolved} colorIdx={colorIdx} />
+      </div>
+      <div
+        style={{
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
+          color: t.textMuted,
+          fontVariantNumeric: "tabular-nums",
+          flexShrink: 0,
+        }}
+      >
+        {stats.join(" · ")}
       </div>
     </button>
   );

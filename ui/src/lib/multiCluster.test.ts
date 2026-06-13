@@ -5,6 +5,7 @@ import {
   scopeRow,
   applyScopedDelta,
   mergeScopedSnapshots,
+  aggregateVirtualContext,
   clusterColorIndexMap,
   groupByCluster,
   bulkClusterPrefix,
@@ -15,6 +16,7 @@ import {
   type ScopedRow,
 } from "./multiCluster";
 import { CLUSTER_ACCENTS, clusterAccent } from "../theme";
+import type { ClusterProbe } from "../types";
 
 // Real-world shaped cluster id: the composite ContextInfo.id itself
 // contains "::", which is exactly the parsing hazard these tests pin.
@@ -330,5 +332,106 @@ describe("namespaceClusterTags", () => {
     expect(tags["us-only"]).toEqual([
       { clusterId: "default::fleet-prod-us", label: "us" },
     ]);
+  });
+});
+
+describe("aggregateVirtualContext", () => {
+  const probe = (over: Partial<ClusterProbe>): ClusterProbe => ({
+    context_name: "x",
+    server_version: null,
+    nodes: null,
+    pods: null,
+    cpu_used_milli: null,
+    cpu_capacity_milli: null,
+    mem_used_mib: null,
+    mem_capacity_mib: null,
+    healthy: null,
+    fetched_at_unix_ms: 0,
+    last_error: null,
+    ...over,
+  });
+  const known = new Set([CID_A, CID_B]);
+
+  it("sums nodes/pods across members and pools cpu/mem into one ratio", () => {
+    const agg = aggregateVirtualContext([CID_A, CID_B], known, {
+      [CID_A]: probe({
+        nodes: 3,
+        pods: 10,
+        cpu_used_milli: 500,
+        cpu_capacity_milli: 1000,
+        mem_used_mib: 1024,
+        mem_capacity_mib: 4096,
+        healthy: true,
+      }),
+      [CID_B]: probe({
+        nodes: 2,
+        pods: 20,
+        cpu_used_milli: 250,
+        cpu_capacity_milli: 500,
+        mem_used_mib: 1024,
+        mem_capacity_mib: 4096,
+        healthy: true,
+      }),
+    });
+    expect(agg.nodes).toBe(5);
+    expect(agg.pods).toBe(30);
+    expect(agg.cpuRatio).toBeCloseTo(750 / 1500);
+    expect(agg.memRatio).toBeCloseTo(2048 / 8192);
+    expect(agg.health).toBe("good");
+    expect(agg.missing).toBe(0);
+    expect(agg.unreachable).toBe(0);
+  });
+
+  it("returns nulls when no member has data yet", () => {
+    const agg = aggregateVirtualContext([CID_A, CID_B], known, {});
+    expect(agg.nodes).toBeNull();
+    expect(agg.pods).toBeNull();
+    expect(agg.cpuRatio).toBeNull();
+    expect(agg.memRatio).toBeNull();
+    expect(agg.health).toBe("unknown");
+  });
+
+  it("excludes per-member partial cpu data (used without capacity) from the ratio", () => {
+    const agg = aggregateVirtualContext([CID_A, CID_B], known, {
+      [CID_A]: probe({ cpu_used_milli: 900, healthy: true }),
+      [CID_B]: probe({
+        cpu_used_milli: 100,
+        cpu_capacity_milli: 1000,
+        healthy: true,
+      }),
+    });
+    expect(agg.cpuRatio).toBeCloseTo(0.1);
+  });
+
+  it("a member missing from the kubeconfig is counted and its stale probe ignored", () => {
+    const agg = aggregateVirtualContext(
+      [CID_A, "default::gone"],
+      known,
+      {
+        [CID_A]: probe({ nodes: 3, healthy: true }),
+        "default::gone": probe({ nodes: 99, healthy: true }),
+      },
+    );
+    expect(agg.missing).toBe(1);
+    expect(agg.nodes).toBe(3);
+    expect(agg.health).toBe("bad");
+  });
+
+  it("an unreachable member flips health to bad but keeps the others' numbers", () => {
+    const agg = aggregateVirtualContext([CID_A, CID_B], known, {
+      [CID_A]: probe({ nodes: 3, pods: 10, healthy: true }),
+      [CID_B]: probe({ healthy: false, last_error: "timeout" }),
+    });
+    expect(agg.unreachable).toBe(1);
+    expect(agg.nodes).toBe(3);
+    expect(agg.pods).toBe(10);
+    expect(agg.health).toBe("bad");
+  });
+
+  it("stays unknown when only some members are probed healthy", () => {
+    const agg = aggregateVirtualContext([CID_A, CID_B], known, {
+      [CID_A]: probe({ healthy: true }),
+    });
+    expect(agg.health).toBe("unknown");
   });
 });

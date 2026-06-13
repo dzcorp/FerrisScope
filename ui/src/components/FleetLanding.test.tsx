@@ -202,6 +202,146 @@ describe("FleetLanding virtual-context flow", () => {
   });
 });
 
+// ─── Virtual context fleet-view variants ────────────────────────────────────
+
+const fleetProbe = (name: string, over: Record<string, unknown>) => ({
+  context_name: name,
+  server_version: "v1.30",
+  nodes: null,
+  pods: null,
+  cpu_used_milli: null,
+  cpu_capacity_milli: null,
+  mem_used_mib: null,
+  mem_capacity_mib: null,
+  healthy: true,
+  fetched_at_unix_ms: 0,
+  last_error: null,
+  ...over,
+});
+
+const probedFleetMock = () =>
+  setMockInvoke((cmd) => {
+    switch (cmd) {
+      case "list_contexts":
+        return [fleetCtx("default::a", "alpha"), fleetCtx("default::b", "beta")];
+      case "get_fleet_cache":
+        return {
+          "default::a": fleetProbe("default::a", {
+            nodes: 3,
+            pods: 10,
+            cpu_used_milli: 500,
+            cpu_capacity_milli: 1000,
+            mem_used_mib: 1024,
+            mem_capacity_mib: 4096,
+          }),
+          "default::b": fleetProbe("default::b", {
+            nodes: 2,
+            pods: 20,
+            cpu_used_milli: 250,
+            cpu_capacity_milli: 500,
+            mem_used_mib: 1024,
+            mem_capacity_mib: 4096,
+          }),
+        };
+      case "refresh_fleet":
+        return undefined;
+      default:
+        return undefined;
+    }
+  });
+
+const setFleetView = (view: "tiles" | "mini" | "rows") =>
+  act(() => {
+    useAppStore.setState((s) => ({
+      settings: { ...s.settings, fleetView: view },
+    }));
+  });
+
+const seedVctx = () =>
+  act(() => {
+    useAppStore.setState({
+      virtualContexts: [
+        { id: "v1", name: "edge", members: ["default::a", "default::b"] },
+      ],
+    });
+  });
+
+describe("FleetLanding virtual-context view variants", () => {
+  afterEach(() => setFleetView("tiles"));
+
+  it("tiles: shows aggregated gauges and summed node/pod stats", async () => {
+    resetVctxState();
+    probedFleetMock();
+    seedVctx();
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={() => {}} />);
+    });
+    await act(async () => {});
+
+    // Summed across members: 3+2 nodes, 10+20 pods — distinct from any
+    // single member's "3 nodes · 10 pods" summary line.
+    expect(screen.getByText("5 nodes · 30 pods")).toBeTruthy();
+    // Gauge pair on the vctx card plus one pair per member FleetCard.
+    expect(screen.getAllByText("cpu")).toHaveLength(3);
+    expect(screen.getAllByText("mem")).toHaveLength(3);
+    // Member chips keep per-member identity on the card.
+    expect(screen.getAllByText("alpha").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("2 clusters")).toBeTruthy();
+  });
+
+  it("mini: compact card without gauges or stats, count retained", async () => {
+    resetVctxState();
+    probedFleetMock();
+    seedVctx();
+    setFleetView("mini");
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={() => {}} />);
+    });
+    await act(async () => {});
+
+    expect(screen.getByText("2 clusters")).toBeTruthy();
+    expect(screen.queryByText("cpu")).toBeNull();
+    expect(screen.queryByText("5 nodes · 30 pods")).toBeNull();
+    // Still opens on click.
+    fireEvent.click(screen.getByText("edge"));
+    expect(useAppStore.getState().selectedVirtualContextId).toBe("v1");
+  });
+
+  it("rows: renders one row with member chips and joined stats", async () => {
+    resetVctxState();
+    probedFleetMock();
+    seedVctx();
+    setFleetView("rows");
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={() => {}} />);
+    });
+    await act(async () => {});
+
+    expect(screen.getByText("2 clusters · 5 nodes · 30 pods")).toBeTruthy();
+    expect(screen.queryByText("cpu")).toBeNull();
+    fireEvent.click(screen.getByText("edge"));
+    expect(useAppStore.getState().selectedVirtualContextId).toBe("v1");
+  });
+
+  it("flags a member missing from the kubeconfig in the stats line", async () => {
+    resetVctxState();
+    probedFleetMock();
+    act(() => {
+      useAppStore.setState({
+        virtualContexts: [
+          { id: "v2", name: "edge", members: ["default::a", "default::gone"] },
+        ],
+      });
+    });
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={() => {}} />);
+    });
+    await act(async () => {});
+
+    expect(screen.getByText("3 nodes · 10 pods · 1 missing")).toBeTruthy();
+  });
+});
+
 describe("FleetLanding generated names + temporary open", () => {
   it("saves with the pregenerated name when the input is left empty", async () => {
     resetVctxState();
