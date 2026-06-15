@@ -492,6 +492,68 @@ describe("ErrorBlock — classification branches", () => {
     expect(getByText(/permission to modify/i)).toBeInTheDocument();
   });
 
+  it("422 immutable Pod ('Forbidden:' inside an Invalid message) → 'Field can't be changed', NOT 'Access denied'", () => {
+    const { getByText, queryByText } = render(
+      <ErrorBlock
+        t={t}
+        message={
+          'kube error: ApiError: Pod "web" is invalid: spec: Forbidden: ' +
+          "pod updates may not change fields other than `spec.containers[*].image` (Invalid)"
+        }
+        kindLabel="Pod"
+        verb="save"
+      />,
+    );
+    expect(getByText("Field can't be changed")).toBeInTheDocument();
+    expect(getByText(/immutable/i)).toBeInTheDocument();
+    // The substring "Forbidden" must NOT trip the RBAC branch.
+    expect(queryByText("Access denied")).not.toBeInTheDocument();
+  });
+
+  it("immutable Deployment selector → 'Field can't be changed'", () => {
+    const { getByText, queryByText } = render(
+      <ErrorBlock
+        t={t}
+        message={
+          'kube error: ApiError: Deployment.apps "api" is invalid: ' +
+          "spec.selector: Invalid value: ...: field is immutable (Invalid)"
+        }
+        kindLabel="Deployment"
+        verb="save"
+      />,
+    );
+    expect(getByText("Field can't be changed")).toBeInTheDocument();
+    expect(queryByText("Access denied")).not.toBeInTheDocument();
+  });
+
+  it("inline error exposes a 'Show details' toggle that reveals the raw apiserver message", () => {
+    const raw =
+      'kube error: ApiError: ConfigMap "x" is invalid: data[bad key]: Invalid value: "bad key": a valid key must match [-._a-zA-Z0-9]+';
+    const { getByText, queryByText } = render(
+      <ErrorBlock t={t} message={raw} kindLabel="ConfigMap" verb="save" inline />,
+    );
+    expect(getByText("Invalid change")).toBeInTheDocument();
+    // Raw field detail hidden until toggled.
+    expect(queryByText(/a valid key must match/)).not.toBeInTheDocument();
+    fireEvent.click(getByText("Show details"));
+    expect(getByText(/a valid key must match/)).toBeInTheDocument();
+    expect(getByText("Hide details")).toBeInTheDocument();
+  });
+
+  it("inline error hides the toggle when the body is already the full message", () => {
+    // A short auth-plugin failure sets body === raw, so a Show details link
+    // would only re-print the same line — it must not render.
+    const { getByText, queryByText } = render(
+      <ErrorBlock
+        t={t}
+        message="auth exec command 'gcloud' failed with status exit status: 1"
+        inline
+      />,
+    );
+    expect(getByText("Auth plugin failed")).toBeInTheDocument();
+    expect(queryByText("Show details")).not.toBeInTheDocument();
+  });
+
   it("401 → 'Authentication failed'", () => {
     const { getByText } = render(
       <ErrorBlock t={t} message="kube error: unauthorized" />,

@@ -1416,25 +1416,75 @@ export function ErrorBlock({
 }) {
   const c = classifyDetailError(message, kindLabel, verb);
   const [showRaw, setShowRaw] = useState(false);
+  // Only offer the raw toggle when it actually reveals more than the friendly
+  // body — several classifications set `body` to the raw string itself, where
+  // a "Show details" link would just re-print the same line. The 422 paths
+  // ("Invalid change" / "Field can't be changed") whose body literally tells
+  // the operator to open Show details always carry a distinct raw message, so
+  // they pass this guard.
+  const hasMore = c.raw.trim() !== c.body.trim();
 
   if (inline) {
     return (
-      <span
+      <div
         className="fs-selectable"
-        style={{
-          fontFamily: FF_MONO,
-          fontSize: FS_SM,
-          color: t.bad,
-          display: "inline-flex",
-          alignItems: "baseline",
-          gap: 8,
-          flexWrap: "wrap",
-          cursor: "text",
-        }}
+        style={{ display: "flex", flexDirection: "column", gap: 4, cursor: "text" }}
       >
-        <span style={{ fontWeight: 600 }}>{c.title}</span>
-        <span style={{ color: t.textMuted, fontWeight: 400 }}>{c.body}</span>
-      </span>
+        <span
+          style={{
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
+            color: t.bad,
+            display: "inline-flex",
+            alignItems: "baseline",
+            gap: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          <span style={{ fontWeight: 600 }}>{c.title}</span>
+          <span style={{ color: t.textMuted, fontWeight: 400 }}>{c.body}</span>
+          {hasMore && (
+            <button
+              type="button"
+              onClick={() => setShowRaw((v) => !v)}
+              style={{
+                background: "none",
+                border: "none",
+                color: t.textMuted,
+                fontSize: FS_SM,
+                fontFamily: FF_MONO,
+                cursor: "pointer",
+                textDecoration: "underline",
+                padding: 0,
+              }}
+            >
+              {showRaw ? "Hide details" : "Show details"}
+            </button>
+          )}
+        </span>
+        {hasMore && showRaw && (
+          <pre
+            className="fs-selectable"
+            style={{
+              padding: "8px 12px",
+              background: t.surfaceAlt,
+              border: `1px solid ${t.borderSoft}`,
+              borderRadius: R_MD,
+              color: t.textMuted,
+              fontFamily: FF_MONO,
+              fontSize: FS_SM,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              margin: 0,
+              maxHeight: 200,
+              overflow: "auto",
+              textAlign: "left",
+            }}
+          >
+            {c.raw}
+          </pre>
+        )}
+      </div>
     );
   }
   return (
@@ -1578,6 +1628,30 @@ function classifyDetailError(
         verb === "save"
           ? `The ${noun} was deleted while you were editing — close and re-open to refresh.`
           : `The ${noun} doesn't exist — it may have been deleted, or the cluster is on a different revision.`,
+      raw: trimmed,
+    };
+  }
+  // Kubernetes embeds "Forbidden:" *inside* HTTP 422 validation messages to
+  // mean "this field can't be changed" — e.g. a running Pod ("Pod \"x\" is
+  // invalid: spec: Forbidden: pod updates may not change fields other than
+  // …") or an immutable Deployment selector ("… is invalid: spec.selector:
+  // … field is immutable"). That is NOT an RBAC denial, so it MUST be matched
+  // before the generic 403 branch below — otherwise a full-access operator
+  // editing a Pod gets a misleading "Access denied". A genuine RBAC 403 reads
+  // "pods \"x\" is forbidden: User … cannot patch …" — it never contains
+  // "is invalid", "422", "immutable", or "may not change", so it still falls
+  // through to the forbidden branch.
+  if (
+    /\bis invalid\b|\b422\b|may not change|field is immutable|\bimmutable\b/.test(
+      m,
+    )
+  ) {
+    const immutable = /may not change|immutable/.test(m);
+    return {
+      title: immutable ? "Field can't be changed" : "Invalid change",
+      body: immutable
+        ? `Some fields on this ${noun} are immutable. A running Pod only lets a few fields change (e.g. container image) — to alter the rest, edit its controller (Deployment / StatefulSet) or delete and recreate it. Open “Show details” for the exact field.`
+        : `The apiserver rejected the change as invalid. Open “Show details” for the exact field.`,
       raw: trimmed,
     };
   }
