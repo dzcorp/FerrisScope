@@ -3,7 +3,7 @@
 // the kind label lookup, and the namespace / selection projections.
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { useAppStore } from "../../store";
+import { useAppStore, type SelectionMeta } from "../../store";
 import type { ResourceKind } from "../../types";
 import { snapshotViewContext } from "./viewContext";
 
@@ -15,7 +15,7 @@ beforeEach(() => {
     selectedContext: null,
     selectedKindId: null,
     selectedNamespaces: new Set<string>(),
-    selection: new Map<string, { namespace: string | null; name: string }>(),
+    selection: new Map<string, SelectionMeta>(),
     kinds: [],
   });
 });
@@ -43,8 +43,8 @@ describe("snapshotViewContext", () => {
       kinds: [deploymentsKind],
       selectedNamespaces: new Set(["default", "kube-system"]),
       selection: new Map([
-        ["uid-a", { namespace: "default", name: "api" }],
-        ["uid-b", { namespace: "default", name: "web" }],
+        ["uid-a", { clusterId: "kind-dev", namespace: "default", name: "api" }],
+        ["uid-b", { clusterId: "kind-dev", namespace: "default", name: "web" }],
       ]),
     });
     const snap = snapshotViewContext();
@@ -75,7 +75,7 @@ describe("snapshotViewContext", () => {
       selectedContext: "kind-dev",
       selectedKindId: "nodes",
       selection: new Map([
-        ["uid-n", { namespace: null, name: "node-1" }],
+        ["uid-n", { clusterId: "kind-dev", namespace: null, name: "node-1" }],
       ]),
     });
     const snap = snapshotViewContext();
@@ -91,5 +91,66 @@ describe("snapshotViewContext", () => {
     const snap = snapshotViewContext();
     expect(snap?.kindId).toBe("deployments");
     expect(snap?.kindLabel).toBeUndefined();
+  });
+});
+
+describe("snapshotViewContext — virtual context", () => {
+  const ctx = (id: string, name: string) => ({
+    id,
+    name,
+    cluster: "c",
+    user: null,
+    namespace: null,
+    is_current: false,
+    group: "Default",
+    source_id: "default",
+    source_path: null,
+  });
+
+  it("sends the member list and omits clusterId when a virtual context is active", () => {
+    useAppStore.setState({
+      contexts: [ctx("default::a", "alpha"), ctx("default::b", "beta")],
+      virtualContexts: [
+        { id: "v1", name: "prod fleet", members: ["default::a", "default::b"] },
+      ],
+      selectedVirtualContextId: "v1",
+      selectedContext: null,
+      scopeExtras: [],
+    });
+    const snap = snapshotViewContext();
+    expect(snap?.clusterId).toBeUndefined();
+    expect(snap?.virtualContext).toEqual({
+      name: "prod fleet",
+      memberClusterIds: ["default::a", "default::b"],
+    });
+  });
+
+  it("an ad-hoc widened scope reports a synthesized name and the full member set", () => {
+    useAppStore.setState({
+      contexts: [ctx("default::a", "alpha"), ctx("default::b", "beta")],
+      virtualContexts: [],
+      selectedVirtualContextId: null,
+      selectedContext: "default::a",
+      scopeExtras: ["default::b"],
+    });
+    const snap = snapshotViewContext();
+    expect(snap?.clusterId).toBeUndefined();
+    expect(snap?.virtualContext).toEqual({
+      name: "alpha +1",
+      memberClusterIds: ["default::a", "default::b"],
+    });
+  });
+
+  it("single-cluster view keeps the old shape (no virtualContext)", () => {
+    useAppStore.setState({
+      contexts: [ctx("default::a", "alpha")],
+      virtualContexts: [],
+      selectedVirtualContextId: null,
+      selectedContext: "default::a",
+      scopeExtras: [],
+    });
+    const snap = snapshotViewContext();
+    expect(snap?.clusterId).toBe("default::a");
+    expect(snap?.virtualContext).toBeUndefined();
   });
 });

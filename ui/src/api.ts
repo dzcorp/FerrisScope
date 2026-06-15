@@ -63,6 +63,8 @@ import type {
   SessionMeta,
   LimitRangeDetail,
   LogEvent,
+  LogPodTarget,
+  ResolvedLogPods,
   TerminalEvent,
   MetricsSnapshot,
   MutatingWebhookConfigurationDetail,
@@ -639,6 +641,17 @@ export const api = {
   },
   stopLogStream: (streamId: string) =>
     invoke<void>("stop_log_stream", { streamId }),
+
+  // Expand a mixed pod/workload selection into concrete pods (one call per
+  // cluster). Best-effort: per-target failures land in `warnings` so one
+  // deleted workload doesn't blank the whole aggregated view.
+  resolveLogPods: (clusterId: string, targets: LogPodTarget[]) =>
+    invoke<ResolvedLogPods>("resolve_log_pods_cmd", { clusterId, targets }),
+
+  // Write text to a user-chosen path (from the OS save dialog) — the log
+  // panel's "Download" action.
+  saveTextFile: (path: string, contents: string) =>
+    invoke<void>("save_text_file", { path, contents }),
 
   // Metrics-server snapshots — pods (cpu_milli + mem_mib) keyed by uid, plus
   // a cluster aggregate. Returns the cached snapshot if metrics are already

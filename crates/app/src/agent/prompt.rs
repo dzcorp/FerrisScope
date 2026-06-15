@@ -172,7 +172,8 @@ pub(crate) async fn build_view_context_block(
         && v.kind_id.as_deref().unwrap_or("").is_empty()
         && v.kind_label.as_deref().unwrap_or("").is_empty()
         && v.namespaces.is_empty()
-        && v.selected.is_empty();
+        && v.selected.is_empty()
+        && v.virtual_context.is_none();
     if nothing {
         return String::new();
     }
@@ -185,17 +186,58 @@ pub(crate) async fn build_view_context_block(
          viewing, ignore this block.\n\n",
     );
 
-    if let Some(ui_cluster) = v.cluster_id.as_deref().filter(|s| !s.is_empty()) {
+    // Context display names are needed by both the virtual-context block and
+    // the single-cluster mismatch warning; resolve once.
+    let resolve_names = v.virtual_context.is_some()
+        || v.cluster_id
+            .as_deref()
+            .is_some_and(|c| !c.is_empty() && c != chat_active_cluster);
+    let contexts = if resolve_names {
+        let sources = app_state.sources.lock().await;
+        ferrisscope_core::kubeconfig::list_contexts(&sources).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let name_of = |id: &str| -> String {
+        contexts
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+
+    if let Some(vc) = v.virtual_context.as_ref() {
+        // Multi-cluster view. List the members (capped like the selected
+        // rows) and remind the model how to move between them. The
+        // single-cluster mismatch warning below is suppressed — the UI is
+        // deliberately viewing several clusters at once.
+        let total = vc.member_cluster_ids.len();
+        let rendered = vc
+            .member_cluster_ids
+            .iter()
+            .take(VIEW_CONTEXT_SELECTED_CAP)
+            .map(|id| format!("`{}`", name_of(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if total > VIEW_CONTEXT_SELECTED_CAP {
+            format!(" … and {} more", total - VIEW_CONTEXT_SELECTED_CAP)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            out,
+            "**Multi-cluster view:** the operator has the virtual context `{}` active, \
+             merging {total} cluster{}: {rendered}{more}. Tables in the UI show rows from \
+             every member. Native tools target ONE cluster at a time (currently the \
+             chat's active cluster) — call `fs_configuration_contexts_list` to see all \
+             contexts and `fs_configuration_use_context` to switch when the operator's \
+             request concerns a different member.",
+            vc.name,
+            if total == 1 { "" } else { "s" },
+        );
+    } else if let Some(ui_cluster) = v.cluster_id.as_deref().filter(|s| !s.is_empty()) {
         if ui_cluster != chat_active_cluster {
-            let sources = app_state.sources.lock().await;
-            let contexts =
-                ferrisscope_core::kubeconfig::list_contexts(&sources).unwrap_or_default();
-            drop(sources);
-            let ui_name = contexts
-                .iter()
-                .find(|c| c.id == ui_cluster)
-                .map(|c| c.name.as_str())
-                .unwrap_or(ui_cluster);
+            let ui_name = name_of(ui_cluster);
             let _ = writeln!(
                 out,
                 "**Cluster mismatch:** the UI is viewing `{ui_name}` but this chat is \
@@ -334,6 +376,7 @@ mod tests {
                 namespace: Some("default".into()),
                 name: "api".into(),
             }],
+            virtual_context: None,
         };
         // Same cluster ⇒ no mismatch warning.
         let out = build_view_context_block(Some(&view), "cluster-x", &state).await;
@@ -384,5 +427,68 @@ mod tests {
             "Selected rows ({}):",
             VIEW_CONTEXT_SELECTED_CAP + 5
         )));
+    }
+
+    #[tokio::test]
+    async fn view_context_block_renders_virtual_context_members() {
+        let state = AppState::default();
+        let view = ViewContextWire {
+            virtual_context: Some(crate::agent::VirtualContextWire {
+                name: "prod fleet".into(),
+                member_cluster_ids: vec!["default::prod-eu".into(), "default::prod-us".into()],
+            }),
+            ..Default::default()
+        };
+        let out = build_view_context_block(Some(&view), "default::prod-eu", &state).await;
+        assert!(out.contains("Multi-cluster view"));
+        assert!(out.contains("`prod fleet`"));
+        assert!(out.contains("merging 2 clusters"));
+        // Empty sources ⇒ member ids render verbatim instead of panicking.
+        assert!(out.contains("default::prod-eu"));
+        assert!(out.contains("default::prod-us"));
+        assert!(out.contains("fs_configuration_use_context"));
+    }
+
+    #[tokio::test]
+    async fn view_context_block_caps_virtual_context_member_list() {
+        let state = AppState::default();
+        let members: Vec<String> = (0..(VIEW_CONTEXT_SELECTED_CAP + 3))
+            .map(|i| format!("default::c{i}"))
+            .collect();
+        let view = ViewContextWire {
+            virtual_context: Some(crate::agent::VirtualContextWire {
+                name: "big".into(),
+                member_cluster_ids: members,
+            }),
+            ..Default::default()
+        };
+        let out = build_view_context_block(Some(&view), "default::c0", &state).await;
+        assert!(out.contains("and 3 more"));
+        assert!(out.contains(&format!(
+            "merging {} clusters",
+            VIEW_CONTEXT_SELECTED_CAP + 3
+        )));
+    }
+
+    #[tokio::test]
+    async fn virtual_context_suppresses_single_cluster_mismatch_warning() {
+        // The UI's `cluster_id` is unset (or different) in a multi-cluster
+        // view — warning about a "mismatch" would be misleading, the view
+        // deliberately spans several clusters.
+        let state = AppState::default();
+        let view = ViewContextWire {
+            cluster_id: Some("default::other".into()),
+            virtual_context: Some(crate::agent::VirtualContextWire {
+                name: "fleet".into(),
+                member_cluster_ids: vec!["default::other".into()],
+            }),
+            ..Default::default()
+        };
+        let out = build_view_context_block(Some(&view), "default::chat", &state).await;
+        assert!(out.contains("Multi-cluster view"));
+        assert!(
+            !out.contains("Cluster mismatch"),
+            "mismatch warning must be suppressed when a virtual context is active"
+        );
     }
 }

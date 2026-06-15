@@ -8,9 +8,12 @@ import {
   NOTIFICATION_LOG_CAP,
   semverGt,
   selectUpdateAvailable,
+  selectActiveClusterIds,
+  buildPrefsPayload,
   type DockTab,
   type ConfirmModal,
   type Toast,
+  type SelectionMeta,
 } from "./store";
 
 const initial = useAppStore.getState();
@@ -22,7 +25,7 @@ beforeEach(() => {
   useAppStore.setState({
     ...initial,
     selectedNamespaces: new Set<string>(),
-    selection: new Map<string, { namespace: string | null; name: string }>(),
+    selection: new Map<string, SelectionMeta>(),
     contexts: [],
     kinds: [],
     dockTabs: [],
@@ -33,9 +36,12 @@ beforeEach(() => {
     detailHistory: [],
     detailIndex: -1,
     pendingDetail: null,
-    metrics: null,
+    metricsByCluster: {},
     forwards: {},
     tableViews: {},
+    virtualContexts: [],
+    selectedVirtualContextId: null,
+    scopeExtras: [],
   });
 });
 
@@ -169,7 +175,7 @@ describe("setContexts", () => {
 describe("selectContext clears scope", () => {
   it("drops selection / namespaces / dock / metrics so the next cluster starts clean", () => {
     useAppStore.setState({
-      selection: new Map([["k", { namespace: "n", name: "x" }]]),
+      selection: new Map([["k", { clusterId: "c1", namespace: "n", name: "x" }]]),
       selectedNamespaces: new Set(["default"]),
       dockTabs: [
         {
@@ -181,8 +187,8 @@ describe("selectContext clears scope", () => {
         },
       ] satisfies DockTab[],
       dockActiveId: "t1",
-      metrics: { pods: {}, available: false } as never,
-      detailHistory: [{ kindId: "pods", namespace: "default", name: "x" }],
+      metricsByCluster: { "ctx-1": { pods: {}, available: false } as never },
+      detailHistory: [{ clusterId: null, kindId: "pods", namespace: "default", name: "x" }],
       detailIndex: 0,
     });
 
@@ -194,7 +200,7 @@ describe("selectContext clears scope", () => {
     expect(s.selectedNamespaces.size).toBe(0);
     expect(s.dockTabs).toHaveLength(0);
     expect(s.dockActiveId).toBeNull();
-    expect(s.metrics).toBeNull();
+    expect(Object.keys(s.metricsByCluster)).toHaveLength(0);
     expect(s.detailHistory).toHaveLength(0);
     expect(s.detailIndex).toBe(-1);
   });
@@ -286,6 +292,46 @@ describe("navigateToDetail", () => {
     const s = useAppStore.getState();
     expect(s.detailHistory.map((e) => e.name)).toEqual(["a", "x"]);
     expect(s.detailIndex).toBe(1);
+  });
+
+  it("extends an active namespace filter to include the target namespace", () => {
+    // Without this, the table's apiserver-scoped subscription would never
+    // see the target's row and the navigation would silently no-op.
+    useAppStore.setState({ selectedNamespaces: new Set(["default"]) });
+    useAppStore.getState().navigateToDetail("pods", "kube-system", "coredns");
+    expect([...useAppStore.getState().selectedNamespaces].sort()).toEqual([
+      "default",
+      "kube-system",
+    ]);
+  });
+
+  it("leaves an empty (all-namespaces) filter and cluster-scoped targets alone", () => {
+    useAppStore.getState().navigateToDetail("pods", "kube-system", "coredns");
+    expect(useAppStore.getState().selectedNamespaces.size).toBe(0);
+    useAppStore.setState({ selectedNamespaces: new Set(["default"]) });
+    useAppStore.getState().navigateToDetail("nodes", null, "node-1");
+    expect([...useAppStore.getState().selectedNamespaces]).toEqual(["default"]);
+  });
+
+  it("keeps the same Set instance when the namespace is already visible", () => {
+    const ns = new Set(["default"]);
+    useAppStore.setState({ selectedNamespaces: ns });
+    useAppStore.getState().navigateToDetail("pods", "default", "a");
+    expect(useAppStore.getState().selectedNamespaces).toBe(ns);
+  });
+
+  it("detailBack re-extends the filter for the restored entry", () => {
+    useAppStore.setState({ selectedNamespaces: new Set(["default"]) });
+    useAppStore.getState().navigateToDetail("pods", "default", "a");
+    useAppStore.getState().navigateToDetail("pods", "kube-system", "b");
+    // Operator narrows the filter after navigating away…
+    useAppStore.setState({ selectedNamespaces: new Set(["kube-system"]) });
+    useAppStore.getState().detailBack();
+    // …going back to the default-namespace entry makes it visible again.
+    expect([...useAppStore.getState().selectedNamespaces].sort()).toEqual([
+      "default",
+      "kube-system",
+    ]);
   });
 });
 
@@ -393,15 +439,15 @@ describe("dock tabs", () => {
 
 describe("selection map", () => {
   it("toggleSelection adds and then removes", () => {
-    useAppStore.getState().toggleSelection("uid-1", { namespace: "default", name: "p1" });
+    useAppStore.getState().toggleSelection("uid-1", { clusterId: "c1", namespace: "default", name: "p1" });
     expect(useAppStore.getState().selection.size).toBe(1);
-    useAppStore.getState().toggleSelection("uid-1", { namespace: "default", name: "p1" });
+    useAppStore.getState().toggleSelection("uid-1", { clusterId: "c1", namespace: "default", name: "p1" });
     expect(useAppStore.getState().selection.size).toBe(0);
   });
 
   it("clearSelection wipes the map", () => {
-    useAppStore.getState().toggleSelection("a", { namespace: null, name: "x" });
-    useAppStore.getState().toggleSelection("b", { namespace: null, name: "y" });
+    useAppStore.getState().toggleSelection("a", { clusterId: "c1", namespace: null, name: "x" });
+    useAppStore.getState().toggleSelection("b", { clusterId: "c1", namespace: null, name: "y" });
     expect(useAppStore.getState().selection.size).toBe(2);
     useAppStore.getState().clearSelection();
     expect(useAppStore.getState().selection.size).toBe(0);
@@ -758,5 +804,414 @@ describe("selectUpdateAvailable", () => {
         snapshot({ appVersion: null, lastKnownVersion: "9.9.9" }),
       ),
     ).toBe(false);
+  });
+});
+
+// ─── Virtual contexts ────────────────────────────────────────────────────────
+
+const vctxCtx = (id: string) => ({
+  id,
+  name: id,
+  cluster: "c",
+  user: null,
+  namespace: null,
+  is_current: false,
+  group: "Default",
+  source_id: "default",
+  source_path: null,
+});
+
+const basePrefs = () =>
+  buildPrefsPayload({
+    ...useAppStore.getState(),
+  });
+
+describe("virtual context CRUD", () => {
+  it("saveVirtualContext appends and returns a fresh id", () => {
+    const id = useAppStore
+      .getState()
+      .saveVirtualContext("prod", ["default::a", "default::b"]);
+    const s = useAppStore.getState();
+    expect(id).toBeTruthy();
+    expect(s.virtualContexts).toHaveLength(1);
+    expect(s.virtualContexts[0]).toEqual({
+      id,
+      name: "prod",
+      members: ["default::a", "default::b"],
+    });
+    // Saving does not activate.
+    expect(s.selectedVirtualContextId).toBeNull();
+  });
+
+  it("renameVirtualContext / setVirtualContextMembers patch in place", () => {
+    const id = useAppStore.getState().saveVirtualContext("prod", ["default::a"]);
+    useAppStore.getState().renameVirtualContext(id, "production");
+    useAppStore
+      .getState()
+      .setVirtualContextMembers(id, ["default::a", "default::c"]);
+    const v = useAppStore.getState().virtualContexts[0]!;
+    expect(v.name).toBe("production");
+    expect(v.members).toEqual(["default::a", "default::c"]);
+  });
+
+  it("deleteVirtualContext removes, and deactivates when active", () => {
+    const id = useAppStore.getState().saveVirtualContext("prod", ["default::a"]);
+    useAppStore.getState().selectVirtualContext(id);
+    expect(useAppStore.getState().selectedVirtualContextId).toBe(id);
+    useAppStore.getState().deleteVirtualContext(id);
+    const s = useAppStore.getState();
+    expect(s.virtualContexts).toHaveLength(0);
+    expect(s.selectedVirtualContextId).toBeNull();
+  });
+});
+
+describe("selectVirtualContext / selectContext mutual exclusion", () => {
+  it("activating a virtual context clears selectedContext and resets scope", () => {
+    const id = useAppStore.getState().saveVirtualContext("prod", ["default::a"]);
+    useAppStore.setState({
+      selectedContext: "default::solo",
+      selection: new Map([["k", { clusterId: "c1", namespace: "n", name: "x" }]]),
+      selectedNamespaces: new Set(["default"]),
+      tableFilter: "auth",
+      scopeExtras: ["default::extra"],
+    });
+    useAppStore.getState().selectVirtualContext(id);
+    const s = useAppStore.getState();
+    expect(s.selectedVirtualContextId).toBe(id);
+    expect(s.selectedContext).toBeNull();
+    expect(s.selection.size).toBe(0);
+    expect(s.selectedNamespaces.size).toBe(0);
+    expect(s.tableFilter).toBe("");
+    expect(s.scopeExtras).toHaveLength(0);
+  });
+
+  it("selectContext clears an active virtual context", () => {
+    const id = useAppStore.getState().saveVirtualContext("prod", ["default::a"]);
+    useAppStore.getState().selectVirtualContext(id);
+    useAppStore.getState().selectContext("default::solo");
+    const s = useAppStore.getState();
+    expect(s.selectedContext).toBe("default::solo");
+    expect(s.selectedVirtualContextId).toBeNull();
+  });
+
+  it("rejects ids that don't resolve to a saved virtual context", () => {
+    useAppStore.setState({ selectedContext: "default::solo" });
+    useAppStore.getState().selectVirtualContext("nope");
+    const s = useAppStore.getState();
+    expect(s.selectedVirtualContextId).toBeNull();
+    expect(s.selectedContext).toBe("default::solo");
+  });
+});
+
+describe("setContexts keeps virtual contexts alive", () => {
+  it("keeps the active virtual context while ≥1 member resolves", () => {
+    const id = useAppStore
+      .getState()
+      .saveVirtualContext("prod", ["default::a", "default::gone"]);
+    useAppStore.getState().selectVirtualContext(id);
+    useAppStore.getState().setContexts([vctxCtx("default::a")]);
+    expect(useAppStore.getState().selectedVirtualContextId).toBe(id);
+  });
+
+  it("deselects the virtual context when no member resolves", () => {
+    const id = useAppStore.getState().saveVirtualContext("prod", ["default::gone"]);
+    useAppStore.getState().selectVirtualContext(id);
+    useAppStore.getState().setContexts([vctxCtx("default::other")]);
+    expect(useAppStore.getState().selectedVirtualContextId).toBeNull();
+    // The saved definition itself survives — only the activation drops.
+    expect(useAppStore.getState().virtualContexts).toHaveLength(1);
+  });
+
+  it("prunes scope extras whose context vanished", () => {
+    useAppStore.setState({
+      selectedContext: "default::a",
+      scopeExtras: ["default::b", "default::gone"],
+    });
+    useAppStore
+      .getState()
+      .setContexts([vctxCtx("default::a"), vctxCtx("default::b")]);
+    expect(useAppStore.getState().scopeExtras).toEqual(["default::b"]);
+  });
+});
+
+describe("scope extras (ad-hoc append)", () => {
+  beforeEach(() => {
+    useAppStore
+      .getState()
+      .setContexts([vctxCtx("default::a"), vctxCtx("default::b"), vctxCtx("default::c")]);
+  });
+
+  it("addScopeExtra appends a known context not already in scope", () => {
+    useAppStore.setState({ selectedContext: "default::a" });
+    useAppStore.getState().addScopeExtra("default::b");
+    expect(useAppStore.getState().scopeExtras).toEqual(["default::b"]);
+  });
+
+  it("ignores unknown contexts and ids already in scope", () => {
+    useAppStore.setState({ selectedContext: "default::a" });
+    useAppStore.getState().addScopeExtra("default::nope");
+    useAppStore.getState().addScopeExtra("default::a");
+    useAppStore.getState().addScopeExtra("default::b");
+    useAppStore.getState().addScopeExtra("default::b");
+    expect(useAppStore.getState().scopeExtras).toEqual(["default::b"]);
+  });
+
+  it("removeScopeExtra drops the id and clears row selection", () => {
+    useAppStore.setState({
+      selectedContext: "default::a",
+      scopeExtras: ["default::b"],
+      selection: new Map([["k", { clusterId: "c1", namespace: "n", name: "x" }]]),
+    });
+    useAppStore.getState().removeScopeExtra("default::b");
+    const s = useAppStore.getState();
+    expect(s.scopeExtras).toHaveLength(0);
+    expect(s.selection.size).toBe(0);
+  });
+});
+
+describe("selectActiveClusterIds", () => {
+  it("returns [] on the fleet landing (nothing selected)", () => {
+    expect(selectActiveClusterIds(useAppStore.getState())).toEqual([]);
+  });
+
+  it("returns the single selected context", () => {
+    useAppStore.setState({ selectedContext: "default::a" });
+    expect(selectActiveClusterIds(useAppStore.getState())).toEqual(["default::a"]);
+  });
+
+  it("returns virtual context members filtered to existing contexts", () => {
+    useAppStore
+      .getState()
+      .setContexts([vctxCtx("default::a"), vctxCtx("default::b")]);
+    const id = useAppStore
+      .getState()
+      .saveVirtualContext("prod", ["default::a", "default::gone", "default::b"]);
+    useAppStore.getState().selectVirtualContext(id);
+    expect(selectActiveClusterIds(useAppStore.getState())).toEqual([
+      "default::a",
+      "default::b",
+    ]);
+  });
+
+  it("does not filter when the contexts list hasn't loaded yet", () => {
+    const id = useAppStore.getState().saveVirtualContext("prod", ["default::a"]);
+    useAppStore.getState().selectVirtualContext(id);
+    expect(useAppStore.getState().contexts).toHaveLength(0);
+    expect(selectActiveClusterIds(useAppStore.getState())).toEqual(["default::a"]);
+  });
+
+  it("appends deduped scope extras", () => {
+    useAppStore
+      .getState()
+      .setContexts([vctxCtx("default::a"), vctxCtx("default::b")]);
+    useAppStore.setState({
+      selectedContext: "default::a",
+      scopeExtras: ["default::b", "default::a"],
+    });
+    expect(selectActiveClusterIds(useAppStore.getState())).toEqual([
+      "default::a",
+      "default::b",
+    ]);
+  });
+});
+
+describe("hydratePrefs — virtual contexts", () => {
+  it("hydrates the list and the persisted active id", () => {
+    const prefs = basePrefs();
+    prefs.virtual_contexts = [
+      { id: "vc-1", name: "prod", members: ["default::a"] },
+    ];
+    prefs.ui.selected_virtual_context = "vc-1";
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.virtualContexts).toHaveLength(1);
+    expect(s.selectedVirtualContextId).toBe("vc-1");
+    // Mutually exclusive: the virtual selection wins over selected_context.
+    expect(s.selectedContext).toBeNull();
+  });
+
+  it("drops a persisted active id that no longer exists", () => {
+    const prefs = basePrefs();
+    prefs.virtual_contexts = [];
+    prefs.ui.selected_virtual_context = "vc-gone";
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().selectedVirtualContextId).toBeNull();
+  });
+
+  it("tolerates prefs from a build that predates virtual contexts", () => {
+    const prefs = basePrefs() as Record<string, unknown>;
+    delete prefs.virtual_contexts;
+    (prefs.ui as Record<string, unknown>).selected_virtual_context = undefined;
+    useAppStore.getState().hydratePrefs(prefs as never);
+    expect(useAppStore.getState().virtualContexts).toEqual([]);
+    expect(useAppStore.getState().selectedVirtualContextId).toBeNull();
+  });
+});
+
+describe("buildPrefsPayload", () => {
+  it("round-trips virtual contexts and the active id (wipe-hazard regression)", () => {
+    const id = useAppStore
+      .getState()
+      .saveVirtualContext("prod", ["default::a", "default::b"]);
+    useAppStore.getState().selectVirtualContext(id);
+    const payload = buildPrefsPayload(useAppStore.getState());
+    expect(payload.virtual_contexts).toEqual([
+      { id, name: "prod", members: ["default::a", "default::b"] },
+    ]);
+    expect(payload.ui.selected_virtual_context).toBe(id);
+    expect(payload.ui.selected_context).toBeNull();
+  });
+
+  it("survives a full payload → hydrate → payload cycle unchanged", () => {
+    const id = useAppStore.getState().saveVirtualContext("prod", ["default::a"]);
+    useAppStore.getState().selectVirtualContext(id);
+    useAppStore.setState({ selectedNamespaces: new Set(["kube-system"]) });
+    const p1 = buildPrefsPayload(useAppStore.getState());
+    useAppStore.getState().hydratePrefs(p1);
+    const p2 = buildPrefsPayload(useAppStore.getState());
+    expect(p2).toEqual(p1);
+  });
+});
+
+describe("absorbScopeExtras", () => {
+  const seed = () => {
+    useAppStore.setState({
+      contexts: [vctxCtx("default::a"), vctxCtx("default::b"), vctxCtx("default::c")],
+    });
+    const id = useAppStore
+      .getState()
+      .saveVirtualContext("prod", ["default::a", "default::b"]);
+    useAppStore.getState().selectVirtualContext(id);
+    useAppStore.getState().addScopeExtra("default::c");
+    return id;
+  };
+
+  it("folds extras into the virtual context's members and clears them", () => {
+    const id = seed();
+    expect(useAppStore.getState().scopeExtras).toEqual(["default::c"]);
+    useAppStore.getState().absorbScopeExtras(id);
+    const s = useAppStore.getState();
+    expect(s.virtualContexts[0]!.members).toEqual([
+      "default::a",
+      "default::b",
+      "default::c",
+    ]);
+    expect(s.scopeExtras).toEqual([]);
+    // Still on the same virtual context — no scope reset.
+    expect(s.selectedVirtualContextId).toBe(id);
+  });
+
+  it("dedupes an extra that is already a member", () => {
+    const id = seed();
+    useAppStore.setState({ scopeExtras: ["default::b", "default::c"] });
+    useAppStore.getState().absorbScopeExtras(id);
+    expect(useAppStore.getState().virtualContexts[0]!.members).toEqual([
+      "default::a",
+      "default::b",
+      "default::c",
+    ]);
+  });
+
+  it("no-ops for an unknown id or without extras", () => {
+    const id = seed();
+    useAppStore.getState().absorbScopeExtras("nope");
+    expect(useAppStore.getState().scopeExtras).toEqual(["default::c"]);
+    useAppStore.setState({ scopeExtras: [] });
+    useAppStore.getState().absorbScopeExtras(id);
+    expect(useAppStore.getState().virtualContexts[0]!.members).toEqual([
+      "default::a",
+      "default::b",
+    ]);
+  });
+});
+
+describe("startup scope restore behaviour", () => {
+  const seedPrefs = () => {
+    useAppStore.setState({
+      contexts: [vctxCtx("default::a"), vctxCtx("default::b"), vctxCtx("default::c")],
+    });
+    const id = useAppStore
+      .getState()
+      .saveVirtualContext("prod", ["default::a", "default::b"]);
+    return id;
+  };
+
+  it("latest_view restores an ad-hoc view: anchor + scope extras", () => {
+    seedPrefs();
+    useAppStore.getState().selectContext("default::a");
+    useAppStore.getState().addScopeExtra("default::c");
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    expect(prefs.ui.scope_extras).toEqual(["default::c"]);
+    expect(prefs.settings.startup_scope).toBe("latest_view");
+
+    // Simulate a fresh boot: clear the selection, hydrate from the file.
+    useAppStore.setState({ selectedContext: null, scopeExtras: [] });
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.selectedContext).toBe("default::a");
+    expect(s.scopeExtras).toEqual(["default::c"]);
+  });
+
+  it("latest_view restores the virtual-context selection", () => {
+    const id = seedPrefs();
+    useAppStore.getState().selectVirtualContext(id);
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    useAppStore.setState({ selectedVirtualContextId: null });
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().selectedVirtualContextId).toBe(id);
+  });
+
+  it("latest_cluster restores only the anchor cluster — no vctx, no extras", () => {
+    const id = seedPrefs();
+    useAppStore.getState().selectContext("default::a");
+    useAppStore.getState().addScopeExtra("default::c");
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.settings.startup_scope = "latest_cluster";
+    prefs.ui.selected_virtual_context = id; // even if a vctx was active…
+    useAppStore.setState({ selectedContext: null, scopeExtras: [] });
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.selectedVirtualContextId).toBeNull();
+    expect(s.selectedContext).toBe("default::a");
+    expect(s.scopeExtras).toEqual([]);
+  });
+
+  it("fleet restores nothing — lands on the fleet screen", () => {
+    const id = seedPrefs();
+    useAppStore.getState().selectVirtualContext(id);
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.settings.startup_scope = "fleet";
+    prefs.ui.selected_context = "default::a";
+    prefs.ui.scope_extras = ["default::c"];
+    useAppStore.setState({ selectedContext: null, selectedVirtualContextId: null, scopeExtras: [] });
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.selectedContext).toBeNull();
+    expect(s.selectedVirtualContextId).toBeNull();
+    expect(s.scopeExtras).toEqual([]);
+    // The saved virtual contexts themselves are untouched by the setting.
+    expect(s.virtualContexts).toHaveLength(1);
+    expect(s.settings.startupScope).toBe("fleet");
+  });
+
+  it("drops persisted extras whose contexts no longer exist", () => {
+    seedPrefs();
+    useAppStore.getState().selectContext("default::a");
+    useAppStore.getState().addScopeExtra("default::c");
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.ui.scope_extras = ["default::c", "default::gone", "default::c"];
+    useAppStore.setState({ scopeExtras: [] });
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().scopeExtras).toEqual(["default::c"]);
+  });
+
+  it("drops extras entirely when there is no anchor to extend", () => {
+    seedPrefs();
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.ui.selected_context = null;
+    prefs.ui.selected_virtual_context = null;
+    prefs.ui.scope_extras = ["default::c"];
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().scopeExtras).toEqual([]);
   });
 });

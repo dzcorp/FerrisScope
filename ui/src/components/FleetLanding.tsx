@@ -1,18 +1,41 @@
 import { logErr } from "../lib/log";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, onFleetProbe, onKubeconfigChanged } from "../api";
 import { useAppStore, useResolvedTheme } from "../store";
-import type { ClusterProbe, ContextInfo } from "../types";
-import { FF_MONO, type ThemeMode, R_LG, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XL, FS_XS } from "../theme";
+import type { ClusterProbe, ContextInfo, VirtualContext } from "../types";
+import {
+  FF_MONO,
+  type ThemeMode,
+  type Tokens,
+  clusterAccent,
+  R_LG,
+  R_MD,
+  R_SM,
+  FS_LG,
+  FS_MD,
+  FS_SM,
+  FS_XL,
+  FS_XS,
+} from "../theme";
+import { MOD_KEY } from "../lib/keyboard";
+import {
+  aggregateVirtualContext,
+  clusterColorIndexMap,
+  defaultVirtualContextName,
+  type VirtualContextAggregate,
+} from "../lib/multiCluster";
 import {
   Btn,
+  Checkbox,
   EmptyState,
   ErrorBlock,
   Eyebrow,
   Gauge,
+  Icons,
   LoadingLine,
   Tooltip,
 } from "./ui";
+import { BulkBar } from "./BulkBar";
 import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
 import { confirm, toast } from "../lib/dialog";
 
@@ -45,6 +68,101 @@ export function FleetLanding({ mode, onSelect }: Props) {
 
   const [probes, setProbes] = useState<Record<string, ClusterProbe>>({});
   const [menu, setMenu] = useState<{ pos: MenuPosition; ctx: ContextInfo } | null>(null);
+  const [vctxMenu, setVctxMenu] = useState<{
+    pos: MenuPosition;
+    vctx: VirtualContext;
+  } | null>(null);
+
+  // Multi-select for "save as virtual context": ⌘/Ctrl-click a card to
+  // toggle it; once anything is picked every card grows a checkbox. Esc
+  // clears. `editingVctx` re-enters this mode seeded with an existing
+  // virtual context's members (the Edit flow).
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [editingVctx, setEditingVctx] = useState<string | null>(null);
+  const [vctxName, setVctxName] = useState("");
+  const virtualContexts = useAppStore((s) => s.virtualContexts);
+  const saveVirtualContext = useAppStore((s) => s.saveVirtualContext);
+  const renameVirtualContext = useAppStore((s) => s.renameVirtualContext);
+  const setVirtualContextMembers = useAppStore(
+    (s) => s.setVirtualContextMembers,
+  );
+  const deleteVirtualContext = useAppStore((s) => s.deleteVirtualContext);
+  const selectVirtualContext = useAppStore((s) => s.selectVirtualContext);
+
+  const clearPick = () => {
+    setPicked(new Set());
+    setEditingVctx(null);
+    setVctxName("");
+  };
+  const togglePick = (id: string) =>
+    setPicked((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  useEffect(() => {
+    if (picked.size === 0 && editingVctx === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const target = e.target as HTMLElement | null;
+      // Let an open input clear itself first.
+      if (target && target.tagName === "INPUT") return;
+      clearPick();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [picked.size, editingVctx]);
+
+  const trimmedName = vctxName.trim();
+  const duplicateName = virtualContexts.some(
+    (v) =>
+      v.id !== editingVctx &&
+      v.name.toLowerCase() === trimmedName.toLowerCase(),
+  );
+  // Empty input is fine — we fall back to a pregenerated "a + b" / "a +N"
+  // name (already deduped against existing virtual contexts), shown as the
+  // input placeholder so the operator sees exactly what Save will use.
+  const generatedName = useMemo(() => {
+    const pickedNames = Array.from(picked).map(
+      (id) => contexts.find((c) => c.id === id)?.name ?? id,
+    );
+    return defaultVirtualContextName(
+      pickedNames,
+      virtualContexts.filter((v) => v.id !== editingVctx).map((v) => v.name),
+    );
+  }, [picked, contexts, virtualContexts, editingVctx]);
+  const canSaveVctx =
+    picked.size >= 2 && !(trimmedName.length > 0 && duplicateName);
+  const onSaveVctx = () => {
+    if (!canSaveVctx) return;
+    const name = trimmedName.length > 0 ? trimmedName : generatedName;
+    const members = Array.from(picked);
+    if (editingVctx) {
+      renameVirtualContext(editingVctx, name);
+      setVirtualContextMembers(editingVctx, members);
+      toast.ok(`Updated virtual context "${name}".`);
+    } else {
+      saveVirtualContext(name, members);
+      toast.ok(
+        `Saved virtual context "${name}" (${members.length} clusters).`,
+      );
+    }
+    clearPick();
+  };
+  // Temporary multi-cluster view: connect the picked clusters without
+  // persisting anything. First pick anchors the scope, the rest ride as
+  // ad-hoc extras — the VirtualClusterBar offers Save if it grows on you.
+  const onOpenTemporary = () => {
+    if (picked.size < 2) return;
+    const [first, ...rest] = Array.from(picked);
+    if (!first) return;
+    const s = useAppStore.getState();
+    s.selectContext(first);
+    for (const id of rest) s.addScopeExtra(id);
+    clearPick();
+  };
 
   useEffect(() => {
     setContextsLoading();
@@ -204,12 +322,25 @@ export function FleetLanding({ mode, onSelect }: Props) {
             Cluster fleet
           </div>
           <div style={{ fontSize: FS_MD, color: t.textDim }}>
-            Pick a context to connect. {contexts.length} loaded across{" "}
+            Pick a context to connect, or {MOD_KEY}-click two or more to save
+            them as a virtual context. {contexts.length} loaded across{" "}
             {orderedGroups.length} group{orderedGroups.length === 1 ? "" : "s"}.
           </div>
         </div>
         <ViewToggle mode={mode} />
       </div>
+
+      {virtualContexts.length > 0 && (
+        <VirtualContextSection
+          mode={mode}
+          virtualContexts={virtualContexts}
+          contexts={contexts}
+          probes={probes}
+          view={fleetView}
+          onOpen={(id) => selectVirtualContext(id)}
+          onMenu={(pos, vctx) => setVctxMenu({ pos, vctx })}
+        />
+      )}
 
       {orderedGroups.map((g) => (
         <FleetGroup
@@ -219,6 +350,8 @@ export function FleetLanding({ mode, onSelect }: Props) {
           list={groups.get(g) ?? []}
           probes={probes}
           view={fleetView}
+          picked={picked}
+          onTogglePick={togglePick}
           onSelect={onSelect}
           onMenu={(pos, ctx) => setMenu({ pos, ctx })}
         />
@@ -230,8 +363,105 @@ export function FleetLanding({ mode, onSelect }: Props) {
           position={menu.pos}
           onClose={() => setMenu(null)}
           rowName={primaryLabel(menu.ctx)}
-          items={fleetMenuItems(menu.ctx, onSelect)}
+          items={fleetMenuItems(menu.ctx, onSelect, togglePick)}
         />
+      )}
+
+      {vctxMenu && (
+        <ContextMenu
+          mode={mode}
+          position={vctxMenu.pos}
+          onClose={() => setVctxMenu(null)}
+          rowName={vctxMenu.vctx.name}
+          items={[
+            {
+              kind: "item",
+              label: "Open",
+              onClick: () => selectVirtualContext(vctxMenu.vctx.id),
+            },
+            {
+              kind: "item",
+              label: "Edit name & members",
+              onClick: () => {
+                // Re-enter pick mode seeded with the saved definition;
+                // Save in the floating bar then updates in place.
+                setPicked(new Set(vctxMenu.vctx.members));
+                setEditingVctx(vctxMenu.vctx.id);
+                setVctxName(vctxMenu.vctx.name);
+              },
+            },
+            { kind: "separator" },
+            {
+              kind: "item",
+              label: "Delete virtual context",
+              danger: true,
+              onClick: async () => {
+                const ok = await confirm({
+                  title: `Delete virtual context "${vctxMenu.vctx.name}"?`,
+                  body: "Only the saved grouping is removed — the member clusters and their kubeconfig entries are untouched.",
+                  confirmLabel: "Delete",
+                  tone: "danger",
+                });
+                if (!ok) return;
+                deleteVirtualContext(vctxMenu.vctx.id);
+                toast.ok(`Deleted virtual context ${vctxMenu.vctx.name}.`);
+              },
+            },
+          ]}
+        />
+      )}
+
+      {(picked.size > 0 || editingVctx !== null) && (
+        <BulkBar
+          mode={mode}
+          count={picked.size}
+          onClear={clearPick}
+          actions={[
+            ...(editingVctx === null && picked.size >= 2
+              ? [
+                  {
+                    icon: Icons.cluster,
+                    label: "Open",
+                    onClick: onOpenTemporary,
+                  },
+                ]
+              : []),
+            {
+              icon: Icons.layers,
+              label: "Save",
+              onClick: onSaveVctx,
+            },
+          ]}
+        >
+          <input
+            value={vctxName}
+            onChange={(e) => setVctxName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onSaveVctx();
+              if (e.key === "Escape") clearPick();
+            }}
+            placeholder={
+              picked.size < 2 ? "Pick 2+ clusters…" : generatedName
+            }
+            aria-label="Virtual context name"
+            style={{
+              height: 28,
+              padding: "0 10px",
+              borderRadius: R_MD,
+              border: `1px solid ${
+                duplicateName && trimmedName.length > 0
+                  ? t.bad
+                  : "rgba(255,255,255,0.2)"
+              }`,
+              background: "rgba(255,255,255,0.08)",
+              color: "#fff",
+              fontSize: FS_MD,
+              fontFamily: "inherit",
+              outline: "none",
+              width: 220,
+            }}
+          />
+        </BulkBar>
       )}
     </div>
   );
@@ -243,13 +473,22 @@ export function FleetLanding({ mode, onSelect }: Props) {
 // allow deleting the file itself. `source_path` carries the on-disk path —
 // when it's missing we still allow context-level edits because the backend
 // resolves the default kubeconfig path on its own.
-function fleetMenuItems(c: ContextInfo, onSelect: (id: string) => void): MenuItem[] {
+function fleetMenuItems(
+  c: ContextInfo,
+  onSelect: (id: string) => void,
+  onTogglePick: (id: string) => void,
+): MenuItem[] {
   const isDefault = c.source_id === "default";
   const items: MenuItem[] = [
     {
       kind: "item",
       label: "Connect",
       onClick: () => onSelect(c.id),
+    },
+    {
+      kind: "item",
+      label: `Toggle in selection (${MOD_KEY}-click)`,
+      onClick: () => onTogglePick(c.id),
     },
   ];
   if (isDefault) {
@@ -313,12 +552,527 @@ function fleetMenuItems(c: ContextInfo, onSelect: (id: string) => void): MenuIte
   return items;
 }
 
+// Saved virtual contexts — rendered as a distinct section above the
+// kubeconfig groups, following the same fleet-view style (tiles / mini /
+// rows) as single-cluster cards. A card opens all members at once;
+// right-click offers Edit (re-enters pick mode seeded) and Delete.
+function VirtualContextSection({
+  mode,
+  virtualContexts,
+  contexts,
+  probes,
+  view,
+  onOpen,
+  onMenu,
+}: {
+  mode: ThemeMode;
+  virtualContexts: VirtualContext[];
+  contexts: ContextInfo[];
+  probes: Record<string, ClusterProbe>;
+  view: FleetView;
+  onOpen: (id: string) => void;
+  onMenu: (pos: MenuPosition, vctx: VirtualContext) => void;
+}) {
+  const t = useResolvedTheme().tokens;
+  const header = (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        marginBottom: 12,
+      }}
+    >
+      <Eyebrow t={t}>Virtual contexts</Eyebrow>
+      <div style={{ flex: 1, height: 1, background: t.border }} />
+      <div
+        style={{
+          fontSize: FS_SM,
+          color: t.textMuted,
+          fontVariantNumeric: "tabular-nums",
+          fontFamily: FF_MONO,
+        }}
+      >
+        {virtualContexts.length}
+      </div>
+    </div>
+  );
+
+  if (view === "rows") {
+    return (
+      <div style={{ marginBottom: 28 }}>
+        {header}
+        <div
+          style={{
+            border: `1px solid ${t.border}`,
+            borderRadius: R_LG,
+            background: t.surface,
+            overflow: "hidden",
+          }}
+        >
+          {virtualContexts.map((v, i) => (
+            <VirtualContextRow
+              key={v.id}
+              mode={mode}
+              vctx={v}
+              contexts={contexts}
+              probes={probes}
+              isLast={i === virtualContexts.length - 1}
+              onOpen={() => onOpen(v.id)}
+              onMenu={(pos) => onMenu(pos, v)}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginBottom: 28 }}>
+      {header}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: view === "mini" ? 8 : 12,
+          alignItems: "stretch",
+        }}
+      >
+        {virtualContexts.map((v) => (
+          <VirtualContextCard
+            key={v.id}
+            mode={mode}
+            vctx={v}
+            contexts={contexts}
+            probes={probes}
+            view={view}
+            onOpen={() => onOpen(v.id)}
+            onMenu={(pos) => onMenu(pos, v)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Per-member resolution shared by every virtual-context variant: chip data
+// (name + stable color) plus the aggregated fleet numbers.
+function resolveVctx(
+  vctx: VirtualContext,
+  contexts: ContextInfo[],
+  probes: Record<string, ClusterProbe>,
+): {
+  resolved: { id: string; ctx: ContextInfo | null }[];
+  colorIdx: Record<string, number>;
+  agg: VirtualContextAggregate;
+} {
+  const colorIdx = clusterColorIndexMap(vctx.members);
+  const resolved = vctx.members.map((id) => ({
+    id,
+    ctx: contexts.find((c) => c.id === id) ?? null,
+  }));
+  const known = new Set(contexts.map((c) => c.id));
+  const agg = aggregateVirtualContext(vctx.members, known, probes);
+  return { resolved, colorIdx, agg };
+}
+
+// Aggregated stat fragments for the summary line / row stats. Missing and
+// unreachable members are called out by count — the chips carry the
+// per-member detail.
+function vctxStats(agg: VirtualContextAggregate): string[] {
+  const bits: string[] = [];
+  if (agg.nodes != null) bits.push(`${agg.nodes} nodes`);
+  if (agg.pods != null) bits.push(`${agg.pods} pods`);
+  if (agg.missing > 0) bits.push(`${agg.missing} missing`);
+  if (agg.unreachable > 0) bits.push(`${agg.unreachable} unreachable`);
+  return bits;
+}
+
+function vctxDotColor(t: Tokens, agg: VirtualContextAggregate): string {
+  return agg.health === "bad"
+    ? t.bad
+    : agg.health === "good"
+      ? t.good
+      : t.unknown;
+}
+
+// One colored dot + name per member; missing members render struck-through
+// in the bad color. `dotsOnly` drops the names for the Mini layout.
+function VctxMemberChips({
+  resolved,
+  colorIdx,
+  dotsOnly,
+}: {
+  resolved: { id: string; ctx: ContextInfo | null }[];
+  colorIdx: Record<string, number>;
+  dotsOnly?: boolean;
+}) {
+  const t = useResolvedTheme().tokens;
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: dotsOnly ? 4 : 8,
+        flexWrap: "wrap",
+        minWidth: 0,
+      }}
+    >
+      {resolved.map((m) => (
+        <span
+          key={m.id}
+          title={m.ctx ? m.ctx.name : `${m.id} (missing from kubeconfig)`}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
+            color: m.ctx ? t.textDim : t.bad,
+            textDecoration: m.ctx ? undefined : "line-through",
+            whiteSpace: "nowrap",
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: clusterAccent(colorIdx[m.id] ?? 0),
+              flexShrink: 0,
+              outline: m.ctx ? undefined : `1px solid ${t.bad}`,
+            }}
+          />
+          {!dotsOnly && (m.ctx?.name ?? m.id)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+// Tile + Mini variants. Tiles mirror FleetCard's anatomy — aggregated
+// CPU/Mem gauges, title row, mono summary line — plus the member chips.
+// Mini drops gauges and stats and shows just dot + name + member dots.
+function VirtualContextCard({
+  mode,
+  vctx,
+  contexts,
+  probes,
+  view,
+  onOpen,
+  onMenu,
+}: {
+  mode: ThemeMode;
+  vctx: VirtualContext;
+  contexts: ContextInfo[];
+  probes: Record<string, ClusterProbe>;
+  view: "tiles" | "mini";
+  onOpen: () => void;
+  onMenu: (pos: MenuPosition) => void;
+}) {
+  const t = useResolvedTheme().tokens;
+  const { resolved, colorIdx, agg } = resolveVctx(vctx, contexts, probes);
+  const dotColor = vctxDotColor(t, agg);
+
+  const buttonBase: React.CSSProperties = {
+    border: `1px solid ${t.border}`,
+    borderRadius: R_LG,
+    background: t.surface,
+    textAlign: "left",
+    cursor: "pointer",
+    fontFamily: "inherit",
+    color: "inherit",
+    transition: "border-color .15s, background .15s",
+  };
+  const hoverHandlers = {
+    onMouseEnter: (e: React.MouseEvent<HTMLButtonElement>) => {
+      e.currentTarget.style.borderColor = t.accent;
+      e.currentTarget.style.background = t.accentSoft;
+    },
+    onMouseLeave: (e: React.MouseEvent<HTMLButtonElement>) => {
+      e.currentTarget.style.borderColor = t.border;
+      e.currentTarget.style.background = t.surface;
+    },
+  };
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    onMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  if (view === "mini") {
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        onContextMenu={onContextMenu}
+        style={{
+          ...buttonBase,
+          padding: "8px 10px",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          minWidth: 180,
+          maxWidth: 420,
+          flex: "0 1 auto",
+        }}
+        {...hoverHandlers}
+      >
+        <span
+          aria-hidden
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: "50%",
+            background: dotColor,
+            flexShrink: 0,
+          }}
+        />
+        <span
+          style={{
+            fontSize: FS_MD,
+            fontWeight: 600,
+            letterSpacing: -0.2,
+            color: t.text,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            minWidth: 0,
+          }}
+        >
+          {vctx.name}
+        </span>
+        <VctxMemberChips resolved={resolved} colorIdx={colorIdx} dotsOnly />
+        <span
+          style={{
+            marginLeft: "auto",
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
+            color: t.textMuted,
+            flexShrink: 0,
+            paddingLeft: 8,
+          }}
+        >
+          {vctx.members.length} clusters
+        </span>
+      </button>
+    );
+  }
+
+  const colorFor = (r: number) =>
+    r > 0.8 ? t.bad : r > 0.65 ? t.warn : t.good;
+  const stats = vctxStats(agg);
+
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      onContextMenu={onContextMenu}
+      style={{
+        ...buttonBase,
+        padding: "12px 14px",
+        display: "flex",
+        alignItems: "center",
+        gap: 14,
+        minWidth: 300,
+        maxWidth: 560,
+        flex: "0 1 auto",
+      }}
+      {...hoverHandlers}
+    >
+      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+        <GaugeWithLabel
+          mode={mode}
+          ratio={agg.cpuRatio}
+          color={agg.cpuRatio != null ? colorFor(agg.cpuRatio) : t.unknown}
+          label="cpu"
+        />
+        <GaugeWithLabel
+          mode={mode}
+          ratio={agg.memRatio}
+          color={agg.memRatio != null ? colorFor(agg.memRatio) : t.unknown}
+          label="mem"
+        />
+      </div>
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span
+            aria-hidden
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: dotColor,
+              flexShrink: 0,
+            }}
+          />
+          <span
+            style={{
+              fontSize: FS_LG,
+              fontWeight: 600,
+              letterSpacing: -0.3,
+              color: t.text,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              minWidth: 0,
+            }}
+          >
+            {vctx.name}
+          </span>
+          <span
+            style={{
+              marginLeft: "auto",
+              fontFamily: FF_MONO,
+              fontSize: FS_XS,
+              color: t.textMuted,
+              flexShrink: 0,
+              paddingLeft: 8,
+            }}
+          >
+            {vctx.members.length} clusters
+          </span>
+        </div>
+        <div
+          style={{
+            fontSize: FS_SM,
+            color: t.textMuted,
+            fontVariantNumeric: "tabular-nums",
+            fontFamily: FF_MONO,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {stats.length > 0 ? stats.join(" · ") : "probing…"}
+        </div>
+        <VctxMemberChips resolved={resolved} colorIdx={colorIdx} />
+      </div>
+    </button>
+  );
+}
+
+// Row variant: one line per virtual context inside the bordered list, same
+// anatomy as FleetRow — dot, name, member chips, right-aligned mono stats.
+function VirtualContextRow({
+  vctx,
+  contexts,
+  probes,
+  isLast,
+  onOpen,
+  onMenu,
+}: {
+  mode: ThemeMode;
+  vctx: VirtualContext;
+  contexts: ContextInfo[];
+  probes: Record<string, ClusterProbe>;
+  isLast: boolean;
+  onOpen: () => void;
+  onMenu: (pos: MenuPosition) => void;
+}) {
+  const t = useResolvedTheme().tokens;
+  const { resolved, colorIdx, agg } = resolveVctx(vctx, contexts, probes);
+  const dotColor = vctxDotColor(t, agg);
+  const stats = [`${vctx.members.length} clusters`, ...vctxStats(agg)];
+
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onMenu({ x: e.clientX, y: e.clientY });
+      }}
+      style={{
+        width: "100%",
+        border: "none",
+        borderBottom: isLast ? "none" : `1px solid ${t.border}`,
+        background: "transparent",
+        padding: "8px 14px",
+        textAlign: "left",
+        cursor: "pointer",
+        fontFamily: "inherit",
+        color: "inherit",
+        transition: "background .12s",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = t.accentSoft;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "transparent";
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: dotColor,
+          flexShrink: 0,
+        }}
+      />
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          overflow: "hidden",
+        }}
+      >
+        <span
+          style={{
+            fontSize: FS_MD,
+            fontWeight: 600,
+            letterSpacing: -0.2,
+            color: t.text,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+            flexShrink: 1,
+          }}
+        >
+          {vctx.name}
+        </span>
+        <VctxMemberChips resolved={resolved} colorIdx={colorIdx} />
+      </div>
+      <div
+        style={{
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
+          color: t.textMuted,
+          fontVariantNumeric: "tabular-nums",
+          flexShrink: 0,
+        }}
+      >
+        {stats.join(" · ")}
+      </div>
+    </button>
+  );
+}
+
 function FleetGroup({
   mode,
   label,
   list,
   probes,
   view,
+  picked,
+  onTogglePick,
   onSelect,
   onMenu,
 }: {
@@ -327,10 +1081,18 @@ function FleetGroup({
   list: ContextInfo[];
   probes: Record<string, ClusterProbe>;
   view: FleetView;
+  picked: Set<string>;
+  onTogglePick: (id: string) => void;
   onSelect: (id: string) => void;
   onMenu: (pos: MenuPosition, ctx: ContextInfo) => void;
 }) {
   const t = useResolvedTheme().tokens;
+  const anyPicked = picked.size > 0;
+  // ⌘/Ctrl-click toggles multi-select; plain click connects.
+  const cardClick = (c: ContextInfo) => (e: React.MouseEvent) => {
+    if (e.metaKey || e.ctrlKey) onTogglePick(c.id);
+    else onSelect(c.id);
+  };
   const header = (
     <div
       style={{
@@ -374,7 +1136,10 @@ function FleetGroup({
               context={c}
               probe={probes[c.id] ?? null}
               isLast={i === list.length - 1}
-              onSelect={() => onSelect(c.id)}
+              picked={picked.has(c.id)}
+              showPick={anyPicked}
+              onTogglePick={() => onTogglePick(c.id)}
+              onSelect={cardClick(c)}
               onMenu={(pos) => onMenu(pos, c)}
             />
           ))}
@@ -416,7 +1181,10 @@ function FleetGroup({
                   mode={mode}
                   context={c}
                   probe={probes[c.id] ?? null}
-                  onSelect={() => onSelect(c.id)}
+                  picked={picked.has(c.id)}
+                  showPick={anyPicked}
+                  onTogglePick={() => onTogglePick(c.id)}
+                  onSelect={cardClick(c)}
                   onMenu={(pos) => onMenu(pos, c)}
                 />
               ) : (
@@ -425,7 +1193,10 @@ function FleetGroup({
                   context={c}
                   probe={probes[c.id] ?? null}
                   wide={visibleLen > 36}
-                  onSelect={() => onSelect(c.id)}
+                  picked={picked.has(c.id)}
+                  showPick={anyPicked}
+                  onTogglePick={() => onTogglePick(c.id)}
+                  onSelect={cardClick(c)}
                   onMenu={(pos) => onMenu(pos, c)}
                 />
               )}
@@ -442,6 +1213,9 @@ function FleetCard({
   context,
   probe,
   wide,
+  picked,
+  showPick,
+  onTogglePick,
   onSelect,
   onMenu,
 }: {
@@ -449,7 +1223,10 @@ function FleetCard({
   context: ContextInfo;
   probe: ClusterProbe | null;
   wide: boolean;
-  onSelect: () => void;
+  picked: boolean;
+  showPick: boolean;
+  onTogglePick: () => void;
+  onSelect: (e: React.MouseEvent) => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
   const t = useResolvedTheme().tokens;
@@ -494,9 +1271,9 @@ function FleetCard({
       }}
       style={{
         width: "100%",
-        border: `1px solid ${t.border}`,
+        border: `1px solid ${picked ? t.accent : t.border}`,
         borderRadius: R_LG,
-        background: t.surface,
+        background: picked ? t.accentSoft : t.surface,
         padding: cardPad,
         textAlign: "left",
         cursor: "pointer",
@@ -512,10 +1289,21 @@ function FleetCard({
         e.currentTarget.style.background = t.accentSoft;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = t.border;
-        e.currentTarget.style.background = t.surface;
+        e.currentTarget.style.borderColor = picked ? t.accent : t.border;
+        e.currentTarget.style.background = picked ? t.accentSoft : t.surface;
       }}
     >
+      {showPick && (
+        <span
+          onClick={(e) => {
+            e.stopPropagation();
+            onTogglePick();
+          }}
+          style={{ display: "inline-flex", flexShrink: 0 }}
+        >
+          <Checkbox t={t} checked={picked} />
+        </span>
+      )}
       <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
         <GaugeWithLabel
           mode={mode}
@@ -791,16 +1579,22 @@ function GaugeWithLabel({
 // gauges, no summary line. Used when the operator wants to scan a large
 // fleet without per-card load info.
 function MiniCard({
-  
+
   context,
   probe,
+  picked,
+  showPick,
+  onTogglePick,
   onSelect,
   onMenu,
 }: {
   mode: ThemeMode;
   context: ContextInfo;
   probe: ClusterProbe | null;
-  onSelect: () => void;
+  picked: boolean;
+  showPick: boolean;
+  onTogglePick: () => void;
+  onSelect: (e: React.MouseEvent) => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
   const t = useResolvedTheme().tokens;
@@ -823,9 +1617,9 @@ function MiniCard({
       style={{
         width: "100%",
         height: "100%",
-        border: `1px solid ${t.border}`,
+        border: `1px solid ${picked ? t.accent : t.border}`,
         borderRadius: R_LG,
-        background: t.surface,
+        background: picked ? t.accentSoft : t.surface,
         padding: "8px 10px",
         textAlign: "left",
         cursor: "pointer",
@@ -841,10 +1635,21 @@ function MiniCard({
         e.currentTarget.style.background = t.accentSoft;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = t.border;
-        e.currentTarget.style.background = t.surface;
+        e.currentTarget.style.borderColor = picked ? t.accent : t.border;
+        e.currentTarget.style.background = picked ? t.accentSoft : t.surface;
       }}
     >
+      {showPick && (
+        <span
+          onClick={(e) => {
+            e.stopPropagation();
+            onTogglePick();
+          }}
+          style={{ display: "inline-flex", flexShrink: 0 }}
+        >
+          <Checkbox t={t} checked={picked} />
+        </span>
+      )}
       <Tooltip
         label={
           probe?.healthy === true
@@ -938,10 +1743,13 @@ function MiniCard({
 // gauges, no card frame — meant for operators with dozens of clusters who
 // want to scan top-to-bottom.
 function FleetRow({
-  
+
   context,
   probe,
   isLast,
+  picked,
+  showPick,
+  onTogglePick,
   onSelect,
   onMenu,
 }: {
@@ -949,7 +1757,10 @@ function FleetRow({
   context: ContextInfo;
   probe: ClusterProbe | null;
   isLast: boolean;
-  onSelect: () => void;
+  picked: boolean;
+  showPick: boolean;
+  onTogglePick: () => void;
+  onSelect: (e: React.MouseEvent) => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
   const t = useResolvedTheme().tokens;
@@ -978,7 +1789,7 @@ function FleetRow({
         width: "100%",
         border: "none",
         borderBottom: isLast ? "none" : `1px solid ${t.border}`,
-        background: "transparent",
+        background: picked ? t.accentSoft : "transparent",
         padding: "8px 14px",
         textAlign: "left",
         cursor: "pointer",
@@ -993,9 +1804,20 @@ function FleetRow({
         e.currentTarget.style.background = t.accentSoft;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.background = picked ? t.accentSoft : "transparent";
       }}
     >
+      {showPick && (
+        <span
+          onClick={(e) => {
+            e.stopPropagation();
+            onTogglePick();
+          }}
+          style={{ display: "inline-flex", flexShrink: 0 }}
+        >
+          <Checkbox t={t} checked={picked} />
+        </span>
+      )}
       <Tooltip
         label={
           probe?.healthy === true

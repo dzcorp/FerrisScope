@@ -21,7 +21,7 @@ const initial = useAppStore.getState();
 beforeEach(() => {
   resetMockInvoke();
   resetEventMock();
-  useAppStore.setState({ ...initial, metrics: null });
+  useAppStore.setState({ ...initial, metricsByCluster: {} });
 });
 
 function Harness({ clusterId }: { clusterId: string | null }) {
@@ -63,13 +63,13 @@ describe("useMetricsSubscription", () => {
     await act(async () => {
       render(<Harness clusterId="ctx" />);
     });
-    expect(useAppStore.getState().metrics).toEqual({
+    expect(useAppStore.getState().metricsByCluster["ctx"]).toEqual({
       pods: { p1: { cpu_milli: 100, mem_mib: 32 } },
       available: true,
     });
   });
 
-  it("null initial snapshot leaves store metrics at null", async () => {
+  it("null initial snapshot leaves the cluster entry absent", async () => {
     setMockInvoke((cmd) => {
       if (cmd === "subscribe_metrics") return null;
       return undefined;
@@ -77,7 +77,7 @@ describe("useMetricsSubscription", () => {
     await act(async () => {
       render(<Harness clusterId="ctx" />);
     });
-    expect(useAppStore.getState().metrics).toBeNull();
+    expect(useAppStore.getState().metricsByCluster["ctx"]).toBeUndefined();
   });
 
   it("metrics:// events flow into the store via setMetrics", async () => {
@@ -91,7 +91,7 @@ describe("useMetricsSubscription", () => {
     act(() => {
       emitMock("metrics://ctx", { pods: { p2: { cpu_milli: 50, mem_mib: 16 } }, available: true });
     });
-    expect(useAppStore.getState().metrics).toEqual({
+    expect(useAppStore.getState().metricsByCluster["ctx"]).toEqual({
       pods: { p2: { cpu_milli: 50, mem_mib: 16 } },
       available: true,
     });
@@ -127,7 +127,7 @@ describe("useMetricsSubscription", () => {
     await act(async () => {
       render(<Harness clusterId="ctx" />);
     });
-    expect(useAppStore.getState().metrics).toBeNull();
+    expect(useAppStore.getState().metricsByCluster["ctx"]).toBeUndefined();
   });
 
   it("switching clusterId tears down the previous subscription", async () => {

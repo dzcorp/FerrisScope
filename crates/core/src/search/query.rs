@@ -1,5 +1,4 @@
 use rusqlite::Connection;
-use serde_json::Value;
 
 use super::{Result, SearchHit};
 
@@ -77,7 +76,7 @@ pub(super) fn run(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Se
     let match_query = fts_tokens.join(" ");
 
     let sql = format!(
-        "SELECT r.kind_id, r.uid, r.namespace, r.name, r.blob,
+        "SELECT r.kind_id, r.uid, r.namespace, r.name,
                 bm25(rows_fts, {BM25_WEIGHTS}) * ({KIND_BIAS_CASE}) AS score
          FROM rows_fts
          JOIN rows r ON r.rowid = rows_fts.rowid
@@ -113,7 +112,7 @@ fn escape_fts_phrase(token: &str) -> String {
 fn like_fallback(conn: &Connection, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
     let pattern = format!("%{}%", escape_like(query));
     let sql = format!(
-        "SELECT r.kind_id, r.uid, r.namespace, r.name, r.blob, 0.0 AS score
+        "SELECT r.kind_id, r.uid, r.namespace, r.name, 0.0 AS score
          FROM rows r
          WHERE r.deleted_at IS NULL
            AND (r.name LIKE ?1 ESCAPE '\\' OR r.namespace LIKE ?1 ESCAPE '\\')
@@ -136,19 +135,115 @@ fn escape_like(s: &str) -> String {
 }
 
 fn parse_hit(row: &rusqlite::Row<'_>) -> Result<SearchHit> {
-    let kind_id: String = row.get(0)?;
-    let uid: String = row.get(1)?;
-    let namespace: Option<String> = row.get(2)?;
-    let name: String = row.get(3)?;
-    let blob_str: String = row.get(4)?;
-    let score: f64 = row.get(5)?;
-    let blob: Value = serde_json::from_str(&blob_str)?;
     Ok(SearchHit {
-        kind_id,
-        uid,
-        namespace,
-        name,
-        blob,
-        score,
+        kind_id: row.get(0)?,
+        uid: row.get(1)?,
+        namespace: row.get(2)?,
+        name: row.get(3)?,
+        score: row.get(4)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search::db::open_in_memory_for_tests;
+
+    fn seed(conn: &Connection, kind: &str, uid: &str, name: &str, blob: &str) {
+        conn.execute(
+            "INSERT INTO rows (kind_id, uid, namespace, name, blob, updated_at, deleted_at)
+             VALUES (?1, ?2, 'default', ?3, ?4, 1, NULL)",
+            rusqlite::params![kind, uid, name, blob],
+        )
+        .unwrap();
+    }
+
+    fn names(hits: &[SearchHit]) -> Vec<&str> {
+        hits.iter().map(|h| h.name.as_str()).collect()
+    }
+
+    #[test]
+    fn substring_match_via_trigram() {
+        let conn = open_in_memory_for_tests();
+        seed(&conn, "pods", "u1", "payments-api-7f9c4", "{}");
+        seed(&conn, "pods", "u2", "frontend-0", "{}");
+        let hits = run(&conn, "ments-api", 10).unwrap();
+        assert_eq!(names(&hits), vec!["payments-api-7f9c4"]);
+    }
+
+    #[test]
+    fn name_match_outranks_blob_mention() {
+        let conn = open_in_memory_for_tests();
+        seed(
+            &conn,
+            "configmaps",
+            "u1",
+            "app-config",
+            r#"{"note":"mysql url"}"#,
+        );
+        seed(&conn, "pods", "u2", "mysql-0", "{}");
+        let hits = run(&conn, "mysql", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].name, "mysql-0");
+    }
+
+    #[test]
+    fn deleted_rows_are_excluded_from_both_paths() {
+        let conn = open_in_memory_for_tests();
+        seed(&conn, "pods", "u1", "mysql-0", "{}");
+        conn.execute("UPDATE rows SET deleted_at = 5 WHERE uid = 'u1'", [])
+            .unwrap();
+        assert!(run(&conn, "mysql", 10).unwrap().is_empty());
+        // 2-char query takes the LIKE fallback — same filter must apply.
+        assert!(run(&conn, "my", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fts_meta_characters_do_not_break_the_query() {
+        let conn = open_in_memory_for_tests();
+        seed(&conn, "pods", "u1", "api-0", "{}");
+        // Each of these would be FTS5 syntax if unescaped.
+        for q in ["app:foo", "a*b(c)", "name-\"quoted\"", "x OR y NOT z"] {
+            run(&conn, q, 10).unwrap_or_else(|e| panic!("query {q:?} failed: {e}"));
+        }
+    }
+
+    #[test]
+    fn like_fallback_serves_short_queries_and_escapes_wildcards() {
+        let conn = open_in_memory_for_tests();
+        seed(&conn, "pods", "u1", "db-0", "{}");
+        seed(&conn, "pods", "u2", "frontend-0", "{}");
+        let hits = run(&conn, "db", 10).unwrap();
+        assert_eq!(names(&hits), vec!["db-0"]);
+        // `%` must match literally, not as a wildcard.
+        assert!(run(&conn, "%-", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn short_query_returns_empty_without_erroring() {
+        let conn = open_in_memory_for_tests();
+        seed(&conn, "pods", "u1", "a", "{}");
+        assert!(run(&conn, "a", 10).unwrap().is_empty());
+        assert!(run(&conn, "  ", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn kind_bias_demotes_events_below_workloads() {
+        let conn = open_in_memory_for_tests();
+        seed(&conn, "events", "u1", "mysql-0.17f1", "{}");
+        seed(&conn, "pods", "u2", "mysql-0", "{}");
+        let hits = run(&conn, "mysql-0", 10).unwrap();
+        assert_eq!(hits[0].kind_id, "pods");
+    }
+
+    #[test]
+    fn limit_is_clamped() {
+        let conn = open_in_memory_for_tests();
+        for i in 0..5 {
+            seed(&conn, "pods", &format!("u{i}"), &format!("api-{i}"), "{}");
+        }
+        assert_eq!(run(&conn, "api", 2).unwrap().len(), 2);
+        // limit 0 clamps to 1 rather than erroring or returning everything.
+        assert_eq!(run(&conn, "api", 0).unwrap().len(), 1);
+    }
 }

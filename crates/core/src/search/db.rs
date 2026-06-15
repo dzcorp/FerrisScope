@@ -6,9 +6,14 @@ use sha2::{Digest, Sha256};
 
 use super::{Result, SearchError};
 
+/// Schema version stamped into `PRAGMA user_version`. The index is a
+/// rebuildable cache (the connect-time bootstrap repopulates it), so we
+/// never migrate: a version mismatch drops the file and starts fresh.
+/// Bump this whenever `SCHEMA_SQL` changes shape.
+const SCHEMA_VERSION: i32 = 1;
+
 /// DDL applied on every `open_and_init`. `IF NOT EXISTS` everywhere so
-/// reopening an existing DB is a no-op. Schema changes will land as a
-/// migration table later; pre-alpha we don't carry any version yet.
+/// reopening an existing DB is a no-op.
 const SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS rows (
     kind_id     TEXT NOT NULL,
@@ -82,7 +87,13 @@ pub(super) fn open_and_init(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(path)?;
+    let conn = open_checked_version(path)?;
+    // A second connection can exist briefly (reconnect re-opens the index
+    // while a just-aborted forwarder still holds the old handle). WAL
+    // tolerates that, but without a busy timeout a write colliding with the
+    // other connection's checkpoint returns SQLITE_BUSY immediately and the
+    // batch is dropped. 5 s is far beyond any real checkpoint pause.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     // WAL gives us reader / writer concurrency; without it, even a single
     // bg query blocks all upserts. NORMAL sync trades a tiny crash-recovery
     // window for ~10× write throughput vs FULL — and the search index is
@@ -107,5 +118,116 @@ pub(super) fn open_and_init(path: &Path) -> Result<Connection> {
     // beyond what we'd see with the page cache alone.
     conn.pragma_update(None, "mmap_size", 0)?;
     conn.execute_batch(SCHEMA_SQL)?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(conn)
+}
+
+/// Open `path`, dropping and recreating the file when it carries a
+/// different schema version (or isn't a SQLite DB at all — a corrupt file
+/// fails the version read). No migrations: the index is a cache, the
+/// bootstrap rebuilds it, and stale-layout data is worth less than the
+/// migration code would cost.
+fn open_checked_version(path: &Path) -> Result<Connection> {
+    let fresh = !path.exists();
+    let conn = Connection::open(path)?;
+    if !fresh {
+        let version: std::result::Result<i32, _> =
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0));
+        match version {
+            Ok(v) if v == SCHEMA_VERSION => {}
+            v => {
+                tracing::info!(
+                    path = %path.display(),
+                    found = ?v.ok(),
+                    expected = SCHEMA_VERSION,
+                    "search index: schema version mismatch, recreating DB"
+                );
+                drop(conn);
+                let _ = std::fs::remove_file(path);
+                let _ = std::fs::remove_file(path.with_extension("db-shm"));
+                let _ = std::fs::remove_file(path.with_extension("db-wal"));
+                return Ok(Connection::open(path)?);
+            }
+        }
+    }
+    Ok(conn)
+}
+
+/// In-memory connection with the production schema applied — for unit tests
+/// of the query / gc / writer layers. Skips the file-oriented pragmas (WAL
+/// is meaningless in memory).
+#[cfg(test)]
+pub(super) fn open_in_memory_for_tests() -> Connection {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    conn.execute_batch(SCHEMA_SQL).expect("schema");
+    conn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_row(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO rows (kind_id, uid, namespace, name, blob, updated_at, deleted_at)
+             VALUES ('pods', 'u1', 'default', 'api-0', '{}', 1, NULL)",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn row_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM rows", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn reopen_at_the_same_version_keeps_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idx.db");
+        {
+            let conn = open_and_init(&path).unwrap();
+            seed_row(&conn);
+        }
+        let conn = open_and_init(&path).unwrap();
+        assert_eq!(row_count(&conn), 1);
+        let v: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn version_mismatch_drops_and_recreates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idx.db");
+        {
+            let conn = open_and_init(&path).unwrap();
+            seed_row(&conn);
+            // Simulate a DB written by a different (older / newer) build.
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                .unwrap();
+        }
+        let conn = open_and_init(&path).unwrap();
+        // Old data gone, fresh schema in place at the current version.
+        assert_eq!(row_count(&conn), 0);
+        let v: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_unstamped_db_is_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idx.db");
+        {
+            // Pre-versioning layout: schema without the stamp (user_version 0).
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            seed_row(&conn);
+        }
+        let conn = open_and_init(&path).unwrap();
+        assert_eq!(row_count(&conn), 0);
+    }
 }

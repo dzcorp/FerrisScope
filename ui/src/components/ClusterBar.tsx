@@ -26,21 +26,9 @@ type Props = {
 export function ClusterBar({ mode, context, state, style }: Props) {
   const t = useResolvedTheme().tokens;
 
-  const selectedNamespaces = useAppStore((s) => s.selectedNamespaces);
-  const openNsModal = useAppStore((s) => s.openNsModal);
   const addMenuOpen = useAppStore((s) => s.addMenuOpen);
   const setAddMenuOpen = useAppStore((s) => s.setAddMenuOpen);
-  const dockTabs = useAppStore((s) => s.dockTabs);
   const addDockTab = useAppStore((s) => s.addDockTab);
-
-  const nsCount = selectedNamespaces.size;
-  const nsAll = nsCount === 0;
-  const nsList = Array.from(selectedNamespaces);
-  const nsSummary = nsAll
-    ? "All namespaces"
-    : nsCount === 1
-      ? nsList[0]
-      : `${nsCount} namespaces`;
 
   // Responsive bar: progressively hide secondary stats as width shrinks so
   // the namespace + add controls (right side) and the cluster name (left
@@ -76,6 +64,17 @@ export function ClusterBar({ mode, context, state, style }: Props) {
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
   }, [addMenuOpen, setAddMenuOpen]);
+
+  // "Add cluster…" flips the dropdown into a context-picker list; appending
+  // a context widens this single-cluster view into an ad-hoc multi-cluster
+  // view (App switches to VirtualClusterPanel when the scope grows past 1).
+  const [addClusterMode, setAddClusterMode] = useState(false);
+  useEffect(() => {
+    if (!addMenuOpen) setAddClusterMode(false);
+  }, [addMenuOpen]);
+  const allContexts = useAppStore((s) => s.contexts);
+  const addScopeExtra = useAppStore((s) => s.addScopeExtra);
+  const addableContexts = allContexts.filter((c) => c.id !== context.id);
 
   return (
     <div
@@ -157,61 +156,12 @@ export function ClusterBar({ mode, context, state, style }: Props) {
 
       {/* "+" menu — opens terminal or YAML in dock */}
       <div ref={menuWrapRef} style={{ position: "relative" }}>
-        <Tooltip label="New terminal or YAML scratchpad">
-        <button
-          type="button"
+        <AddMenuTrigger
+          open={addMenuOpen}
           onClick={() => setAddMenuOpen(!addMenuOpen)}
-          onMouseEnter={(e) =>
-            (e.currentTarget.style.background = t.btnHover)
-          }
-          onMouseLeave={(e) =>
-            (e.currentTarget.style.background = addMenuOpen
-              ? t.btnHover
-              : t.surface)
-          }
-          style={{
-            border: `1px solid ${t.border}`,
-            background: addMenuOpen ? t.btnHover : t.surface,
-            color: t.text,
-            width: 36,
-            height: 36,
-            borderRadius: R_MD,
-            cursor: "pointer",
-            outline: "none",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            position: "relative",
-            transition: "background .12s, border-color .12s",
-          }}
-        >
-          {Icons.plus}
-          {dockTabs.length > 0 && (
-            <span
-              style={{
-                position: "absolute",
-                top: -3,
-                right: -3,
-                minWidth: 14,
-                height: 14,
-                padding: "0 3px",
-                borderRadius: R_MD,
-                background: t.accent,
-                color: "#fff",
-                fontSize: FS_XS,
-                fontWeight: 700,
-                fontFamily: FF_MONO,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                border: `2px solid ${t.headerAlt}`,
-              }}
-            >
-              {dockTabs.length}
-            </span>
-          )}
-        </button>
-        </Tooltip>
+          tooltip="New terminal or YAML scratchpad"
+          ariaLabel="Add tab or cluster"
+        />
         {addMenuOpen && (
           <div
             style={{
@@ -228,8 +178,54 @@ export function ClusterBar({ mode, context, state, style }: Props) {
                 mode === "dark"
                   ? "0 8px 24px rgba(0,0,0,0.4)"
                   : "0 8px 24px rgba(15,20,30,0.12)",
+              // The "Add cluster…" mode lists every kubeconfig context —
+              // long lists must scroll, not run off the viewport.
+              maxHeight: "min(420px, 60vh)",
+              overflowY: "auto",
             }}
           >
+            {addClusterMode ? (
+              <>
+                <div
+                  style={{
+                    padding: "6px 10px 4px",
+                    fontSize: FS_XS,
+                    fontWeight: 700,
+                    textTransform: "uppercase",
+                    letterSpacing: 0.5,
+                    color: t.textMuted,
+                    fontFamily: FF_MONO,
+                  }}
+                >
+                  Add cluster to this view
+                </div>
+                {addableContexts.length === 0 && (
+                  <div
+                    style={{
+                      padding: "8px 10px",
+                      fontSize: FS_MD,
+                      color: t.textMuted,
+                    }}
+                  >
+                    No other contexts in your kubeconfig.
+                  </div>
+                )}
+                {addableContexts.map((c) => (
+                  <AddMenuItem
+                    key={c.id}
+                    t={t}
+                    icon={Icons.cluster}
+                    title={c.name}
+                    subtitle={c.cluster}
+                    onClick={() => {
+                      addScopeExtra(c.id);
+                      setAddMenuOpen(false);
+                    }}
+                  />
+                ))}
+              </>
+            ) : (
+              <>
             <AddMenuItem
               t={t}
               icon={Icons.shell}
@@ -283,17 +279,125 @@ export function ClusterBar({ mode, context, state, style }: Props) {
                 }
               }}
             />
+            <AddMenuItem
+              t={t}
+              icon={Icons.plus}
+              title="Add cluster…"
+              subtitle="Merge another cluster into this view"
+              onClick={() => setAddClusterMode(true)}
+            />
+              </>
+            )}
           </div>
         )}
       </div>
 
-      <Tooltip
-        label={
-          nsAll
-            ? "Filter by namespace"
-            : `Filter: ${Array.from(selectedNamespaces).join(", ")}`
+      <NamespaceButton />
+    </div>
+  );
+}
+
+// ── Shared bar controls ─────────────────────────────────────────────────────
+// The single-cluster ClusterBar and the multi-cluster VirtualClusterBar must
+// present identical control sizing (36px height, same chrome) — they swap in
+// for each other when the scope grows/shrinks, and a size jump there reads
+// as a glitch. Both bars consume these instead of hand-rolling buttons.
+
+/// 36×36 "+" trigger with the open-dock-tabs count badge. The dropdown
+/// itself stays with the caller — only the trigger chrome is shared.
+export function AddMenuTrigger({
+  open,
+  onClick,
+  tooltip,
+  ariaLabel,
+}: {
+  open: boolean;
+  onClick: () => void;
+  tooltip: string;
+  ariaLabel: string;
+}) {
+  const t = useResolvedTheme().tokens;
+  const dockTabs = useAppStore((s) => s.dockTabs);
+  return (
+    <Tooltip label={tooltip}>
+      <button
+        type="button"
+        aria-label={ariaLabel}
+        onClick={onClick}
+        onMouseEnter={(e) => (e.currentTarget.style.background = t.btnHover)}
+        onMouseLeave={(e) =>
+          (e.currentTarget.style.background = open ? t.btnHover : t.surface)
         }
+        style={{
+          border: `1px solid ${t.border}`,
+          background: open ? t.btnHover : t.surface,
+          color: t.text,
+          width: 36,
+          height: 36,
+          borderRadius: R_MD,
+          cursor: "pointer",
+          outline: "none",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          position: "relative",
+          flexShrink: 0,
+          transition: "background .12s, border-color .12s",
+        }}
       >
+        {Icons.plus}
+        {dockTabs.length > 0 && (
+          <span
+            style={{
+              position: "absolute",
+              top: -3,
+              right: -3,
+              minWidth: 14,
+              height: 14,
+              padding: "0 3px",
+              borderRadius: R_MD,
+              background: t.accent,
+              color: "#fff",
+              fontSize: FS_XS,
+              fontWeight: 700,
+              fontFamily: FF_MONO,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              border: `2px solid ${t.headerAlt}`,
+            }}
+          >
+            {dockTabs.length}
+          </span>
+        )}
+      </button>
+    </Tooltip>
+  );
+}
+
+/// The namespace-filter button: 36px tall, two-line label (caption + active
+/// filter summary), ⌘I hint, accent chrome while a filter is active. Reads
+/// the namespace selection straight from the store so both bars stay in sync.
+export function NamespaceButton() {
+  const t = useResolvedTheme().tokens;
+  const selectedNamespaces = useAppStore((s) => s.selectedNamespaces);
+  const openNsModal = useAppStore((s) => s.openNsModal);
+
+  const nsCount = selectedNamespaces.size;
+  const nsAll = nsCount === 0;
+  const nsList = Array.from(selectedNamespaces);
+  const nsSummary = nsAll
+    ? "All namespaces"
+    : nsCount === 1
+      ? nsList[0]
+      : `${nsCount} namespaces`;
+
+  return (
+    <Tooltip
+      label={
+        nsAll ? "Filter by namespace" : `Filter: ${nsList.join(", ")}`
+      }
+    >
       <button
         type="button"
         onClick={openNsModal}
@@ -371,12 +475,13 @@ export function ClusterBar({ mode, context, state, style }: Props) {
           {MOD_KEY}I
         </Kbd>
       </button>
-      </Tooltip>
-    </div>
+    </Tooltip>
   );
 }
 
-function AddMenuItem({
+// Shared with VirtualClusterPanel's "+" menu — same row anatomy (icon chip +
+// title + subtitle + optional kbd) so the two menus read identically.
+export function AddMenuItem({
   t,
   icon,
   title,
@@ -473,7 +578,7 @@ function ClusterGauges({ clusterId }: { mode: ThemeMode; clusterId: string }) {
   // subscription here means future variants of the bar that hide the
   // gauges (e.g. a compact mode) don't pay for metrics polling either.
   useMetricsSubscription(clusterId);
-  const metrics = useAppStore((s) => s.metrics);
+  const metrics = useAppStore((s) => s.metricsByCluster[clusterId] ?? null);
   if (!metrics || !metrics.available || !metrics.cluster) return null;
   const c = metrics.cluster;
   if (c.cpu_capacity_milli === 0 || c.mem_capacity_mib === 0) return null;

@@ -174,6 +174,23 @@ pub struct Settings {
     /// terminal to look like a terminal. Toggleable in Settings → Appearance.
     #[serde(default = "default_dark_console")]
     pub dark_console: bool,
+    /// What scope the app opens with after a restart. Settings → General.
+    #[serde(default)]
+    pub startup_scope: StartupScope,
+}
+
+/// Restore-on-launch behaviour. `LatestView` reopens exactly what was on
+/// screen at quit — single cluster, virtual context, or an unsaved ad-hoc
+/// multi-cluster view (via `UiState::scope_extras`). `LatestCluster`
+/// restores only the anchor cluster (no virtual context, no extras).
+/// `Fleet` always starts at the fleet landing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupScope {
+    #[default]
+    LatestView,
+    LatestCluster,
+    Fleet,
 }
 
 impl Default for Settings {
@@ -188,6 +205,7 @@ impl Default for Settings {
             ui_scale: default_ui_scale(),
             fleet_view: FleetView::default(),
             dark_console: default_dark_console(),
+            startup_scope: StartupScope::default(),
         }
     }
 }
@@ -231,10 +249,37 @@ impl Default for UpdateState {
     }
 }
 
+/// A saved multi-cluster view: a user-named set of kubeconfig contexts that
+/// open together. Members are `ContextInfo.id` composites
+/// (`"<source_id>::<context_name>"`). Purely a frontend + prefs concept —
+/// the data plane only ever sees the member cluster ids, never the virtual
+/// id. Members that no longer resolve against the kubeconfig sources are
+/// filtered at hydrate/selection time rather than rewritten here, so a
+/// temporarily-missing kubeconfig file doesn't permanently shrink the set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VirtualContext {
+    /// Frontend-generated UUID. Stable across renames and member edits.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UiState {
     #[serde(default)]
     pub selected_context: Option<String>,
+    /// Id of the active `VirtualContext`, mutually exclusive with
+    /// `selected_context`. Dropped at hydrate if it no longer exists in
+    /// `Prefs::virtual_contexts`.
+    #[serde(default)]
+    pub selected_virtual_context: Option<String>,
+    /// Ad-hoc clusters appended to the current view ("Add cluster…" /
+    /// "Open without saving") — persisted so an unsaved multi-cluster view
+    /// survives a restart. Restored only under `StartupScope::LatestView`;
+    /// members that no longer resolve are filtered at hydrate.
+    #[serde(default)]
+    pub scope_extras: Vec<String>,
     #[serde(default)]
     pub selected_kind_id: Option<String>,
     #[serde(default)]
@@ -260,6 +305,24 @@ pub struct Prefs {
     pub ui: UiState,
     #[serde(default)]
     pub update: UpdateState,
+    #[serde(default, deserialize_with = "lenient_virtual_contexts")]
+    pub virtual_contexts: Vec<VirtualContext>,
+}
+
+/// Deserialize `virtual_contexts` entry-by-entry, dropping malformed entries
+/// instead of failing the whole document. A single bad entry (hand-edited
+/// file, interrupted write) must not reset every other preference — `parse()`
+/// falls back to `Prefs::default()` on any top-level error.
+fn lenient_virtual_contexts<'de, D>(deserializer: D) -> Result<Vec<VirtualContext>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<VirtualContext>(v).ok())
+        .filter(|vc| !vc.id.is_empty() && !vc.name.is_empty())
+        .collect())
 }
 
 #[must_use]
@@ -414,6 +477,107 @@ mod tests {
         assert_eq!(prefs.theme.id, "default");
         assert_eq!(prefs.theme.palette_id, "default");
         assert!(matches!(prefs.theme.mode, ThemeMode::Dark));
+    }
+
+    #[test]
+    fn legacy_prefs_without_virtual_contexts_loads_with_defaults() {
+        // A prefs.json written before virtual contexts existed must load
+        // with an empty list and no selected virtual context.
+        let legacy = r#"{ "theme": "dark", "ui": { "selected_context": "default::minikube" } }"#;
+        let prefs = parse(legacy);
+        assert!(prefs.virtual_contexts.is_empty());
+        assert_eq!(prefs.ui.selected_virtual_context, None);
+        assert_eq!(
+            prefs.ui.selected_context,
+            Some("default::minikube".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_prefs_without_startup_scope_defaults_to_latest_view() {
+        // Files written before the startup-scope setting / persisted scope
+        // extras existed must load with the restore-everything default.
+        let legacy = r#"{ "theme": "dark", "ui": { "selected_context": "default::minikube" } }"#;
+        let prefs = parse(legacy);
+        assert_eq!(prefs.settings.startup_scope, StartupScope::LatestView);
+        assert!(prefs.ui.scope_extras.is_empty());
+    }
+
+    #[test]
+    fn startup_scope_and_scope_extras_round_trip() {
+        let mut prefs = Prefs::default();
+        prefs.settings.startup_scope = StartupScope::Fleet;
+        prefs.ui.scope_extras = vec!["default::edge".to_string()];
+        let json = serde_json::to_string(&prefs).unwrap();
+        assert!(json.contains(r#""startup_scope":"fleet""#));
+        let back = parse(&json);
+        assert_eq!(back.settings.startup_scope, StartupScope::Fleet);
+        assert_eq!(back.ui.scope_extras, vec!["default::edge".to_string()]);
+    }
+
+    #[test]
+    fn virtual_contexts_round_trip() {
+        let mut prefs = Prefs {
+            virtual_contexts: vec![
+                VirtualContext {
+                    id: "vc-1".to_string(),
+                    name: "prod".to_string(),
+                    members: vec![
+                        "default::prod-eu".to_string(),
+                        "default::prod-us".to_string(),
+                    ],
+                },
+                VirtualContext {
+                    id: "vc-2".to_string(),
+                    name: "edge".to_string(),
+                    members: vec!["src-a::edge-1".to_string()],
+                },
+            ],
+            ..Prefs::default()
+        };
+        prefs.ui.selected_virtual_context = Some("vc-1".to_string());
+        let json = serde_json::to_string(&prefs).unwrap();
+        let parsed = parse(&json);
+        assert_eq!(parsed.virtual_contexts.len(), 2);
+        assert_eq!(parsed.virtual_contexts[0].id, "vc-1");
+        assert_eq!(parsed.virtual_contexts[0].name, "prod");
+        assert_eq!(
+            parsed.virtual_contexts[0].members,
+            vec![
+                "default::prod-eu".to_string(),
+                "default::prod-us".to_string()
+            ]
+        );
+        assert_eq!(parsed.ui.selected_virtual_context, Some("vc-1".to_string()));
+    }
+
+    #[test]
+    fn malformed_virtual_context_entries_are_dropped_not_fatal() {
+        // A hand-edited or corrupted entry must not reset the rest of the
+        // prefs file. Bad entries: wrong type, missing id/name, empty name.
+        let payload = r#"{
+            "settings": { "refresh_sec": 42, "confirm_destructive": true,
+                          "show_system_ns": false, "density": "compact",
+                          "mono_tables": true, "refresh_on_launch": true },
+            "virtual_contexts": [
+                { "id": "vc-good", "name": "prod", "members": ["default::a", "default::b"] },
+                "not-an-object",
+                { "name": "missing-id" },
+                { "id": "vc-empty-name", "name": "" },
+                { "id": "vc-bad-members", "name": "x", "members": [1, 2] }
+            ]
+        }"#;
+        let prefs = parse(payload);
+        assert_eq!(
+            prefs.virtual_contexts.len(),
+            1,
+            "only the well-formed entry survives"
+        );
+        assert_eq!(prefs.virtual_contexts[0].id, "vc-good");
+        assert_eq!(
+            prefs.settings.refresh_sec, 42,
+            "rest of the document must still parse"
+        );
     }
 
     #[test]

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useAppStore, useResolvedTheme } from "../store";
+import { useActiveClusterIds, useAppStore, useResolvedTheme } from "../store";
 import { FF_MONO, type ThemeMode, R_LG, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
 import { Icons, Kbd, resolveKindIcon } from "./ui";
 import { MOD_KEY } from "../lib/keyboard";
 import { api } from "../api";
+import { mergeSearchHits } from "../lib/multiCluster";
 import type { SearchHit } from "../types";
 
 type Item = {
@@ -43,13 +44,26 @@ export function CommandPalette({ mode, onClose }: Props) {
   const kinds = useAppStore((s) => s.kinds);
   const selectedContext = useAppStore((s) => s.selectedContext);
   const selectContext = useAppStore((s) => s.selectContext);
+  const virtualContexts = useAppStore((s) => s.virtualContexts);
+  const selectVirtualContext = useAppStore((s) => s.selectVirtualContext);
   const selectKind = useAppStore((s) => s.selectKind);
   const navigateToDetail = useAppStore((s) => s.navigateToDetail);
   const openSettings = useAppStore((s) => s.openSettings);
   const openNsModal = useAppStore((s) => s.openNsModal);
   const toggleTheme = useAppStore((s) => s.toggleTheme);
+  // Every cluster the app is observing — search fans out across all of
+  // them in a multi-cluster view and hits get a per-cluster badge.
+  const activeClusterIds = useActiveClusterIds();
+  const scopeActive = activeClusterIds.length > 0;
 
-  const [hits, setHits] = useState<SearchHit[]>([]);
+  const [hits, setHits] = useState<{ clusterId: string; hit: SearchHit }[]>(
+    [],
+  );
+  // Members whose search call failed for the current query. Their absence
+  // from the results is shown, not silently swallowed — in a multi-cluster
+  // view "no hits from prod-eu" and "prod-eu unreachable" are different
+  // answers.
+  const [searchFailures, setSearchFailures] = useState<string[]>([]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -61,35 +75,66 @@ export function CommandPalette({ mode, onClose }: Props) {
     activeItemRef.current?.scrollIntoView({ block: "nearest" });
   }, [hi]);
 
-  // Debounced full-text search against the cluster's index. Fires only when
-  // a cluster is selected and the trimmed query has at least 2 chars (the
-  // backend short-circuits below that anyway). 100ms catches a typing burst
-  // without making the palette feel laggy.
+  // Debounced full-text search against every active cluster's index. Fires
+  // only when a scope is active and the trimmed query has at least 2 chars
+  // (the backend short-circuits below that anyway). 100ms catches a typing
+  // burst without making the palette feel laggy. A member whose index is
+  // unavailable simply contributes no hits.
   useEffect(() => {
     const trimmed = q.trim();
-    if (!selectedContext || trimmed.length < 2) {
+    if (activeClusterIds.length === 0 || trimmed.length < 2) {
       setHits([]);
+      setSearchFailures([]);
       return;
     }
     let cancelled = false;
     const handle = window.setTimeout(() => {
-      api
-        .searchClusterIndex(selectedContext, trimmed, 30)
-        .then((res) => {
-          if (!cancelled) setHits(res);
-        })
-        .catch(() => {
-          if (!cancelled) setHits([]);
-        });
+      Promise.all(
+        activeClusterIds.map(async (cid) => {
+          try {
+            const res = await api.searchClusterIndex(cid, trimmed, 30);
+            return { clusterId: cid, hits: res, ok: true };
+          } catch {
+            return { clusterId: cid, hits: [] as SearchHit[], ok: false };
+          }
+        }),
+      ).then((results) => {
+        if (cancelled) return;
+        setHits(mergeSearchHits(results, 30));
+        setSearchFailures(results.filter((r) => !r.ok).map((r) => r.clusterId));
+      });
     }, 100);
     return () => {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [q, selectedContext]);
+  }, [q, activeClusterIds]);
 
   const items = useMemo<Item[]>(() => {
     const list: Item[] = [];
+
+    virtualContexts.forEach((v) => {
+      list.push({
+        id: `vctx:${v.id}`,
+        group: "Switch context",
+        icon: (
+          <span
+            style={{
+              width: 13,
+              height: 13,
+              display: "inline-flex",
+              color: t.textMuted,
+            }}
+          >
+            {Icons.layers}
+          </span>
+        ),
+        label: v.name,
+        sub: `Virtual context · ${v.members.length} clusters`,
+        keywords: `${v.name} virtual context ${v.members.join(" ")}`.toLowerCase(),
+        action: () => selectVirtualContext(v.id),
+      });
+    });
 
     contexts.forEach((c) => {
       list.push({
@@ -114,7 +159,7 @@ export function CommandPalette({ mode, onClose }: Props) {
       });
     });
 
-    if (selectedContext) {
+    if (scopeActive) {
       kinds.forEach((k) => {
         list.push({
           id: `kind:${k.id}`,
@@ -202,7 +247,7 @@ export function CommandPalette({ mode, onClose }: Props) {
       action: () => toggleTheme(),
     });
 
-    if (selectedContext) {
+    if (scopeActive) {
       list.push({
         id: "cmd:home",
         group: "Actions",
@@ -228,9 +273,11 @@ export function CommandPalette({ mode, onClose }: Props) {
     return list;
   }, [
     contexts,
+    virtualContexts,
     kinds,
-    selectedContext,
+    scopeActive,
     selectContext,
+    selectVirtualContext,
     selectKind,
     openSettings,
     openNsModal,
@@ -245,11 +292,23 @@ export function CommandPalette({ mode, onClose }: Props) {
   const hitItems = useMemo<Item[]>(() => {
     if (hits.length === 0) return [];
     const kindByIdAttempt = new Map(kinds.map((k) => [k.id, k]));
-    return hits.map((h) => {
+    const multi = activeClusterIds.length > 1;
+    const clusterName = (cid: string) =>
+      contexts.find((c) => c.id === cid)?.name ?? cid;
+    // Index rows can outlive their kind id — e.g. a CRD upgraded to a new
+    // version leaves `crd:`/`wkcrd:` ids no rail entry matches until GC
+    // sweeps them. Navigating to a dead kind id is a guaranteed no-op, so
+    // drop those hits. Only filter once kinds are known: right after
+    // connect the rail hasn't published yet and everything would vanish.
+    const known = hits.filter(
+      ({ hit }) => kinds.length === 0 || kindByIdAttempt.has(hit.kind_id),
+    );
+    return known.map(({ clusterId, hit: h }) => {
       const kind = kindByIdAttempt.get(h.kind_id);
       const kindLabel = kind?.kind ?? h.kind_id;
+      const where = h.namespace ? ` · ns:${h.namespace}` : "";
       return {
-        id: `hit:${h.kind_id}:${h.uid}`,
+        id: `hit:${clusterId}:${h.kind_id}:${h.uid}`,
         group: "Cluster objects",
         icon: (
           <span
@@ -266,16 +325,19 @@ export function CommandPalette({ mode, onClose }: Props) {
           </span>
         ),
         label: h.name,
-        sub: h.namespace
-          ? `${kindLabel} · ns:${h.namespace}`
-          : `${kindLabel}`,
+        // In a multi-cluster view the origin cluster is part of the hit's
+        // identity — two members can hold same-named objects.
+        sub: multi
+          ? `${kindLabel}${where} · ${clusterName(clusterId)}`
+          : `${kindLabel}${where}`,
         keywords: `${h.name} ${h.namespace ?? ""} ${h.kind_id}`.toLowerCase(),
         mono: true,
         preFiltered: true,
-        action: () => navigateToDetail(h.kind_id, h.namespace, h.name),
+        action: () =>
+          navigateToDetail(h.kind_id, h.namespace, h.name, clusterId),
       };
     });
-  }, [hits, kinds, t, navigateToDetail]);
+  }, [hits, kinds, t, navigateToDetail, activeClusterIds, contexts]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -373,9 +435,11 @@ export function CommandPalette({ mode, onClose }: Props) {
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={onKey}
             placeholder={
-              selectedContext
-                ? `Search in ${selectedContext}, switch context, jump to a kind…`
-                : "Search contexts, type a name…"
+              activeClusterIds.length > 1
+                ? `Search across ${activeClusterIds.length} clusters, switch context, jump to a kind…`
+                : selectedContext
+                  ? `Search in ${selectedContext}, switch context, jump to a kind…`
+                  : "Search contexts, type a name…"
             }
             style={{
               flex: 1,
@@ -499,6 +563,21 @@ export function CommandPalette({ mode, onClose }: Props) {
                 })}
               </div>
             ))
+          )}
+          {searchFailures.length > 0 && (
+            <div
+              style={{
+                padding: "8px 18px 4px",
+                fontSize: FS_XS,
+                fontFamily: FF_MONO,
+                color: t.warn,
+              }}
+            >
+              search unavailable on{" "}
+              {searchFailures
+                .map((cid) => contexts.find((c) => c.id === cid)?.name ?? cid)
+                .join(", ")}
+            </div>
           )}
         </div>
 

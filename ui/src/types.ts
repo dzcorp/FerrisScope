@@ -185,6 +185,10 @@ export type PrefsTheme = PrefsThemeRecord | PrefsThemeMode;
 export type PrefsDensity = "compact" | "comfortable" | "spacious";
 export type PrefsFleetView = "tiles" | "mini" | "rows";
 export type PrefsRailMode = "auto" | "pinned" | "collapsed";
+/// Restore-on-launch behaviour: reopen the full last view (cluster,
+/// virtual context, or unsaved ad-hoc set), only the last single cluster,
+/// or always start at the fleet landing.
+export type PrefsStartupScope = "latest_view" | "latest_cluster" | "fleet";
 export type PrefsSettings = {
   refresh_sec: number;
   confirm_destructive: boolean;
@@ -195,15 +199,34 @@ export type PrefsSettings = {
   ui_scale: number;
   fleet_view: PrefsFleetView;
   dark_console: boolean;
+  /// Optional for payloads from transitional builds; absent ⇒ "latest_view".
+  startup_scope?: PrefsStartupScope;
 };
 export type PrefsUiState = {
   selected_context: string | null;
+  /// Id of the active virtual context, mutually exclusive with
+  /// `selected_context`. Dropped at hydrate if no longer in
+  /// `Prefs.virtual_contexts`.
+  selected_virtual_context: string | null;
   selected_kind_id: string | null;
   selected_namespaces: string[];
+  /// Ad-hoc clusters appended to the current view — persisted so an
+  /// unsaved multi-cluster view survives a restart (restored only under
+  /// `startup_scope: "latest_view"`). Optional for transitional payloads.
+  scope_extras?: string[];
   rail_mode: PrefsRailMode;
   /// Persisted dock pane sizes. `null` ⇒ use the first-launch default.
   dock_size_right: number | null;
   dock_size_bottom: number | null;
+};
+
+/// A saved multi-cluster view: a user-named set of kubeconfig contexts that
+/// open together. Members are `ContextInfo.id` composites. Mirrors
+/// `crates/core/src/prefs.rs::VirtualContext`.
+export type VirtualContext = {
+  id: string;
+  name: string;
+  members: string[];
 };
 /// Background update-check state. Mirrors `crates/core/src/prefs.rs::UpdateState`.
 /// Persisted so the "v… available" mark on Settings → About survives restarts,
@@ -241,6 +264,7 @@ export type Prefs = {
   settings: PrefsSettings;
   ui: PrefsUiState;
   update: PrefsUpdateState;
+  virtual_contexts: VirtualContext[];
 };
 
 /// Source of a cached Prometheus target. `User` choices are sticky across
@@ -336,16 +360,15 @@ export type SubscribeResult = {
   init_done: boolean;
 };
 
-// Result row from the per-cluster search index. `blob` is the original
-// projected row (same shape as `ResourceRow`) so the palette can render
-// inline metadata (status, age) without a second round-trip. `score` is
-// FTS5 bm25; lower = more relevant.
+// Result row from the per-cluster search index. Deliberately lean — the
+// palette renders name / namespace / kind only, so the backend doesn't ship
+// the full projected row over IPC. `score` is FTS5 bm25; lower = more
+// relevant.
 export type SearchHit = {
   kind_id: string;
   uid: string;
   namespace: string | null;
   name: string;
-  blob: ResourceRow;
   score: number;
 };
 
@@ -357,6 +380,28 @@ export type LogEvent =
   // the backend is polling and will switch to `line`/`batch` once it starts.
   | { kind: "waiting"; reason: string }
   | { kind: "ended"; reason: string };
+
+// One entry of a logs/metrics observation request — a pod or a pod-bearing
+// workload (deployments, statefulsets, daemonsets, replicasets, jobs). The
+// backend expands workloads to their pods via the label selector.
+export type LogPodTarget = {
+  kind_id: string;
+  namespace: string;
+  name: string;
+};
+
+export type ResolvedLogPod = {
+  namespace: string;
+  name: string;
+  containers: string[];
+};
+
+export type ResolvedLogPods = {
+  pods: ResolvedLogPod[];
+  // Per-target resolution problems (missing object, selector mismatch). The
+  // pods list stays usable alongside these.
+  warnings: string[];
+};
 
 // Terminal sessions stream PTY output over a per-session Channel<TerminalEvent>
 // (no global event bus). `data` chunks are base64-encoded raw PTY bytes; `exit`
@@ -2308,6 +2353,14 @@ export type ChatViewContext = {
   /// Multi-selected rows in the current table. Backend truncates to a
   /// fixed cap when rendering the block.
   selected?: ChatViewSelectedResource[];
+  /// Present when a multi-cluster (virtual context) view is active. The
+  /// prompt then lists the members and reminds the model it can switch
+  /// between them with `fs_configuration_use_context`; `clusterId` is
+  /// omitted in that case.
+  virtualContext?: {
+    name: string;
+    memberClusterIds: string[];
+  };
 };
 
 export type ChatViewSelectedResource = {

@@ -180,6 +180,16 @@ export const Icons = {
       d="M5 3h11l3 3v15H5V3zm3 6v2h8V9H8zm0 4v2h8v-2H8zm0 4v2h5v-2H8z"
     />,
   ),
+  // Metrics glyph: solid speedometer dome with a negative-space needle +
+  // hub, flat bottom. Per icon.md: one filled form, simple cuts only.
+  gauge: filled(
+    14,
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M12 5a9 9 0 0 1 9 9v3H3v-3a9 9 0 0 1 9-9zm5.66 3.34-6.37 4.96a1.5 1.5 0 1 0 1.41 1.41l4.96-6.37z"
+    />,
+  ),
   yaml: filled(
     14,
     <path d="M9 6l-7 6 7 6 1.6-1.6L5 12l5.6-4.4zM15 6l-1.6 1.6L19 12l-5.6 4.4L15 18l7-6zM14.5 4l-4 16h-2l4-16z" />,

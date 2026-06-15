@@ -30,10 +30,10 @@ export function useMetricsSubscription(clusterId: string | null) {
     (async () => {
       try {
         unlisten = await onMetrics(clusterId, (snap) => {
-          if (!cancelled) setMetrics(snap);
+          if (!cancelled) setMetrics(clusterId, snap);
         });
         const initial = await api.subscribeMetrics(clusterId);
-        if (!cancelled && initial) setMetrics(initial);
+        if (!cancelled && initial) setMetrics(clusterId, initial);
       } catch {
         // Best-effort: unavailable metrics-server is not a hard error.
       }
@@ -41,7 +41,51 @@ export function useMetricsSubscription(clusterId: string | null) {
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
+      // Deliberately do NOT clear the store snapshot here: the backend
+      // subscription is refcounted and another consumer (gauges vs. pods
+      // table) may still be displaying it. Snapshots drop on scope switch
+      // (`scopeResetSlice`) and when the last context deselects (App.tsx).
       api.unsubscribeMetrics(clusterId).catch(logErr("metrics-sub"));
     };
   }, [clusterId, setMetrics]);
+}
+
+// N-cluster variant for merged (virtual context) views: one effect that
+// holds a metrics subscription per member. Pass an empty array to skip.
+// The array's CONTENTS key the effect (not its identity), so callers may
+// rebuild the array each render as long as the ids are stable.
+export function useMetricsSubscriptions(clusterIds: string[]) {
+  const setMetrics = useAppStore((s) => s.setMetrics);
+  const key = clusterIds.join(String.fromCharCode(0));
+  useEffect(() => {
+    const ids = key === "" ? [] : key.split(String.fromCharCode(0));
+    if (ids.length === 0) return;
+    let cancelled = false;
+    const unlistens: Array<() => void> = [];
+    for (const cid of ids) {
+      void (async () => {
+        try {
+          const un = await onMetrics(cid, (snap) => {
+            if (!cancelled) setMetrics(cid, snap);
+          });
+          if (cancelled) {
+            un();
+            return;
+          }
+          unlistens.push(un);
+          const initial = await api.subscribeMetrics(cid);
+          if (!cancelled && initial) setMetrics(cid, initial);
+        } catch {
+          // Best-effort: unavailable metrics-server is not a hard error.
+        }
+      })();
+    }
+    return () => {
+      cancelled = true;
+      for (const u of unlistens) u();
+      for (const cid of ids) {
+        api.unsubscribeMetrics(cid).catch(logErr("metrics-sub"));
+      }
+    };
+  }, [key, setMetrics]);
 }

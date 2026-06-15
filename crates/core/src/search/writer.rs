@@ -192,6 +192,31 @@ fn apply_writes(conn: &mut Connection, ops: &[WriteOp]) -> Result<()> {
                     rusqlite::params![now, kind_id, uid],
                 )?;
             }
+            WriteOp::Retain { kind_id, keep_uids } => {
+                // Stage the keep-set in a temp table so the reconcile is one
+                // indexed UPDATE regardless of listing size, instead of an
+                // unboundedly long `NOT IN (?, ?, …)` parameter list.
+                tx.execute_batch(
+                    "CREATE TEMP TABLE IF NOT EXISTS retain_keep (uid TEXT PRIMARY KEY);
+                     DELETE FROM retain_keep;",
+                )?;
+                {
+                    let mut ins =
+                        tx.prepare_cached("INSERT OR IGNORE INTO retain_keep (uid) VALUES (?1)")?;
+                    for uid in keep_uids {
+                        ins.execute(rusqlite::params![uid])?;
+                    }
+                }
+                // Soft delete, same as `Delete` — a re-upsert (object came
+                // back / listing raced a create) flips `deleted_at` to NULL.
+                tx.execute(
+                    "UPDATE rows SET deleted_at = ?1
+                     WHERE kind_id = ?2 AND deleted_at IS NULL
+                       AND uid NOT IN (SELECT uid FROM retain_keep)",
+                    rusqlite::params![now, kind_id],
+                )?;
+                tx.execute("DELETE FROM retain_keep", [])?;
+            }
         }
     }
     tx.commit()?;
@@ -232,4 +257,123 @@ fn unix_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search::db::open_in_memory_for_tests;
+
+    fn upsert(kind: &str, uid: &str, name: &str) -> WriteOp {
+        WriteOp::Upsert {
+            kind_id: kind.to_owned(),
+            uid: uid.to_owned(),
+            namespace: Some("default".to_owned()),
+            name: name.to_owned(),
+            blob: format!("{{\"name\":\"{name}\"}}"),
+        }
+    }
+
+    fn live_names(conn: &Connection, kind: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM rows WHERE kind_id = ?1 AND deleted_at IS NULL ORDER BY name",
+            )
+            .unwrap();
+        stmt.query_map([kind], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn upsert_then_delete_then_reupsert_revives_the_row() {
+        let mut conn = open_in_memory_for_tests();
+        apply_writes(&mut conn, &[upsert("pods", "u1", "api-0")]).unwrap();
+        assert_eq!(live_names(&conn, "pods"), vec!["api-0"]);
+
+        apply_writes(
+            &mut conn,
+            &[WriteOp::Delete {
+                kind_id: "pods".into(),
+                uid: "u1".into(),
+            }],
+        )
+        .unwrap();
+        assert!(live_names(&conn, "pods").is_empty());
+
+        // Flapping-pod fast path: a re-upsert flips deleted_at back to NULL.
+        apply_writes(&mut conn, &[upsert("pods", "u1", "api-0")]).unwrap();
+        assert_eq!(live_names(&conn, "pods"), vec!["api-0"]);
+    }
+
+    #[test]
+    fn retain_tombstones_unlisted_rows_of_that_kind_only() {
+        let mut conn = open_in_memory_for_tests();
+        apply_writes(
+            &mut conn,
+            &[
+                upsert("pods", "u1", "api-0"),
+                upsert("pods", "u2", "gone-0"),
+                upsert("deployments", "u3", "api"),
+            ],
+        )
+        .unwrap();
+
+        apply_writes(
+            &mut conn,
+            &[WriteOp::Retain {
+                kind_id: "pods".into(),
+                keep_uids: vec!["u1".into()],
+            }],
+        )
+        .unwrap();
+
+        // gone-0 tombstoned, api-0 kept, the other kind untouched.
+        assert_eq!(live_names(&conn, "pods"), vec!["api-0"]);
+        assert_eq!(live_names(&conn, "deployments"), vec!["api"]);
+    }
+
+    #[test]
+    fn retain_with_empty_keep_set_tombstones_the_whole_kind() {
+        let mut conn = open_in_memory_for_tests();
+        apply_writes(&mut conn, &[upsert("pods", "u1", "api-0")]).unwrap();
+        apply_writes(
+            &mut conn,
+            &[WriteOp::Retain {
+                kind_id: "pods".into(),
+                keep_uids: vec![],
+            }],
+        )
+        .unwrap();
+        assert!(live_names(&conn, "pods").is_empty());
+    }
+
+    #[test]
+    fn consecutive_retains_in_one_batch_use_their_own_keep_sets() {
+        let mut conn = open_in_memory_for_tests();
+        apply_writes(
+            &mut conn,
+            &[upsert("pods", "u1", "api-0"), upsert("pods", "u2", "api-1")],
+        )
+        .unwrap();
+        // Same transaction — the temp keep-table must be cleared between
+        // ops, or the first op's u1 would leak into the second's keep set
+        // and api-0 would wrongly survive.
+        apply_writes(
+            &mut conn,
+            &[
+                WriteOp::Retain {
+                    kind_id: "pods".into(),
+                    keep_uids: vec!["u1".into(), "u2".into()],
+                },
+                WriteOp::Retain {
+                    kind_id: "pods".into(),
+                    keep_uids: vec!["u2".into()],
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(live_names(&conn, "pods"), vec!["api-1"]);
+    }
 }
