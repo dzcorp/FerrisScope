@@ -23,6 +23,7 @@ import type {
   ChatEvent,
   ClusterHealthEvent,
   ClusterInfo,
+  ConnectionDiagnostics,
   ClusterProbe,
   ClusterRoleBindingDetail,
   ClusterRoleDetail,
@@ -125,6 +126,11 @@ export const api = {
     invoke<ClusterInfo>("connect_context", { name, connectId }),
   cancelConnect: (connectId: string) =>
     invoke<void>("cancel_connect", { connectId }),
+  /// Passive connection diagnostics for a context: resolved PATH, whether the
+  /// exec plugin is findable, and which cloud/proxy/TLS env vars are present.
+  /// Never executes the plugin.
+  diagnoseConnection: (name: string) =>
+    invoke<ConnectionDiagnostics>("diagnose_connection_cmd", { name }),
 
   listResourceKinds: () => invoke<ResourceKind[]>("list_resource_kinds"),
   // CRD-derived dynamic kinds. Per-cluster (CRDs are cluster-local), so

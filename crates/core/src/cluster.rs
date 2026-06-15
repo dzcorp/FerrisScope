@@ -5,7 +5,7 @@
 //! we can talk to an apiserver.
 
 use crate::sync::LockExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +13,7 @@ use http::{header::ACCEPT_ENCODING, HeaderValue};
 use k8s_openapi::api::core::v1::Node;
 use kube::{
     api::{Api, ListParams},
-    client::ClientBuilder,
+    client::{AuthError, ClientBuilder},
     config::{KubeConfigOptions, Kubeconfig},
     Client, Config,
 };
@@ -73,13 +73,126 @@ fn exec_plugin_for_context(kc: &Kubeconfig, context_name: &str) -> Option<String
 /// Gated strictly on `NotFound` so a `PermissionDenied` plugin (a different
 /// failure) is never mislabelled as "not found".
 fn enrich_exec_error(err: Error, exec_command: Option<String>) -> Error {
-    match exec_command {
-        Some(command) if io_not_found_in_chain(&err) => {
+    // ENOENT — plugin binary missing from PATH (spawn failure). Highest
+    // priority: a missing binary and a non-zero exit are distinct failures, and
+    // "not found" is the more actionable label, so it wins when both could match.
+    if io_not_found_in_chain(&err) {
+        if let Some(command) = exec_command {
             let hint = exec_install_hint(&command);
-            Error::ExecPluginNotFound { command, hint }
+            return Error::ExecPluginNotFound { command, hint };
         }
-        _ => err,
+        return err;
     }
+    // Plugin ran but exited non-zero. kube-rs has the stderr in `AuthExecRun`,
+    // but its `Display` prints `{out:?}` (raw byte arrays). Reformat to readable,
+    // redacted, truncated UTF-8 so the operator sees the real cause.
+    if let Some((command, code, stderr)) = auth_exec_run_in_chain(&err) {
+        return Error::ExecPluginFailed {
+            command,
+            code,
+            stderr,
+        };
+    }
+    err
+}
+
+/// Walk the source chain for kube-rs's [`AuthError::AuthExecRun`] (the plugin
+/// ran and exited non-zero). Returns `(command, exit-code-string, readable
+/// stderr)`. The plugin's stderr is captured by kube-rs but only Debug-printed
+/// as raw bytes; we decode it lossily, redact credential material, and truncate.
+fn auth_exec_run_in_chain(
+    err: &(dyn std::error::Error + 'static),
+) -> Option<(String, String, String)> {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        if let Some(AuthError::AuthExecRun { cmd, status, out }) = e.downcast_ref::<AuthError>() {
+            let code = status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| status.to_string());
+            // Prefer stderr (human error messages); fall back to stdout (some
+            // plugins emit the failure there).
+            let raw = if out.stderr.is_empty() {
+                String::from_utf8_lossy(&out.stdout)
+            } else {
+                String::from_utf8_lossy(&out.stderr)
+            };
+            return Some((cmd.clone(), code, redact_and_truncate(&raw)));
+        }
+        cur = e.source();
+    }
+    None
+}
+
+/// Make a plugin's raw stderr safe and compact for display: drop lines that
+/// look like they carry a credential (token JSON, JWT/base64 runs, Bearer
+/// headers), strip blank lines, and cap total length. Conservative on what it
+/// flags as secret so genuine error text ("reauth required", "invalid
+/// credentials") survives.
+fn redact_and_truncate(s: &str) -> String {
+    const MAX: usize = 1500;
+    let mut lines: Vec<&str> = Vec::new();
+    let mut redacted_any = false;
+    for line in s.lines() {
+        let t = line.trim_end();
+        if t.is_empty() {
+            continue;
+        }
+        if looks_secretish(t) {
+            redacted_any = true;
+            continue;
+        }
+        lines.push(t);
+    }
+    let mut out = lines.join("\n");
+    if redacted_any {
+        out.push_str("\n[credential material redacted]");
+    }
+    let out = out.trim().to_string();
+    let mut out = if out.len() > MAX {
+        let mut end = MAX;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut truncated = out[..end].to_string();
+        truncated.push_str(" … (truncated)");
+        truncated
+    } else {
+        out
+    };
+    if out.is_empty() {
+        out = "(plugin produced no output)".to_string();
+    }
+    out
+}
+
+/// Heuristic: does this line likely contain a secret value (not merely the word
+/// "credentials")? Catches token JSON fields, `Bearer` headers, and long
+/// base64url/JWT runs. Excludes `/` and `.` from the run alphabet so file paths
+/// and dotted hostnames don't trip it.
+fn looks_secretish(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("\"token\"")
+        || lower.contains("token=")
+        || lower.contains("bearer ")
+        || lower.contains("id_token")
+        || lower.contains("access_token")
+        || lower.contains("\"password\"")
+        || lower.contains("client-secret")
+    {
+        return true;
+    }
+    let mut run = 0usize;
+    let mut max_run = 0usize;
+    for c in line.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '+' | '_' | '-' | '=') {
+            run += 1;
+            max_run = max_run.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    max_run >= 40
 }
 
 /// Walk the [`std::error::Error`] source chain looking for an `io::Error` of
@@ -580,6 +693,166 @@ fn parse_server_url(url: &str) -> Result<(String, u16, String)> {
     Ok((host, port, scheme.to_owned()))
 }
 
+// ---------------------------------------------------------------------------
+// Connection diagnostics (passive / read-only)
+//
+// Answers "what does the app actually see" without executing the auth plugin
+// (kube-rs already surfaces live plugin stderr via `enrich_exec_error`). Reports
+// the resolved PATH, whether the context's exec plugin is findable, and which
+// cloud/proxy/TLS env vars are present (presence only — never values).
+// ---------------------------------------------------------------------------
+
+/// Cloud / proxy / TLS env vars whose *presence* is worth showing the operator
+/// when a connection fails. Values are deliberately never read or returned.
+const DIAG_ENV_KEYS: &[&str] = &[
+    "HOME",
+    "USERPROFILE", // Windows HOME equivalent
+    "KUBECONFIG",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "AWS_PROFILE",
+    "AWS_REGION",
+    "AWS_ROLE_ARN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "CLOUDSDK_CONFIG",
+    "CLOUDSDK_CORE_PROJECT",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AZURE_CONFIG_DIR",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
+
+/// The exec-credential plugin declared for a context, including its args.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExecProbe {
+    pub command: String,
+    pub args: Vec<String>,
+    /// Absolute path the command resolves to on the app's PATH, if found.
+    pub resolved_path: Option<String>,
+    pub found: bool,
+}
+
+/// Presence (not value) of one diagnostic env var.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnvPresence {
+    pub key: String,
+    pub present: bool,
+}
+
+/// Read-only snapshot of what the app sees for a context's connection.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConnectionDiagnostics {
+    /// The process PATH the app will hand to exec plugins, split per entry.
+    pub resolved_path: Vec<String>,
+    /// The context's exec plugin + whether it's findable. `None` if the context
+    /// uses no exec plugin (in-cluster token, client cert, basic auth, …).
+    pub exec: Option<ExecProbe>,
+    pub env_presence: Vec<EnvPresence>,
+}
+
+/// Extract a context's exec command + args (the args matter for diagnostics:
+/// e.g. `gke-gcloud-auth-plugin` vs `gcloud config config-helper`).
+fn exec_for_context(kc: &Kubeconfig, context_name: &str) -> Option<(String, Vec<String>)> {
+    let user = kc
+        .contexts
+        .iter()
+        .find(|c| c.name == context_name)
+        .and_then(|c| c.context.as_ref())
+        .and_then(|ctx| ctx.user.clone())?;
+    let exec = kc
+        .auth_infos
+        .iter()
+        .find(|a| a.name == user)
+        .and_then(|a| a.auth_info.as_ref())
+        .and_then(|ai| ai.exec.as_ref())?;
+    let command = exec.command.clone()?;
+    let args = exec.args.clone().unwrap_or_default();
+    Some((command, args))
+}
+
+/// Expand one candidate into the forms a spawn would actually try. On Windows a
+/// bare `foo` resolves to `foo.exe`/`foo.cmd`/… via PATHEXT (which `Command::new`
+/// applies), so the diagnostic must do the same or it falsely reports a present
+/// `.exe` as missing. On unix the command is taken verbatim.
+fn path_candidates(base: PathBuf) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let mut v = vec![base.clone()];
+        if base.extension().is_none() {
+            let exts =
+                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+            for ext in exts.split(';').filter(|e| !e.is_empty()) {
+                let mut p = base.clone().into_os_string();
+                p.push(ext);
+                v.push(PathBuf::from(p));
+            }
+        }
+        v
+    }
+    #[cfg(not(windows))]
+    {
+        vec![base]
+    }
+}
+
+/// Resolve a command against the app's current PATH the same way a spawn would:
+/// an absolute / path-bearing command is checked directly; a bare name is
+/// scanned across PATH entries (applying PATHEXT on Windows). Returns the
+/// resolved file, or `None` if missing.
+fn resolve_in_path(command: &str) -> Option<PathBuf> {
+    if command.contains('/') || command.contains(std::path::MAIN_SEPARATOR) {
+        return path_candidates(PathBuf::from(command))
+            .into_iter()
+            .find(|p| p.is_file());
+    }
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .flat_map(|dir| path_candidates(dir.join(command)))
+        .find(|cand| cand.is_file())
+}
+
+/// Build a read-only [`ConnectionDiagnostics`] for a context. Reads the
+/// kubeconfig and inspects the process env/PATH; never executes the plugin.
+pub fn diagnose_context(
+    context_name: &str,
+    source_path: Option<&Path>,
+) -> Result<ConnectionDiagnostics> {
+    let kubeconfig = match source_path {
+        Some(p) => Kubeconfig::read_from(p)?,
+        None => Kubeconfig::read()?,
+    };
+    let exec = exec_for_context(&kubeconfig, context_name).map(|(command, args)| {
+        let resolved = resolve_in_path(&command);
+        ExecProbe {
+            found: resolved.is_some(),
+            resolved_path: resolved.map(|p| p.display().to_string()),
+            command,
+            args,
+        }
+    });
+    let resolved_path = std::env::var_os("PATH")
+        .map(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.display().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let env_presence = DIAG_ENV_KEYS
+        .iter()
+        .map(|k| EnvPresence {
+            key: (*k).to_string(),
+            present: std::env::var_os(k).is_some(),
+        })
+        .collect();
+    Ok(ConnectionDiagnostics {
+        resolved_path,
+        exec,
+        env_presence,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,5 +1004,160 @@ users:
         assert_eq!(exec_plugin_for_context(&kc, "no-exec"), None);
         // Unknown context → None.
         assert_eq!(exec_plugin_for_context(&kc, "missing"), None);
+    }
+
+    #[test]
+    fn exec_for_context_extracts_command_and_args() {
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster: { server: https://1.2.3.4 }
+contexts:
+- name: aws
+  context: { cluster: c, user: aws-user }
+users:
+- name: aws-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: aws
+      args: ["eks", "get-token", "--cluster-name", "prod"]
+"#;
+        let kc = Kubeconfig::from_yaml(yaml).expect("parse kubeconfig");
+        let (cmd, args) = exec_for_context(&kc, "aws").expect("exec present");
+        assert_eq!(cmd, "aws");
+        assert_eq!(args, vec!["eks", "get-token", "--cluster-name", "prod"]);
+        assert!(exec_for_context(&kc, "missing").is_none());
+    }
+
+    #[test]
+    fn resolve_in_path_handles_absolute_and_missing() {
+        // An absolute path to a real file resolves to itself.
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!("fs-diag-probe-{}", std::process::id()));
+        std::fs::write(&tmp, b"#!/bin/sh\n").expect("write temp");
+        let abs = tmp.display().to_string();
+        assert_eq!(resolve_in_path(&abs), Some(tmp.clone()));
+        std::fs::remove_file(&tmp).ok();
+        // A bare name that doesn't exist anywhere on PATH → None.
+        assert!(resolve_in_path("fs-definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn diagnose_context_reports_exec_and_env_presence() {
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster: { server: https://1.2.3.4 }
+contexts:
+- name: gke
+  context: { cluster: c, user: gke-user }
+users:
+- name: gke-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: gke-gcloud-auth-plugin
+"#;
+        let mut path = std::env::temp_dir();
+        path.push(format!("fs-diag-kubeconfig-{}.yaml", std::process::id()));
+        std::fs::write(&path, yaml).expect("write kubeconfig");
+
+        let diag = diagnose_context("gke", Some(path.as_path())).expect("diagnose");
+        std::fs::remove_file(&path).ok();
+
+        let exec = diag.exec.expect("exec probe present");
+        assert_eq!(exec.command, "gke-gcloud-auth-plugin");
+        // Plugin almost certainly not installed in CI → found=false, no path.
+        assert_eq!(exec.found, exec.resolved_path.is_some());
+        // Env presence covers the full diagnostic key set, values never leaked.
+        assert_eq!(diag.env_presence.len(), DIAG_ENV_KEYS.len());
+        assert!(diag.env_presence.iter().any(|e| e.key == "HOME"));
+    }
+
+    #[test]
+    fn redact_and_truncate_keeps_error_text_drops_secrets() {
+        let raw = "ERROR: (gcloud.auth) reauth required\n\
+                   invalid credentials for project foo\n\
+                   token=eyJhbGciOiJSUzI1NiIsImtpZCI6IjEyMzQ1Njc4OTABCDEFGH\n";
+        let out = redact_and_truncate(raw);
+        // Human-readable diagnostics survive…
+        assert!(out.contains("reauth required"));
+        // …including a line that merely mentions "credentials" (no secret value).
+        assert!(out.contains("invalid credentials for project foo"));
+        // …but the token line is gone, replaced by a marker.
+        assert!(!out.contains("eyJhbGci"));
+        assert!(!out.contains("token="));
+        assert!(out.contains("[credential material redacted]"));
+    }
+
+    #[test]
+    fn redact_and_truncate_caps_length_and_handles_empty() {
+        // Long but non-secret text (spaces break the base64-run heuristic).
+        let long = "err line ".repeat(1000);
+        let out = redact_and_truncate(&long);
+        assert!(out.len() <= 1500 + 32);
+        assert!(out.ends_with("… (truncated)"));
+        assert_eq!(
+            redact_and_truncate("   \n  \n"),
+            "(plugin produced no output)"
+        );
+    }
+
+    #[test]
+    fn looks_secretish_flags_tokens_not_paths() {
+        assert!(looks_secretish("\"token\": \"abc\""));
+        assert!(looks_secretish("Authorization: Bearer abc123"));
+        assert!(looks_secretish(&format!("blob {}", "A".repeat(45))));
+        // File paths and dotted hostnames must NOT be flagged.
+        assert!(!looks_secretish(
+            "/Users/me/.config/gcloud/application_default_credentials.json"
+        ));
+        assert!(!looks_secretish(
+            "could not reach oauth2.googleapis.com:443"
+        ));
+        assert!(!looks_secretish("invalid credentials"));
+    }
+
+    // kube-rs surfaces a non-zero plugin exit as `AuthError::AuthExecRun`, which
+    // carries the captured `Output`. Build one and assert we reformat it into a
+    // readable `ExecPluginFailed`. `ExitStatus` is only constructible via the
+    // unix extension trait, so gate on unix (our only shipping targets).
+    #[cfg(unix)]
+    #[test]
+    fn enrich_reformats_auth_exec_run_into_readable_failure() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(1 << 8); // exit code 1
+        let out = std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: b"ERROR: (gcloud.auth) reauth required\ntoken=eyJhbGciABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n".to_vec(),
+        };
+        let auth = AuthError::AuthExecRun {
+            cmd: "gke-gcloud-auth-plugin".to_owned(),
+            status,
+            out,
+        };
+        // Wrap in the real error path: kube::Error::Auth → our Error::Kube.
+        let err = Error::Kube(kube::Error::Auth(auth));
+        // No exec_command passed — the command must come from AuthExecRun itself,
+        // proving the path works even when we couldn't pre-extract the plugin.
+        match enrich_exec_error(err, None) {
+            Error::ExecPluginFailed {
+                command,
+                code,
+                stderr,
+            } => {
+                assert_eq!(command, "gke-gcloud-auth-plugin");
+                assert_eq!(code, "1");
+                assert!(stderr.contains("reauth required"));
+                assert!(!stderr.contains("eyJhbGci"));
+            }
+            other => panic!("expected ExecPluginFailed, got {other:?}"),
+        }
     }
 }

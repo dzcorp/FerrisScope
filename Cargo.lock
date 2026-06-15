@@ -3270,6 +3270,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "either",
+ "form_urlencoded",
  "futures",
  "http",
  "http-body",
@@ -3288,6 +3289,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tame-oauth",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
@@ -6008,6 +6010,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
 name = "string_cache"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6106,6 +6114,21 @@ dependencies = [
  "pkg-config",
  "toml 0.8.2",
  "version-compare",
+]
+
+[[package]]
+name = "tame-oauth"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c206bbecfbc0aea8bf35f57bf34e8be060d2cf7efe3937f8d0bdfdd4205ed771"
+dependencies = [
+ "data-encoding",
+ "http",
+ "ring",
+ "serde",
+ "serde_json",
+ "twox-hash",
+ "url",
 ]
 
 [[package]]
@@ -7002,6 +7025,16 @@ dependencies = [
  "sha1 0.10.6",
  "thiserror 2.0.18",
  "utf-8",
+]
+
+[[package]]
+name = "twox-hash"
+version = "1.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
+dependencies = [
+ "cfg-if",
+ "static_assertions",
 ]
 
 [[package]]

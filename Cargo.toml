@@ -37,7 +37,22 @@ futures = "0.3"
 bytes = "1"
 
 # Kubernetes
-kube = { version = "3.1", features = ["runtime", "client", "ws", "config"] }
+kube = { version = "3.1", features = [
+    "runtime",
+    "client",
+    "ws",
+    "config",
+    # Auth coverage for cloud + on-prem providers:
+    #   oauth     — GCP application-default-credentials (`auth-provider: gcp` ADC path).
+    #   oidc      — `auth-provider: oidc` (dex/keycloak/on-prem) + id-token refresh.
+    #   http-proxy — let kube-rs's own apiserver client honour HTTPS_PROXY/NO_PROXY
+    #                (corporate networks where the apiserver is only reachable via proxy).
+    # exec credential plugins (gke-gcloud-auth-plugin, aws, kubelogin) work without these;
+    # they cover the legacy auth-provider stanzas and proxied apiserver reach.
+    "oauth",
+    "oidc",
+    "http-proxy",
+] }
 k8s-openapi = { version = "0.27", features = ["latest"] }
 http = "1"
 http-body-util = "0.1"
