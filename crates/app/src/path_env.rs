@@ -61,32 +61,43 @@ mod unix {
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
 
         // Terminal launch → PATH is already rich; skip the (slow) shell spawn
-        // and just top up any missing curated dirs.
-        let captured = if path_looks_rich(&existing) {
+        // and just top up any missing curated dirs. On the rich path we also skip
+        // env capture: a rich PATH means a real login shell launched us, so the
+        // full environment (AWS_*, CLOUDSDK_*, proxy vars, …) was already
+        // inherited — there is nothing to recover.
+        let (captured, captured_env) = if path_looks_rich(&existing) {
             tracing::info!(
                 target: "ferrisscope::startup",
                 "path: rich PATH detected (terminal launch) — skipping login-shell capture"
             );
-            Vec::new()
+            (Vec::new(), Vec::new())
         } else {
-            match capture_login_shell_path() {
-                Some(p) => {
+            match capture_login_shell() {
+                Some((p, env)) => {
                     tracing::info!(
                         target: "ferrisscope::startup",
                         "path: recovered {} dir(s) from login shell",
                         p.len()
                     );
-                    p
+                    (p, env)
                 }
                 None => {
                     tracing::info!(
                         target: "ferrisscope::startup",
                         "path: login-shell capture unavailable — using curated fallback only"
                     );
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 }
             }
         };
+
+        // Sync whitelisted cloud / proxy / TLS env vars from the login shell so
+        // exec-credential plugins see the same environment as the operator's
+        // terminal. A found binary still fails auth without e.g. AWS_PROFILE,
+        // CLOUDSDK_CONFIG, or HTTPS_PROXY — these are absent on a Dock/.desktop
+        // launch. Done independently of the PATH change below so it still runs
+        // even if PATH happened to be unchanged. No-op on the rich path.
+        apply_shell_env(&captured_env);
 
         let curated = curated_dirs();
         let (merged, applied) = merge_paths(&captured, &existing, &curated, |p| p.is_dir());
@@ -280,10 +291,79 @@ mod unix {
     /// Recover `PATH` by running the operator's login+interactive shell once.
     /// Returns `None` on any failure (no shell, spawn error, timeout, or
     /// missing sentinels) — the caller falls back to the curated list.
-    fn capture_login_shell_path() -> Option<Vec<PathBuf>> {
+    /// `(KEY, VALUE)` env pairs harvested from the login shell.
+    type EnvPairs = Vec<(String, String)>;
+
+    /// Capture the login shell's `PATH` and full environment in a single spawn.
+    /// `PATH` is required (we fall back to curated dirs without it); the env map
+    /// is best-effort. Returns `(path_dirs, env_pairs)`.
+    fn capture_login_shell() -> Option<(Vec<PathBuf>, EnvPairs)> {
         let shell = pick_capture_shell(std::env::var("SHELL").ok().as_deref(), is_executable)?;
         let out = run_shell_capture(&shell, SHELL_CAPTURE_TIMEOUT)?;
-        parse_shell_path(&out)
+        let path = parse_shell_path(&out)?;
+        let env = parse_shell_env(&out).unwrap_or_default();
+        Some((path, env))
+    }
+
+    /// Exact env-var names worth syncing from the login shell. Cloud SDKs and
+    /// auth plugins read these; they are absent on a Dock/.desktop launch.
+    const ENV_EXACT: &[&str] = &[
+        "HOME",
+        "KUBECONFIG",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "all_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+    ];
+
+    /// Prefix families worth syncing (AWS / gcloud / Google / Azure / Kerberos).
+    const ENV_PREFIX: &[&str] = &["AWS_", "CLOUDSDK_", "GOOGLE_", "GCP_", "AZURE_", "KRB5"];
+
+    fn is_whitelisted_env(key: &str) -> bool {
+        ENV_EXACT.contains(&key) || ENV_PREFIX.iter().any(|p| key.starts_with(p))
+    }
+
+    /// Pure selection step (testable without touching the real process env):
+    /// keep only whitelisted vars, never `PATH` (handled separately), and only
+    /// those not already set in the current process (launch context wins).
+    fn select_env_vars(
+        captured: &[(String, String)],
+        is_set: impl Fn(&str) -> bool,
+    ) -> Vec<(String, String)> {
+        captured
+            .iter()
+            .filter(|(k, _)| k != "PATH" && is_whitelisted_env(k) && !is_set(k))
+            .cloned()
+            .collect()
+    }
+
+    /// Merge whitelisted captured vars into the process env (only-if-absent).
+    /// Sound for the same reason as the PATH `set_var`: called on the main thread
+    /// before the tokio runtime starts and before any cluster connect. Logs only
+    /// the var *names* — values may carry secrets or private paths.
+    fn apply_shell_env(captured: &[(String, String)]) {
+        let to_set = select_env_vars(captured, |k| std::env::var_os(k).is_some());
+        if to_set.is_empty() {
+            return;
+        }
+        let names: Vec<&str> = to_set.iter().map(|(k, _)| k.as_str()).collect();
+        for (k, v) in &to_set {
+            std::env::set_var(k, v);
+        }
+        tracing::info!(
+            target: "ferrisscope::startup",
+            "env: synced {} var(s) from login shell: [{}]",
+            names.len(),
+            names.join(", ")
+        );
     }
 
     /// Slice the `PATH=` value out of a sentinel-wrapped `env` dump. Tolerates
@@ -305,6 +385,43 @@ mod unix {
         } else {
             Some(dirs)
         }
+    }
+
+    /// Parse every `KEY=VALUE` line from the captured `env` dump (same sentinel
+    /// slice + ANSI strip as `parse_shell_path`). Lines that don't begin with a
+    /// valid shell identifier followed by `=` are skipped (banner noise, and the
+    /// continuation lines of rare multi-line values). Returns `None` if the
+    /// markers are absent or no pairs were found.
+    fn parse_shell_env(stdout: &str) -> Option<Vec<(String, String)>> {
+        let start = stdout.find(PATH_START)? + PATH_START.len();
+        let rest = &stdout[start..];
+        let end = rest.find(PATH_END)?;
+        let slice = strip_ansi(&rest[..end]);
+        let mut pairs = Vec::new();
+        for line in slice.lines() {
+            let Some(eq) = line.find('=') else { continue };
+            let key = &line[..eq];
+            if is_env_key(key) {
+                pairs.push((key.to_string(), line[eq + 1..].to_string()));
+            }
+        }
+        if pairs.is_empty() {
+            None
+        } else {
+            Some(pairs)
+        }
+    }
+
+    /// A valid POSIX-ish env-var name: leading letter/underscore, then
+    /// alphanumerics/underscores. Guards against treating banner text containing
+    /// `=` (e.g. `foo = bar`) as an env pair.
+    fn is_env_key(k: &str) -> bool {
+        let mut chars = k.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
     /// Spawn `<shell> -ilc 'printf …; command -p env; printf …'`, draining
@@ -437,6 +554,73 @@ mod unix {
         fn parse_none_without_path_line() {
             let out = format!("{PATH_START}USER=me\nSHELL=/bin/zsh\n{PATH_END}");
             assert!(parse_shell_path(&out).is_none());
+        }
+
+        #[test]
+        fn parse_shell_env_extracts_all_pairs() {
+            let out = format!(
+                "banner noise\n{PATH_START}USER=me\n\
+                 PATH=/opt/homebrew/bin:/usr/bin\n\
+                 AWS_PROFILE=prod\nHTTPS_PROXY=http://proxy:8080\n\
+                 not an env line\nfoo = spaced\n{PATH_END}\n"
+            );
+            let env = parse_shell_env(&out).expect("parse env");
+            assert!(env.contains(&("USER".to_string(), "me".to_string())));
+            assert!(env.contains(&("AWS_PROFILE".to_string(), "prod".to_string())));
+            assert!(env.contains(&("HTTPS_PROXY".to_string(), "http://proxy:8080".to_string())));
+            // "foo = spaced" has a space before '=' → key "foo " is not a valid
+            // identifier → skipped.
+            assert!(!env.iter().any(|(k, _)| k == "foo " || k == "foo"));
+        }
+
+        #[test]
+        fn parse_shell_env_none_without_markers() {
+            assert!(parse_shell_env("PATH=/usr/bin\nAWS_PROFILE=x").is_none());
+        }
+
+        #[test]
+        fn env_whitelist_matches_exact_and_prefix() {
+            assert!(is_whitelisted_env("HOME"));
+            assert!(is_whitelisted_env("KUBECONFIG"));
+            assert!(is_whitelisted_env("HTTPS_PROXY"));
+            assert!(is_whitelisted_env("AWS_PROFILE"));
+            assert!(is_whitelisted_env("CLOUDSDK_CONFIG"));
+            assert!(is_whitelisted_env("GOOGLE_APPLICATION_CREDENTIALS"));
+            assert!(is_whitelisted_env("AZURE_CONFIG_DIR"));
+            // Not whitelisted — locale, shell identity, arbitrary vars.
+            assert!(!is_whitelisted_env("LANG"));
+            assert!(!is_whitelisted_env("USER"));
+            assert!(!is_whitelisted_env("EDITOR"));
+        }
+
+        #[test]
+        fn select_env_vars_filters_path_present_and_non_whitelisted() {
+            let captured = vec![
+                ("PATH".to_string(), "/should/not/leak".to_string()),
+                ("AWS_PROFILE".to_string(), "prod".to_string()),
+                ("AWS_REGION".to_string(), "us-east-1".to_string()),
+                ("HOME".to_string(), "/home/shell".to_string()),
+                ("EDITOR".to_string(), "vim".to_string()),
+            ];
+            // HOME is already set in the launch env → must be skipped (launch wins).
+            let already_set = |k: &str| k == "HOME";
+            let got = select_env_vars(&captured, already_set);
+            let keys: Vec<&str> = got.iter().map(|(k, _)| k.as_str()).collect();
+            assert!(keys.contains(&"AWS_PROFILE"));
+            assert!(keys.contains(&"AWS_REGION"));
+            assert!(!keys.contains(&"PATH")); // never synced here
+            assert!(!keys.contains(&"HOME")); // already set
+            assert!(!keys.contains(&"EDITOR")); // not whitelisted
+        }
+
+        #[test]
+        fn is_env_key_rejects_garbage() {
+            assert!(is_env_key("AWS_PROFILE"));
+            assert!(is_env_key("_FOO"));
+            assert!(!is_env_key(""));
+            assert!(!is_env_key("1ABC"));
+            assert!(!is_env_key("foo "));
+            assert!(!is_env_key("a-b"));
         }
 
         #[test]

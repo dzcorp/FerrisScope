@@ -127,6 +127,7 @@ fn main() {
             commands::helm_uninstall_managed,
             commands::list_contexts,
             commands::connect_context,
+            commands::diagnose_connection_cmd,
             commands::cancel_connect,
             commands::list_resource_kinds,
             commands::list_custom_resource_kinds,

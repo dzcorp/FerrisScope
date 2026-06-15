@@ -8,6 +8,7 @@ import {
 } from "../lib/useClusterConnection";
 import { ClusterBar } from "./ClusterBar";
 import { ResourceTable } from "./ResourceTable";
+import { ConnectionDiagnosticsModal } from "./ConnectionDiagnosticsModal";
 import { Btn, EmptyState, ErrorBlock, LoadingLine } from "./ui";
 
 type Props = {
@@ -80,6 +81,7 @@ export function ClusterPanel({ mode, context }: Props) {
             title="Could not connect to this cluster"
             reason={state.message}
             onReconnect={reconnect}
+            diagnoseContext={context}
           />
         ) : state.status === "cancelled" ? (
           <ReconnectBanner
@@ -150,17 +152,22 @@ function ConnectingLabel({
 // regardless of how the cluster got broken. Exported for the
 // per-member failure strips in VirtualClusterPanel.
 export function ReconnectBanner({
-  
   title,
   reason,
   onReconnect,
+  diagnoseContext,
 }: {
   mode: ThemeMode;
   title: string;
   reason: string | null;
   onReconnect: () => void;
+  /// When set, renders a "Diagnose" button that opens passive connection
+  /// diagnostics for this context. Omitted where diagnosis makes no sense
+  /// (a healthy cluster gone temporarily unavailable, a cancelled connect).
+  diagnoseContext?: ContextInfo;
 }) {
   const t = useResolvedTheme().tokens;
+  const [showDiag, setShowDiag] = useState(false);
   return (
     <div
       role="alert"
@@ -200,9 +207,27 @@ export function ReconnectBanner({
           </div>
         )}
       </div>
+      {diagnoseContext && (
+        <Btn
+          t={t}
+          variant="secondary"
+          size="sm"
+          onClick={() => setShowDiag(true)}
+        >
+          Diagnose
+        </Btn>
+      )}
       <Btn t={t} variant="primary" size="sm" onClick={onReconnect}>
         Reconnect
       </Btn>
+      {diagnoseContext && showDiag && (
+        <ConnectionDiagnosticsModal
+          t={t}
+          contextId={diagnoseContext.id}
+          contextName={diagnoseContext.name}
+          onClose={() => setShowDiag(false)}
+        />
+      )}
     </div>
   );
 }

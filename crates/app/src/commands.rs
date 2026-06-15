@@ -403,6 +403,29 @@ pub(crate) async fn list_contexts(state: State<'_, AppState>) -> Result<Vec<Cont
     kubeconfig::list_contexts(&sources).map_err(|e| e.to_string())
 }
 
+/// Passive, read-only connection diagnostics for a context: the PATH the app
+/// sees, whether the context's exec plugin is findable, and which cloud/proxy/
+/// TLS env vars are present. Does NOT execute the plugin (live plugin stderr is
+/// already surfaced on connect failure). Backs the "Diagnose connection" UI.
+#[tauri::command]
+pub(crate) async fn diagnose_connection_cmd(
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<ferrisscope_core::cluster::ConnectionDiagnostics, String> {
+    let context_name = kubeconfig::context_name_from_id(&name).to_owned();
+    let source_path = {
+        let s = state.sources.lock().await;
+        kubeconfig::source_path_for(&name, &s)
+    };
+    // Reads the kubeconfig from disk → keep off the async worker.
+    tokio::task::spawn_blocking(move || {
+        ferrisscope_core::cluster::diagnose_context(&context_name, source_path.as_deref())
+    })
+    .await
+    .map_err(|e| format!("diagnostics task failed: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
 /// Wall-clock budget for `connect_context`. Long enough for slow auth plugins
 /// (gke/aws/oidc shell out and can be sluggish on a cold cache) but short
 /// enough that a wedged apiserver doesn't pin the panel forever. The frontend

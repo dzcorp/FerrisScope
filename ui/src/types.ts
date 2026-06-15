@@ -95,6 +95,32 @@ export type ContextInfo = {
   source_path: string | null;
 };
 
+/// The exec-credential plugin a context declares, plus whether the app can find
+/// it on the PATH it sees. Mirrors `ferrisscope_core::cluster::ExecProbe`.
+export type ExecProbe = {
+  command: string;
+  args: string[];
+  /// Absolute path the command resolves to, if found.
+  resolved_path: string | null;
+  found: boolean;
+};
+
+/// Presence (never the value) of one diagnostic env var.
+export type EnvPresence = {
+  key: string;
+  present: boolean;
+};
+
+/// Passive, read-only snapshot of what the app sees for a context's connection.
+/// Mirrors `ferrisscope_core::cluster::ConnectionDiagnostics`.
+export type ConnectionDiagnostics = {
+  /// The process PATH the app hands to exec plugins, one entry per element.
+  resolved_path: string[];
+  /// The context's exec plugin probe, or null if it uses no exec plugin.
+  exec: ExecProbe | null;
+  env_presence: EnvPresence[];
+};
+
 export type KubeconfigSourceKind = "file" | "folder" | "ssh";
 
 export type SshAuthInput =

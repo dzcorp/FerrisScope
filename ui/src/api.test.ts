@@ -67,6 +67,17 @@ describe("contexts + connect", () => {
       connectId: "abc-123",
     });
   });
+
+  it("diagnoseConnection → 'diagnose_connection_cmd' with name", async () => {
+    const cap = captureNext({
+      resolved_path: ["/usr/bin"],
+      exec: null,
+      env_presence: [{ key: "HOME", present: true }],
+    });
+    await api.diagnoseConnection("default::ctx-a");
+    expect(cap.calls[0]?.cmd).toBe("diagnose_connection_cmd");
+    expect(cap.calls[0]?.args).toEqual({ name: "default::ctx-a" });
+  });
 });
 
 describe("subscribeResource", () => {
