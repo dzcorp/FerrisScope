@@ -517,22 +517,24 @@ mod tests {
 
     #[test]
     fn virtual_contexts_round_trip() {
-        let mut prefs = Prefs::default();
-        prefs.virtual_contexts = vec![
-            VirtualContext {
-                id: "vc-1".to_string(),
-                name: "prod".to_string(),
-                members: vec![
-                    "default::prod-eu".to_string(),
-                    "default::prod-us".to_string(),
-                ],
-            },
-            VirtualContext {
-                id: "vc-2".to_string(),
-                name: "edge".to_string(),
-                members: vec!["src-a::edge-1".to_string()],
-            },
-        ];
+        let mut prefs = Prefs {
+            virtual_contexts: vec![
+                VirtualContext {
+                    id: "vc-1".to_string(),
+                    name: "prod".to_string(),
+                    members: vec![
+                        "default::prod-eu".to_string(),
+                        "default::prod-us".to_string(),
+                    ],
+                },
+                VirtualContext {
+                    id: "vc-2".to_string(),
+                    name: "edge".to_string(),
+                    members: vec!["src-a::edge-1".to_string()],
+                },
+            ],
+            ..Prefs::default()
+        };
         prefs.ui.selected_virtual_context = Some("vc-1".to_string());
         let json = serde_json::to_string(&prefs).unwrap();
         let parsed = parse(&json);

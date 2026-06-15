@@ -71,12 +71,7 @@ mod tests {
         seed(&conn, "stale-live", now - 200 * hour, None);
         seed(&conn, "fresh-live", now, None);
 
-        let stats = run(
-            &conn,
-            Duration::from_secs(24 * 3600),
-            Duration::from_secs(168 * 3600),
-        )
-        .unwrap();
+        let stats = run(&conn, Duration::from_hours(24), Duration::from_hours(168)).unwrap();
 
         assert_eq!(stats.tombstones_purged, 1);
         assert_eq!(stats.stale_purged, 1);
