@@ -76,8 +76,10 @@ Lens is the de-facto desktop IDE for Kubernetes, but it bundles an entire Chromi
 
 ### Cluster operations
 - **Multi-source kubeconfigs.** Default kubeconfig + user-added files, folder scans, and SSH-mounted remote configs. Live FS watcher reloads on change. Each context gets a stable `(source, name)` id so duplicate names across files never collide.
+- **Virtual contexts — multi-cluster views.** Select 2+ clusters in the fleet and save them as a named *virtual context*; opening it connects every member in parallel and merges resource tables across them with a per-row Cluster column (stable identity colors so same-uid objects on two clusters never collide). A failed member gets its own Reconnect banner while the table keeps serving the healthy ones. Ad-hoc widening too — the cluster bar's **+** menu adds a cluster to the current view for the session. The AI chat is briefed on the active members and switches its target cluster on demand.
 - **Fleet landing.** Per-cluster cards with cached probes (server version, node count, pod count, CPU / Mem load). Refresh is best-effort and never clears the last known good values.
-- **Auth-plugin diagnostics.** `gke-gcloud-auth-plugin` / `aws-iam-authenticator` / OIDC failures surface clearly — silent auth failures are the #1 Lens UX papercut we wanted to fix.
+- **Cloud-provider auth.** GKE / EKS / AKS / OIDC (dex / keycloak) exec plugins run through `kube-rs` — including legacy `auth-provider: gcp`/`oidc` id-token refresh and `HTTPS_PROXY` / `NO_PROXY` on corporate networks. On Dock / `.desktop` launches the full login-shell environment (`AWS_*` / `CLOUDSDK_*` / `GOOGLE_*` / `AZURE_*` / proxy / TLS) is synced so a plugin that authenticates in your terminal also authenticates in the app.
+- **Auth-plugin diagnostics.** `gke-gcloud-auth-plugin` / `aws-iam-authenticator` / OIDC failures surface clearly — readable, credential-redacted plugin stderr instead of raw bytes, plus a passive **Diagnose** button on the connect-error banner that reports the resolved PATH, whether the context's exec plugin is findable, and which cloud / proxy / TLS env vars are present — never executing the plugin. Silent auth failures are the #1 Lens UX papercut we wanted to fix.
 
 ### Resource browsing — 40+ built-in kinds, reflector-backed
 | Category | Kinds |
