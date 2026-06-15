@@ -159,6 +159,8 @@ function BulkActionButton({
         gap: 6,
         padding: "5px 10px",
         height: 28,
+        flexShrink: 0,
+        whiteSpace: "nowrap",
         borderRadius: R_MD,
         border: "none",
         background: hover
