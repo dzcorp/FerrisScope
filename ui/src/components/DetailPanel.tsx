@@ -125,6 +125,7 @@ import {
 } from "./detail/gateway";
 import { HelmReleaseSummary } from "./detail/helm";
 import { HelmChartSummary } from "./detail/helm/chart";
+import { DETAIL_POLL_MS, shouldPollDetail } from "./detail/detailPoll";
 
 // Set of kind ids that have a structured Summary tab. Used to gate the tab
 // label + the default tab + the dispatch in the body.
@@ -377,6 +378,13 @@ export function DetailPanel({
   // its detail in response. The YAML tab still triggers via `refetch` below.
   const [detailVersion, setDetailVersion] = useState(0);
   const reqId = useRef(0);
+  // Read inside the periodic-poll tick (see the delta effect below) so the
+  // interval sees the live tab / YAML-draft state without being torn down and
+  // recreated whenever either changes.
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const yamlBufferRef = useRef(yamlBuffer);
+  yamlBufferRef.current = yamlBuffer;
 
   const detailHistory = useAppStore((s) => s.detailHistory);
   const detailIndex = useAppStore((s) => s.detailIndex);
@@ -690,6 +698,28 @@ export function DetailPanel({
       }
     });
 
+    // Periodic refresh while the panel stays open. The delta listener above
+    // only fires when the projected ROW changes — but labels, annotations and
+    // most spec fields live in `project_detail()`, off the row, so the watcher
+    // suppresses metadata-only edits as no-op rows and `detailVersion` never
+    // bumps. This timer re-bumps it on a cadence so those fields refresh
+    // without reopening the panel. Gated by `shouldPollDetail` (paused while
+    // the window is hidden or a YAML draft is in flight); structured per-field
+    // editors are clobber-safe and need no guard. Reuses `scheduleRefetch` so
+    // a poll tick coalesces with any concurrent delta-driven refetch.
+    const poll = setInterval(() => {
+      if (cancelled) return;
+      if (
+        shouldPollDetail({
+          hidden: typeof document !== "undefined" && document.hidden,
+          yamlEditing: yamlBufferRef.current != null,
+          tab: tabRef.current,
+        })
+      ) {
+        scheduleRefetch();
+      }
+    }, DETAIL_POLL_MS);
+
     // Switching to a different target drops any in-flight edit — the
     // buffer is keyed to the prior resource and would otherwise corrupt
     // the new one's apply payload.
@@ -720,6 +750,7 @@ export function DetailPanel({
     return () => {
       cancelled = true;
       if (pending != null) clearTimeout(pending);
+      clearInterval(poll);
       if (unlisten) unlisten();
       window.removeEventListener("keydown", onKey);
     };
