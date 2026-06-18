@@ -21,6 +21,7 @@ pub(crate) mod can_i;
 pub(crate) mod config_view;
 pub(crate) mod diagnose;
 pub(crate) mod events;
+pub(crate) mod global_forward;
 pub(crate) mod helm;
 pub(crate) mod http_fetch;
 pub(crate) mod logs;
@@ -352,6 +353,23 @@ pub(crate) fn build_registry(
         cluster.clone(),
     )));
     reg.register(Arc::new(portforward::PortForwardClose::new(app.clone())));
+
+    // Global (DNS) forwards. Route through the privileged helper;
+    // Write category. Session-scoped — torn down on app exit, not on chat close.
+    reg.register(Arc::new(global_forward::GlobalForwardList::new(
+        app.clone(),
+    )));
+    reg.register(Arc::new(global_forward::GlobalForwardNamespace::new(
+        app.clone(),
+        cluster.clone(),
+    )));
+    reg.register(Arc::new(global_forward::GlobalForwardService::new(
+        app.clone(),
+        cluster.clone(),
+    )));
+    reg.register(Arc::new(global_forward::GlobalForwardClose::new(
+        app.clone(),
+    )));
 
     // HTTP probe — no per-cluster state, so no AppHandle/cluster capture.
     reg.register(Arc::new(http_fetch::HttpFetch::new()));

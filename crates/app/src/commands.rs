@@ -36,8 +36,9 @@ use ferrisscope_kube_ext::{
     get_secret_detail, get_service_account_detail, get_service_detail, get_stateful_set_detail,
     get_storage_class_detail, get_validating_webhook_configuration_detail, get_well_known_detail,
     helm_install_chart, helm_repo_update, helm_uninstall, helm_upgrade,
-    list_config_maps_in_namespace, list_persistent_volume_claims_in_namespace, list_pods_on_node,
-    list_secrets_in_namespace, lookup, merge_patch_resource, registry, restart_pod_owner,
+    list_config_maps_in_namespace, list_namespace_names,
+    list_persistent_volume_claims_in_namespace, list_pods_on_node, list_secrets_in_namespace,
+    list_services_in_namespace, lookup, merge_patch_resource, registry, restart_pod_owner,
     restart_pods_owners, restart_workload, set_node_cordon, start_forward, ApplyResult,
     DrainReport, ForwardEntry, ForwardStatus, HelmInstallResult, HelmUpgradeResult,
     MergePatchResult, ResourceKind, ResourceKindEntry, RestartPodsReport,
@@ -1316,6 +1317,7 @@ pub(crate) async fn drop_cluster_watchers(
     cluster_id: String,
     state: State<'_, AppState>,
     agent_state: State<'_, AgentState>,
+    gf: State<'_, crate::globalfwd::GlobalForwardManager>,
 ) -> Result<(), String> {
     // Close any chats bound to this cluster FIRST, while its kube `Client` is
     // still alive, so each chat's `on_chat_close` can delete its debug pods and
@@ -1323,6 +1325,11 @@ pub(crate) async fn drop_cluster_watchers(
     // `chat_close` may never arrive on a backend-initiated disconnect, and the
     // pods' TTL would otherwise be the only backstop).
     let chats_closed = agent_state.close_chats_for_cluster(&cluster_id).await;
+    // Tear down any global (DNS) forward sessions for this cluster: stop their
+    // listeners, drop loopback aliases, strip their /etc/hosts entries. Done
+    // here (not relying on app-exit) so a disconnect doesn't leave dead
+    // listeners + stale hosts entries pointing at a gone cluster.
+    gf.disable_cluster(&state.portforwards, &cluster_id).await;
     let dropped = drop_all_kind_watchers(&state, &cluster_id).await;
     let removed = state.remove_cluster(&cluster_id).await.is_some();
     // Drop the in-memory search-index handle. The writer task flushes its
@@ -1775,6 +1782,33 @@ pub(crate) async fn list_secrets_in_namespace_cmd(
 ) -> Result<Value, String> {
     let entry = state.entry(&cluster_id).await?;
     list_secrets_in_namespace(entry.cluster.client(), &namespace)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Namespace names in a cluster, sorted. Backs the namespace picker in the
+/// new-port-forward form. One-shot — no caching.
+#[tauri::command]
+pub(crate) async fn list_namespaces_cmd(
+    cluster_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let entry = state.entry(&cluster_id).await?;
+    list_namespace_names(entry.cluster.client())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Service names + ports in a namespace, used by the port-forward form's
+/// Service picker (and remote-port dropdown). One-shot — no caching.
+#[tauri::command]
+pub(crate) async fn list_services_in_namespace_cmd(
+    cluster_id: String,
+    namespace: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let entry = state.entry(&cluster_id).await?;
+    list_services_in_namespace(entry.cluster.client(), &namespace)
         .await
         .map_err(|e| e.to_string())
 }
@@ -3635,10 +3669,15 @@ pub(crate) async fn pf_start(
         remote_port,
         requested_local_port,
         autostart: pinned,
+        // Simple tier: bind 127.0.0.1 (local_ip None). Global forwards go
+        // through the dedicated gf_* path, not pf_start.
+        mode: Default::default(),
+        local_ip: None,
     };
     let handle = start_forward(
         entry_arc.cluster.client(),
         spec,
+        None, // Simple forward: bind in-process.
         state.portforwards.status_tx.clone(),
     )
     .await
@@ -3723,6 +3762,114 @@ pub(crate) async fn pf_set_autostart(
     Ok(())
 }
 
+// ---- Global (DNS) forwards ----------------------------------------------
+//
+// These route through the privileged helper (loopback aliases + /etc/hosts) via
+// the `GlobalForwardManager` managed state. Unlike `pf_*`, global sessions are
+// session-scoped (not persisted across restarts) in v1; crash leftovers are
+// cleaned by the helper's `PurgeStale` the next time it's spawned.
+
+#[tauri::command]
+pub(crate) async fn gf_enable_namespace(
+    cluster_id: String,
+    namespace: String,
+    gf: State<'_, crate::globalfwd::GlobalForwardManager>,
+    state: State<'_, AppState>,
+) -> Result<crate::globalfwd::GlobalSessionSnapshot, String> {
+    let namespace = namespace.trim();
+    if namespace.is_empty() {
+        return Err("namespace is required".into());
+    }
+    let entry = state.entry(&cluster_id).await?;
+    let client = entry.cluster.client();
+    gf.enable_namespace(client, &state.portforwards, &cluster_id, namespace)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn gf_enable_service(
+    cluster_id: String,
+    namespace: String,
+    name: String,
+    gf: State<'_, crate::globalfwd::GlobalForwardManager>,
+    state: State<'_, AppState>,
+) -> Result<crate::globalfwd::GlobalSessionSnapshot, String> {
+    let namespace = namespace.trim();
+    let name = name.trim();
+    if namespace.is_empty() {
+        return Err("namespace is required".into());
+    }
+    if name.is_empty() {
+        return Err("service name is required".into());
+    }
+    let entry = state.entry(&cluster_id).await?;
+    let client = entry.cluster.client();
+    gf.enable_service(client, &state.portforwards, &cluster_id, namespace, name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Enable a global forward by query: `namespace = None` → all namespaces;
+/// `label_selector = Some("k=v,k2")` → filter. Covers kubefwd `-A` / `-l`.
+#[tauri::command]
+pub(crate) async fn gf_enable_query(
+    cluster_id: String,
+    namespace: Option<String>,
+    label_selector: Option<String>,
+    gf: State<'_, crate::globalfwd::GlobalForwardManager>,
+    state: State<'_, AppState>,
+) -> Result<crate::globalfwd::GlobalSessionSnapshot, String> {
+    // Normalize blank inputs to `None`: an empty namespace means "all
+    // namespaces", and an empty selector means "match everything" — passing the
+    // empty string through would instead hit `Api::namespaced("")` / an empty
+    // field selector and error at the apiserver.
+    let namespace = namespace
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let label_selector = label_selector
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let entry = state.entry(&cluster_id).await?;
+    let client = entry.cluster.client();
+    gf.enable_query(
+        client,
+        &state.portforwards,
+        &cluster_id,
+        namespace,
+        label_selector,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn gf_disable(
+    id: String,
+    gf: State<'_, crate::globalfwd::GlobalForwardManager>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    gf.disable(&state.portforwards, &id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn gf_list(
+    gf: State<'_, crate::globalfwd::GlobalForwardManager>,
+) -> Result<Vec<crate::globalfwd::GlobalSessionSnapshot>, String> {
+    Ok(gf.list().await)
+}
+
+#[tauri::command]
+pub(crate) async fn gf_helper_status(
+    gf: State<'_, crate::globalfwd::GlobalForwardManager>,
+) -> Result<crate::globalfwd::HelperStatus, String> {
+    Ok(gf.status().await)
+}
+
 /// Persist every currently-pinned forward to `portforwards.json`. Called
 /// after start/stop/pin transitions.
 ///
@@ -3753,7 +3900,12 @@ pub(crate) async fn persist_forwards(state: &State<'_, AppState>) {
         .collect();
     drop(overrides);
     drop(map);
-    if let Err(e) = portforwards::save(&PortForwardsFile { specs }).await {
+    if let Err(e) = portforwards::save(&PortForwardsFile {
+        version: portforwards::CURRENT_VERSION,
+        specs,
+    })
+    .await
+    {
         tracing::warn!(error = %e, "persist port-forwards");
     }
 }
@@ -3815,6 +3967,9 @@ pub(crate) async fn restore_persisted_forwards(state: &State<'_, AppState>, app:
                 match start_forward(
                     entry.cluster.client(),
                     spec.clone(),
+                    // Persisted forwards are Simple-tier (global sessions are
+                    // re-established via gf_*, not restored here) → bind in-process.
+                    None,
                     state.portforwards.status_tx.clone(),
                 )
                 .await

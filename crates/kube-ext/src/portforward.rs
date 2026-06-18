@@ -399,16 +399,37 @@ fn workload_selector_job(j: &Job) -> Option<String> {
 /// clone for per-connection pod resolution; if the cluster is dropped from
 /// `AppState` and re-created (re-connect), the next `start_forward` re-uses
 /// the new client.
+///
+/// `prebound` lets the caller supply an already-bound listening socket instead
+/// of binding here. Global (DNS) forwards use this on Linux for privileged
+/// service ports (<1024): the elevated helper binds the socket and passes the fd
+/// to the app, which the app then drives. When `None`, we bind `spec`'s address
+/// ourselves (every Simple forward, and every high-port / non-Linux global one).
 pub async fn start(
     client: Client,
     spec: ForwardSpec,
+    prebound: Option<std::net::TcpListener>,
     status_tx: broadcast::Sender<(String, ForwardStatus)>,
 ) -> Result<Arc<ForwardHandle>, PortForwardError> {
-    let bind_addr = (
-        std::net::Ipv4Addr::LOCALHOST,
-        spec.requested_local_port.unwrap_or(0),
-    );
-    let listener = TcpListener::bind(bind_addr).await?;
+    let listener = match prebound {
+        // Pre-bound by the helper (privileged port): adopt it. It was created
+        // blocking; tokio needs it non-blocking.
+        Some(std_listener) => {
+            std_listener.set_nonblocking(true)?;
+            TcpListener::from_std(std_listener)?
+        }
+        // `local_ip` is `None` for Simple forwards → bind 127.0.0.1 exactly as
+        // before. Global forwards pass their allocated per-service loopback IP
+        // (somewhere in 127.0.0.0/8), which is already reachable (Linux loops the
+        // whole /8; the helper has aliased it on macOS/Windows).
+        None => {
+            let ip = spec
+                .local_ip
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+            let bind_addr = std::net::SocketAddr::new(ip, spec.requested_local_port.unwrap_or(0));
+            TcpListener::bind(bind_addr).await?
+        }
+    };
     let actual_local_port = listener.local_addr()?.port();
 
     let id = spec.id.clone();

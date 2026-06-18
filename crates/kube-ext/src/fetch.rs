@@ -289,6 +289,68 @@ pub async fn list_config_maps_in_namespace(
     Ok(Value::Array(out))
 }
 
+/// Namespace names in the cluster, sorted. Backs the namespace picker in the
+/// new-port-forward form. One-shot list per call — fresh each time the form
+/// opens, no caching (mirrors the env-ref / volume pickers).
+pub async fn list_namespace_names(client: Client) -> Result<Vec<String>, FetchError> {
+    let api: Api<Namespace> = Api::all(client);
+    let list = api.list(&ListParams::default()).await?;
+    let mut names: Vec<String> = list
+        .items
+        .into_iter()
+        .filter_map(|ns| ns.metadata.name)
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Light projection of every Service in a namespace — name + its ports — used
+/// by the port-forward form's Service picker. Carries `ports` so the form can
+/// offer a remote-port dropdown without a second `get_service_detail` round
+/// trip. Sorted by name for stable UI.
+pub async fn list_services_in_namespace(
+    client: Client,
+    namespace: &str,
+) -> Result<Value, FetchError> {
+    let api: Api<Service> = Api::namespaced(client, namespace);
+    let list = api.list(&ListParams::default()).await?;
+    let mut out: Vec<Value> = list
+        .items
+        .into_iter()
+        .map(|svc| {
+            let name = svc.metadata.name.unwrap_or_default();
+            let ports: Vec<Value> = svc
+                .spec
+                .as_ref()
+                .and_then(|s| s.ports.as_ref())
+                .map(|ports| {
+                    ports
+                        .iter()
+                        .filter_map(|p| {
+                            // Only ports that fit a u16 are forwardable.
+                            u16::try_from(p.port).ok().map(|port| {
+                                json!({
+                                    "port": port,
+                                    "name": p.name,
+                                    "protocol": p.protocol.clone().unwrap_or_else(|| "TCP".into()),
+                                })
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            json!({ "name": name, "ports": ports })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("name").and_then(Value::as_str).unwrap_or(""))
+    });
+    Ok(Value::Array(out))
+}
+
 /// Light projection of every PersistentVolumeClaim in a namespace, used
 /// by the volume picker. Carries `storage_class` + `requested_storage` so
 /// the operator can disambiguate at a glance — claim names alone aren't

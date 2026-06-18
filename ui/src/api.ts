@@ -44,6 +44,8 @@ import type {
   ForwardEntry,
   ForwardStatusEvent,
   ForwardTarget,
+  GlobalForwardSession,
+  HelperStatus,
   HorizontalPodAutoscalerDetail,
   IngressClassDetail,
   IngressDetail,
@@ -102,6 +104,7 @@ import type {
   SecretKeysSummary,
   ServiceAccountDetail,
   ServiceDetail,
+  ServicePick,
   StatefulSetDetail,
   StorageClassDetail,
   CustomResourceDefinitionDetail,
@@ -293,6 +296,17 @@ export const api = {
   /// is write-only and never returned by GET). Values are not included.
   listSecretsInNamespace: (clusterId: string, namespace: string) =>
     invoke<SecretKeysSummary[]>("list_secrets_in_namespace_cmd", {
+      clusterId,
+      namespace,
+    }),
+  /// Namespace names in a cluster (sorted). Backs the new-forward namespace
+  /// picker; one-shot, not cached.
+  listNamespaces: (clusterId: string) =>
+    invoke<string[]>("list_namespaces_cmd", { clusterId }),
+  /// Service names + ports in a namespace. Backs the new-forward Service picker
+  /// (and its remote-port dropdown); one-shot, not cached.
+  listServicesInNamespace: (clusterId: string, namespace: string) =>
+    invoke<ServicePick[]>("list_services_in_namespace_cmd", {
       clusterId,
       namespace,
     }),
@@ -753,6 +767,28 @@ export const api = {
   // Toggle the pin on an existing forward without tearing the listener down.
   pfSetAutostart: (id: string, pinned: boolean) =>
     invoke<void>("pf_set_autostart", { id, pinned }),
+
+  // Global (DNS) forwards. First enable in a session triggers an OS
+  // elevation prompt (privileged helper for loopback aliases + /etc/hosts).
+  gfEnableNamespace: (clusterId: string, namespace: string) =>
+    invoke<GlobalForwardSession>("gf_enable_namespace", { clusterId, namespace }),
+  gfEnableService: (clusterId: string, namespace: string, name: string) =>
+    invoke<GlobalForwardSession>("gf_enable_service", { clusterId, namespace, name }),
+  // Query enable: namespace null = all namespaces; labelSelector null = no
+  // filter. Covers kubefwd's -A / -l. Stays live via a backend Service watch.
+  gfEnableQuery: (
+    clusterId: string,
+    namespace: string | null,
+    labelSelector: string | null,
+  ) =>
+    invoke<GlobalForwardSession>("gf_enable_query", {
+      clusterId,
+      namespace,
+      labelSelector,
+    }),
+  gfDisable: (id: string) => invoke<void>("gf_disable", { id }),
+  gfList: () => invoke<GlobalForwardSession[]>("gf_list"),
+  gfHelperStatus: () => invoke<HelperStatus>("gf_helper_status"),
 
   // Multi-doc YAML apply (Create-from-YAML). Backend never errors as a
   // whole — per-doc results carry status, conflicts, and dry-run flag.

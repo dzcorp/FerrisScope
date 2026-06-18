@@ -1,0 +1,21 @@
+[package]
+name = "ferrisscope-fdpass-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Workspace `forbid(unsafe_code)` blocks the libc `sendmsg`/`recvmsg` +
+# SCM_RIGHTS FFI that is the whole point of this crate. The unsafe is isolated
+# here (mirrors `ferrisscope-mimalloc-ext` / `-winpipe-ext`) so the rest of the
+# workspace keeps its unsafe-free invariant. Non-unix targets compile empty.
+[lints.rust]
+unsafe_code = "allow"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

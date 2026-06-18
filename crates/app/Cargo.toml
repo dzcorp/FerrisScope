@@ -30,6 +30,7 @@ tauri-build = { version = "2.6", features = [] }
 ferrisscope-core.workspace = true
 ferrisscope-kube-ext.workspace = true
 ferrisscope-agent.workspace = true
+ferrisscope-helper.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 uuid.workspace = true
@@ -103,3 +104,9 @@ mimalloc = { version = "0.1", default-features = false }
 # `libmimalloc-sys` would trip the workspace's `forbid(unsafe_code)`
 # lint. The shim crate isolates that one `unsafe` block.
 ferrisscope-mimalloc-ext.workspace = true
+
+# Unix-only: receive a privileged-port listening socket from the helper via
+# SCM_RIGHTS (isolates the libc recvmsg unsafe). Used by global port-forwarding
+# to bind service ports <1024 the unprivileged app can't bind itself.
+[target.'cfg(unix)'.dependencies]
+ferrisscope-fdpass-ext.workspace = true

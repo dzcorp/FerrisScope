@@ -1,0 +1,35 @@
+[package]
+name = "ferrisscope-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Privileged helper for global port-forwarding: loopback aliases + /etc/hosts. Spawned elevated by the app, talks a closed IPC protocol. Tauri-free."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ferrisscope-helper"
+path = "src/main.rs"
+
+[dependencies]
+ferrisscope-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Windows-only: builds the control pipe with a security descriptor the
+# unprivileged app can connect to (isolates the Win32 FFI unsafe).
+[target.'cfg(windows)'.dependencies]
+ferrisscope-winpipe-ext.workspace = true
+
+# Unix-only: passes a privileged-port listening socket back to the app via
+# SCM_RIGHTS (isolates the libc sendmsg/recvmsg unsafe).
+[target.'cfg(unix)'.dependencies]
+ferrisscope-fdpass-ext.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

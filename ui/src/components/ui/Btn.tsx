@@ -242,6 +242,10 @@ export const IconBtn = forwardRef<HTMLButtonElement, IconBtnProps>(
         type="button"
         onClick={onClick}
         disabled={disabled}
+        // Mirror the tooltip label as the accessible name: the icon is the only
+        // content, and `Tooltip` only renders `title` into the DOM on hover, so
+        // without this the button has no name for screen readers (or tests).
+        aria-label={title}
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
         style={{

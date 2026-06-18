@@ -174,10 +174,14 @@ impl NativeTool for PortForwardOpen {
             remote_port: a.remote_port,
             requested_local_port: a.requested_local_port,
             autostart: false,
+            // Agent-opened forwards are Simple tier (localhost), never persisted.
+            mode: Default::default(),
+            local_ip: None,
         };
         let handle = start_forward(
             entry.cluster.client(),
             spec,
+            None, // Simple forward: bind in-process.
             state.portforwards.status_tx.clone(),
         )
         .await

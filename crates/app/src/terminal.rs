@@ -326,30 +326,38 @@ fn pick_default_shell() -> String {
             return s;
         }
     }
+    // cfg'd `let` (not two cfg'd blocks) so each target has a genuine tail
+    // expression — no `return` for clippy to flag as needless when the other
+    // branch is cfg'd out.
     #[cfg(target_os = "windows")]
-    {
+    let shell = {
+        let mut found = None;
         for candidate in ["pwsh.exe", "powershell.exe", "cmd.exe"] {
             if which_on_path(candidate).is_some() {
-                return candidate.to_owned();
+                found = Some(candidate.to_owned());
+                break;
             }
         }
         // Last-resort absolute path so we never surface "/bin/bash" on
         // Windows even when %PATH% is empty (it isn't, but defence in
         // depth — cmd.exe always lives at this path on every supported
         // Windows version).
-        return r"C:\Windows\System32\cmd.exe".to_owned();
-    }
+        found.unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".to_owned())
+    };
     #[cfg(not(target_os = "windows"))]
-    {
+    let shell = {
+        let mut found = None;
         for candidate in ["/bin/bash", "/bin/sh"] {
             if std::path::Path::new(candidate).exists() {
-                return candidate.to_owned();
+                found = Some(candidate.to_owned());
+                break;
             }
         }
         // /bin/sh is mandated by POSIX; if missing, surfacing the error
         // from spawn is more useful than papering over it.
-        "/bin/sh".to_owned()
-    }
+        found.unwrap_or_else(|| "/bin/sh".to_owned())
+    };
+    shell
 }
 
 #[cfg(target_os = "windows")]

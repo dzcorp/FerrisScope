@@ -5,6 +5,8 @@ import type {
   ContextInfo,
   ForwardEntry,
   ForwardStatus,
+  GlobalForwardSession,
+  HelperStatus,
   MetricsSnapshot,
   Prefs,
   PrefsRailMode,
@@ -312,6 +314,12 @@ type AppState = {
   forwards: Record<string, ForwardEntry>;
   // Whether the global port-forwards slide-over panel is open.
   forwardsOpen: boolean;
+  // Global (DNS) forward sessions keyed by session id. Hydrated by
+  // api.gfList(); mutated on enable/disable.
+  globalForwards: Record<string, GlobalForwardSession>;
+  // Lifecycle of the privileged helper, for surfacing the elevation/error
+  // state in the panel.
+  helperStatus: HelperStatus;
 
   /// Running app's CARGO_PKG_VERSION, fetched once on launch via
   /// `api.updaterInfo()`. `null` until hydrated. Read by the
@@ -442,6 +450,11 @@ type AppState = {
   removeForward: (id: string) => void;
   openForwardsPanel: () => void;
   closeForwardsPanel: () => void;
+
+  hydrateGlobalForwards: (sessions: GlobalForwardSession[]) => void;
+  upsertGlobalForward: (session: GlobalForwardSession) => void;
+  removeGlobalForward: (id: string) => void;
+  setHelperStatus: (status: HelperStatus) => void;
 
   hydrateTableViews: (views: Record<string, TableView>) => void;
   setTableView: (clusterId: string, kindId: string, view: TableView) => void;
@@ -584,6 +597,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   forwards: {},
   forwardsOpen: false,
+  globalForwards: {},
+  helperStatus: { state: "not_started" },
 
   tableViews: {},
 
@@ -986,6 +1001,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
   openForwardsPanel: () => set({ forwardsOpen: true }),
   closeForwardsPanel: () => set({ forwardsOpen: false }),
+
+  hydrateGlobalForwards: (sessions) =>
+    set({
+      globalForwards: Object.fromEntries(sessions.map((s) => [s.id, s])),
+    }),
+  upsertGlobalForward: (session) =>
+    set((s) => ({
+      globalForwards: { ...s.globalForwards, [session.id]: session },
+    })),
+  removeGlobalForward: (id) =>
+    set((s) => {
+      const next = { ...s.globalForwards };
+      delete next[id];
+      return { globalForwards: next };
+    }),
+  setHelperStatus: (status) => set({ helperStatus: status }),
 
   hydrateTableViews: (views) => set({ tableViews: views }),
 

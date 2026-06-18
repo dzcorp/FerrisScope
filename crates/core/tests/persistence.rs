@@ -190,6 +190,8 @@ fn portforwards_file_round_trip_preserves_optional_fields() {
                 remote_port: 80,
                 requested_local_port: Some(18080),
                 autostart: true,
+                mode: Default::default(),
+                local_ip: None,
             },
             ForwardSpec {
                 id: "ctx-a::Service/x/y:443".into(),
@@ -204,8 +206,11 @@ fn portforwards_file_round_trip_preserves_optional_fields() {
                 // null/absent and round-trip back to None.
                 requested_local_port: None,
                 autostart: false,
+                mode: Default::default(),
+                local_ip: None,
             },
         ],
+        ..Default::default()
     };
     let s = serde_json::to_string(&f).unwrap();
     let back: PortForwardsFile = serde_json::from_str(&s).unwrap();

@@ -5,7 +5,10 @@ members = [
     "crates/kube-ext",
     "crates/agent",
     "crates/app",
+    "crates/helper",
     "crates/mimalloc-ext",
+    "crates/winpipe-ext",
+    "crates/fdpass-ext",
     "crates/test-support",
 ]
 
@@ -113,7 +116,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 ferrisscope-core = { path = "crates/core" }
 ferrisscope-kube-ext = { path = "crates/kube-ext" }
 ferrisscope-agent = { path = "crates/agent" }
+ferrisscope-helper = { path = "crates/helper" }
 ferrisscope-mimalloc-ext = { path = "crates/mimalloc-ext" }
+ferrisscope-winpipe-ext = { path = "crates/winpipe-ext" }
+ferrisscope-fdpass-ext = { path = "crates/fdpass-ext" }
 ferrisscope-test-support = { path = "crates/test-support" }
 
 # Test deps

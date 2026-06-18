@@ -1,0 +1,25 @@
+[package]
+name = "ferrisscope-winpipe-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Workspace `forbid(unsafe_code)` would block the Win32 FFI needed to build a
+# SECURITY_ATTRIBUTES / security descriptor for the helper's named pipe. The
+# unsafe surface is a few advapi32/kernel32 calls with documented contracts,
+# isolated here (mirrors `ferrisscope-mimalloc-ext`) so the rest of the
+# workspace keeps its unsafe-free invariant. Non-Windows builds compile this to
+# an empty crate.
+[lints.rust]
+unsafe_code = "allow"
+
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }
