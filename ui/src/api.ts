@@ -64,6 +64,7 @@ import type {
   SessionMeta,
   LimitRangeDetail,
   LogEvent,
+  LogPodEvent,
   LogPodTarget,
   ResolvedLogPods,
   TerminalEvent,
@@ -653,6 +654,34 @@ export const api = {
   // deleted workload doesn't blank the whole aggregated view.
   resolveLogPods: (clusterId: string, targets: LogPodTarget[]) =>
     invoke<ResolvedLogPods>("resolve_log_pods_cmd", { clusterId, targets }),
+
+  // Live pod-set watch for a single workload target. Unlike `resolveLogPods`'s
+  // one-shot snapshot, this keeps the log panel's pod set current as pods are
+  // scaled / rolled / recreated. Same Channel pattern as `startLogStream`:
+  // deltas arrive on `onEvent`; `close()` detaches the handler against late
+  // frames; the backend watch is torn down via `unwatchLogPods(watchId)`.
+  // Rejects pod targets (use `resolveLogPods`) and selector-less workloads.
+  watchLogPods: async (
+    clusterId: string,
+    target: LogPodTarget,
+    onEvent: (evt: LogPodEvent) => void,
+  ): Promise<{ watchId: string; close: () => void }> => {
+    const channel = new Channel<LogPodEvent>();
+    channel.onmessage = onEvent;
+    const watchId = await invoke<string>("watch_log_pods", {
+      clusterId,
+      target,
+      onEvent: channel,
+    });
+    return {
+      watchId,
+      close: () => {
+        channel.onmessage = () => {};
+      },
+    };
+  },
+  unwatchLogPods: (watchId: string) =>
+    invoke<void>("unwatch_log_pods", { watchId }),
 
   // Write text to a user-chosen path (from the OS save dialog) — the log
   // panel's "Download" action.

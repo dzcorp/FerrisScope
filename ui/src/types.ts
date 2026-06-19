@@ -429,6 +429,15 @@ export type ResolvedLogPods = {
   warnings: string[];
 };
 
+// Live pod-set delta for a watched workload (one `watch_log_pods` per target).
+// `added` carries the full resolved pod (new pod, or its container set changed);
+// `removed` identifies a pod that left the set; `init_done` marks the seed as
+// fully delivered so the panel can flip loading→ready even for a zero-pod set.
+export type LogPodEvent =
+  | { kind: "added"; pod: ResolvedLogPod }
+  | { kind: "removed"; namespace: string; name: string }
+  | { kind: "init_done" };
+
 // Terminal sessions stream PTY output over a per-session Channel<TerminalEvent>
 // (no global event bus). `data` chunks are base64-encoded raw PTY bytes; `exit`
 // fires once when the child process closes.

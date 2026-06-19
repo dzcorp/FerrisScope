@@ -3,11 +3,58 @@ import {
   aggregateLogStatus,
   buildLogSources,
   formatLogExport,
+  isFullSourceSwap,
   MAX_LOG_SOURCES,
+  reconcileStreams,
   suggestedLogFileName,
   type LogStatus,
   type ObservedPod,
 } from "./logSources";
+
+describe("reconcileStreams", () => {
+  it("starts only new keys and stops only gone keys", () => {
+    // a stays, b is removed, c is added.
+    const { toStart, toStop } = reconcileStreams(["a", "b"], ["a", "c"]);
+    expect(toStart).toEqual(["c"]);
+    expect(toStop).toEqual(["b"]);
+  });
+
+  it("is a no-op when the sets match", () => {
+    const { toStart, toStop } = reconcileStreams(["a", "b"], ["b", "a"]);
+    expect(toStart).toEqual([]);
+    expect(toStop).toEqual([]);
+  });
+
+  it("starts everything from empty and stops everything to empty", () => {
+    expect(reconcileStreams([], ["a", "b"])).toEqual({
+      toStart: ["a", "b"],
+      toStop: [],
+    });
+    expect(reconcileStreams(["a", "b"], [])).toEqual({
+      toStart: [],
+      toStop: ["a", "b"],
+    });
+  });
+});
+
+describe("isFullSourceSwap", () => {
+  it("is true when the two sets are disjoint and both non-empty", () => {
+    expect(isFullSourceSwap(["a", "b"], ["c", "d"])).toBe(true);
+  });
+
+  it("is false when any key overlaps (incremental add/remove)", () => {
+    // Pod added: a kept, b new.
+    expect(isFullSourceSwap(["a"], ["a", "b"])).toBe(false);
+    // Pod removed: a kept.
+    expect(isFullSourceSwap(["a", "b"], ["a"])).toBe(false);
+  });
+
+  it("is false when either side is empty (initial start / full teardown)", () => {
+    expect(isFullSourceSwap([], ["a"])).toBe(false);
+    expect(isFullSourceSwap(["a"], [])).toBe(false);
+    expect(isFullSourceSwap([], [])).toBe(false);
+  });
+});
 
 const names: Record<string, string> = {
   "kc::prod-eu": "prod-eu",
@@ -150,9 +197,9 @@ describe("formatLogExport", () => {
   it("includes ts + label for aggregated views and strips ANSI", () => {
     const out = formatLogExport(
       [
-        { ts: "10:30:00.000", text: "\u001b[31mred\u001b[0m alert", system: false, src: 0 },
-        { ts: null, text: "plain", system: false, src: 1 },
-        { ts: null, text: "— stream ended: exited", system: true, src: 0 },
+        { ts: "10:30:00.000", text: "\u001b[31mred\u001b[0m alert", system: false, src: sources[0]!.key },
+        { ts: null, text: "plain", system: false, src: sources[1]!.key },
+        { ts: null, text: "— stream ended: exited", system: true, src: sources[0]!.key },
       ],
       sources,
     );
@@ -166,7 +213,7 @@ describe("formatLogExport", () => {
   it("omits labels for a single source", () => {
     const single = sources.slice(0, 1);
     const out = formatLogExport(
-      [{ ts: null, text: "hello", system: false, src: 0 }],
+      [{ ts: null, text: "hello", system: false, src: single[0]!.key }],
       single,
     );
     expect(out).toBe("hello\n");

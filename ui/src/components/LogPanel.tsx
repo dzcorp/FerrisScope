@@ -30,6 +30,8 @@ import {
   type LogViewSource,
   type ObservedPod,
 } from "../lib/logSources";
+import { applyPodDelta, podKey, pruneAfterInit } from "../lib/logPods";
+import { logErr } from "../lib/log";
 import type { LogPodTarget } from "../types";
 
 // One requested observation — a pod or a pod-bearing workload on a specific
@@ -118,7 +120,30 @@ export function useObservedPods(targets: ObserveTarget[]): {
     }
     let cancelled = false;
     setState({ kind: "loading" });
+
+    // The pod map is mutated by both the one-shot resolve (initial set) and the
+    // live workload watches (add/remove as pods scale / roll / recreate). Keyed
+    // clusterId\0ns\0name so multi-cluster selections can't collide.
+    const podMap = new Map<string, ObservedPod>();
+    // Union of pod keys the live watches have confirmed (added, minus removed),
+    // used to prune stale one-shot-seeded pods on a watch's `init_done` — see
+    // `pruneAfterInit`.
+    const watchConfirmed = new Set<string>();
+    const warnings: string[] = [...capWarnings];
+    const handles: { watchId: string; close: () => void }[] = [];
+
+    const flushReady = () => {
+      if (cancelled) return;
+      setState({
+        kind: "ready",
+        pods: [...podMap.values()],
+        warnings: [...warnings],
+      });
+    };
+
     void (async () => {
+      // 1. One-shot resolve for the initial set + per-target warnings (pods and
+      // workloads both — `resolveLogPods` expands workloads by selector).
       const byCluster = new Map<string, ObserveTarget[]>();
       for (const t of reqs) {
         const list = byCluster.get(t.clusterId) ?? [];
@@ -143,30 +168,76 @@ export function useObservedPods(targets: ObserveTarget[]): {
       if (cancelled) return;
       const clusterName = (cid: string) =>
         useAppStore.getState().contexts.find((c) => c.id === cid)?.name ?? cid;
-      const pods: ObservedPod[] = [];
-      const warnings: string[] = [...capWarnings];
       results.forEach((res, i) => {
         const cid = entries[i]![0];
         if (res.status === "fulfilled") {
           for (const p of res.value.pods) {
-            pods.push({ clusterId: cid, ...p });
+            podMap.set(podKey(cid, p.namespace, p.name), { clusterId: cid, ...p });
           }
           warnings.push(...res.value.warnings);
         } else {
           warnings.push(`${clusterName(cid)}: ${String(res.reason)}`);
         }
       });
-      if (pods.length === 0 && results.every((r) => r.status === "rejected")) {
+      if (podMap.size === 0 && results.every((r) => r.status === "rejected")) {
         setState({
           kind: "error",
           message: warnings.join("\n") || "pod resolution failed",
         });
         return;
       }
-      setState({ kind: "ready", pods, warnings });
+      flushReady();
+
+      // 2. Live pod-set watch per workload target. The watch re-confirms the
+      // initial set (idempotent — `applyPodDelta` keys by pod) and then keeps it
+      // current. A watch that can't arm (no selector / RBAC) is non-fatal: the
+      // one-shot seed already stands, so we just log and carry on.
+      for (const t of reqs) {
+        if (cancelled) break;
+        if (t.kindId === "pods") continue;
+        try {
+          const handle = await api.watchLogPods(
+            t.clusterId,
+            { kind_id: t.kindId, namespace: t.namespace, name: t.name },
+            (evt) => {
+              if (cancelled) return;
+              if (evt.kind === "init_done") {
+                // Watch's initial list is complete — drop any one-shot-seeded
+                // pod it didn't confirm (deleted in the resolve→watch window).
+                if (
+                  pruneAfterInit(podMap, t.clusterId, t.namespace, watchConfirmed)
+                )
+                  flushReady();
+                return;
+              }
+              if (evt.kind === "added")
+                watchConfirmed.add(
+                  podKey(t.clusterId, evt.pod.namespace, evt.pod.name),
+                );
+              else
+                watchConfirmed.delete(
+                  podKey(t.clusterId, evt.namespace, evt.name),
+                );
+              if (applyPodDelta(podMap, t.clusterId, evt)) flushReady();
+            },
+          );
+          if (cancelled) {
+            handle.close();
+            void api.unwatchLogPods(handle.watchId);
+            break;
+          }
+          handles.push(handle);
+        } catch (e) {
+          logErr("logs")(e);
+        }
+      }
     })();
     return () => {
       cancelled = true;
+      for (const h of handles) {
+        h.close();
+        void api.unwatchLogPods(h.watchId);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, attempt]);

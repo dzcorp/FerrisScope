@@ -70,6 +70,10 @@ function mockBackend(opts: {
     if (cmd === "stop_log_stream") return undefined;
     if (cmd === "subscribe_metrics") return null;
     if (cmd === "unsubscribe_metrics") return undefined;
+    // The live workload pod-set watch arms after the one-shot resolve. Tests
+    // assert on the resolve seed + streams; the watch just needs to not throw.
+    if (cmd === "watch_log_pods") return `lpw${++seq}`;
+    if (cmd === "unwatch_log_pods") return undefined;
     if (cmd === "resolve_log_pods_cmd") {
       const res = opts.resolve?.(String(args!.clusterId));
       if (res instanceof Error) throw res;

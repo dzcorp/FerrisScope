@@ -1323,6 +1323,10 @@ pub(crate) async fn drop_cluster_watchers(
     // `chat_close` may never arrive on a backend-initiated disconnect, and the
     // pods' TTL would otherwise be the only backstop).
     let chats_closed = agent_state.close_chats_for_cluster(&cluster_id).await;
+    // Abort log streams + log-pod watches owned by this cluster so their reader
+    // tasks stop retrying against the torn-down apiserver (the frontend's panel
+    // close may never arrive on a backend-initiated disconnect).
+    let logs_dropped = state.drop_cluster_logs(&cluster_id).await;
     let dropped = drop_all_kind_watchers(&state, &cluster_id).await;
     let removed = state.remove_cluster(&cluster_id).await.is_some();
     // Drop the in-memory search-index handle. The writer task flushes its
@@ -1341,6 +1345,7 @@ pub(crate) async fn drop_cluster_watchers(
     tracing::info!(
         cluster_id = %cluster_id,
         chats_closed,
+        logs_dropped,
         dropped,
         removed,
         index_closed,
@@ -1370,10 +1375,14 @@ pub(crate) async fn reconnect_cluster(
     cluster_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    // The fresh `connect_context` rebuilds the kube `Client`; the old log
+    // streams / watches hold the wedged one, so abort them here too.
+    let logs_dropped = state.drop_cluster_logs(&cluster_id).await;
     let dropped = drop_all_kind_watchers(&state, &cluster_id).await;
     let removed = state.remove_cluster(&cluster_id).await.is_some();
     tracing::info!(
         cluster_id = %cluster_id,
+        logs_dropped,
         dropped,
         removed,
         "reconnect_cluster: entry dropped, awaiting fresh connect_context"
@@ -2149,7 +2158,9 @@ pub(crate) async fn start_log_stream(
 
     let id = format!("s{}", STREAM_COUNTER.fetch_add(1, Ordering::Relaxed));
     spawn_log_forwarder(on_event, id.clone(), stream.clone());
-    state.insert_log_stream(id.clone(), stream).await;
+    state
+        .insert_log_stream(id.clone(), cluster_id, stream)
+        .await;
     Ok(id)
 }
 
@@ -2287,6 +2298,80 @@ fn spawn_log_forwarder(
                     return;
                 }
                 if is_end {
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// Start a live watch over a workload's pods for the logs panel. Returns a
+/// watch id; pod add/remove deltas (and an initial `InitDone`) arrive on
+/// `on_event`. Single-pod targets are not watched here — the frontend resolves
+/// those with the one-shot `resolve_log_pods` fast path, so this rejects them
+/// (and other non-workload kinds) via `start_log_pod_watch`.
+#[tauri::command]
+pub(crate) async fn watch_log_pods(
+    cluster_id: String,
+    target: ferrisscope_kube_ext::LogPodTarget,
+    on_event: tauri::ipc::Channel<ferrisscope_kube_ext::LogPodEvent>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let entry = state.entry(&cluster_id).await?;
+    // Use a watcher-pool client: this is a long-lived watch, not a one-shot
+    // call, so it should share the pool that carries the resource reflectors
+    // (and now inherits their TCP keepalive).
+    let watch = ferrisscope_kube_ext::start_log_pod_watch(entry.cluster.watcher_client(), &target)
+        .await
+        .map_err(|e| e.to_string())?;
+    let id = format!("lpw{}", STREAM_COUNTER.fetch_add(1, Ordering::Relaxed));
+    spawn_log_pod_forwarder(on_event, id.clone(), watch.clone());
+    state
+        .insert_log_pod_watch(id.clone(), cluster_id, watch)
+        .await;
+    Ok(id)
+}
+
+#[tauri::command]
+pub(crate) async fn unwatch_log_pods(
+    watch_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // Dropping the Arc aborts the watch task (LogPodWatch::Drop).
+    state.remove_log_pod_watch(&watch_id).await;
+    Ok(())
+}
+
+/// Bridge a [`ferrisscope_kube_ext::LogPodWatch`] broadcast to the frontend
+/// channel. Exits when the frontend drops the channel or the watch is torn
+/// down. No batching: pod-set churn is low-frequency.
+fn spawn_log_pod_forwarder(
+    channel: tauri::ipc::Channel<ferrisscope_kube_ext::LogPodEvent>,
+    watch_id: String,
+    watch: Arc<ferrisscope_kube_ext::LogPodWatch>,
+) {
+    let mut rx = watch.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    if channel.send(ev).is_err() {
+                        tracing::debug!(
+                            ?watch_id,
+                            "log pod forwarder exiting (channel send failed; frontend dropped)"
+                        );
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Pod-set deltas aren't idempotent snapshots, but a 256-slot
+                    // ring vs. seconds-apart pod churn makes overrun practically
+                    // impossible; the next watcher relist re-syncs the set if it
+                    // ever happens. Log and keep going.
+                    tracing::warn!(?watch_id, dropped = n, "log pod forwarder lagged");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::debug!(?watch_id, "log pod forwarder exiting (watch closed)");
                     return;
                 }
             }

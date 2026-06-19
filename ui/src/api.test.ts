@@ -454,6 +454,40 @@ describe("pod / workload restart", () => {
     });
   });
 
+  it("watchLogPods arms a channel and forwards target + cluster", async () => {
+    const cap = captureNext("lpw7");
+    const seen: unknown[] = [];
+    const handle = await api.watchLogPods(
+      "ctx",
+      { kind_id: "deployments", namespace: "default", name: "api" },
+      (evt) => seen.push(evt),
+    );
+    expect(cap.calls[0]?.cmd).toBe("watch_log_pods");
+    expect(handle.watchId).toBe("lpw7");
+    const args = cap.calls[0]?.args as Record<string, unknown>;
+    expect(args.clusterId).toBe("ctx");
+    expect(args.target).toEqual({
+      kind_id: "deployments",
+      namespace: "default",
+      name: "api",
+    });
+    // The backend pushes deltas over the channel passed as `onEvent`.
+    const channel = args.onEvent as { onmessage: (m: unknown) => void };
+    channel.onmessage({ kind: "init_done" });
+    expect(seen).toEqual([{ kind: "init_done" }]);
+    // close() detaches the handler so late frames are dropped.
+    handle.close();
+    channel.onmessage({ kind: "removed", namespace: "default", name: "api-0" });
+    expect(seen).toEqual([{ kind: "init_done" }]);
+  });
+
+  it("unwatchLogPods carries the watch id", async () => {
+    const cap = captureNext(undefined);
+    await api.unwatchLogPods("lpw7");
+    expect(cap.calls[0]?.cmd).toBe("unwatch_log_pods");
+    expect(cap.calls[0]?.args).toEqual({ watchId: "lpw7" });
+  });
+
   it("saveTextFile carries path + contents", async () => {
     const cap = captureNext(undefined);
     await api.saveTextFile("/tmp/x.log", "hello\n");
