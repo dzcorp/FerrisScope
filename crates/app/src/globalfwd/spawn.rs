@@ -60,6 +60,7 @@ fn helper_args(
     endpoint: &str,
     token_file: &Path,
     hosts_backup: &Path,
+    log_file: &Path,
     embedded: bool,
 ) -> Vec<String> {
     let mut args = Vec::new();
@@ -73,6 +74,10 @@ fn helper_args(
         token_file.display().to_string(),
         "--hosts-backup".into(),
         hosts_backup.display().to_string(),
+        // The elevated helper's stderr is invisible; have it append its tracing
+        // to a file we own so failures (wedge / crash) are diagnosable.
+        "--log-file".into(),
+        log_file.display().to_string(),
     ]);
     args
 }
@@ -152,6 +157,10 @@ fn write_token_file(path: &Path, token: &str) -> Result<()> {
 pub(crate) async fn spawn(runtime_dir: &Path, config_dir: &Path) -> Result<SpawnedHelper> {
     let token = uuid::Uuid::new_v4().to_string();
     let hosts_backup = config_dir.join("hosts.backup");
+    // The elevated helper appends its tracing here (its stderr is invisible). In
+    // the per-user config dir so the unprivileged app can read it back for
+    // diagnostics.
+    let log_file = config_dir.join("helper.log");
     let bin = resolve_helper_bin()?;
     // Embedded (the common case): relaunch our own binary with the marker. Only
     // a `FERRISSCOPE_HELPER_BIN` override targets a standalone helper binary.
@@ -176,7 +185,7 @@ pub(crate) async fn spawn(runtime_dir: &Path, config_dir: &Path) -> Result<Spawn
         }
         let token_file = runtime_dir.join("helper.token");
         write_token_file(&token_file, &token)?;
-        let args = helper_args(&endpoint, &token_file, &hosts_backup, embedded);
+        let args = helper_args(&endpoint, &token_file, &hosts_backup, &log_file, embedded);
         let cmd = build_command(&bin, &args)?;
         (endpoint, token_file, cmd)
     };
@@ -187,7 +196,7 @@ pub(crate) async fn spawn(runtime_dir: &Path, config_dir: &Path) -> Result<Spawn
         let endpoint = format!(r"\\.\pipe\ferrisscope-helper-{}", uuid::Uuid::new_v4());
         let token_file = config_dir.join("helper.token");
         write_token_file(&token_file, &token)?;
-        let args = helper_args(&endpoint, &token_file, &hosts_backup, embedded);
+        let args = helper_args(&endpoint, &token_file, &hosts_backup, &log_file, embedded);
         let cmd = build_command(&bin, &args)?;
         (endpoint, token_file, cmd)
     };
@@ -285,13 +294,22 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Upper bound on how long we wait for the helper's endpoint to become
+/// Absolute backstop on how long we wait for the helper's endpoint to become
 /// connectable. The helper binary only starts *after* the user clears the
-/// elevation prompt, which is human-paced — so this has to comfortably cover
-/// someone fishing a password out of a manager, not just the helper's own
-/// startup. We bail early the moment the elevation child exits (cancel / auth
-/// fail), so this ceiling is only reached if the prompt is left untouched.
-const ELEVATION_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// elevation prompt, which is human-paced.
+///
+/// This must NOT be tuned to "how long a password takes": while the prompt is
+/// open the elevation child (pkexec/osascript/powershell) stays alive, so the
+/// real cancel signal is the **child exiting** — a user who cancels, an
+/// auth-fail, or the OS auto-dismissing an idle dialog all make `try_wait`
+/// return, and we bail immediately on that. The only thing this ceiling guards
+/// against is an elevation that is somehow alive yet never connectable. So it
+/// has to comfortably outlast a *slow but active* entry — a password manager
+/// lookup, 2FA, Touch ID, a mistyped-password retry — none of which exit the
+/// child. A previous 120s value cut those users off mid-entry (the loop bailed
+/// and killed the still-open dialog), forwarding nothing. Ten minutes is far
+/// past any real interaction while still bounding a genuinely stuck elevation.
+const ELEVATION_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
 
 /// Poll interval between connect attempts while the prompt is up.
 const CONNECT_POLL: std::time::Duration = std::time::Duration::from_millis(120);

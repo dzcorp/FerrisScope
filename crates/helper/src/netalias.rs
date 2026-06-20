@@ -85,14 +85,29 @@ pub(crate) async fn del(_ip: Ipv4Addr) -> Result<()> {
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 async fn run(prog: &str, args: &[&str]) -> Result<()> {
     use anyhow::Context;
-    let out = tokio::process::Command::new(prog)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to spawn {prog}"))?;
+    let prog = prog.to_string();
+    let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let display = format!("{prog} {argv:?}");
+
+    // Run the helper's only subprocess (`ifconfig` / `netsh`) via **std**, on a
+    // blocking thread — NOT `tokio::process`. tokio reaps spawned children
+    // through a SIGCHLD-driven reaper; when the helper is launched **elevated**
+    // (osascript "with administrator privileges" / pkexec / UAC) the signal mask
+    // it inherits can leave SIGCHLD blocked, so that reaper never fires and
+    // `.output().await` hangs forever on a child that has already exited — the
+    // macOS "`add_loopback` never returns, helper goes unresponsive" wedge.
+    // `std::process::Command::output()` `waitpid()`s the specific child directly
+    // and does not depend on signal delivery, sidestepping the whole problem.
+    // (On Linux this path is never reached — loopback aliasing is a no-op there.)
+    let out =
+        tokio::task::spawn_blocking(move || std::process::Command::new(&prog).args(&argv).output())
+            .await
+            .context("subprocess join failed")?
+            .with_context(|| format!("failed to spawn {display}"))?;
+
     if !out.status.success() {
         anyhow::bail!(
-            "{prog} {args:?} failed: {}",
+            "{display} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }

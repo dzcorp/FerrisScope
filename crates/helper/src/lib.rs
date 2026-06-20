@@ -35,6 +35,11 @@ struct Args {
     token: String,
     hosts_path: PathBuf,
     hosts_backup: PathBuf,
+    /// Optional file the helper appends its tracing to. The helper runs elevated
+    /// (osascript/pkexec/UAC), which swallows its stderr — so without this we are
+    /// blind to why it wedges or dies. The app passes a path it owns so it can
+    /// read the log back.
+    log_file: Option<PathBuf>,
 }
 
 impl Args {
@@ -43,6 +48,7 @@ impl Args {
         let mut token = None;
         let mut hosts_path = None;
         let mut hosts_backup = None;
+        let mut log_file = None;
         let mut it = args.into_iter();
         while let Some(key) = it.next() {
             let mut val = || it.next().ok_or_else(|| anyhow!("missing value for {key}"));
@@ -54,6 +60,7 @@ impl Args {
                 "--token-file" => token = Some(read_token_file(&PathBuf::from(val()?))?),
                 "--hosts-path" => hosts_path = Some(PathBuf::from(val()?)),
                 "--hosts-backup" => hosts_backup = Some(PathBuf::from(val()?)),
+                "--log-file" => log_file = Some(PathBuf::from(val()?)),
                 other => return Err(anyhow!("unknown argument: {other}")),
             }
         }
@@ -62,6 +69,7 @@ impl Args {
             token: token.ok_or_else(|| anyhow!("--token or --token-file is required"))?,
             hosts_path: hosts_path.unwrap_or_else(default_hosts_path),
             hosts_backup: hosts_backup.ok_or_else(|| anyhow!("--hosts-backup is required"))?,
+            log_file,
         })
     }
 }
@@ -80,15 +88,49 @@ fn default_hosts_path() -> PathBuf {
     path
 }
 
-fn init_tracing() {
+fn init_tracing(log_file: Option<&Path>) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
     // `try_init` (not `init`): in embedded mode another subscriber might exist;
     // a failure here is harmless — we just won't emit helper logs.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+    match log_file {
+        // Append to the app-provided file. The helper is spawned elevated, so its
+        // stderr goes nowhere visible — the file is our only window into it. Open
+        // per-line (the helper logs at human pace, so the cost is irrelevant) and
+        // degrade to a sink if the open fails, so logging never aborts the helper.
+        Some(path) => {
+            let path = path.to_path_buf();
+            // Bound growth: the file is append-only across every helper spawn, so
+            // without this it would creep up forever. Once past the cap, truncate
+            // and start fresh at the next spawn. The cap is generous (the helper
+            // emits only a handful of lines per session) so it rarely triggers and
+            // recent history survives across spawns until it does.
+            const MAX_LOG_BYTES: u64 = 1024 * 1024; // 1 MiB
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
+                let _ = std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&path);
+            }
+            let _ = builder
+                .with_ansi(false)
+                .with_writer(move || -> Box<dyn std::io::Write> {
+                    match std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                    {
+                        Ok(f) => Box::new(f),
+                        Err(_) => Box::new(std::io::sink()),
+                    }
+                })
+                .try_init();
+        }
+        None => {
+            let _ = builder.with_writer(std::io::stderr).try_init();
+        }
+    }
 }
 
 /// Read the one-time auth token from the file the app wrote (0600, in its
@@ -111,8 +153,12 @@ fn read_token_file(path: &Path) -> Result<String> {
 /// stripped argv[0] and any subcommand marker). Builds a runtime and blocks
 /// until the helper exits (Shutdown request or parent death).
 pub fn run<I: IntoIterator<Item = String>>(args: I) -> Result<()> {
-    init_tracing();
+    // Parse before init_tracing so logs land in the app-provided `--log-file`
+    // (the elevated helper's stderr is invisible). A parse failure here is rare
+    // (our own argv) and surfaces as a non-zero exit the app detects.
     let parsed = Args::parse_from(args)?;
+    init_tracing(parsed.log_file.as_deref());
+    info!(endpoint = %parsed.endpoint, "helper starting");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
