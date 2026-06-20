@@ -14,7 +14,7 @@ use ferrisscope_core::{
     cluster::Cluster, fleet::ClusterProbe, health::ClusterHealth, kubeconfig, logs::LogStream,
     metrics::MetricsService, search::SearchIndex, sources::SourcesFile, watcher::KubeconfigWatcher,
 };
-use ferrisscope_kube_ext::{ForwardHandle, ForwardStatus, ResourceWatcher};
+use ferrisscope_kube_ext::{ForwardHandle, ForwardStatus, LogPodWatch, ResourceWatcher};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use crate::terminal::TerminalRegistry;
@@ -31,6 +31,17 @@ pub(crate) type KindId = String;
 /// Pods) each get their own slot, watcher, and forwarder.
 pub(crate) type SlotKey = (KindId, ferrisscope_kube_ext::NsScope);
 pub(crate) type StreamId = String;
+
+/// Drop every entry of a `StreamId -> (ClusterId, handle)` map whose owning
+/// cluster is `cluster_id`, returning the count removed. Dropping the handle's
+/// `Arc` aborts its task. Pulled out as a free generic so it can be unit-tested
+/// without constructing a real `LogStream` / `LogPodWatch` (both need a live
+/// kube `Client`). Used by `AppState::drop_cluster_logs`.
+fn retain_other_cluster<V>(map: &mut HashMap<StreamId, (ClusterId, V)>, cluster_id: &str) -> usize {
+    let before = map.len();
+    map.retain(|_, (cid, _)| cid != cluster_id);
+    before - map.len()
+}
 
 pub(crate) struct ClusterEntry {
     pub(crate) cluster: Arc<Cluster>,
@@ -177,8 +188,16 @@ impl KindSlot {
 #[derive(Default)]
 pub(crate) struct AppState {
     inner: Mutex<HashMap<ClusterId, Arc<ClusterEntry>>>,
-    /// Active log streams keyed by app-assigned id. Dropping the Arc aborts the reader.
-    logs: Mutex<HashMap<StreamId, Arc<LogStream>>>,
+    /// Active log streams keyed by app-assigned id. Dropping the Arc aborts the
+    /// reader. The `ClusterId` is carried so a cluster disconnect / reconnect
+    /// can abort the streams it owns (`drop_cluster_logs`) — otherwise the
+    /// reader task keeps retrying against a dead cluster until the panel closes.
+    logs: Mutex<HashMap<StreamId, (ClusterId, Arc<LogStream>)>>,
+    /// Active log-pod-set watches keyed by app-assigned id. Dropping the Arc
+    /// aborts the watch task (see `ferrisscope_kube_ext::LogPodWatch`). Tagged
+    /// with the owning `ClusterId` for the same disconnect-cleanup reason as
+    /// `logs`.
+    log_pod_watches: Mutex<HashMap<StreamId, (ClusterId, Arc<LogPodWatch>)>>,
     /// Per-context fleet probes (cached on disk; loaded lazily).
     pub(crate) fleet: Arc<Mutex<FleetCache>>,
     /// User-managed kubeconfig sources + last-picked dir + default-disabled flag.
@@ -339,12 +358,44 @@ impl AppState {
         entry
     }
 
-    pub(crate) async fn insert_log_stream(&self, id: StreamId, stream: Arc<LogStream>) {
-        self.logs.lock().await.insert(id, stream);
+    pub(crate) async fn insert_log_stream(
+        &self,
+        id: StreamId,
+        cluster_id: ClusterId,
+        stream: Arc<LogStream>,
+    ) {
+        self.logs.lock().await.insert(id, (cluster_id, stream));
     }
 
     pub(crate) async fn remove_log_stream(&self, id: &str) -> Option<Arc<LogStream>> {
-        self.logs.lock().await.remove(id)
+        self.logs.lock().await.remove(id).map(|(_, s)| s)
+    }
+
+    pub(crate) async fn insert_log_pod_watch(
+        &self,
+        id: StreamId,
+        cluster_id: ClusterId,
+        watch: Arc<LogPodWatch>,
+    ) {
+        self.log_pod_watches
+            .lock()
+            .await
+            .insert(id, (cluster_id, watch));
+    }
+
+    pub(crate) async fn remove_log_pod_watch(&self, id: &str) -> Option<Arc<LogPodWatch>> {
+        self.log_pod_watches.lock().await.remove(id).map(|(_, w)| w)
+    }
+
+    /// Abort and drop every log stream and log-pod-set watch owned by
+    /// `cluster_id`. Called on disconnect / reconnect so their tasks stop
+    /// retrying against a torn-down cluster (the keepalive fix makes those
+    /// reconnect attempts more eager, so leaving them running is wasteful).
+    /// Returns the count dropped. The frontend's own `unwatch`/`stop` on panel
+    /// close is the normal path; this is the backend-initiated backstop.
+    pub(crate) async fn drop_cluster_logs(&self, cluster_id: &str) -> usize {
+        retain_other_cluster(&mut *self.logs.lock().await, cluster_id)
+            + retain_other_cluster(&mut *self.log_pod_watches.lock().await, cluster_id)
     }
 
     /// Drop the cached `ClusterEntry` for `id` if any. Called by
@@ -444,5 +495,25 @@ mod tests {
             r1 ^ r2,
             "exactly one caller must win (xor): r1={r1} r2={r2}"
         );
+    }
+
+    #[test]
+    fn retain_other_cluster_drops_only_the_named_cluster() {
+        use super::retain_other_cluster;
+        use std::collections::HashMap;
+
+        let mut map: HashMap<String, (String, ())> = HashMap::new();
+        map.insert("s1".into(), ("c1".into(), ()));
+        map.insert("s2".into(), ("c1".into(), ()));
+        map.insert("s3".into(), ("c2".into(), ()));
+
+        // Disconnecting c1 drops its two streams, leaves c2's alone.
+        assert_eq!(retain_other_cluster(&mut map, "c1"), 2);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("s3"));
+
+        // A cluster with nothing registered drops nothing.
+        assert_eq!(retain_other_cluster(&mut map, "c-absent"), 0);
+        assert_eq!(map.len(), 1);
     }
 }

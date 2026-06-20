@@ -175,6 +175,8 @@ describe("MetricsTab workload fallback (no Prometheus)", () => {
       // No cached Prometheus entry and no detection — reject so the hook
       // commits `null` (the "missing" state) without the watchdog wait.
       if (cmd === "get_prometheus_target") throw new Error("no prom");
+      if (cmd === "watch_log_pods") return "lpw1";
+      if (cmd === "unwatch_log_pods") return undefined;
       if (cmd === "resolve_log_pods_cmd") {
         return {
           pods: [
@@ -224,6 +226,8 @@ describe("MetricsTab workload fallback (no Prometheus)", () => {
   it("explains an empty selector match instead of a blank pane", async () => {
     setMockInvoke((cmd) => {
       if (cmd === "get_prometheus_target") throw new Error("no prom");
+      if (cmd === "watch_log_pods") return "lpw1";
+      if (cmd === "unwatch_log_pods") return undefined;
       if (cmd === "resolve_log_pods_cmd") {
         return {
           pods: [],

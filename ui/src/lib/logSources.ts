@@ -119,6 +119,37 @@ export function buildLogSources(
   return { sources, dropped };
 }
 
+/// Diff the currently-running stream keys against the desired set, so a log
+/// view can start/stop only the streams that changed instead of tearing every
+/// stream down (which would wipe the scrollback). Pure for testing.
+export function reconcileStreams(
+  running: Iterable<string>,
+  desired: Iterable<string>,
+): { toStart: string[]; toStop: string[] } {
+  const runningSet = new Set(running);
+  const desiredSet = new Set(desired);
+  const toStart = [...desiredSet].filter((k) => !runningSet.has(k));
+  const toStop = [...runningSet].filter((k) => !desiredSet.has(k));
+  return { toStart, toStop };
+}
+
+/// True when `desired` shares NO key with `running` and both are non-empty — a
+/// wholesale source swap (the panel switched to a different workload / pod)
+/// rather than an incremental pod add/remove within the same set. The log view
+/// keeps its ring across incremental reconciles to preserve scrollback, but on
+/// a full swap it must clear the ring so the previous target's lines don't
+/// linger unattributed. Pure for testing.
+export function isFullSourceSwap(
+  running: Iterable<string>,
+  desired: Iterable<string>,
+): boolean {
+  const runningSet = new Set(running);
+  const desiredSet = new Set(desired);
+  if (runningSet.size === 0 || desiredSet.size === 0) return false;
+  for (const k of desiredSet) if (runningSet.has(k)) return false;
+  return true;
+}
+
 /// Merge per-stream statuses into the single status the chrome shows.
 /// Liveness wins: as long as anything streams (or might), the view is live;
 /// failures only take over once nothing is producing.
@@ -156,9 +187,9 @@ export type ExportableLine = {
   text: string;
   ts: string | null;
   system: boolean;
-  /// Index into the sources array; -1 for lines that predate a source
-  /// (defensive — shouldn't happen).
-  src: number;
+  /// Stable source key (`LogViewSource.key`) the line came from. Keyed (not a
+  /// positional index) so a removed pod doesn't re-attribute buffered lines.
+  src: string;
 };
 
 /// Serialize the visible buffer to one plain-text document. ANSI escapes are
@@ -169,12 +200,13 @@ export function formatLogExport(
   sources: LogViewSource[],
 ): string {
   const multi = sources.length > 1;
+  const byKey = new Map(sources.map((s) => [s.key, s]));
   const out: string[] = [];
   for (const l of lines) {
     const parts: string[] = [];
     if (l.ts) parts.push(l.ts);
     if (multi && !l.system) {
-      const label = sources[l.src]?.label;
+      const label = byKey.get(l.src)?.label;
       if (label) parts.push(`[${label}]`);
     }
     parts.push(l.system ? l.text : stripAnsi(l.text));

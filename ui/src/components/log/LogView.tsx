@@ -28,6 +28,8 @@ import { toast } from "../../lib/dialog";
 import {
   aggregateLogStatus,
   formatLogExport,
+  isFullSourceSwap,
+  reconcileStreams,
   suggestedLogFileName,
   type LogStatus,
   type LogViewSource,
@@ -71,9 +73,11 @@ type LineEntry = {
   text: string;
   ts: string | null;
   system: boolean;
-  // Index into the active sources array — drives the per-line label/color
-  // when more than one source streams into the view.
-  src: number;
+  // Stable source *key* (`LogViewSource.key`) this line came from — drives the
+  // per-line label/color when more than one source streams. Keyed (not a
+  // positional index) so a pod removed from the middle of a live set doesn't
+  // re-attribute every buffered line.
+  src: string;
 };
 
 // Ring buffer over a fixed-capacity array. Append is O(1) (overwrites the
@@ -149,6 +153,19 @@ export function LogView({ t, sources, onStateChange }: Props) {
   useLayoutEffect(() => {
     sourcesRef.current = sources;
   });
+  // Live streams, keyed by source key. Persists across reconciles so a single
+  // pod add/remove starts/stops only the affected stream — the ring (and all
+  // scrollback) survives. `startingRef` guards against a reconcile firing again
+  // while a start is still in flight; `wantedRef` is the desired key set, read
+  // after the async `startLogStream` resolves to drop a stream that was
+  // reconciled away mid-start.
+  const runningRef = useRef<Map<string, { streamId: string; close: () => void }>>(
+    new Map(),
+  );
+  const startingRef = useRef<Set<string>>(new Set());
+  const wantedRef = useRef<Set<string>>(new Set());
+  const rafRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
   // Set whenever we issue a programmatic scroll (tail-follow). The
   // resulting `scroll` event would otherwise be observed by
   // `handleScroll` mid-measurement and could flip `autoScroll` off if
@@ -239,59 +256,48 @@ export function LogView({ t, sources, onStateChange }: Props) {
     });
   }, [status, paused, bufferedCount, lines.length, onStateChange]);
 
-  // One backend stream per source. Restarts only when the *key set*
-  // changes — the NUL join is the same effect-key pattern the multi-cluster
-  // table subscriptions use.
+  // Stable signature of the desired source set; the reconcile effect below
+  // diffs it against the running streams to start/stop only what changed. NUL
+  // join matches the multi-cluster table's effect-key pattern.
   const sourcesEffectKey = sources.map((s) => s.key).join("\u0000");
-  useEffect(() => {
-    const active = sourcesRef.current;
-    if (active.length === 0) return;
-    let cancelled = false;
-    const handles: { streamId: string; close: () => void }[] = [];
-    let rafHandle: number | null = null;
-    ringRef.current.clear();
-    setLines([]);
-    statusesRef.current = new Map(
-      active.map((s) => [s.key, { kind: "starting" } as LogStatus]),
-    );
-    setStatus({ kind: "starting" });
-    setBufferedCount(0);
-    setPaused(false);
-    pausedRef.current = false;
-    const multi = active.length > 1;
-    const updateStatus = (key: string, st: LogStatus) => {
-      statusesRef.current.set(key, st);
-      setStatus(aggregateLogStatus([...statusesRef.current.values()]));
-    };
-    // Coalesce per-line state writes into one render per animation
-    // frame. High-volume log streams used to trigger N React renders +
-    // N array allocations per second; with the ring buffer + rAF gate
-    // it's one fresh array per paint. While paused the rAF still fires
-    // but skips `setLines` — the ring keeps filling so resume shows
-    // everything in one go.
-    const scheduleFlush = () => {
-      if (rafHandle != null) return;
-      rafHandle = requestAnimationFrame(() => {
-        rafHandle = null;
-        if (cancelled) return;
-        if (pausedRef.current) return;
-        setLines(ringRef.current.toArray());
-      });
-    };
-    const pushSystem = (srcIdx: number, text: string) => {
-      ringRef.current.push({
-        id: ++lineSeq.current,
-        text,
-        ts: null,
-        system: true,
-        src: srcIdx,
-      });
-    };
-    active.forEach((src, srcIdx) => {
-      // System-line prefix so per-source lifecycle markers stay
-      // attributable in an aggregated view; redundant for a lone source.
+  // Coalesce per-line state writes into one render per animation frame. While
+  // paused the rAF still fires but skips `setLines` — the ring keeps filling so
+  // resume shows everything in one go.
+  const scheduleFlush = useCallback(() => {
+    if (rafRef.current != null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      if (!mountedRef.current || pausedRef.current) return;
+      setLines(ringRef.current.toArray());
+    });
+  }, []);
+
+  const updateStatus = useCallback((key: string, st: LogStatus) => {
+    statusesRef.current.set(key, st);
+    setStatus(aggregateLogStatus([...statusesRef.current.values()]));
+  }, []);
+
+  const pushSystem = useCallback((srcKey: string, text: string) => {
+    ringRef.current.push({
+      id: ++lineSeq.current,
+      text,
+      ts: null,
+      system: true,
+      src: srcKey,
+    });
+  }, []);
+
+  // Start one stream and register it in `runningRef` once live. Cancellation is
+  // per-stream: `wantedRef` (the desired key set) is re-checked after the async
+  // open so a source reconciled away mid-start is torn down immediately, and a
+  // running stream's handler bails the moment its key leaves `wantedRef`.
+  const startOneStream = useCallback(
+    (src: LogViewSource, multi: boolean) => {
+      // System-line prefix so per-source lifecycle markers stay attributable in
+      // an aggregated view; redundant for a lone source.
       const sysLabel = multi && src.label ? `[${src.label}] ` : "";
-      (async () => {
+      startingRef.current.add(src.key);
+      void (async () => {
         try {
           const handle = await api.startLogStream(
             src.clusterId,
@@ -299,16 +305,12 @@ export function LogView({ t, sources, onStateChange }: Props) {
             src.pod,
             src.container,
             (evt) => {
-              if (cancelled) return;
-              // `waiting` carries no line — the container just isn't up
-              // yet. Reflect it in the status only; the backend keeps the
-              // stream live and switches to `line`/`batch` once it starts.
+              if (!mountedRef.current || !wantedRef.current.has(src.key)) return;
+              // `waiting` carries no line — the container just isn't up yet.
               if (evt.kind === "waiting") {
                 updateStatus(src.key, { kind: "waiting", reason: evt.reason });
                 return;
               }
-              // First real output after a `waiting` (or the initial
-              // optimistic `streaming`): pin this source to streaming.
               const markStreaming = () => {
                 const cur = statusesRef.current.get(src.key);
                 if (!cur || cur.kind === "waiting" || cur.kind === "starting") {
@@ -323,7 +325,7 @@ export function LogView({ t, sources, onStateChange }: Props) {
                     text,
                     ts,
                     system: false,
-                    src: srcIdx,
+                    src: src.key,
                   });
                 }
                 if (pausedRef.current) {
@@ -342,7 +344,7 @@ export function LogView({ t, sources, onStateChange }: Props) {
                   text,
                   ts,
                   system: false,
-                  src: srcIdx,
+                  src: src.key,
                 });
                 markStreaming();
                 if (pausedRef.current) {
@@ -350,11 +352,11 @@ export function LogView({ t, sources, onStateChange }: Props) {
                 }
               } else if (evt.kind === "lagged") {
                 pushSystem(
-                  srcIdx,
+                  src.key,
                   `… ${sysLabel}${evt.dropped} lines dropped (frontend lagged)`,
                 );
               } else {
-                pushSystem(srcIdx, `— ${sysLabel}stream ended: ${evt.reason}`);
+                pushSystem(src.key, `— ${sysLabel}stream ended: ${evt.reason}`);
               }
               scheduleFlush();
               if (evt.kind === "ended") {
@@ -362,37 +364,94 @@ export function LogView({ t, sources, onStateChange }: Props) {
               }
             },
           );
-          if (cancelled) {
+          startingRef.current.delete(src.key);
+          // Reconciled away (or unmounted) while the open was in flight.
+          if (!mountedRef.current || !wantedRef.current.has(src.key)) {
             handle.close();
             api.stopLogStream(handle.streamId).catch(logErr("logs"));
             return;
           }
-          handles.push(handle);
+          runningRef.current.set(src.key, {
+            streamId: handle.streamId,
+            close: handle.close,
+          });
           const cur = statusesRef.current.get(src.key);
           if (cur && cur.kind === "starting") {
             updateStatus(src.key, { kind: "streaming" });
           }
         } catch (e) {
-          if (cancelled) return;
+          startingRef.current.delete(src.key);
+          if (!mountedRef.current || !wantedRef.current.has(src.key)) return;
           updateStatus(src.key, { kind: "error", message: String(e) });
-          // In an aggregated view a single failed stream must be visible in
-          // the body, not just averaged into the status pill.
+          // In an aggregated view a single failed stream must be visible in the
+          // body, not just averaged into the status pill.
           if (multi) {
-            pushSystem(srcIdx, `— ${sysLabel}stream failed: ${String(e)}`);
+            pushSystem(src.key, `— ${sysLabel}stream failed: ${String(e)}`);
             scheduleFlush();
           }
         }
       })();
-    });
+    },
+    [scheduleFlush, updateStatus, pushSystem],
+  );
+
+  useEffect(() => {
+    const desired = new Map(sourcesRef.current.map((s) => [s.key, s]));
+    wantedRef.current = new Set(desired.keys());
+    const multi = desired.size > 1;
+    const running = runningRef.current;
+    const { toStart, toStop } = reconcileStreams(running.keys(), desired.keys());
+    // Wholesale swap to a different target (no key carried over): clear the ring
+    // so the previous workload's lines don't linger in scrollback. Incremental
+    // pod add/remove (some overlap) keeps the ring — that's the whole point.
+    if (isFullSourceSwap(running.keys(), desired.keys())) {
+      ringRef.current.clear();
+      setLines([]);
+      setBufferedCount(0);
+      setPaused(false);
+      pausedRef.current = false;
+    }
+    for (const key of toStop) {
+      const h = running.get(key);
+      if (h) {
+        h.close();
+        api.stopLogStream(h.streamId).catch(logErr("logs"));
+        running.delete(key);
+      }
+    }
+    for (const key of toStart) {
+      // Skip a key whose open is still in flight from a prior reconcile.
+      if (startingRef.current.has(key)) continue;
+      const src = desired.get(key);
+      if (!src) continue;
+      statusesRef.current.set(key, { kind: "starting" });
+      startOneStream(src, multi);
+    }
+    // Drop statuses for sources that are gone (incl. ones removed mid-start).
+    for (const key of [...statusesRef.current.keys()]) {
+      if (!wantedRef.current.has(key)) statusesRef.current.delete(key);
+    }
+    setStatus(
+      statusesRef.current.size > 0
+        ? aggregateLogStatus([...statusesRef.current.values()])
+        : { kind: "starting" },
+    );
+  }, [sourcesEffectKey, startOneStream]);
+
+  // Stop every stream on unmount (panel close / tab switch).
+  useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      cancelled = true;
-      if (rafHandle != null) cancelAnimationFrame(rafHandle);
-      for (const h of handles) {
+      mountedRef.current = false;
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      for (const h of runningRef.current.values()) {
         h.close();
         api.stopLogStream(h.streamId).catch(logErr("logs"));
       }
+      runningRef.current.clear();
+      startingRef.current.clear();
     };
-  }, [sourcesEffectKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   useLayoutEffect(() => {
     if (!autoScroll) return;
@@ -559,6 +618,12 @@ export function LogView({ t, sources, onStateChange }: Props) {
   const activeMatchBg = hexWithAlpha(t.accent, 0.55);
   const activeRowBg = hexWithAlpha(t.accent, 0.12);
   const multiSource = sources.length > 1;
+  // Resolve a line's source by its stable key (lines carry `src: key`, not a
+  // positional index, so a removed pod can't re-attribute buffered lines).
+  const sourceByKey = useMemo(
+    () => new Map(sources.map((s) => [s.key, s])),
+    [sources],
+  );
 
   return (
     <div
@@ -643,7 +708,7 @@ export function LogView({ t, sources, onStateChange }: Props) {
             {virtualItems.map((vi) => {
               const l = lines[vi.index];
               if (!l) return null;
-              const src = multiSource ? sources[l.src] : undefined;
+              const src = multiSource ? sourceByKey.get(l.src) : undefined;
               return (
                 <div
                   key={l.id}

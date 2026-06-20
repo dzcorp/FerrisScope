@@ -9,42 +9,191 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use std::time::Duration;
+
 use http::{header::ACCEPT_ENCODING, HeaderValue};
+use hyper::rt::{Read, Write};
+use hyper_timeout::TimeoutConnector;
+use hyper_util::client::legacy::{
+    connect::{Connection, HttpConnector},
+    Builder as LegacyBuilder,
+};
+use hyper_util::rt::TokioExecutor;
 use k8s_openapi::api::core::v1::Node;
 use kube::{
     api::{Api, ListParams},
-    client::{AuthError, ClientBuilder},
+    client::{AuthError, Body, ClientBuilder, ConfigExt, DynBody},
     config::{KubeConfigOptions, Kubeconfig},
     Client, Config,
 };
 use serde::Serialize;
-use tower_http::{decompression::DecompressionLayer, set_header::SetRequestHeaderLayer};
+use tower::{BoxError, Service, ServiceBuilder, ServiceExt as _};
+use tower_http::{
+    decompression::DecompressionLayer, set_header::SetRequestHeaderLayer, ServiceExt as _,
+};
 
 use crate::sources::SshSourceConfig;
 use crate::ssh::{SshSession, TunnelHandle};
 use crate::{Error, Result};
 
-/// Wrap the default kube `ClientBuilder` with two layers:
+// --- Watch-connection liveness -------------------------------------------
+//
+// Root cause of "a Deployment deleted+recreated by external CI/CD never shows
+// up, but its Pod does": kube-rs negotiates **HTTP/1.1** to the apiserver
+// (kube-client's rustls connector enables ALPN `http/1.1` only — see
+// `ConfigExt::rustls_https_connector_with_connector`, config_ext.rs:248), so
+// every watch rides its **own** TCP connection with no multiplexing. A busy
+// Pods watch keeps its socket full of traffic; an idle Deployments watch sits
+// silent, and a NAT box / cloud L4 LB / conntrack table (AWS NLB ~350 s, GCP
+// ~600 s, conntrack ~5 min) silently evicts the idle flow half-open. The
+// default `HttpConnector` sets **no** SO_KEEPALIVE, so the kernel never probes;
+// kube's only backstop was the coarse 295 s `TimeoutConnector` read-timeout,
+// and the recreate is missed until then (if it fires at all).
+//
+// TCP keepalive fixes both halves: probing every [`TCP_KEEPALIVE_INTERVAL`]
+// keeps the NAT mapping warm (so the flow is never evicted), and on a path that
+// has actually died the probes go unanswered and error the socket within
+// ~[`TCP_KEEPALIVE_IDLE`] + retries — kube-rs's `default_backoff()` then
+// reconnects and re-LISTs, surfacing the recreate.
+
+/// Idle time before the kernel sends the first TCP keepalive probe.
+const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+
+/// Gap between TCP keepalive probes once they start. Also the cadence at which
+/// an *idle-but-healthy* connection is kept warm through NAT.
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Unacked probes before the socket is declared dead. With idle 30 s + 10 s ×
+/// 3, a severed idle watch surfaces an error in ~60 s instead of ~11 min (the
+/// OS default) or 295 s (kube's read-timeout).
+const TCP_KEEPALIVE_RETRIES: u32 = 3;
+
+/// HTTP/2 keepalive-while-idle. **Inert today** — kube 3.1 negotiates HTTP/1.1
+/// to the apiserver (above), so no H2 connection exists to ping. Kept as
+/// zero-cost future-proofing: if a future kube/feature enables H2 ALPN, these
+/// PINGs become the h2-equivalent of the TCP keepalive above. Interval must be
+/// `>` [`H2_KEEPALIVE_TIMEOUT`] so a missed ACK is acted on before the next.
+const H2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// PING-ACK deadline for [`H2_KEEPALIVE_INTERVAL`] (inert under HTTP/1.1).
+const H2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Build a `kube::Client` equivalent to `ClientBuilder::try_from(config)`'s
+/// default stack, **plus** TCP keepalive on the socket (the watch-liveness fix —
+/// see the const docs above) and inert-today H2 keepalive, **plus** the two
+/// compression layers below.
 ///
-/// * [`SetRequestHeaderLayer`] adds `Accept-Encoding: gzip` to every
-///   request so the apiserver can compress the body. Measured ratio on
-///   real Pod LIST responses is ~7×; the typed reflector's "kubectl is
-///   way faster" gap is almost entirely this header.
-/// * [`DecompressionLayer`] transparently inflates `Content-Encoding:
-///   gzip` responses so kube-rs's deserialiser sees plain JSON. Without
-///   this layer, asking for gzip would just give us garbage bytes.
+/// * [`SetRequestHeaderLayer`] adds `Accept-Encoding: gzip` to every request so
+///   the apiserver can compress the body. Measured ratio on real Pod LIST
+///   responses is ~7×; the typed reflector's "kubectl is way faster" gap is
+///   almost entirely this header. `if_not_present` lets a caller disable
+///   compression per-call (e.g. the bench's identity variants) by setting its
+///   own header.
+/// * [`DecompressionLayer`] transparently inflates `Content-Encoding: gzip`
+///   responses so kube-rs's deserialiser sees plain JSON.
 ///
-/// `if_not_present` on the request layer means a caller that wants to
-/// disable compression for a specific call (e.g. the bench's identity
-/// variants) can still set its own `Accept-Encoding` header.
+/// kube 3.1 exposes no keepalive knob (the hyper client is built privately
+/// inside `make_generic_builder`), so we re-assemble the generic stack through
+/// the public [`ConfigExt`] extension API. This mirrors kube-client's
+/// `make_generic_builder` (builder.rs) — base-uri + auth (exec/oidc/oauth) +
+/// extra-headers layers over a rustls + timeout connector — with keepalive
+/// injected and our compression layers as the outermost wrappers.
+///
+/// One intentional behavioural delta vs. `try_from`: `Config::exec_identity_pem`
+/// is `pub(crate)`, so we cannot set `ClientBuilder::with_valid_until` for
+/// exec-credential expiry. That clock is redundant here — every reconnect
+/// rebuilds `Config` (so auth is re-resolved) and reflectors re-LIST on 401.
 fn build_compressed_client(config: Config) -> Result<Client> {
-    let builder = ClientBuilder::try_from(config)?
-        .with_layer(&DecompressionLayer::new())
-        .with_layer(&SetRequestHeaderLayer::if_not_present(
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+    // TCP keepalive — the operative liveness fix (see the const docs above).
+    http.set_keepalive(Some(TCP_KEEPALIVE_IDLE));
+    http.set_keepalive_interval(Some(TCP_KEEPALIVE_INTERVAL));
+    http.set_keepalive_retries(Some(TCP_KEEPALIVE_RETRIES));
+
+    // Mirror kube's `ClientBuilder::try_from` proxy dispatch, restricted to the
+    // features this workspace enables: `http-proxy` only (no `socks5`). Each arm
+    // hands a concrete connector to the generic `finish_kube_client`.
+    match config.proxy_url.clone() {
+        Some(proxy_url) if proxy_url.scheme_str() == Some("http") => {
+            let mut connector =
+                hyper_util::client::legacy::connect::proxy::Tunnel::new(proxy_url.clone(), http);
+            if let Some(authority) = proxy_url.authority() {
+                if let Some((userinfo, _)) = authority.as_str().split_once('@') {
+                    use base64::Engine as _;
+                    let value = format!(
+                        "Basic {}",
+                        base64::engine::general_purpose::STANDARD.encode(userinfo)
+                    );
+                    if let Ok(header) = HeaderValue::from_str(&value) {
+                        connector = connector.with_auth(header);
+                    }
+                }
+            }
+            finish_kube_client(connector, config)
+        }
+        Some(proxy_url) => Err(Error::Invalid(format!(
+            "unsupported proxy scheme in {proxy_url} (only http proxies are supported)"
+        ))),
+        None => finish_kube_client(http, config),
+    }
+}
+
+/// Assemble the kube tower stack over `connector` (which already carries TCP
+/// keepalive), adding the inert-today H2 keepalive and the gzip compression
+/// layers. Generic over the connector so the proxy and no-proxy paths share one
+/// body (the connector types differ — `Tunnel<HttpConnector>` vs
+/// `HttpConnector`). Bounds mirror kube-client's `make_generic_builder<H>`.
+fn finish_kube_client<H>(connector: H, config: Config) -> Result<Client>
+where
+    H: 'static + Clone + Send + Sync + Service<http::Uri>,
+    H::Response: 'static + Connection + Read + Write + Send + Unpin,
+    H::Future: 'static + Send,
+    H::Error: 'static + Send + Sync + std::error::Error,
+{
+    let default_ns = config.default_namespace.clone();
+    let auth_layer = config.auth_layer()?;
+
+    // TLS via the public ConfigExt, then kube's connect/read/write timeouts.
+    let https = config.rustls_https_connector_with_connector(connector)?;
+    let mut timeout = TimeoutConnector::new(https);
+    timeout.set_connect_timeout(config.connect_timeout);
+    timeout.set_read_timeout(config.read_timeout);
+    timeout.set_write_timeout(config.write_timeout);
+
+    // H2 keepalive-while-idle. Inert under kube's HTTP/1.1 ALPN; the live
+    // liveness fix is the TCP keepalive on the connector. See const docs.
+    let mut hyper_builder = LegacyBuilder::new(TokioExecutor::new());
+    hyper_builder
+        .http2_keep_alive_interval(H2_KEEPALIVE_INTERVAL)
+        .http2_keep_alive_timeout(H2_KEEPALIVE_TIMEOUT)
+        .http2_keep_alive_while_idle(true);
+    let hyper_client: hyper_util::client::legacy::Client<_, Body> = hyper_builder.build(timeout);
+
+    // Tower stack. Our two compression layers go OUTERMOST (first in the
+    // builder) so they wrap kube's base-uri/auth/extra-headers exactly as the
+    // previous `try_from(..).with_layer(..).with_layer(..)` did. kube's own
+    // `gzip` feature is off in this workspace, so this is the sole
+    // decompression layer — no double-inflate.
+    let service = ServiceBuilder::new()
+        .layer(SetRequestHeaderLayer::if_not_present(
             ACCEPT_ENCODING,
             HeaderValue::from_static("gzip"),
-        ));
-    Ok(builder.build())
+        ))
+        .layer(DecompressionLayer::new())
+        .layer(config.base_uri_layer())
+        .option_layer(auth_layer)
+        .layer(config.extra_headers_layer()?)
+        .map_err(BoxError::from)
+        .service(hyper_client);
+
+    let service = service
+        .map_response_body(|body| {
+            Box::new(http_body_util::BodyExt::map_err(body, BoxError::from)) as Box<DynBody>
+        })
+        .boxed();
+
+    Ok(ClientBuilder::new(service, default_ns).build())
 }
 
 /// The exec-credential plugin command configured for `context_name`'s user, if
@@ -892,6 +1041,43 @@ mod tests {
         );
         assert!(parse_server_url("ftp://nope:21").is_err());
         assert!(parse_server_url("https://:6443").is_err());
+    }
+
+    #[test]
+    fn h2_keepalive_timeout_below_interval() {
+        // A missed PING ACK must be acted on before the next ping is queued.
+        assert!(H2_KEEPALIVE_TIMEOUT < H2_KEEPALIVE_INTERVAL);
+    }
+
+    // `ClientBuilder::build()` spawns a `tower::Buffer` worker, so these need a
+    // running reactor even though no network I/O happens.
+    #[tokio::test]
+    async fn build_compressed_client_assembles_plain_config() {
+        // Exercises the whole reassembled connector/TLS/timeout/tower stack with
+        // keepalive — the principal risk is whether this type stack assembles
+        // (and that the rustls connector builds without a process crypto
+        // provider, since our hand-rolled path skips kube's `try_from`).
+        let config = Config::new("https://127.0.0.1:6443".parse().unwrap());
+        assert!(build_compressed_client(config).is_ok());
+    }
+
+    #[tokio::test]
+    async fn build_compressed_client_assembles_http_proxy_config() {
+        let mut config = Config::new("https://127.0.0.1:6443".parse().unwrap());
+        config.proxy_url = Some("http://127.0.0.1:3128".parse().unwrap());
+        assert!(build_compressed_client(config).is_ok());
+    }
+
+    #[test]
+    fn build_compressed_client_rejects_unsupported_proxy() {
+        // socks5 is not enabled in this workspace; the dispatch must reject it
+        // rather than silently fall through to a direct connection.
+        let mut config = Config::new("https://127.0.0.1:6443".parse().unwrap());
+        config.proxy_url = Some("socks5://127.0.0.1:1080".parse().unwrap());
+        assert!(matches!(
+            build_compressed_client(config),
+            Err(Error::Invalid(_))
+        ));
     }
 
     /// A synthetic error that wraps an `io::Error` in its source chain, to
