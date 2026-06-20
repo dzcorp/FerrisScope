@@ -1,10 +1,11 @@
 //! Pass a listening socket between processes over a connected Unix
 //! `SOCK_STREAM` socket using `SCM_RIGHTS`.
 //!
-//! Used by global (DNS) port-forwarding on **Linux**: the elevated helper binds
-//! a privileged (<1024) loopback listener — which an unprivileged process can't
-//! — and hands the listening socket to the app. The privilege boundary stays at
-//! the helper: no `setcap`, no persistent capability, no binary edits.
+//! Used by global (DNS) port-forwarding on **unix** (Linux *and* macOS): both
+//! reserve ports <1024 for root, so the elevated helper binds a privileged
+//! loopback listener — which an unprivileged process can't — and hands the
+//! listening socket to the app. The privilege boundary stays at the helper: no
+//! `setcap`, no persistent capability, no binary edits.
 //!
 //! Wire shape for one exchange (after the app has sent a framed
 //! `Request::BindListener`): the helper replies with a single `sendmsg` carrying

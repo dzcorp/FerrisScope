@@ -68,6 +68,25 @@ pub enum Request {
     Shutdown,
 }
 
+impl Request {
+    /// Stable, log-safe label for this request's variant (the `op` tag). Used for
+    /// tracing and timeout messages — carries no payload, so it never leaks IPs
+    /// or hostnames into logs.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Request::Ping => "ping",
+            Request::AddLoopback { .. } => "add_loopback",
+            Request::DelLoopback { .. } => "del_loopback",
+            Request::BindListener { .. } => "bind_listener",
+            Request::HostsApply { .. } => "hosts_apply",
+            Request::HostsRemove => "hosts_remove",
+            Request::PurgeStale => "purge_stale",
+            Request::Shutdown => "shutdown",
+        }
+    }
+}
+
 /// Helper → client replies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -177,6 +196,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_kind_labels_every_variant() {
+        // Labels feed tracing + timeout messages and must match the `op` tag.
+        assert_eq!(Request::Ping.kind(), "ping");
+        assert_eq!(
+            Request::AddLoopback {
+                ip: Ipv4Addr::new(127, 1, 0, 1)
+            }
+            .kind(),
+            "add_loopback"
+        );
+        assert_eq!(
+            Request::DelLoopback {
+                ip: Ipv4Addr::new(127, 1, 0, 1)
+            }
+            .kind(),
+            "del_loopback"
+        );
+        assert_eq!(
+            Request::BindListener {
+                ip: Ipv4Addr::new(127, 1, 0, 1),
+                port: 80
+            }
+            .kind(),
+            "bind_listener"
+        );
+        assert_eq!(
+            Request::HostsApply { entries: vec![] }.kind(),
+            "hosts_apply"
+        );
+        assert_eq!(Request::HostsRemove.kind(), "hosts_remove");
+        assert_eq!(Request::PurgeStale.kind(), "purge_stale");
+        assert_eq!(Request::Shutdown.kind(), "shutdown");
+    }
 
     #[test]
     fn request_round_trips() {

@@ -152,6 +152,33 @@ fn host_entry(local_ip: Ipv4Addr, svc_name: &str, namespace: &str) -> HostEntry 
     }
 }
 
+/// Whether binding `port` requires the privileged helper (root binds it and
+/// passes the fd back) rather than an in-process bind.
+///
+/// On unix (Linux *and* macOS/BSD) ports `1..1024` are reserved for root, so a
+/// kubefwd-style forward that keeps a service's real port can't be bound by the
+/// unprivileged app and must go through the helper. Port `0` ("any") and high
+/// ports bind in-process. Windows imposes no low-port restriction (and has no
+/// fd passing), so nothing needs the helper there.
+#[must_use]
+fn needs_privileged_bind(port: u16) -> bool {
+    cfg!(unix) && (1..1024).contains(&port)
+}
+
+/// Whether two port lists describe the same set (order-independent). Used by the
+/// watch to decide if an already-forwarded service's ports drifted and the
+/// forward must be rebuilt.
+fn same_port_set(a: &[u16], b: &[u16]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut a = a.to_vec();
+    let mut b = b.to_vec();
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
+}
+
 /// Service ports worth forwarding, as `(u16)`. Skips ports that don't fit u16.
 fn service_ports(svc: &Service) -> Vec<u16> {
     svc.spec
@@ -285,13 +312,34 @@ impl GlobalForwardManager {
         }
     }
 
+    /// After a helper RPC, if the client poisoned itself (round-trip timeout or
+    /// dead/desynced transport), drop the helper and reset status so the *next*
+    /// forward action spawns a fresh one instead of reusing a wedged connection
+    /// that would hang or error forever. This is what makes a stop→start
+    /// re-toggle recover after the helper goes unresponsive rather than leaving
+    /// the button stuck. A benign `Response::Error` does not poison the client.
+    async fn drop_helper_if_broken(
+        &self,
+        guard: &mut tokio::sync::MutexGuard<'_, Option<SpawnedHelper>>,
+    ) {
+        if guard.as_ref().is_some_and(|s| s.client.is_broken()) {
+            warn!(
+                "helper connection unusable; dropping it so the next forward respawns the helper"
+            );
+            **guard = None;
+            *self.status.lock().await = HelperStatus::NotStarted;
+        }
+    }
+
     /// Borrow the live helper client. Errors if not spawned.
     async fn helper_add_loopback(&self, ip: Ipv4Addr) -> Result<()> {
         let mut guard = self.helper.lock().await;
         let spawned = guard
             .as_mut()
             .ok_or_else(|| anyhow!("helper not running"))?;
-        spawned.client.add_loopback(ip).await
+        let res = spawned.client.add_loopback(ip).await;
+        self.drop_helper_if_broken(&mut guard).await;
+        res
     }
 
     async fn helper_del_loopback(&self, ip: Ipv4Addr) -> Result<()> {
@@ -299,7 +347,9 @@ impl GlobalForwardManager {
         let spawned = guard
             .as_mut()
             .ok_or_else(|| anyhow!("helper not running"))?;
-        spawned.client.del_loopback(ip).await
+        let res = spawned.client.del_loopback(ip).await;
+        self.drop_helper_if_broken(&mut guard).await;
+        res
     }
 
     async fn helper_hosts_apply(&self, entries: Vec<HostEntry>) -> Result<()> {
@@ -307,7 +357,9 @@ impl GlobalForwardManager {
         let spawned = guard
             .as_mut()
             .ok_or_else(|| anyhow!("helper not running"))?;
-        spawned.client.hosts_apply(entries).await
+        let res = spawned.client.hosts_apply(entries).await;
+        self.drop_helper_if_broken(&mut guard).await;
+        res
     }
 
     /// Recompute the full hosts entry set across all sessions and apply it.
@@ -387,6 +439,7 @@ impl GlobalForwardManager {
             .await
             .map_err(|e| anyhow!("listing services: {e}"))?;
 
+        let matched = svcs.items.len();
         let mut services: Vec<ServiceForward> = Vec::new();
         for svc in svcs {
             let Some(name) = svc.metadata.name.clone() else {
@@ -411,10 +464,24 @@ impl GlobalForwardManager {
                 .start_service(client.clone(), registry, cluster_id, &ns, &name, &ports)
                 .await
             {
-                Ok(sf) => services.push(sf),
+                Ok(sf) => {
+                    info!(
+                        service = %name, namespace = %ns, ip = %sf.local_ip,
+                        listeners = sf.forward_ids.len(), ports = ?sf.ports,
+                        "global forward: service forwarded"
+                    );
+                    services.push(sf);
+                }
                 Err(e) => warn!(service = %name, error = %e, "skipping service in global forward"),
             }
         }
+        info!(
+            cluster_id,
+            namespace = namespace.unwrap_or("(all namespaces)"),
+            matched,
+            forwarded = services.len(),
+            "global forward: enable complete"
+        );
 
         let ns_label = namespace.unwrap_or("(all namespaces)").to_string();
         {
@@ -430,7 +497,18 @@ impl GlobalForwardManager {
                 },
             );
         }
-        self.reapply_hosts().await?;
+        // If the helper wedged or died at any point during the per-service loop,
+        // `drop_helper_if_broken` has already dropped it — so this hosts apply
+        // (and any subsequent forward) can't succeed. Roll the whole session back
+        // rather than leave a half-live one: the forwards panel reads backend
+        // sessions directly, so a kept-but-broken session shows services that
+        // don't route while the helper reads "not running". Tear it down and
+        // surface the failure so the UI stays honest.
+        if let Err(e) = self.reapply_hosts().await {
+            warn!(error = %e, session = %id, "global forward: hosts apply failed mid-enable; rolling back the session");
+            let _ = self.disable(registry, &id).await;
+            return Err(e);
+        }
 
         // Keep the session live: watch Services matching this query and
         // forward/teardown as they appear/disappear. For all-namespaces this
@@ -565,21 +643,40 @@ impl GlobalForwardManager {
         }
         let ports = service_ports(svc);
         if ports.is_empty() {
+            // The service lost every forwardable port (e.g. ports removed, or it
+            // became headless/ExternalName). Drop any forward we held for it
+            // rather than leave dead listeners. No-op if we weren't forwarding it.
+            self.teardown_service(registry, session_id, &ns, &name)
+                .await;
             return;
         }
-        // Already forwarded in this session? (also confirms the session lives)
-        {
+        // Decide: unchanged (skip), ports drifted (rebuild), or new (forward).
+        // Also confirms the session still lives.
+        let ports_changed = {
             let sessions = self.sessions.lock().await;
             let Some(sess) = sessions.get(session_id) else {
                 return;
             };
-            if sess
+            match sess
                 .services
                 .iter()
-                .any(|s| s.name == name && s.namespace == ns)
+                .find(|s| s.name == name && s.namespace == ns)
             {
-                return;
+                // Already forwarded with the same ports → nothing to do.
+                Some(existing) if same_port_set(&existing.ports, &ports) => return,
+                // Forwarded, but the port set changed → must rebuild.
+                Some(_) => true,
+                // Not forwarded yet → forward it fresh.
+                None => false,
             }
+        };
+        if ports_changed {
+            // Tear the stale forward down first so the new port set replaces it
+            // cleanly — and so the loopback alias is freed before `start_service`
+            // re-adds it on the (stable) same IP. The service keeps its address.
+            info!(service = %name, namespace = %ns, "global-forward: service ports changed, re-forwarding");
+            self.teardown_service(registry, session_id, &ns, &name)
+                .await;
         }
         match self
             .start_service(client, registry, cluster_id, &ns, &name, &ports)
@@ -752,7 +849,9 @@ impl GlobalForwardManager {
     ) -> Result<ServiceForward> {
         let ip = {
             let mut alloc = self.allocator.lock().await;
-            alloc.allocate(cluster_id, namespace)?
+            // Pass the service name so the same service keeps the same loopback IP
+            // across enable/disable cycles (stable DNS → no stale-cache flakiness).
+            alloc.allocate(cluster_id, namespace, svc_name)?
         };
         if let Err(e) = self.helper_add_loopback(ip).await {
             self.allocator.lock().await.release(ip);
@@ -799,18 +898,22 @@ impl GlobalForwardManager {
         })
     }
 
-    /// On **Linux**, ask the helper to bind a privileged (<1024) service port and
-    /// pass the listening socket back via SCM_RIGHTS — the unprivileged app
-    /// can't bind those itself. High ports bind in-process; macOS and Windows
-    /// don't restrict low ports, so they always bind in-process too. Returns
-    /// `None` (→ in-process bind) for anything that doesn't need the helper, and
-    /// also on helper error (the in-process attempt then surfaces the failure).
-    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async))]
+    /// On **unix** (Linux *and* macOS), ask the helper to bind a privileged
+    /// (<1024) service port and pass the listening socket back via SCM_RIGHTS —
+    /// the unprivileged app can't bind those itself. Both Linux and macOS (BSD)
+    /// gate ports <1024 behind root, so a kubefwd-style forward that keeps a
+    /// service's real port (80, 443, …) fails the in-process bind on both; the
+    /// root helper does it and hands us the fd. High ports bind in-process.
+    /// **Windows** doesn't restrict low ports (and has no fd passing), so it
+    /// always binds in-process. Returns `None` (→ in-process bind) for anything
+    /// that doesn't need the helper, and also on helper error (the in-process
+    /// attempt then surfaces the failure).
+    #[cfg_attr(not(unix), allow(clippy::unused_async))]
     async fn prebind_privileged(&self, spec: &ForwardSpec) -> Option<std::net::TcpListener> {
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             let port = spec.requested_local_port.unwrap_or(0);
-            if port == 0 || port >= 1024 {
+            if !needs_privileged_bind(port) {
                 return None;
             }
             let std::net::IpAddr::V4(ip) = spec.local_ip? else {
@@ -822,14 +925,17 @@ impl GlobalForwardManager {
                 return None;
             };
             match spawned.client.bind_listener(ip, port).await {
-                Ok(listener) => Some(listener),
+                Ok(listener) => {
+                    info!(%ip, port, "helper bound privileged port; adopted fd from helper");
+                    Some(listener)
+                }
                 Err(e) => {
                     warn!(%ip, port, error = %e, "helper failed to bind privileged port; falling back to in-process bind (likely to fail)");
                     None
                 }
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         {
             let _ = spec;
             None
@@ -998,6 +1104,36 @@ mod tests {
         }
         // Distinct ids per port.
         assert_ne!(specs[0].id, specs[1].id);
+    }
+
+    #[test]
+    fn privileged_bind_policy_matches_platform() {
+        // Port 0 ("any") and high ports never need the helper anywhere.
+        assert!(!needs_privileged_bind(0));
+        assert!(!needs_privileged_bind(1024));
+        assert!(!needs_privileged_bind(8080));
+        assert!(!needs_privileged_bind(8443));
+
+        // Low ports (1..1024) are root-reserved on unix (Linux *and* macOS) —
+        // this is the macOS regression: they were treated as in-process-bindable
+        // and silently failed. On Windows there's no such restriction.
+        let low_needs_helper = cfg!(unix);
+        assert_eq!(needs_privileged_bind(1), low_needs_helper);
+        assert_eq!(needs_privileged_bind(80), low_needs_helper);
+        assert_eq!(needs_privileged_bind(443), low_needs_helper);
+        assert_eq!(needs_privileged_bind(1023), low_needs_helper);
+    }
+
+    #[test]
+    fn same_port_set_is_order_independent() {
+        assert!(same_port_set(&[80, 443], &[443, 80]));
+        assert!(same_port_set(&[], &[]));
+        assert!(same_port_set(&[5432], &[5432]));
+        // Different sets — a changed/added/removed port must be detected so the
+        // watch rebuilds the forward.
+        assert!(!same_port_set(&[80], &[80, 443]));
+        assert!(!same_port_set(&[80, 443], &[80]));
+        assert!(!same_port_set(&[80], &[8080]));
     }
 
     #[test]

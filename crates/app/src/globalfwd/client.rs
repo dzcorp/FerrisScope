@@ -10,6 +10,14 @@ use ferrisscope_core::globalfwd::protocol::{
     self, Handshake, HostEntry, Request, Response, PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::warn;
+
+/// Upper bound on one framed helper round-trip. The helper's slowest operation
+/// is a loopback-alias `ifconfig` (macOS) or a hosts-file rewrite — both well
+/// under a second — so exceeding this means the helper is wedged. Bounding it
+/// keeps a stuck helper from hanging the Tauri command (and the UI button)
+/// indefinitely. `bind_listener`'s out-of-band fd recv has its own deadline.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// Any bidirectional, sendable byte stream we can run the protocol over.
 pub(crate) trait Transport: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -22,6 +30,13 @@ pub(crate) struct HelperClient {
     /// transport can't pass fds (Windows pipe, in-memory test duplex).
     #[cfg_attr(not(unix), allow(dead_code))]
     ctl_fd: Option<i32>,
+    /// Set once a round-trip times out, the helper closes the connection, or the
+    /// framed stream desyncs — anything that makes the protocol stream
+    /// unusable. Once broken, the manager must drop this client and respawn the
+    /// helper rather than keep issuing requests that will hang/error. A benign
+    /// `Response::Error` (e.g. validation rejection) does **not** set this — the
+    /// stream is still healthy there.
+    broken: bool,
 }
 
 impl HelperClient {
@@ -41,17 +56,61 @@ impl HelperClient {
         )
         .await?;
         match protocol::read_message::<_, Response>(&mut stream).await? {
-            Some(Response::Ok) => Ok(Self { stream, ctl_fd }),
+            Some(Response::Ok) => Ok(Self {
+                stream,
+                ctl_fd,
+                broken: false,
+            }),
             Some(Response::Error { message }) => bail!("helper handshake rejected: {message}"),
             other => bail!("unexpected handshake reply: {other:?}"),
         }
     }
 
+    /// Whether the protocol stream has become unusable (timeout / closed / IO
+    /// error). The manager checks this after each call and, when set, drops the
+    /// client so the next operation respawns a fresh helper instead of reusing a
+    /// wedged one (which would hang or error forever — the re-toggle bug).
+    pub(crate) fn is_broken(&self) -> bool {
+        self.broken
+    }
+
     async fn request(&mut self, req: Request) -> Result<Response> {
-        protocol::write_message(&mut self.stream, &req).await?;
-        protocol::read_message::<_, Response>(&mut self.stream)
-            .await?
-            .ok_or_else(|| anyhow!("helper closed the connection"))
+        let label = req.kind();
+        // Hard ceiling on a single round-trip. The helper's slowest op is an
+        // `ifconfig` subprocess (macOS loopback alias) — sub-second in practice —
+        // so anything past this means the helper wedged (or the framed stream
+        // desynced) and we must surface an error rather than hang the UI thread
+        // that's awaiting this command forever (a re-toggle would otherwise leave
+        // the button spinning with no toast).
+        let stream = &mut self.stream;
+        let fut = async {
+            protocol::write_message(stream, &req).await?;
+            protocol::read_message::<_, Response>(stream)
+                .await?
+                .ok_or_else(|| anyhow!("helper closed the connection"))
+        };
+        match tokio::time::timeout(REQUEST_TIMEOUT, fut).await {
+            // Transport IO error or a clean EOF ("closed the connection"): the
+            // stream is dead/desynced — poison the client so the manager respawns.
+            Ok(Err(e)) => {
+                self.broken = true;
+                Err(e)
+            }
+            Ok(ok) => ok,
+            Err(_) => {
+                self.broken = true;
+                warn!(
+                    request = label,
+                    timeout_secs = REQUEST_TIMEOUT.as_secs(),
+                    "helper request timed out; marking helper unresponsive"
+                );
+                bail!(
+                    "helper did not respond to {label} within {}s (it may be unresponsive — \
+                     try toggling the forward again, or reconnect the cluster)",
+                    REQUEST_TIMEOUT.as_secs()
+                )
+            }
+        }
     }
 
     fn expect_ok(resp: Response) -> Result<()> {
@@ -217,6 +276,38 @@ mod tests {
         let mut c = connect("secret").await;
         let e = c.add_loopback(Ipv4Addr::BROADCAST).await.unwrap_err();
         assert!(e.to_string().contains("nope"), "got: {e}");
+        // A *protocol* error (validation rejection) means the stream is still
+        // healthy — the client must NOT be poisoned, or one bad input would force
+        // a needless helper respawn.
+        assert!(
+            !c.is_broken(),
+            "benign Response::Error must not break the client"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_connection_poisons_client() {
+        // Helper handshakes then dies (drops the socket) without serving requests
+        // — the macOS re-toggle wedge looks like this once the timeout/EOF hits.
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let mut io = server_io;
+            let hs: Handshake = protocol::read_message(&mut io).await.unwrap().unwrap();
+            assert!(hs.token == "secret");
+            protocol::write_message(&mut io, &Response::Ok)
+                .await
+                .unwrap();
+            // Drop `io` → the client's next read sees EOF.
+        });
+        let mut c = HelperClient::handshake(Box::new(client_io), "secret", None)
+            .await
+            .unwrap();
+        assert!(!c.is_broken());
+        // The next round-trip fails on the dead transport — whether the write
+        // hits a broken pipe or the read sees EOF, both are transport-fatal.
+        let _err = c.ping().await.unwrap_err();
+        // Poisoned: the manager will see this and respawn a fresh helper.
+        assert!(c.is_broken(), "a dead transport must poison the client");
     }
 
     #[tokio::test]
