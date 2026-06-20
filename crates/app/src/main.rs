@@ -215,6 +215,8 @@ fn main() {
             commands::start_log_stream,
             commands::stop_log_stream,
             commands::resolve_log_pods_cmd,
+            commands::watch_log_pods,
+            commands::unwatch_log_pods,
             commands::save_text_file,
             commands::subscribe_metrics,
             commands::unsubscribe_metrics,
