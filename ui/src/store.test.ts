@@ -586,6 +586,48 @@ describe("port-forwards reducer", () => {
   });
 });
 
+describe("global-forwards reducer", () => {
+  const mkSession = (id: string, ns = "default") => ({
+    id,
+    cluster_id: "ctx",
+    namespace: ns,
+    services: [
+      {
+        name: "api",
+        namespace: ns,
+        local_ip: "127.1.0.1",
+        hostnames: ["api", "api.default.svc.cluster.local"],
+        ports: [80],
+      },
+    ],
+  });
+
+  it("hydrateGlobalForwards builds the map from a list", () => {
+    useAppStore.getState().hydrateGlobalForwards([mkSession("a"), mkSession("b")]);
+    expect(Object.keys(useAppStore.getState().globalForwards).sort()).toEqual(["a", "b"]);
+  });
+
+  it("upsertGlobalForward inserts or replaces by id", () => {
+    useAppStore.getState().upsertGlobalForward(mkSession("a", "one"));
+    useAppStore.getState().upsertGlobalForward(mkSession("a", "two"));
+    expect(useAppStore.getState().globalForwards["a"]?.namespace).toBe("two");
+  });
+
+  it("removeGlobalForward deletes by id", () => {
+    useAppStore.getState().hydrateGlobalForwards([mkSession("a"), mkSession("b")]);
+    useAppStore.getState().removeGlobalForward("a");
+    expect(Object.keys(useAppStore.getState().globalForwards)).toEqual(["b"]);
+  });
+
+  it("setHelperStatus replaces the helper status", () => {
+    expect(useAppStore.getState().helperStatus).toEqual({ state: "not_started" });
+    useAppStore.getState().setHelperStatus({ state: "running" });
+    expect(useAppStore.getState().helperStatus).toEqual({ state: "running" });
+    useAppStore.getState().setHelperStatus({ state: "failed", message: "denied" });
+    expect(useAppStore.getState().helperStatus).toEqual({ state: "failed", message: "denied" });
+  });
+});
+
 describe("cluster health", () => {
   it("applyClusterHealth records status + reason, clearClusterHealth removes both", () => {
     useAppStore.getState().applyClusterHealth("ctx", "unavailable", "tcp refused");

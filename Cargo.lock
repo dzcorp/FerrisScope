@@ -1716,6 +1716,8 @@ dependencies = [
  "directories",
  "ferrisscope-agent",
  "ferrisscope-core",
+ "ferrisscope-fdpass-ext",
+ "ferrisscope-helper",
  "ferrisscope-kube-ext",
  "ferrisscope-mimalloc-ext",
  "ferrisscope-test-support",
@@ -1793,6 +1795,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrisscope-fdpass-ext"
+version = "1.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "ferrisscope-helper"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "ferrisscope-core",
+ "ferrisscope-fdpass-ext",
+ "ferrisscope-winpipe-ext",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ferrisscope-kube-ext"
 version = "1.0.0"
 dependencies = [
@@ -1839,6 +1862,14 @@ dependencies = [
  "tokio",
  "tracing",
  "which",
+]
+
+[[package]]
+name = "ferrisscope-winpipe-ext"
+version = "1.0.0"
+dependencies = [
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

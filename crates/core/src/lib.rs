@@ -10,6 +10,7 @@ pub mod atomic_write;
 pub mod cluster;
 pub mod error;
 pub mod fleet;
+pub mod globalfwd;
 pub mod health;
 pub mod kubeconfig;
 pub mod logs;

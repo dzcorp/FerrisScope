@@ -530,6 +530,7 @@ export function KvEditor({
   valuePlaceholder = "value",
   duplicates,
   validateKey,
+  addLabel = "Add",
 }: {
   t: Tokens;
   buffer: KvBuffer;
@@ -539,6 +540,8 @@ export function KvEditor({
   duplicates?: Set<string>;
   // Optional per-key validator. Returns true when valid.
   validateKey?: (k: string) => boolean;
+  // Label for the built-in "+ Add" row button. Defaults to "Add".
+  addLabel?: string;
 }) {
   const dup = duplicates ?? kvBufferDuplicates(buffer);
   return (
@@ -605,7 +608,7 @@ export function KvEditor({
       })}
       <AddRowButton
         t={t}
-        label="Add"
+        label={addLabel}
         onClick={() => onChange(kvBufferAdd(buffer))}
       />
     </div>

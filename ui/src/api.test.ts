@@ -339,6 +339,22 @@ describe("listConfigMapsInNamespace / listSecretsInNamespace / listPvcsInNamespa
   });
 });
 
+describe("listNamespaces / listServicesInNamespace (forward picker)", () => {
+  it("listNamespaces ships only the clusterId", async () => {
+    const cap = captureNext([]);
+    await api.listNamespaces("ctx");
+    expect(cap.calls[0]?.cmd).toBe("list_namespaces_cmd");
+    expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx" });
+  });
+
+  it("listServicesInNamespace ships clusterId + namespace", async () => {
+    const cap = captureNext([]);
+    await api.listServicesInNamespace("ctx", "default");
+    expect(cap.calls[0]?.cmd).toBe("list_services_in_namespace_cmd");
+    expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx", namespace: "default" });
+  });
+});
+
 describe("resource kinds / search / index", () => {
   it("listResourceKinds takes no args", async () => {
     const cap = captureNext([]);
@@ -593,6 +609,44 @@ describe("port-forward", () => {
     ]);
     expect(cap.calls[0]?.args).toEqual({ id: "pf-1" });
     expect(cap.calls[2]?.args).toEqual({ id: "pf-1", pinned: false });
+  });
+});
+
+describe("global port-forward", () => {
+  it("gf* commands route with the right names and camelCased args", async () => {
+    const cap = captureNext({
+      id: "ctx::ns::default",
+      cluster_id: "ctx",
+      namespace: "default",
+      services: [],
+    });
+    await api.gfEnableNamespace("ctx", "default");
+    await api.gfEnableService("ctx", "default", "api");
+    await api.gfEnableQuery("ctx", null, "app=api");
+    await api.gfDisable("ctx::ns::default");
+    await api.gfList();
+    await api.gfHelperStatus();
+    expect(cap.calls.map((c) => c.cmd)).toEqual([
+      "gf_enable_namespace",
+      "gf_enable_service",
+      "gf_enable_query",
+      "gf_disable",
+      "gf_list",
+      "gf_helper_status",
+    ]);
+    expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx", namespace: "default" });
+    expect(cap.calls[1]?.args).toEqual({
+      clusterId: "ctx",
+      namespace: "default",
+      name: "api",
+    });
+    // all-namespaces + label selector
+    expect(cap.calls[2]?.args).toEqual({
+      clusterId: "ctx",
+      namespace: null,
+      labelSelector: "app=api",
+    });
+    expect(cap.calls[3]?.args).toEqual({ id: "ctx::ns::default" });
   });
 });
 

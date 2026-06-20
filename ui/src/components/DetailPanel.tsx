@@ -126,6 +126,7 @@ import {
 import { HelmReleaseSummary } from "./detail/helm";
 import { HelmChartSummary } from "./detail/helm/chart";
 import { DETAIL_POLL_MS, shouldPollDetail } from "./detail/detailPoll";
+import { NamespaceForwardButton } from "./forwards/NamespaceForwardButton";
 
 // Set of kind ids that have a structured Summary tab. Used to gate the tab
 // label + the default tab + the dispatch in the body.
@@ -1043,6 +1044,13 @@ export function DetailPanel({
                 >
                   {Icons.refresh}
                 </IconBtn>
+              )}
+              {isNamespace && (
+                <NamespaceForwardButton
+                  t={t}
+                  clusterId={clusterId}
+                  namespace={target.name}
+                />
               )}
               <IconBtn
                 ref={deleteBtnRef}

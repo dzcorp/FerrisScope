@@ -1332,6 +1332,20 @@ export type ConfigMapKeysSummary = {
   keys: string[];
 };
 
+// One forwardable port of a Service, as returned by `list_services_in_namespace`.
+export type ServicePickPort = {
+  port: number;
+  name: string | null;
+  protocol: string;
+};
+
+// A Service candidate for the new-port-forward picker: its name plus the ports
+// the form can offer for the remote-port dropdown.
+export type ServicePick = {
+  name: string;
+  ports: ServicePickPort[];
+};
+
 export type SecretKeysSummary = {
   name: string;
   keys: string[];
@@ -2074,6 +2088,10 @@ export type ForwardTarget = {
   name: string;
 };
 
+// Forwarding tier. "simple" = today's localhost:port (default); "global" =
+// global: per-service loopback IP + real port + /etc/hosts DNS.
+export type ForwardMode = "simple" | "global";
+
 export type ForwardSpec = {
   id: string;
   cluster_id: string;
@@ -2083,6 +2101,10 @@ export type ForwardSpec = {
   // Pinned forwards survive app restart (live in
   // `<config>/portforwards.json`). Ephemeral forwards don't.
   autostart: boolean;
+  // Absent in pre-v1 persisted specs → treat as "simple".
+  mode?: ForwardMode;
+  // Bound loopback address for global forwards; null/absent = 127.0.0.1.
+  local_ip?: string | null;
 };
 
 export type ForwardStatus =
@@ -2103,6 +2125,33 @@ export type ForwardEntry = {
 export type ForwardStatusEvent = {
   id: string;
   status: ForwardStatus;
+};
+
+// ── Global (DNS) forwards ───────────────────────────────────────────────────
+
+// Lifecycle of the privileged helper. Tagged union mirroring the Rust
+// `HelperStatus` (serde tag = "state", snake_case variants).
+export type HelperStatus =
+  | { state: "not_started" }
+  | { state: "running" }
+  | { state: "failed"; message: string };
+
+// One service forwarded within a global session: its dedicated loopback IP,
+// the in-cluster DNS names registered for it, and the forwarded ports.
+export type ServiceForwardEntry = {
+  name: string;
+  namespace: string;
+  local_ip: string;
+  hostnames: string[];
+  ports: number[];
+};
+
+// A global forward session (one per enabled namespace or single service).
+export type GlobalForwardSession = {
+  id: string;
+  cluster_id: string;
+  namespace: string;
+  services: ServiceForwardEntry[];
 };
 
 // ── Settings deep-linking ───────────────────────────────────────────────────

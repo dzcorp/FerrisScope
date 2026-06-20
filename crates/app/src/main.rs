@@ -7,6 +7,7 @@ mod agent_native;
 mod agent_oauth;
 mod clipboard_image;
 mod commands;
+mod globalfwd;
 mod helm_install;
 mod kubectl_install;
 mod path_env;
@@ -36,6 +37,21 @@ const UI_SCALE_BASELINE: f64 = 1.1;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
+    // Multi-call binary: when relaunched elevated with the helper marker, run
+    // the privileged global-forward helper instead of booting the GUI, then
+    // exit. Keeps the helper *inside* this one binary — nothing separate to
+    // build, bundle, or sign. Must be the very first thing in `main` (before
+    // mimalloc tuning, rustls, Tauri). See `globalfwd::spawn`.
+    if std::env::args().nth(1).as_deref() == Some(globalfwd::HELPER_ARG) {
+        std::process::exit(match ferrisscope_helper::run(std::env::args().skip(2)) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[helper] {e}");
+                1
+            }
+        });
+    }
+
     // Tell mimalloc to use `MADV_DONTNEED` (immediate RSS decrement)
     // instead of `MADV_FREE` (lazy reclaim that leaves freed pages in
     // `RssAnon` until memory pressure). Must run before mimalloc's
@@ -111,6 +127,7 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::default())
         .manage(agent::AgentState::default())
+        .manage(globalfwd::GlobalForwardManager::default())
         .invoke_handler(tauri::generate_handler![
             commands::ping,
             clipboard_image::read_clipboard_image,
@@ -158,6 +175,8 @@ fn main() {
             commands::get_secret_detail_cmd,
             commands::list_config_maps_in_namespace_cmd,
             commands::list_secrets_in_namespace_cmd,
+            commands::list_namespaces_cmd,
+            commands::list_services_in_namespace_cmd,
             commands::list_persistent_volume_claims_in_namespace_cmd,
             commands::get_helm_release_detail_cmd,
             commands::upgrade_helm_release_cmd,
@@ -229,6 +248,12 @@ fn main() {
             commands::pf_stop,
             commands::pf_list,
             commands::pf_set_autostart,
+            commands::gf_enable_namespace,
+            commands::gf_enable_service,
+            commands::gf_enable_query,
+            commands::gf_disable,
+            commands::gf_list,
+            commands::gf_helper_status,
             commands::discover_prometheus_targets,
             commands::get_prometheus_target,
             commands::set_prometheus_target,
@@ -404,10 +429,31 @@ fn main() {
                 commands::restore_persisted_forwards_state(&state, &pf_handle).await;
             });
 
+            // Let global-forward Service-watch tasks re-enter the manager + the
+            // registry by handle (they run detached, so they can't borrow it).
+            app.state::<globalfwd::GlobalForwardManager>()
+                .attach(app.handle().clone());
+
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("ferrisscope failed to start");
+        .build(tauri::generate_context!())
+        .expect("ferrisscope failed to start")
+        .run(|app_handle, event| {
+            // On exit, tear down the privileged helper. The elevated child
+            // (root via pkexec) would otherwise be reparented to init and
+            // outlive the app, leaking loopback aliases + the hosts block.
+            // Bounded so a wedged helper can't block shutdown indefinitely.
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                let gf = app_handle.state::<globalfwd::GlobalForwardManager>();
+                tauri::async_runtime::block_on(async {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), gf.shutdown())
+                        .await;
+                });
+            }
+        });
 }
 
 #[cfg(target_os = "linux")]
