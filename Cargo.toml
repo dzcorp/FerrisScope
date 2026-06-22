@@ -60,7 +60,7 @@ k8s-openapi = { version = "0.27", features = ["latest"] }
 http = "1"
 http-body-util = "0.1"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["decompression-gzip", "set-header"] }
+tower-http = { version = "0.7", features = ["decompression-gzip", "set-header"] }
 # Direct deps so `cluster.rs` can rebuild kube's hyper client stack with HTTP/2 +
 # TCP keepalive (kube 3.1 exposes no keepalive knob — see `build_compressed_client`).
 # Pinned exactly to the versions kube-client compiled against: the connector /
