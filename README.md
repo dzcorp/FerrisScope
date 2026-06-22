@@ -94,6 +94,8 @@ Lens is the de-facto desktop IDE for Kubernetes, but it bundles an entire Chromi
 | **Custom Resources** | Dynamic CRD discovery + browseable instances |
 | **Well-known CRDs** | Gateway API today (GatewayClass / Gateway / HTTPRoute / GRPCRoute / ReferenceGrant) — first-class category, columns, and detail panel without a typed crate per ecosystem |
 
+- **Filtering** (⌘F or `/`) — one box, auto-detecting. Plain text is a case-insensitive **name** substring; add regex metachars (`| * + ? ( ) ^ $ [ ] { }`) to switch to a name **regex** (`^api.*-prod$`). Type a `=` and it becomes a **label selector**: `app=nginx` (exact), `app=web.*` (regex value), `app=nginx|redis` (OR within a value). Comma separates terms — same key is OR'd, different keys are AND'd (`app=web,app=api,tier=prod` → (web or api) and prod). `app=` / `app!=` test for a label's presence / absence, and `app!=web` excludes. A bad pattern lights the box red.
+
 ### Detail panels & inline editing
 - Kind-agnostic detail primitives: copyable values everywhere, cross-kind navigation (owner refs, node names, service-account refs, image-pull-secret refs, volume sources), key/value chip strips, condition chips with invert support for "True is bad" conditions, sub-grids for nested structs.
 - **Inline editing** — ConfigMap and Secret data, ResourceQuota limits, LimitRange items, Deployment / StatefulSet / ReplicaSet replicas, PVC size, plus labels and annotations, straight from the detail panel. Edits go through Server-Side Apply, so FerrisScope coexists with your controllers and GitOps instead of stomping their fields.

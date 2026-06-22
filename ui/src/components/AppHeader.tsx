@@ -254,8 +254,8 @@ export function AppHeader({
                     placeholder="Filter rows…"
                     title={
                       filterInvalid
-                        ? "Invalid regex pattern"
-                        : "Plain text = substring · use | * + ? ( ) ^ $ to switch to regex"
+                        ? "Invalid pattern (bad regex or label selector)"
+                        : "Name: text=substring, | * + ? ( ) ^ $ → regex · Labels: app=nginx, app=web.* (regex), app=a|b or app=a,app=b (or), app=web,tier=prod (and), app= / app!= (has/not)"
                     }
                     style={{
                       width: 220,
@@ -322,10 +322,10 @@ export function AppHeader({
                     onClick={openFilterEditor}
                     title={
                       filterInvalid
-                        ? `Invalid regex: ${tableFilter}`
+                        ? `Invalid filter: ${tableFilter}`
                         : tableFilter
                           ? `Filter: "${tableFilter}" — edit (${MOD_KEY}F or /)`
-                          : `Filter visible rows (${MOD_KEY}F or /). Plain text matches substring; metachars switch to regex.`
+                          : `Filter visible rows (${MOD_KEY}F or /). Text matches name (substring/regex); k=v matches labels (e.g. app=nginx).`
                     }
                     style={{
                       display: "inline-flex",
