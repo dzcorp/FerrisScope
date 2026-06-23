@@ -20,7 +20,7 @@ concurrency:
 
 env:
   NODE_VERSION: "22"
-  RUST_TOOLCHAIN: "1.94"
+  RUST_TOOLCHAIN: "1.95"
 
 jobs:
   build:
