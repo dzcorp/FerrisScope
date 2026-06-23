@@ -65,7 +65,8 @@ impl KindSpec for EndpointSliceSpec {
                     .join(",")
             })
             .unwrap_or_default();
-        let endpoints_count = slice.endpoints.len();
+        // k8s-openapi 0.28 made `EndpointSlice.endpoints` an `Option<Vec<_>>`.
+        let endpoints_count = slice.endpoints.as_ref().map_or(0, Vec::len);
 
         json!({
             "namespace": meta.namespace.clone().unwrap_or_default(),
@@ -110,6 +111,7 @@ pub fn project_detail(slice: &EndpointSlice) -> Value {
     let endpoints: Vec<Value> = slice
         .endpoints
         .iter()
+        .flatten()
         .map(|e| {
             let target_ref = e.target_ref.as_ref().map(|r| {
                 json!({

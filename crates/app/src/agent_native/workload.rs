@@ -211,8 +211,9 @@ impl NativeTool for WorkloadSummary {
                     "active_jobs": s.active.as_ref().map(|a| a.len()).unwrap_or(0),
                     "last_schedule_time": s.last_schedule_time.map(|t| t.0.to_string()),
                     "last_successful_time": s.last_successful_time.map(|t| t.0.to_string()),
-                    "schedule": cj.spec.as_ref().map(|s| s.schedule.clone()),
-                    "suspend": cj.spec.as_ref().and_then(|s| s.suspend),
+                    // k8s-openapi 0.28 made `CronJob.spec` non-optional.
+                    "schedule": cj.spec.schedule.clone(),
+                    "suspend": cj.spec.suspend,
                 });
                 // CronJobs don't have a selector — child Jobs are tracked by
                 // owner reference. Return early without pod fan-out.
