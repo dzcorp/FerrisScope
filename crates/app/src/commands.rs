@@ -349,6 +349,18 @@ pub(crate) async fn apply_update(release: crate::updater::ReleaseInfo) -> Result
         .map_err(|e| format!("apply-update task failed: {e}"))?
 }
 
+/// Dynamic "What's new" notes for the About panel: every release newer than the
+/// installed build, newest-first, with parsed change items. Disk-cached and
+/// ETag-revalidated; `force` skips the freshness window (still ETag-guarded).
+#[tauri::command]
+pub(crate) async fn get_release_notes_cmd(
+    force: bool,
+) -> Result<crate::updater::ReleaseNotesBundle, String> {
+    tokio::task::spawn_blocking(move || crate::updater::fetch_release_notes(force))
+        .await
+        .map_err(|e| format!("release-notes task failed: {e}"))?
+}
+
 // ── kubectl install / detection ──────────────────────────────────────────
 
 #[tauri::command]

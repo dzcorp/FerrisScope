@@ -129,6 +129,10 @@ export type Toast = {
   body?: string;
   // 0 = sticky (no auto-dismiss). Anything > 0 auto-dismisses after that many ms.
   durationMs: number;
+  // Optional deep-link: clicking the toast (or its notification-log entry)
+  // opens Settings at this target instead of the notifications panel. Used by
+  // the "update available" toast to jump straight to About → What's new.
+  route?: SettingsTarget;
 };
 
 // Persistent in-memory copy of every toast ever pushed (per session). Toasts
@@ -140,6 +144,9 @@ export type Notification = {
   text: string;
   body?: string;
   createdAt: number;
+  // Mirrors `Toast.route` so a logged notification stays clickable after its
+  // toast auto-dismisses (e.g. the update notice deep-links to About).
+  route?: SettingsTarget;
 };
 
 export const NOTIFICATION_LOG_CAP = 50;
@@ -1166,6 +1173,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         text: toast.text,
         body: toast.body,
         createdAt: Date.now(),
+        route: toast.route,
       };
       const next = [...s.notifications, note];
       // Drop oldest if over the cap so the log stays bounded.

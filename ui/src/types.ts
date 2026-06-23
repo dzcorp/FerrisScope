@@ -81,6 +81,38 @@ export type UpdateCheckOutcome =
   | { kind: "up_to_date"; latest_version: string; html_url: string }
   | { kind: "update_available"; release: ReleaseInfo };
 
+/// One parsed bullet from a release's "What's Changed" list. Mirrors
+/// `updater::ChangeItem`. `kind` is a conventional-commit type (feat/fix/…) or
+/// "other" when the PR title isn't conventional.
+export type ChangeItem = {
+  kind: string;
+  scope: string | null;
+  text: string;
+  pr: number | null;
+  author: string | null;
+};
+
+/// One release newer than the installed build. Mirrors `updater::ReleaseNote`.
+export type ReleaseNote = {
+  version: string;
+  tag: string;
+  name: string | null;
+  published_at: string | null;
+  html_url: string;
+  changes: ChangeItem[];
+};
+
+/// Dynamic "What's new" payload for the About panel. Mirrors
+/// `updater::ReleaseNotesBundle`. `releases` is newest-first and only contains
+/// versions strictly greater than `current_version`, so an up-to-date install
+/// yields an empty list.
+export type ReleaseNotesBundle = {
+  current_version: string;
+  latest_version: string | null;
+  releases: ReleaseNote[];
+  fetched_at: number;
+};
+
 export type ContextInfo = {
   /// Stable opaque id, e.g. "default::minikube" or "<sourceUuid>::prod-1".
   /// Use this as the cluster_id for every command. The display name is `name`.

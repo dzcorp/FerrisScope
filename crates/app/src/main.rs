@@ -136,6 +136,7 @@ fn main() {
             commands::updater_info,
             commands::check_for_update,
             commands::apply_update,
+            commands::get_release_notes_cmd,
             commands::kubectl_get_status,
             commands::kubectl_install_managed,
             commands::kubectl_uninstall_managed,

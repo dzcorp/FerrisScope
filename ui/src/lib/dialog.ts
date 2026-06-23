@@ -4,6 +4,7 @@
 
 import { useAppStore } from "../store";
 import type { Toast, ToastTone } from "../store";
+import type { SettingsTarget } from "../types";
 
 export type ConfirmOpts = {
   title: string;
@@ -38,7 +39,15 @@ const DEFAULT_TOAST_MS: Record<ToastTone, number> = {
   bad: 0, // sticky — operator must dismiss
 };
 
-function emit(tone: ToastTone, text: string, durationMs?: number): string {
+/// Extra, optional toast behaviour. `route` deep-links the toast (and its
+/// notification-log entry) to a Settings target instead of the notifications
+/// panel — see `Toast.route`.
+export type ToastOptions = {
+  durationMs?: number;
+  route?: SettingsTarget;
+};
+
+function emit(tone: ToastTone, text: string, opts?: ToastOptions): string {
   const id = makeId();
   // Header strip can only render one line — split multi-line input so the
   // first line stays the headline and the rest moves into `body`, which is
@@ -52,16 +61,27 @@ function emit(tone: ToastTone, text: string, durationMs?: number): string {
     tone,
     text: headline,
     body,
-    durationMs: durationMs ?? DEFAULT_TOAST_MS[tone],
+    durationMs: opts?.durationMs ?? DEFAULT_TOAST_MS[tone],
+    route: opts?.route,
   };
   useAppStore.getState().pushToast(toast);
   return id;
 }
 
+// Back-compat: callers may pass a bare `durationMs` number (legacy) or a
+// `ToastOptions` object. Normalise to options.
+function toOptions(arg?: number | ToastOptions): ToastOptions | undefined {
+  return typeof arg === "number" ? { durationMs: arg } : arg;
+}
+
 export const toast = {
-  info: (text: string, durationMs?: number) => emit("info", text, durationMs),
-  ok: (text: string, durationMs?: number) => emit("ok", text, durationMs),
-  warn: (text: string, durationMs?: number) => emit("warn", text, durationMs),
-  bad: (text: string, durationMs?: number) => emit("bad", text, durationMs),
+  info: (text: string, arg?: number | ToastOptions) =>
+    emit("info", text, toOptions(arg)),
+  ok: (text: string, arg?: number | ToastOptions) =>
+    emit("ok", text, toOptions(arg)),
+  warn: (text: string, arg?: number | ToastOptions) =>
+    emit("warn", text, toOptions(arg)),
+  bad: (text: string, arg?: number | ToastOptions) =>
+    emit("bad", text, toOptions(arg)),
   dismiss: (id: string) => useAppStore.getState().dismissToast(id),
 };

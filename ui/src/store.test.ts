@@ -236,6 +236,27 @@ describe("toasts + notifications cap", () => {
     // Oldest 5 dropped — first remaining is index 5.
     expect(s.notifications[0]?.id).toBe("n5");
   });
+
+  it("carries a routed toast's route into both the toast and the notification log", () => {
+    const routed: Toast = {
+      id: "upd",
+      tone: "info",
+      text: "update available",
+      durationMs: 0,
+      route: { section: "about", anchor: "about-whatsnew" },
+    };
+    useAppStore.getState().pushToast(routed);
+    const s = useAppStore.getState();
+    expect(s.toasts[0]?.route).toEqual({
+      section: "about",
+      anchor: "about-whatsnew",
+    });
+    // Survives in the log so the entry stays clickable after auto-dismiss.
+    expect(s.notifications[0]?.route).toEqual({
+      section: "about",
+      anchor: "about-whatsnew",
+    });
+  });
 });
 
 describe("modals queue", () => {

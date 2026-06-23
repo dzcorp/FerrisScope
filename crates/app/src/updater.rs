@@ -68,7 +68,20 @@ struct ApplyUpdateCommand {
 struct GitHubRelease {
     tag_name: String,
     html_url: String,
+    #[serde(default)]
     assets: Vec<GitHubAsset>,
+    // Release-notes fields. Optional so the leaner `check_latest_release`
+    // deserialize (and older releases with empty bodies) keep working.
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    draft: bool,
 }
 
 #[derive(Deserialize)]
@@ -327,6 +340,371 @@ pub(crate) fn check_latest_release() -> Result<CheckOutcome, String> {
             download_url: asset.browser_download_url,
         },
     })
+}
+
+// ── Release notes ────────────────────────────────────────────────────────────
+//
+// Dynamic "What's new" for the About panel. We read the GitHub *list* endpoint
+// (not just /latest), parse each release body's "What's Changed" section into
+// structured change items, and keep only releases strictly newer than the
+// installed build. The bundle is cached on disk (next to prefs.json) and
+// revalidated with an ETag so opening About doesn't hammer the API.
+
+const GITHUB_RELEASES_LIST_API: &str =
+    "https://api.github.com/repos/dzcorp/FerrisScope/releases?per_page=100";
+/// Serve cached notes without a network round-trip for this long; matches the
+/// 6h background update-check cadence. Past this we revalidate with the ETag,
+/// so a 304 still costs no download.
+const NOTES_CACHE_TTL_MS: u64 = 6 * 60 * 60 * 1000;
+
+/// One parsed bullet from a release's "What's Changed" list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ChangeItem {
+    /// Conventional-commit type: `feat` / `fix` / `refactor` / `docs` / `perf`
+    /// / `chore` / … or `other` when the title isn't conventional.
+    pub(crate) kind: String,
+    /// Conventional-commit scope (`watch`, `port-forward`), if present.
+    pub(crate) scope: Option<String>,
+    /// Human-readable subject with the type/scope prefix and PR tail stripped.
+    pub(crate) text: String,
+    /// PR number parsed from the `… in …/pull/N` tail (or `(#N)`).
+    pub(crate) pr: Option<u64>,
+    /// Author login parsed from the `… by @login …` tail.
+    pub(crate) author: Option<String>,
+}
+
+/// One release newer than the installed build, with its parsed changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ReleaseNote {
+    pub(crate) version: String,
+    pub(crate) tag: String,
+    pub(crate) name: Option<String>,
+    pub(crate) published_at: Option<String>,
+    pub(crate) html_url: String,
+    pub(crate) changes: Vec<ChangeItem>,
+}
+
+/// What `get_release_notes` returns to the frontend. `releases` is newest-first
+/// and contains only versions strictly greater than `current_version`, so an
+/// up-to-date install yields an empty list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ReleaseNotesBundle {
+    pub(crate) current_version: String,
+    pub(crate) latest_version: Option<String>,
+    pub(crate) releases: Vec<ReleaseNote>,
+    pub(crate) fetched_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NotesCacheEntry {
+    #[serde(default)]
+    etag: Option<String>,
+    #[serde(default)]
+    fetched_at: u64,
+    bundle: ReleaseNotesBundle,
+}
+
+struct EtagResponse {
+    status: u16,
+    etag: Option<String>,
+    body: String,
+}
+
+/// Parse a release body's "What's Changed" section into structured items.
+/// Total — returns an empty Vec on a missing/empty section so older releases
+/// (and any future format drift) degrade gracefully rather than panicking.
+fn parse_whats_changed(body: &str) -> Vec<ChangeItem> {
+    let lower = body.to_ascii_lowercase();
+    // GitHub uses a curly apostrophe in "What's Changed"; tolerate both.
+    let Some(header) = lower
+        .find("what's changed")
+        .or_else(|| lower.find("what\u{2019}s changed"))
+    else {
+        return Vec::new();
+    };
+    // Skip to the line after the header.
+    let after = match body[header..].find('\n') {
+        Some(nl) => header + nl + 1,
+        None => return Vec::new(),
+    };
+
+    let mut items = Vec::new();
+    for line in body[after..].lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let low = trimmed.to_ascii_lowercase();
+        // Footer or next section ends the list.
+        if low.starts_with("**full changelog") || low.starts_with("full changelog") {
+            break;
+        }
+        if trimmed.starts_with('#') {
+            break;
+        }
+        let Some(rest) = trimmed
+            .strip_prefix("* ")
+            .or_else(|| trimmed.strip_prefix("- "))
+            .or_else(|| trimmed.strip_prefix("\u{2022} "))
+        else {
+            continue;
+        };
+        items.push(parse_change_line(rest));
+    }
+    items
+}
+
+/// Parse one bullet, e.g.
+/// `fix(watch): TCP keepalive by @yzhelezko in https://github.com/o/r/pull/44`.
+fn parse_change_line(line: &str) -> ChangeItem {
+    let mut text = line.trim().to_string();
+    let mut author = None;
+    let mut pr = None;
+
+    if let Some(by_idx) = text.rfind(" by @") {
+        let tail = text[by_idx + 5..].trim().to_string();
+        text = text[..by_idx].trim().to_string();
+        if let Some(in_idx) = tail.find(" in ") {
+            let who = tail[..in_idx].trim();
+            if !who.is_empty() {
+                author = Some(who.to_string());
+            }
+            let url = tail[in_idx + 4..].trim();
+            pr = url
+                .rsplit('/')
+                .next()
+                .and_then(|n| n.trim().parse::<u64>().ok());
+        } else if !tail.is_empty() {
+            author = Some(tail);
+        }
+    } else if let Some(hash_idx) = text.rfind("(#") {
+        // "title (#44)" form.
+        let inner = text[hash_idx + 2..].trim_end_matches(')');
+        if let Ok(n) = inner.trim().parse::<u64>() {
+            pr = Some(n);
+            text = text[..hash_idx].trim().to_string();
+        }
+    }
+
+    let (kind, scope, subject) = split_conventional(&text);
+    ChangeItem {
+        kind,
+        scope,
+        text: subject,
+        pr,
+        author,
+    }
+}
+
+/// Split a conventional-commit title into (kind, scope, subject). Non-conforming
+/// titles fall back to `("other", None, <whole title>)`.
+fn split_conventional(text: &str) -> (String, Option<String>, String) {
+    if let Some(colon) = text.find(": ") {
+        let head = &text[..colon];
+        let subject = text[colon + 2..].trim().to_string();
+        let (kind_raw, scope) = match (head.find('('), head.find(')')) {
+            (Some(open), Some(close)) if close > open => (
+                head[..open].to_string(),
+                Some(head[open + 1..close].trim().to_string()),
+            ),
+            _ => (head.to_string(), None),
+        };
+        if let Some(kind) = normalize_kind(kind_raw.trim_end_matches('!')) {
+            return (kind, scope.filter(|s| !s.is_empty()), subject);
+        }
+    }
+    ("other".to_string(), None, text.trim().to_string())
+}
+
+/// Recognise the conventional-commit types we group on. Unknown → None
+/// (caller maps to `other`).
+fn normalize_kind(kind: &str) -> Option<String> {
+    let k = kind.trim().to_ascii_lowercase();
+    matches!(
+        k.as_str(),
+        "feat"
+            | "fix"
+            | "refactor"
+            | "perf"
+            | "docs"
+            | "chore"
+            | "test"
+            | "build"
+            | "ci"
+            | "style"
+            | "revert"
+    )
+    .then_some(k)
+}
+
+fn now_unix_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Debug builds (`make dev`) run with version `0.1.0`. We use this both to
+/// preview the panel one-version-behind and to keep dev cache off the released
+/// cache file, so testing in dev never clobbers a real install's cached notes.
+fn is_dev_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+fn notes_cache_path() -> Option<PathBuf> {
+    // Separate file in dev so a debug run's preview bundle never overwrites the
+    // released build's cache (different effective version, different contents).
+    let file = if is_dev_build() {
+        "release_notes.dev.json"
+    } else {
+        "release_notes.json"
+    };
+    directories::ProjectDirs::from("dev", "ferrisscope", "ferrisscope")
+        .map(|p| p.config_dir().join(file))
+}
+
+fn read_notes_cache() -> Option<NotesCacheEntry> {
+    let path = notes_cache_path()?;
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn write_notes_cache(entry: &NotesCacheEntry) -> Result<(), String> {
+    let path = notes_cache_path().ok_or("No config dir for release-notes cache")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create cache dir: {e}"))?;
+    }
+    let data =
+        serde_json::to_string(entry).map_err(|e| format!("serialize release-notes cache: {e}"))?;
+    std::fs::write(&path, data).map_err(|e| format!("write release-notes cache: {e}"))
+}
+
+/// Build a `ReleaseNotesBundle` from the raw GitHub releases list + the
+/// installed version. Pure (no IO) so it's unit-testable against fixtures.
+///
+/// `preview_one_behind` is the dev affordance: in a debug build the installed
+/// version is `0.1.0` (lower than every release), which would otherwise list
+/// *every* release as "new" and make the panel impossible to eyeball. When set,
+/// we filter as if installed at the second-newest tag, so the panel shows just
+/// the newest release — exactly what a real one-version-behind user sees.
+/// `current_version` in the returned bundle is always the *real* installed
+/// version (cache identity + display depend on it being stable).
+fn build_bundle(
+    releases: Vec<GitHubRelease>,
+    current_str: &str,
+    fetched_at: u64,
+    preview_one_behind: bool,
+) -> ReleaseNotesBundle {
+    // First pass: parse every non-draft release into (version, note).
+    let mut parsed: Vec<(Version, ReleaseNote)> = Vec::new();
+    for r in releases {
+        // Skip drafts and prereleases — the updater tracks stable releases only
+        // (GitHub's /latest endpoint, which `check_latest_release` uses, does
+        // the same), so the notes panel must agree with the update offer.
+        if r.draft || r.prerelease {
+            continue;
+        }
+        let Ok(v_str) = normalize_version(&r.tag_name) else {
+            continue;
+        };
+        let Ok(v) = Version::parse(&v_str) else {
+            continue;
+        };
+        let changes = r
+            .body
+            .as_deref()
+            .map(parse_whats_changed)
+            .unwrap_or_default();
+        parsed.push((
+            v,
+            ReleaseNote {
+                version: v_str,
+                tag: r.tag_name,
+                name: r.name,
+                published_at: r.published_at,
+                html_url: r.html_url,
+                changes,
+            },
+        ));
+    }
+
+    let latest = parsed.iter().map(|(v, _)| v).max().cloned();
+
+    // Threshold: releases strictly greater than this are "new".
+    let threshold: Option<Version> = if preview_one_behind {
+        let mut versions: Vec<Version> = parsed.iter().map(|(v, _)| v.clone()).collect();
+        versions.sort();
+        versions.dedup();
+        if versions.len() >= 2 {
+            // Second-newest → only the newest release surfaces.
+            Some(versions[versions.len() - 2].clone())
+        } else {
+            // 0 or 1 releases: floor so the single release (if any) shows.
+            Some(Version::new(0, 0, 0))
+        }
+    } else {
+        Version::parse(current_str).ok()
+    };
+
+    let mut notes: Vec<(Version, ReleaseNote)> = parsed
+        .into_iter()
+        .filter(|(v, _)| threshold.as_ref().is_none_or(|t| v > t))
+        .collect();
+    // Newest-first.
+    notes.sort_by(|a, b| b.0.cmp(&a.0));
+
+    ReleaseNotesBundle {
+        current_version: current_str.to_string(),
+        latest_version: latest.map(|v| v.to_string()),
+        releases: notes.into_iter().map(|(_, n)| n).collect(),
+        fetched_at,
+    }
+}
+
+/// Fetch (or serve cached) release notes for versions newer than the installed
+/// build. `force` skips the freshness window but still sends the ETag, so an
+/// unchanged list returns 304 with no body download.
+pub(crate) fn fetch_release_notes(force: bool) -> Result<ReleaseNotesBundle, String> {
+    let current_str = current_version().to_string();
+    let now = now_unix_ms();
+    let cache = read_notes_cache();
+
+    if !force {
+        if let Some(c) = &cache {
+            let fresh = now.saturating_sub(c.fetched_at) < NOTES_CACHE_TTL_MS;
+            if fresh && c.bundle.current_version == current_str {
+                return Ok(c.bundle.clone());
+            }
+        }
+    }
+
+    let etag = cache.as_ref().and_then(|c| c.etag.clone());
+    let resp = http_get_with_etag(GITHUB_RELEASES_LIST_API, etag.as_deref())?;
+
+    if resp.status == 304 {
+        if let Some(mut c) = cache {
+            // Still current; just stamp it so we don't revalidate every open.
+            if c.bundle.current_version == current_str {
+                c.fetched_at = now;
+                let bundle = c.bundle.clone();
+                let _ = write_notes_cache(&c);
+                return Ok(bundle);
+            }
+        }
+        return Err("GitHub returned 304 but no usable cached notes were available.".to_string());
+    }
+
+    let releases: Vec<GitHubRelease> = serde_json::from_str(&resp.body)
+        .map_err(|e| format!("Invalid GitHub releases response: {e}"))?;
+    let bundle = build_bundle(releases, &current_str, now, is_dev_build());
+    let entry = NotesCacheEntry {
+        etag: resp.etag,
+        fetched_at: now,
+        bundle: bundle.clone(),
+    };
+    let _ = write_notes_cache(&entry);
+    Ok(bundle)
 }
 
 pub(crate) fn prepare_and_spawn_update(release: &ReleaseInfo) -> Result<(), String> {
@@ -942,6 +1320,46 @@ fn http_get_response(url: &str, json: bool) -> Result<Box<dyn io::Read>, String>
     Ok(Box::new(body.into_reader()))
 }
 
+/// GET that keeps the status code + ETag header so callers can do conditional
+/// requests. Sends `If-None-Match` when `if_none_match` is set; a 304 returns an
+/// empty body (caller reuses its cache). 304 is not an error here — ureq only
+/// maps >= 400 to `Error::StatusCode`.
+fn http_get_with_etag(url: &str, if_none_match: Option<&str>) -> Result<EtagResponse, String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into();
+    let mut request = agent
+        .get(url)
+        .header("User-Agent", &format!("ferrisscope/{}", current_version()))
+        .header("Accept", "application/vnd.github+json");
+    if let Some(etag) = if_none_match {
+        request = request.header("If-None-Match", etag);
+    }
+    let (parts, body) = request.call().map_err(format_http_error)?.into_parts();
+    let status = parts.status.as_u16();
+    let etag = parts
+        .headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let text = if status == 304 {
+        String::new()
+    } else {
+        use std::io::Read;
+        let mut s = String::new();
+        body.into_reader()
+            .read_to_string(&mut s)
+            .map_err(|err| format!("Failed to read HTTP response body: {err}"))?;
+        s
+    };
+    Ok(EtagResponse {
+        status,
+        etag,
+        body: text,
+    })
+}
+
 fn format_http_error(error: ureq::Error) -> String {
     match error {
         ureq::Error::StatusCode(code) => format!("HTTP {code} while contacting GitHub"),
@@ -952,10 +1370,28 @@ fn format_http_error(error: ureq::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_suffix, current_version, normalize_version, parse_apply_update_command,
-        supported_target_label,
+        asset_suffix, build_bundle, current_version, normalize_version, parse_apply_update_command,
+        parse_change_line, parse_whats_changed, split_conventional, supported_target_label,
+        GitHubRelease,
     };
     use std::ffi::OsString;
+
+    fn fixture_releases() -> Vec<GitHubRelease> {
+        // `json!` strings carry real newlines (from `\n`), so `parse_whats_changed`
+        // sees genuine line breaks — a raw string literal would not.
+        let v = serde_json::json!([
+            {"tag_name":"v1.0.27","html_url":"https://x/v1.0.27","name":"v1.0.27","published_at":"2026-06-20T00:00:00Z","prerelease":false,"draft":false,
+             "body":"## What's Changed\n* feat(a): newest by @u in https://x/pull/45"},
+            {"tag_name":"v1.0.26","html_url":"https://x/v1.0.26","name":"v1.0.26","prerelease":false,"draft":false,
+             "body":"## What's Changed\n* fix(b): middle by @u in https://x/pull/44"},
+            {"tag_name":"v1.0.25","html_url":"https://x/v1.0.25","prerelease":false,"draft":false,"body":""},
+            {"tag_name":"v1.0.28-rc1","html_url":"https://x/rc","prerelease":true,"draft":false,
+             "body":"## What's Changed\n* feat(z): pre by @u in https://x/pull/99"},
+            {"tag_name":"v9.9.9","html_url":"https://x/draft","prerelease":false,"draft":true,
+             "body":"## What's Changed\n* feat(z): draft by @u in https://x/pull/100"}
+        ]);
+        serde_json::from_value(v).expect("valid releases fixture")
+    }
 
     #[test]
     fn strips_v_prefix() {
@@ -1154,5 +1590,116 @@ mod tests {
             OsString::from("/d"),
         ];
         assert!(parse_apply_update_command(args).is_err());
+    }
+
+    // ── Release notes ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_whats_changed_extracts_bullets() {
+        let body = "Some intro blurb.\n\n\
+            ## What's Changed\n\
+            * fix(watch): TCP keepalive on watch sockets by @yzhelezko in https://github.com/dzcorp/FerrisScope/pull/44\n\
+            * feat(port-forward): global DNS forwarding by @yzhelezko in https://github.com/dzcorp/FerrisScope/pull/45\n\n\
+            **Full Changelog**: https://github.com/dzcorp/FerrisScope/compare/v1.0.26...v1.0.27";
+        let items = parse_whats_changed(body);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].kind, "fix");
+        assert_eq!(items[0].scope.as_deref(), Some("watch"));
+        assert_eq!(items[0].text, "TCP keepalive on watch sockets");
+        assert_eq!(items[0].pr, Some(44));
+        assert_eq!(items[0].author.as_deref(), Some("yzhelezko"));
+        assert_eq!(items[1].kind, "feat");
+        assert_eq!(items[1].scope.as_deref(), Some("port-forward"));
+        assert_eq!(items[1].pr, Some(45));
+    }
+
+    #[test]
+    fn parse_whats_changed_tolerates_missing_section() {
+        // Older releases ship empty bodies / install boilerplate only.
+        assert!(parse_whats_changed("").is_empty());
+        assert!(parse_whats_changed("Download the AppImage below.").is_empty());
+        // Curly apostrophe variant is still recognised.
+        let curly = "## What\u{2019}s Changed\n* chore: bump deps by @bot in https://x/pull/9";
+        let items = parse_whats_changed(curly);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "chore");
+        assert_eq!(items[0].pr, Some(9));
+    }
+
+    #[test]
+    fn parse_whats_changed_stops_at_next_heading() {
+        let body = "## What's Changed\n* fix: a by @u in https://x/pull/1\n## New Contributors\n* @newbie made their first contribution";
+        let items = parse_whats_changed(body);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "a");
+    }
+
+    #[test]
+    fn parse_change_line_handles_hash_form_and_plain() {
+        let hash = parse_change_line("feat(ui): nicer about panel (#123)");
+        assert_eq!(hash.kind, "feat");
+        assert_eq!(hash.scope.as_deref(), Some("ui"));
+        assert_eq!(hash.text, "nicer about panel");
+        assert_eq!(hash.pr, Some(123));
+        assert!(hash.author.is_none());
+
+        // Non-conventional title → "other", whole text preserved.
+        let plain = parse_change_line("Update README by @docsbot in https://x/pull/7");
+        assert_eq!(plain.kind, "other");
+        assert!(plain.scope.is_none());
+        assert_eq!(plain.text, "Update README");
+        assert_eq!(plain.author.as_deref(), Some("docsbot"));
+        assert_eq!(plain.pr, Some(7));
+    }
+
+    #[test]
+    fn split_conventional_recognises_types_and_breaking_marker() {
+        assert_eq!(
+            split_conventional("refactor(core)!: drop legacy path"),
+            (
+                "refactor".into(),
+                Some("core".into()),
+                "drop legacy path".into()
+            )
+        );
+        assert_eq!(
+            split_conventional("docs: tidy"),
+            ("docs".into(), None, "tidy".into())
+        );
+        // Unknown type prefix is not treated as conventional.
+        assert_eq!(
+            split_conventional("wip(thing): half done"),
+            ("other".into(), None, "wip(thing): half done".into())
+        );
+    }
+
+    #[test]
+    fn build_bundle_filters_to_newer_stable_releases() {
+        let bundle = build_bundle(fixture_releases(), "1.0.25", 1000, false);
+        // 1.0.26 and 1.0.27 are newer than 1.0.25; rc + draft excluded.
+        let versions: Vec<&str> = bundle.releases.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(versions, vec!["1.0.27", "1.0.26"]); // newest-first
+                                                        // latest_version reflects the newest *stable* release.
+        assert_eq!(bundle.latest_version.as_deref(), Some("1.0.27"));
+        assert_eq!(bundle.current_version, "1.0.25");
+        assert_eq!(bundle.fetched_at, 1000);
+    }
+
+    #[test]
+    fn build_bundle_up_to_date_is_empty() {
+        let bundle = build_bundle(fixture_releases(), "1.0.27", 0, false);
+        assert!(bundle.releases.is_empty());
+        assert_eq!(bundle.latest_version.as_deref(), Some("1.0.27"));
+    }
+
+    #[test]
+    fn build_bundle_dev_preview_shows_only_newest() {
+        // Dev build (real version 0.1.0) would otherwise list every release.
+        // Preview mode pretends we're at the second-newest tag → only newest.
+        let bundle = build_bundle(fixture_releases(), "0.1.0", 0, true);
+        let versions: Vec<&str> = bundle.releases.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(versions, vec!["1.0.27"]);
+        // Real installed version is preserved for cache identity / display.
+        assert_eq!(bundle.current_version, "0.1.0");
     }
 }
