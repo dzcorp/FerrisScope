@@ -98,8 +98,12 @@ describe("parseYaml / dumpYaml / stripYaml", () => {
   });
 
   it("empty document parses to null", () => {
+    // js-yaml 5 throws on documentless input; parseYaml must keep returning
+    // null so a cleared YAML editor buffer doesn't surface a parse error.
     expect(parseYaml("")).toBeNull();
+    expect(parseYaml("   \n\t\n")).toBeNull();
     expect(parseYaml("# only a comment\n")).toBeNull();
+    expect(parseYaml("\n\n# c\n")).toBeNull();
   });
 });
 

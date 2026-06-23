@@ -3,7 +3,7 @@
 // shape so renames go through the test first.
 
 import { describe, it, expect } from "vitest";
-import jsYaml from "js-yaml";
+import * as jsYaml from "js-yaml";
 import {
   DEFAULT_YAML_TEMPLATE_ID,
   getYamlTemplate,
