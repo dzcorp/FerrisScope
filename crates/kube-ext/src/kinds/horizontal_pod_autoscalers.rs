@@ -60,7 +60,9 @@ impl KindSpec for HorizontalPodAutoscalerSpec {
 
     fn project(hpa: &HorizontalPodAutoscaler) -> Value {
         let meta = &hpa.metadata;
-        let spec = hpa.spec.as_ref();
+        // k8s-openapi 0.28 made `HorizontalPodAutoscaler.spec` non-optional; keep
+        // the downstream Option-chaining intact by re-wrapping.
+        let spec = Some(&hpa.spec);
         let status = hpa.status.as_ref();
 
         let reference = spec
@@ -88,7 +90,9 @@ impl KindSpec for HorizontalPodAutoscalerSpec {
 
 pub fn project_detail(hpa: &HorizontalPodAutoscaler) -> Value {
     let meta = project_meta(&hpa.metadata);
-    let spec = hpa.spec.as_ref();
+    // k8s-openapi 0.28 made `HorizontalPodAutoscaler.spec` non-optional; keep
+    // the downstream Option-chaining intact by re-wrapping.
+    let spec = Some(&hpa.spec);
     let status = hpa.status.as_ref();
 
     let scale_target = spec.map(|s| {

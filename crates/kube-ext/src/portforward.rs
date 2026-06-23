@@ -216,7 +216,8 @@ async fn resolve_service_pod(
     let lp = ListParams::default().labels(&label);
     let list = slices.list(&lp).await?;
     for slice in list.items {
-        for ep in slice.endpoints {
+        // k8s-openapi 0.28 made `EndpointSlice.endpoints` an `Option<Vec<_>>`.
+        for ep in slice.endpoints.into_iter().flatten() {
             let ready = ep.conditions.as_ref().and_then(|c| c.ready).unwrap_or(true);
             if !ready {
                 continue;

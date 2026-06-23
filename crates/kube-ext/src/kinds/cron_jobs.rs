@@ -60,7 +60,9 @@ impl KindSpec for CronJobSpec {
 
     fn project(cj: &CronJob) -> Value {
         let meta = &cj.metadata;
-        let spec = cj.spec.as_ref();
+        // k8s-openapi 0.28 made `CronJob.spec` non-optional; keep the downstream
+        // Option-chaining intact by re-wrapping.
+        let spec = Some(&cj.spec);
         let status = cj.status.as_ref();
         let schedule = spec.map(|s| s.schedule.clone()).unwrap_or_default();
         let suspend = spec.and_then(|s| s.suspend).unwrap_or(false);
@@ -85,7 +87,9 @@ impl KindSpec for CronJobSpec {
 
 pub fn project_detail(cj: &CronJob) -> Value {
     let meta = project_meta(&cj.metadata);
-    let spec = cj.spec.as_ref();
+    // k8s-openapi 0.28 made `CronJob.spec` non-optional; keep the downstream
+    // Option-chaining intact by re-wrapping.
+    let spec = Some(&cj.spec);
     let status = cj.status.as_ref();
 
     // The CronJob's pod template lives at .spec.jobTemplate.spec.template.

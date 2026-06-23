@@ -77,8 +77,8 @@ impl KindSpec for PodDisruptionBudgetSpec {
             "namespace": meta.namespace.clone(),
             "min_available": min_available,
             "max_unavailable": max_unavailable,
-            "current_healthy": status.map(|s| s.current_healthy).unwrap_or(0),
-            "desired_healthy": status.map(|s| s.desired_healthy).unwrap_or(0),
+            "current_healthy": status.and_then(|s| s.current_healthy).unwrap_or(0),
+            "desired_healthy": status.and_then(|s| s.desired_healthy).unwrap_or(0),
             "creation_timestamp": meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),
         })
     }
@@ -129,10 +129,10 @@ pub fn project_detail(pdb: &PodDisruptionBudget) -> Value {
             .map(intstr_to_string),
         "unhealthy_pod_eviction_policy": spec.and_then(|s| s.unhealthy_pod_eviction_policy.clone()),
         "selector": selector,
-        "current_healthy": status.map(|s| s.current_healthy).unwrap_or(0),
-        "desired_healthy": status.map(|s| s.desired_healthy).unwrap_or(0),
-        "expected_pods": status.map(|s| s.expected_pods).unwrap_or(0),
-        "disruptions_allowed": status.map(|s| s.disruptions_allowed).unwrap_or(0),
+        "current_healthy": status.and_then(|s| s.current_healthy).unwrap_or(0),
+        "desired_healthy": status.and_then(|s| s.desired_healthy).unwrap_or(0),
+        "expected_pods": status.and_then(|s| s.expected_pods).unwrap_or(0),
+        "disruptions_allowed": status.and_then(|s| s.disruptions_allowed).unwrap_or(0),
         "conditions": conditions,
     })
 }

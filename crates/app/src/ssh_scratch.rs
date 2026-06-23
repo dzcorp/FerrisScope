@@ -174,6 +174,8 @@ fn build_scratch_yaml(
         current_context: Some(context_name.to_owned()),
         preferences: None,
         extensions: None,
+        // kube 4.0 added a flattened catch-all for unknown top-level keys.
+        other: Default::default(),
     };
     serde_yaml::to_string(&scratch).map_err(|e| format!("serialize: {e}"))
 }
