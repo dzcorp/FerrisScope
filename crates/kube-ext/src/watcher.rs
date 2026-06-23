@@ -21,7 +21,7 @@
 //! and the drainer always sees the latest state.
 
 use ferrisscope_core::sync::LockExt;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -480,6 +480,7 @@ impl ResourceWatcher {
                     }
                 }
                 let row = with_uid(uid.clone(), S::project(&obj));
+                let row = with_labels(row, Some(obj.labels()));
                 // Drop the typed object as soon as projection is done.
                 drop(obj);
                 // No-op suppression: if the projected row is byte-
@@ -643,6 +644,7 @@ impl ResourceWatcher {
                     }
                 }
                 let row = with_uid(uid.clone(), project_task(&obj));
+                let row = with_labels(row, Some(obj.labels()));
                 // No-op suppression — see typed-watcher branch above
                 // for the rationale. Same behaviour: cheap structural
                 // equality on the projected row; on miss, update the
@@ -1314,6 +1316,28 @@ fn with_uid(uid: String, projected: Value) -> Value {
     }
 }
 
+/// Inject the object's labels into a projected row under the reserved
+/// `__labels` key. The frontend filter box uses it for label-selector
+/// matching (`app=nginx`, `tier=prod,app=web`). Attached only when there
+/// is at least one label, so the per-update bus payload stays minimal —
+/// label-less objects add nothing. The `__` prefix marks it as synthetic
+/// row metadata (cf. `__sid` / `__clusterId` on the frontend), never a
+/// table column. No-op when the projection isn't a JSON object.
+fn with_labels(row: Value, labels: Option<&BTreeMap<String, String>>) -> Value {
+    let Some(labels) = labels.filter(|m| !m.is_empty()) else {
+        return row;
+    };
+    let Value::Object(mut map) = row else {
+        return row;
+    };
+    let projected: serde_json::Map<String, Value> = labels
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect();
+    map.insert("__labels".to_owned(), Value::Object(projected));
+    Value::Object(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1322,6 +1346,33 @@ mod tests {
 
     fn row(name: &str) -> Value {
         json!({ "uid": "ignored", "name": name })
+    }
+
+    #[test]
+    fn with_labels_attaches_only_when_present() {
+        let base = with_uid("u1".to_owned(), json!({ "name": "nginx" }));
+
+        // None / empty → no `__labels`, original fields untouched.
+        let none = with_labels(base.clone(), None);
+        assert_eq!(none["uid"], json!("u1"));
+        assert_eq!(none["name"], json!("nginx"));
+        assert!(none.get("__labels").is_none());
+
+        let empty = with_labels(base.clone(), Some(&BTreeMap::new()));
+        assert!(empty.get("__labels").is_none());
+
+        // Non-empty → mirrored under `__labels`, siblings preserved.
+        let labels: BTreeMap<String, String> = [
+            ("app".to_owned(), "nginx".to_owned()),
+            ("tier".to_owned(), "frontend".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let tagged = with_labels(base, Some(&labels));
+        assert_eq!(tagged["uid"], json!("u1"));
+        assert_eq!(tagged["name"], json!("nginx"));
+        assert_eq!(tagged["__labels"]["app"], json!("nginx"));
+        assert_eq!(tagged["__labels"]["tier"], json!("frontend"));
     }
 
     #[tokio::test]

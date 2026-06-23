@@ -611,8 +611,9 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       })
       .filter((r) => {
         if (parsed.mode === "off") return true;
-        const name = typeof r.name === "string" ? r.name : "";
-        return parsed.test(name);
+        // Pass the whole row — name modes read `r.name`, label mode reads
+        // `r.__labels` (watcher-injected).
+        return parsed.test(r);
       });
   }, [rows, selectedNamespaces, tableFilter, kind.namespaced]);
 

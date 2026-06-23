@@ -364,9 +364,13 @@ export type ResourceKind = {
 
 /// A row produced by the backend projection. Always contains `uid`; remaining
 /// keys correspond to the kind's registered columns. Pod rows additionally
-/// carry `containers` for the logs side panel.
+/// carry `containers` for the logs side panel. `__labels` is synthetic row
+/// metadata (the object's `metadata.labels`, injected by the watcher only
+/// when non-empty) used by the filter box's label-selector mode — it is not
+/// a column.
 export type ResourceRow = {
   uid: string;
+  __labels?: Record<string, string>;
   [key: string]: unknown;
 };
 
