@@ -49,6 +49,29 @@ describe("ping / updater plumbing", () => {
     expect(cap.calls[0]?.cmd).toBe("apply_update");
     expect(cap.calls[0]?.args).toEqual({ release });
   });
+
+  it("getReleaseNotes → 'get_release_notes_cmd' with force=false by default", async () => {
+    const cap = captureNext({
+      current_version: "1.0.0",
+      latest_version: "1.0.1",
+      releases: [],
+      fetched_at: 0,
+    });
+    await api.getReleaseNotes();
+    expect(cap.calls[0]?.cmd).toBe("get_release_notes_cmd");
+    expect(cap.calls[0]?.args).toEqual({ force: false });
+  });
+
+  it("getReleaseNotes forwards force=true", async () => {
+    const cap = captureNext({
+      current_version: "1.0.0",
+      latest_version: null,
+      releases: [],
+      fetched_at: 0,
+    });
+    await api.getReleaseNotes(true);
+    expect(cap.calls[0]?.args).toEqual({ force: true });
+  });
 });
 
 describe("contexts + connect", () => {

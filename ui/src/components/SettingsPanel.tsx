@@ -47,6 +47,7 @@ import {
 import { MOD_KEY, SHIFT_KEY, ALT_KEY } from "../lib/keyboard";
 import { AiSection } from "./settings/AiSection";
 import { ToolsSection } from "./settings/ToolsSection";
+import { ReleaseNotes } from "./ReleaseNotes";
 
 // Re-export from `types.ts` so the rest of the app uses one canonical
 // `SettingsSectionId` (the store typed `openSettings(target)` against
@@ -2258,6 +2259,21 @@ function AboutSection({}: { mode: ThemeMode }) {
           />
         )}
       </div>
+      {/* Dynamic "What's new" — every release newer than the installed build,
+          merged with skipped versions collapsed into a range. The notification
+          toast deep-links here via the `about-whatsnew` anchor. */}
+      <ReleaseNotes
+        t={t}
+        // Re-fetch notes when a check changes the detected version, so the
+        // existing "Check for updates" button above also refreshes this panel.
+        reloadKey={
+          update.kind === "available"
+            ? `a:${update.release.version}`
+            : update.kind === "up_to_date"
+              ? `u:${update.latest}`
+              : ""
+        }
+      />
     </div>
   );
 }

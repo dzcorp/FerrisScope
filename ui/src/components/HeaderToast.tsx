@@ -43,6 +43,7 @@ function HeaderToastCard({
 }) {
   const dismissToast = useAppStore((s) => s.dismissToast);
   const openNotifications = useAppStore((s) => s.openNotifications);
+  const openSettings = useAppStore((s) => s.openSettings);
 
   useEffect(() => {
     if (toast.durationMs <= 0) return;
@@ -74,7 +75,17 @@ function HeaderToastCard({
   const sticky = tone === "bad" && toast.durationMs <= 0;
   const ringShadow = sticky ? `0 0 0 1px ${withAlpha(t.bad, 0.32)}` : "none";
 
-  const onCardClick = () => openNotifications();
+  // Routed toasts (e.g. "update available" → About → What's new) deep-link to
+  // Settings; everything else opens the notifications panel. Dismiss the toast
+  // either way so it doesn't linger over the destination.
+  const onCardClick = () => {
+    if (toast.route) {
+      openSettings(toast.route);
+      dismissToast(toast.id);
+    } else {
+      openNotifications();
+    }
+  };
   const onDismissClick = (e: MouseEvent) => {
     e.stopPropagation();
     dismissToast(toast.id);

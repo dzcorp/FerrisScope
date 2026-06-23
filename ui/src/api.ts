@@ -87,6 +87,7 @@ import type {
   PromChangedEvent,
   PromTarget,
   ReleaseInfo,
+  ReleaseNotesBundle,
   ReplicaSetDetail,
   ResourceDelta,
   ResourceKind,
@@ -125,6 +126,11 @@ export const api = {
   checkForUpdate: () => invoke<UpdateCheckOutcome>("check_for_update"),
   applyUpdate: (release: ReleaseInfo) =>
     invoke<void>("apply_update", { release }),
+  /// Dynamic "What's new" notes for every release newer than the installed
+  /// build. Disk-cached + ETag-revalidated in the backend; `force` skips the
+  /// freshness window (still no download on a 304).
+  getReleaseNotes: (force = false) =>
+    invoke<ReleaseNotesBundle>("get_release_notes_cmd", { force }),
   listContexts: () => invoke<ContextInfo[]>("list_contexts"),
   connectContext: (name: string, connectId: string) =>
     invoke<ClusterInfo>("connect_context", { name, connectId }),

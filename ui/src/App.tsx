@@ -400,7 +400,8 @@ export default function App() {
             // durable signal.
             if (prev !== v && seen !== v) {
               toast.info(
-                `FerrisScope v${v} is available\nOpen Settings → About to update or skip this version.`,
+                `FerrisScope v${v} is available\nClick to see what's new, update, or skip.`,
+                { route: { section: "about", anchor: "about-whatsnew" } },
               );
             }
           } else {
