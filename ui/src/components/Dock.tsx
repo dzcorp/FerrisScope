@@ -12,7 +12,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
-import jsYaml from "js-yaml";
+// js-yaml 5 ships flat named exports with no default; namespace import keeps
+// the `jsYaml.loadAll` call site intact.
+import * as jsYaml from "js-yaml";
 import Editor from "@monaco-editor/react";
 import {
   useAppStore,

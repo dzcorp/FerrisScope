@@ -18,7 +18,10 @@
 // can't express deletion by omission, which is why removals and empties
 // silently no-op'd under the old `diffPartial`.
 
-import jsYaml from "js-yaml";
+// js-yaml 5 dropped the default export in favour of flat named exports, so a
+// `import jsYaml from "js-yaml"` resolves to "Missing export" under Vite. Use a
+// namespace import to keep the `jsYaml.load` / `jsYaml.dump` call sites intact.
+import * as jsYaml from "js-yaml";
 
 export type Json =
   | null
@@ -79,8 +82,24 @@ export function stripServerFields(doc: Json): Json {
 }
 
 export function parseYaml(text: string): Json {
+  // js-yaml 5 throws `YAMLException: expected a document, but the input is
+  // empty` for documentless input (empty / whitespace-only / comment-only)
+  // where v4 returned `undefined`. Preserve the v4 contract — a source with no
+  // document node parses to null — so the YAML editor tolerates a cleared
+  // buffer instead of surfacing a spurious parse error.
+  if (!hasYamlDocument(text)) return null;
   const v = jsYaml.load(text);
   return (v ?? null) as Json;
+}
+
+/** True if `text` contains at least one non-comment, non-blank line. */
+function hasYamlDocument(text: string): boolean {
+  return text
+    .split("\n")
+    .some((line) => {
+      const trimmed = line.trim();
+      return trimmed.length > 0 && !trimmed.startsWith("#");
+    });
 }
 
 export function dumpYaml(value: Json): string {
