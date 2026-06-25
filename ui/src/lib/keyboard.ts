@@ -12,6 +12,12 @@ export const IS_MAC = (() => {
   return /Mac|iPhone|iPad/.test(p);
 })();
 
+export const IS_WINDOWS = (() => {
+  if (typeof navigator === "undefined") return false;
+  const p = navigator.platform || navigator.userAgent || "";
+  return /Win/.test(p);
+})();
+
 export const MOD_KEY = IS_MAC ? "⌘" : "Ctrl";
 export const SHIFT_KEY = IS_MAC ? "⇧" : "Shift";
 export const ALT_KEY = IS_MAC ? "⌥" : "Alt";
