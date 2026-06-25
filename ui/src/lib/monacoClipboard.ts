@@ -100,7 +100,7 @@ function patchSystemClipboard() {
 
 patchSystemClipboard();
 
-async function readClipboard(): Promise<string> {
+export async function readClipboard(): Promise<string> {
   try {
     const text = await tauriReadText();
     return text ?? "";
@@ -116,7 +116,7 @@ async function readClipboard(): Promise<string> {
   }
 }
 
-async function writeClipboard(text: string): Promise<boolean> {
+export async function writeClipboard(text: string): Promise<boolean> {
   try {
     await tauriWriteText(text);
     return true;
@@ -131,6 +131,47 @@ async function writeClipboard(text: string): Promise<boolean> {
     }
     return false;
   }
+}
+
+export type ClipboardIO = {
+  read: () => Promise<string>;
+  write: (text: string) => Promise<unknown>;
+};
+
+// Apply a clipboard action to a plain `<input>`/`<textarea>` (e.g. Monaco's
+// find-widget input), routing through the injected clipboard IO instead of the
+// browser's native paste — which returns empty `clipboardData` on webkit2gtk
+// when the GTK/Tauri side owns the clipboard. Returns whether it acted; the
+// caller `preventDefault()`s only on a truthy result.
+//
+// Pure + dependency-injected so it's unit-testable under jsdom without a real
+// clipboard or a live Monaco instance.
+export async function applyClipboardKeyToInput(
+  el: HTMLInputElement | HTMLTextAreaElement,
+  action: "copy" | "cut" | "paste",
+  io: ClipboardIO,
+): Promise<boolean> {
+  const start = el.selectionStart ?? 0;
+  const end = el.selectionEnd ?? 0;
+  if (action === "paste") {
+    const text = await io.read();
+    if (!text) return false;
+    // Replaces the current selection (or inserts at the caret) and moves the
+    // caret to the end of the inserted run.
+    el.setRangeText(text, start, end, "end");
+    // Let Monaco's FindInput observe the change and re-run the search.
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    return true;
+  }
+  // copy / cut only act on a real selection — an empty Ctrl+C is a no-op so the
+  // caller leaves the event alone.
+  if (start === end) return false;
+  await io.write(el.value.slice(start, end));
+  if (action === "cut") {
+    el.setRangeText("", start, end, "end");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  return true;
 }
 
 export function installClipboardShortcuts(
@@ -212,5 +253,46 @@ export function installClipboardShortcuts(
         { range: sel, text, forceMoveMarkers: true },
       ]);
     },
+  });
+
+  // The `addAction` keybindings above only fire while the editor *body* has
+  // focus — they never reach Monaco's find-widget <input>. There, Ctrl+V falls
+  // back to the browser's native paste, which on webkit2gtk reads an empty
+  // `event.clipboardData` whenever the GTK/Tauri side owns the clipboard, so
+  // paste-into-Find silently no-ops (microsoft/monaco-editor#4855, which
+  // Freelens patches at the Electron `before-input-event` layer). We patch it
+  // in the renderer: a capture-phase keydown that routes Ctrl/Cmd+C/X/V for the
+  // find input through the Tauri clipboard. Scoped to this editor's DOM and
+  // torn down on dispose so multiple editors don't double-handle.
+  const onWidgetClipboardKey = (e: KeyboardEvent) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const target = e.target;
+    if (
+      !(target instanceof HTMLInputElement) &&
+      !(target instanceof HTMLTextAreaElement)
+    )
+      return;
+    const dom = editor.getDomNode();
+    if (!dom || !dom.contains(target) || !target.closest(".find-widget")) return;
+    const action =
+      e.code === "KeyV"
+        ? "paste"
+        : e.code === "KeyC"
+          ? "copy"
+          : e.code === "KeyX"
+            ? "cut"
+            : null;
+    if (!action) return;
+    // Stop the broken native path (and Monaco's own handlers) before they run.
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    void applyClipboardKeyToInput(target, action, {
+      read: readClipboard,
+      write: writeClipboard,
+    });
+  };
+  document.addEventListener("keydown", onWidgetClipboardKey, true);
+  editor.onDidDispose(() => {
+    document.removeEventListener("keydown", onWidgetClipboardKey, true);
   });
 }

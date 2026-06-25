@@ -38,8 +38,13 @@ import { Btn, ErrorBlock, IconBtn, Icons, Select } from "./ui";
 import { MinimizedChatPill } from "./MinimizedChatPill";
 import { api } from "../api";
 import type { DocApplyResult } from "../types";
-import { latinLetter } from "../lib/keyboard";
-import { installClipboardShortcuts } from "../lib/monacoClipboard";
+import { IS_WINDOWS, latinLetter } from "../lib/keyboard";
+import {
+  installClipboardShortcuts,
+  readClipboard,
+  writeClipboard,
+} from "../lib/monacoClipboard";
+import { normalizeTerminalSelection } from "../lib/terminalCopy";
 import {
   YAML_TEMPLATES,
   YAML_TEMPLATE_CATEGORIES,
@@ -766,6 +771,8 @@ function DockTerminal({
     let term: Terminal | null = null;
     let fit: FitAddon | null = null;
     let fitRaf = 0;
+    let copyTimer: ReturnType<typeof setTimeout> | null = null;
+    let detachContextMenu: (() => void) | null = null;
 
     // Fit pipeline (cribbed from thermic's terminal.js):
     //   1. Bail if the host isn't visible yet — fit() against a hidden
@@ -901,32 +908,44 @@ function DockTerminal({
           return true;
         });
         term.open(host);
-        // Auto-copy on selection (terminal-style UX): the moment the
-        // operator finishes a drag-select / shift-arrow extension, the
-        // selected text lands on the system clipboard. xterm fires
-        // `onSelectionChange` for every extension *and* every clear, so
-        // we coalesce onto one rAF (avoid spamming clipboard.writeText
-        // mid-drag) and skip empty strings (clears shouldn't wipe the
-        // clipboard). Paste path is unchanged — Ctrl/Cmd+V still routes
-        // through xterm's default paste handler into the PTY.
-        let copyRaf = 0;
+        // Auto-copy on selection (terminal-style UX): once the operator
+        // finishes a drag-select / shift-arrow extension, the selected text
+        // lands on the system clipboard. xterm fires `onSelectionChange` for
+        // every extension *and* every clear, so we debounce on the trailing
+        // edge: one write per settled selection. A per-frame write raced —
+        // `writeClipboard` is async (Tauri IPC), so an earlier partial
+        // selection could resolve *after* the final one and win, truncating
+        // the copy. `normalizeTerminalSelection` collapses CRLF and drops the
+        // trailing newline (the shell auto-exec footgun). Empty selections are
+        // clears — don't wipe the clipboard. Paste still routes through xterm's
+        // default Ctrl/Cmd+V handler into the PTY, plus right-click below.
         term.onSelectionChange(() => {
-          if (copyRaf) return;
-          copyRaf = requestAnimationFrame(() => {
-            copyRaf = 0;
+          if (copyTimer) clearTimeout(copyTimer);
+          copyTimer = setTimeout(() => {
+            copyTimer = null;
             const sel = termRef.current?.getSelection();
             if (!sel) return;
-            // xterm returns multi-row selections with `\r\n` between rows;
-            // some paste targets (chat apps, GitHub markdown editors, …)
-            // treat the `\r` as part of the line and render the `\n`
-            // away, so multi-line copies arrive as one blob with spaces.
-            // Normalise to plain `\n` so paste matches the visual rows.
-            const normalised = sel.replace(/\r\n?/g, "\n");
-            navigator.clipboard?.writeText(normalised).catch(() => {
-              /* permission denied / non-secure context */
-            });
-          });
+            const text = normalizeTerminalSelection(
+              sel,
+              IS_WINDOWS ? "crlf" : "lf",
+            );
+            if (!text) return;
+            void writeClipboard(text);
+          }, 80);
         });
+        // Right-click paste (PuTTY / Lens convention): pull the system
+        // clipboard via Tauri and feed it through xterm's paste path (which
+        // handles bracketed paste). preventDefault suppresses the native
+        // context menu.
+        const onContextMenu = (e: MouseEvent) => {
+          e.preventDefault();
+          void readClipboard().then((text) => {
+            if (text) termRef.current?.paste(text);
+          });
+        };
+        host.addEventListener("contextmenu", onContextMenu);
+        detachContextMenu = () =>
+          host.removeEventListener("contextmenu", onContextMenu);
         // WebGL renderer was previously loaded here for GPU-accelerated
         // compositing. Removed: addon-webgl@0.19 references
         // `Terminal._core._store` which only exists on xterm 6.x; on 5.5
@@ -1045,6 +1064,8 @@ function DockTerminal({
     return () => {
       cancelled = true;
       if (fitRaf) cancelAnimationFrame(fitRaf);
+      if (copyTimer) clearTimeout(copyTimer);
+      detachContextMenu?.();
       window.removeEventListener("resize", scheduleFit);
       ro.disconnect();
       detachChannel?.();
