@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, Generate, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use directories::ProjectDirs;
 use ferrisscope_agent::{provider::meta, Credential, ProviderKind};
@@ -134,7 +134,7 @@ impl From<agent_keyring::KeyringError> for SecretError {
 
 mod encrypted_file {
     use super::{
-        meta, Aead, AeadCore, Aes256Gcm, Credential, Digest, Key, KeyInit, Nonce, OnceLock, OsRng,
+        meta, Aead, Aes256Gcm, Credential, Digest, Generate, Key, KeyInit, Nonce, OnceLock,
         PathBuf, ProjectDirs, ProviderKind, SecretError, Sha256,
     };
     use std::collections::HashMap;
@@ -179,8 +179,9 @@ mod encrypted_file {
         hasher.update([0u8]);
         hasher.update(uuid.as_bytes());
         let key_bytes = hasher.finalize();
-        let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
-        Ok(Aes256Gcm::new(key))
+        let key = Key::<Aes256Gcm>::try_from(key_bytes.as_slice())
+            .map_err(|_| "derive_cipher: SHA-256 output is not a 32-byte AES key".to_string())?;
+        Ok(Aes256Gcm::new(&key))
     }
 
     #[cfg(target_os = "macos")]
@@ -253,10 +254,11 @@ mod encrypted_file {
                 bytes[0]
             )));
         }
-        let nonce = Nonce::from_slice(&bytes[1..1 + NONCE_LEN]);
+        let nonce = Nonce::try_from(&bytes[1..1 + NONCE_LEN])
+            .map_err(|_| SecretError::Other("credentials.enc: bad nonce length".into()))?;
         let ct = &bytes[1 + NONCE_LEN..];
         let plain = cipher()?
-            .decrypt(nonce, ct)
+            .decrypt(&nonce, ct)
             .map_err(|_| SecretError::Other("credentials.enc: decryption failed".into()))?;
         serde_json::from_slice::<Store>(&plain)
             .map_err(|e| SecretError::Other(format!("credentials.enc: parse: {e}")))
@@ -270,7 +272,7 @@ mod encrypted_file {
         }
         let plain = serde_json::to_vec(store)
             .map_err(|e| SecretError::Other(format!("serialize store: {e}")))?;
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::generate();
         let ct = cipher()?
             .encrypt(&nonce, plain.as_ref())
             .map_err(|_| SecretError::Other("encryption failed".into()))?;
@@ -396,5 +398,61 @@ mod mac_signing {
             }
         }
         false
+    }
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    // Regression guard for the `aes-gcm` 0.10 → 0.11 migration. The new
+    // (aead 0.6) API dropped the `aead::OsRng` re-export and the
+    // `AeadCore::generate_nonce` / `Array::from_slice` helpers in favour of
+    // the `Generate` trait and `TryFrom`. This exercises every call shape the
+    // encrypted-file backend relies on, independent of platform (the real
+    // backend derives its key from `machine_uuid`, which is macOS-only).
+    use aes_gcm::aead::{Aead, Generate, KeyInit};
+    use aes_gcm::{Aes256Gcm, Key, Nonce};
+
+    fn cipher() -> Aes256Gcm {
+        // A deterministic 32-byte key — same shape `derive_cipher` produces
+        // from a SHA-256 digest, built via the same `try_from` path.
+        let key_bytes = [7u8; 32];
+        let key = Key::<Aes256Gcm>::try_from(key_bytes.as_slice()).expect("32-byte key");
+        Aes256Gcm::new(&key)
+    }
+
+    #[test]
+    fn generated_nonce_is_twelve_bytes() {
+        // `aead::Nonce<A>` pins the size to the cipher's `NonceSize` (U12),
+        // so no surrounding usage is needed to infer it.
+        let nonce = aes_gcm::aead::Nonce::<Aes256Gcm>::generate();
+        // AES-GCM nonces are 96-bit; this matches `NONCE_LEN`.
+        assert_eq!(nonce.len(), 12);
+    }
+
+    #[test]
+    fn encrypt_then_decrypt_roundtrips() {
+        let cipher = cipher();
+        let plaintext = br#"{"providers":{"anthropic":"sk-test"}}"#;
+
+        let nonce = Nonce::generate();
+        let ct = cipher.encrypt(&nonce, plaintext.as_ref()).expect("encrypt");
+        assert_ne!(ct.as_slice(), plaintext.as_ref(), "ciphertext must differ");
+
+        // Reconstruct the nonce from raw bytes exactly as `load_store` does.
+        let nonce2 = Nonce::try_from(nonce.as_slice()).expect("nonce from bytes");
+        let plain = cipher.decrypt(&nonce2, ct.as_ref()).expect("decrypt");
+        assert_eq!(plain.as_slice(), plaintext.as_ref());
+    }
+
+    #[test]
+    fn decrypt_rejects_tampered_ciphertext() {
+        let cipher = cipher();
+        let nonce = Nonce::generate();
+        let mut ct = cipher.encrypt(&nonce, b"secret".as_ref()).expect("encrypt");
+        // Flip a bit — the GCM auth tag must reject it.
+        ct[0] ^= 0x01;
+        assert!(cipher.decrypt(&nonce, ct.as_ref()).is_err());
     }
 }
