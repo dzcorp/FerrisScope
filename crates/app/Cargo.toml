@@ -45,6 +45,12 @@ keyring = { version = "3", default-features = false, features = ["sync-secret-se
 # (a no-op on Linux/Windows) to keep feature and allowlist in sync on every
 # target. Without that, Linux/Windows builds fail the allowlist check.
 tauri = { version = "2.11", features = ["macos-private-api"] }
+# Forbid a second concurrent process: the architecture assumes ONE Rust
+# backend owns all canonical state (reflectors, supervisors, port-forwards).
+# A second instance would race prefs.json / session index.json (last-writer-
+# wins => silent lost updates). The plugin redirects a second launch into a
+# focus of the already-running window instead. Registered first in main.rs.
+tauri-plugin-single-instance = "2.3"
 tauri-plugin-fs = "2.5"
 tauri-plugin-dialog = "2.4"
 tauri-plugin-opener = "2.5"

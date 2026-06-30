@@ -120,6 +120,18 @@ fn main() {
     updater::cleanup_old_update_files();
 
     tauri::Builder::default()
+        // MUST be the first plugin. A second `ferrisscope` launch hands its
+        // argv to this callback inside the already-running process instead of
+        // standing up a competing backend that would race prefs.json and the
+        // chat session index (both last-writer-wins => silent lost updates).
+        // We just resurface the existing window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
