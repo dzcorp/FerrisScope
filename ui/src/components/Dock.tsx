@@ -155,9 +155,16 @@ type Props = {
   clusterId: string | null;
   // Inset from the left so the dock doesn't sit under the rail.
   leftInset: number;
-  // Which placement this Dock instance owns. App.tsx mounts <Dock> twice —
-  // one per placement — and each instance only sees its own tabs.
+  // Which placement this Dock instance owns. App.tsx mounts a Dock pair per
+  // open cluster tab — one per placement — and each instance only sees its own
+  // tabs.
   placement: DockPlacement;
+  // The cluster tab this Dock belongs to. App mounts one Dock pair per open
+  // tab; only the active tab's pair is visible, but inactive pairs stay mounted
+  // (hidden) so their terminals' PTYs and chats' channels survive a switch.
+  // The active tab reads the live top-level dock state; inactive tabs read
+  // their stashed slice (identical at switch time → no remount).
+  clusterTabId: string;
 };
 
 // HV2Dock — tabbed panel hosting terminal scratchpads, YAML editors, and AI
@@ -170,11 +177,28 @@ export function Dock({
   clusterId,
   leftInset,
   placement,
+  clusterTabId,
 }: Props) {
   const t = useResolvedTheme().tokens;
-  const allTabs = useAppStore((s) => s.dockTabs);
-  const activeTabId = useAppStore((s) => s.dockActiveId);
-  const dockMin = useAppStore((s) => s.dockMin);
+  // The active cluster tab's dock state is the live top-level mirror; an
+  // inactive tab reads its stashed slice. `switchTab` syncs the two on every
+  // switch, so the dock-tab ids (and therefore the React keys of the mounted
+  // terminal/chat bodies) are identical across the active⇄inactive flip — the
+  // bodies reconcile by key and never remount, keeping PTYs/chat channels live.
+  const isLive = useAppStore((s) => s.activeTabId === clusterTabId);
+  const liveTabs = useAppStore((s) => s.dockTabs);
+  const liveActive = useAppStore((s) => s.dockActiveId);
+  const liveMin = useAppStore((s) => s.dockMin);
+  const slice = useAppStore((s) =>
+    s.activeTabId === clusterTabId
+      ? null
+      : (s.openTabs.find((tt) => tt.id === clusterTabId)?.slice ?? null),
+  );
+  const allTabs = isLive ? liveTabs : (slice?.dockTabs ?? []);
+  const activeTabId = isLive ? liveActive : (slice?.dockActiveId ?? null);
+  const dockMin = isLive
+    ? liveMin
+    : (slice?.dockMin ?? { bottom: false, right: false });
   const setDockMin = useAppStore((s) => s.setDockMin);
   const setActiveId = useAppStore((s) => s.setDockActiveId);
   const closeTab = useAppStore((s) => s.closeDockTab);

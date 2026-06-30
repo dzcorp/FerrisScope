@@ -1,14 +1,24 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import { createPortal } from "react-dom";
 import type { ContextInfo } from "../types";
 import {
   FF_MONO,
   type ThemeMode,
+  type Tokens,
   R_MD,
   R_SM,
   FS_LG,
   FS_MD,
   FS_SM,
   FS_XS,
+  clusterAccent,
   vibrantSurface,
 } from "../theme";
 import { BrandMark, IconBtn, Icons, Kbd } from "./ui";
@@ -16,8 +26,14 @@ import { MOD_KEY, IS_MAC } from "../lib/keyboard";
 import { headerPaddingLeft, dragRegionProps } from "../lib/macChrome";
 import { HeaderToast } from "./HeaderToast";
 import { parseTableFilter } from "../lib/tableFilter";
-import { useAppStore, useResolvedTheme } from "../store";
+import { useAppStore, useResolvedTheme, type ClusterTab } from "../store";
 import { api } from "../api";
+import {
+  closeClusterTab,
+  clusterTabLabel,
+  clusterTabPrimaryId,
+} from "../lib/clusterTabs";
+import { clusterColorIndexMap } from "../lib/multiCluster";
 
 type Props = {
   mode: ThemeMode;
@@ -56,6 +72,15 @@ export function AppHeader({
   onOpenForwards,
 }: Props) {
   const t = useResolvedTheme().tokens;
+  // Open cluster tabs for the breadcrumb switcher dropdown.
+  const openTabs = useAppStore((s) => s.openTabs);
+  const activeTabId = useAppStore((s) => s.activeTabId);
+  const switchTab = useAppStore((s) => s.switchTab);
+  const openTab = useAppStore((s) => s.openTab);
+  const allContexts = useAppStore((s) => s.contexts);
+  const allVirtualContexts = useAppStore((s) => s.virtualContexts);
+  const [clusterMenuOpen, setClusterMenuOpen] = useState(false);
+  const clusterBtnRef = useRef<HTMLButtonElement>(null);
   // Visible-row count + active filter for the breadcrumb. Both pushed by
   // ResourceTable; both null when no kind table is mounted.
   const tableCount = useAppStore((s) => s.tableCount);
@@ -157,14 +182,64 @@ export function AppHeader({
           <span style={{ color: t.textMuted, display: "inline-flex" }}>
             {Icons.chevR}
           </span>
-          <span
-            style={{
-              padding: "3px 6px",
-              fontWeight: 600,
-              letterSpacing: -0.2,
-            }}
-          >
-            {context.name}
+          <span style={{ position: "relative", display: "inline-flex" }}>
+            <button
+              ref={clusterBtnRef}
+              type="button"
+              onClick={() => setClusterMenuOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={clusterMenuOpen}
+              title="Switch or open a cluster"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                border: "none",
+                background: clusterMenuOpen ? t.chip : "transparent",
+                padding: "3px 6px",
+                borderRadius: R_SM,
+                cursor: "pointer",
+                fontWeight: 600,
+                letterSpacing: -0.2,
+                color: "inherit",
+                font: "inherit",
+              }}
+            >
+              {context.name}
+              <span
+                aria-hidden
+                style={{
+                  display: "inline-flex",
+                  color: t.textMuted,
+                  transform: "rotate(90deg)",
+                }}
+              >
+                {Icons.chevR}
+              </span>
+            </button>
+            {clusterMenuOpen && (
+              <ClusterSwitcherMenu
+                t={t}
+                anchorRef={clusterBtnRef}
+                openTabs={openTabs}
+                activeTabId={activeTabId}
+                contexts={allContexts}
+                virtualContexts={allVirtualContexts}
+                onPick={(id) => {
+                  switchTab(id);
+                  setClusterMenuOpen(false);
+                }}
+                onOpenContext={(id) => {
+                  openTab({ kind: "context", contextId: id });
+                  setClusterMenuOpen(false);
+                }}
+                onOpenVirtual={(id) => {
+                  openTab({ kind: "virtual", virtualId: id });
+                  setClusterMenuOpen(false);
+                }}
+                onClose={() => setClusterMenuOpen(false)}
+              />
+            )}
           </span>
           {context.namespace && (
             <span
@@ -719,4 +794,262 @@ function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+/// Breadcrumb dropdown — the one place to switch between open cluster tabs AND
+/// open a new one. Open tabs are listed first (click to switch, × to close);
+/// below the divider, every other available cluster / virtual context can be
+/// opened as a new tab. Anchored under the cluster-name button; an invisible
+/// full-screen backdrop closes it on an outside click. Returning to Fleet (a
+/// full reset) is the separate "Clusters" crumb.
+function ClusterSwitcherMenu({
+  t,
+  anchorRef,
+  openTabs,
+  activeTabId,
+  contexts,
+  virtualContexts,
+  onPick,
+  onOpenContext,
+  onOpenVirtual,
+  onClose,
+}: {
+  t: Tokens;
+  anchorRef: RefObject<HTMLElement | null>;
+  openTabs: ClusterTab[];
+  activeTabId: string | null;
+  contexts: { id: string; name: string }[];
+  virtualContexts: { id: string; name: string; members?: string[] }[];
+  onPick: (id: string) => void;
+  onOpenContext: (id: string) => void;
+  onOpenVirtual: (id: string) => void;
+  onClose: () => void;
+}) {
+  // Anchor the menu to the trigger's viewport rect. It is portaled to <body>
+  // (below) so it escapes the header's stacking context (zIndex 5) — otherwise
+  // it would paint behind the dock (zIndex 25) and detail panel. Fixed
+  // positioning means it tracks the button without a position:relative parent.
+  const rect = anchorRef.current?.getBoundingClientRect();
+  const anchorTop = rect ? rect.bottom + 4 : 56;
+  const anchorLeft = rect ? rect.left : 80;
+  const colorIdx = clusterColorIndexMap(
+    openTabs.map((tab) => clusterTabPrimaryId(tab, contexts, virtualContexts)),
+  );
+  // Clusters / virtual contexts not currently open as a tab — the "open
+  // another" list. A context is "open" if some tab anchors it directly.
+  const openContextIds = new Set(
+    openTabs
+      .filter((tb) => tb.selectedVirtualContextId === null)
+      .map((tb) => tb.selectedContext),
+  );
+  const openVirtualIds = new Set(
+    openTabs
+      .map((tb) => tb.selectedVirtualContextId)
+      .filter((id): id is string => id !== null),
+  );
+  const availableContexts = contexts.filter((c) => !openContextIds.has(c.id));
+  const availableVirtuals = virtualContexts.filter(
+    (v) => !openVirtualIds.has(v.id),
+  );
+  const hasAvailable =
+    availableContexts.length > 0 || availableVirtuals.length > 0;
+
+  const dot = (id: string) => (
+    <span
+      aria-hidden
+      style={{
+        flexShrink: 0,
+        width: 8,
+        height: 8,
+        borderRadius: "50%",
+        background: clusterAccent(colorIdx[id] ?? 0),
+      }}
+    />
+  );
+
+  return createPortal(
+    <>
+      <div
+        onClick={onClose}
+        style={{ position: "fixed", inset: 0, zIndex: 58 }}
+      />
+      <div
+        role="menu"
+        aria-label="Switch or open a cluster"
+        data-testid="cluster-switcher-menu"
+        style={{
+          // Fixed + portaled to <body>: paints above the dock (25), detail
+          // panel (31) and table chrome (35); below the modal scrim (60).
+          position: "fixed",
+          top: anchorTop,
+          left: anchorLeft,
+          zIndex: 59,
+          minWidth: 240,
+          // Cap to the viewport so a long cluster list scrolls inside the menu
+          // instead of running off-screen.
+          maxHeight: "min(70vh, 520px)",
+          overflowY: "auto",
+          background: t.surface,
+          border: `1px solid ${t.border}`,
+          borderRadius: R_MD,
+          boxShadow: "0 8px 28px rgba(0,0,0,0.28)",
+          padding: 4,
+          display: "flex",
+          flexDirection: "column",
+          gap: 1,
+        }}
+      >
+        <MenuCaption t={t}>Open</MenuCaption>
+        {openTabs.map((tab) => {
+          const isActive = tab.id === activeTabId;
+          const label = clusterTabLabel(tab, contexts, virtualContexts);
+          const primaryId = clusterTabPrimaryId(tab, contexts, virtualContexts);
+          return (
+            <div
+              key={tab.id}
+              role="menuitem"
+              aria-current={isActive ? "true" : undefined}
+              onClick={() => onPick(tab.id)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "6px 8px",
+                borderRadius: R_SM,
+                cursor: "pointer",
+                background: isActive ? t.accentSoft : "transparent",
+                color: isActive ? t.text : t.textDim,
+                fontSize: FS_SM,
+                fontWeight: isActive ? 600 : 500,
+              }}
+            >
+              {dot(primaryId)}
+              <span
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {label}
+              </span>
+              <button
+                type="button"
+                aria-label={`Close ${label}`}
+                title="Close cluster tab"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // Don't fold the menu here: closeClusterTab is async (it may
+                  // raise a confirm dialog) — folding now would hide the list
+                  // even if the user cancels. Closing the LAST tab drops to
+                  // Fleet, which unmounts the breadcrumb (and this menu) anyway.
+                  void closeClusterTab(tab.id);
+                }}
+                style={{
+                  flexShrink: 0,
+                  border: "none",
+                  background: "transparent",
+                  cursor: "pointer",
+                  color: t.textMuted,
+                  display: "inline-flex",
+                  padding: 2,
+                  borderRadius: R_SM,
+                }}
+              >
+                {Icons.close}
+              </button>
+            </div>
+          );
+        })}
+        {hasAvailable && (
+          <>
+            <div style={{ height: 1, background: t.border, margin: "3px 0" }} />
+            <MenuCaption t={t}>Open another</MenuCaption>
+            {availableVirtuals.map((v) => (
+              <MenuOpenRow
+                key={`v:${v.id}`}
+                t={t}
+                label={v.name}
+                onClick={() => onOpenVirtual(v.id)}
+              />
+            ))}
+            {availableContexts.map((c) => (
+              <MenuOpenRow
+                key={`c:${c.id}`}
+                t={t}
+                label={c.name}
+                onClick={() => onOpenContext(c.id)}
+              />
+            ))}
+          </>
+        )}
+      </div>
+    </>,
+    document.body,
+  );
+}
+
+function MenuCaption({ t, children }: { t: Tokens; children: ReactNode }) {
+  return (
+    <div
+      style={{
+        fontSize: FS_XS,
+        color: t.textMuted,
+        fontWeight: 600,
+        letterSpacing: 0.4,
+        textTransform: "uppercase",
+        padding: "4px 8px 2px",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function MenuOpenRow({
+  t,
+  label,
+  onClick,
+}: {
+  t: Tokens;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <div
+      role="menuitem"
+      onClick={onClick}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "6px 8px",
+        borderRadius: R_SM,
+        cursor: "pointer",
+        color: t.textDim,
+        fontSize: FS_SM,
+        fontWeight: 500,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{ flexShrink: 0, display: "inline-flex", color: t.textMuted }}
+      >
+        {Icons.plus}
+      </span>
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {label}
+      </span>
+    </div>
+  );
 }

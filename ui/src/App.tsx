@@ -1,14 +1,23 @@
 import { logErr, reportErr } from "./lib/log";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { api, onPortForwardStatus, onResourceDelta } from "./api";
 import {
   buildPrefsPayload,
+  selectActiveClusterIds,
   useActiveClusterIds,
   useAppStore,
   useResolvedTheme,
+  type ClusterTab,
   type SelectionMeta,
 } from "./store";
 import type { AppInfo, ResourceKind } from "./types";
@@ -56,6 +65,7 @@ import {
   namespaceClusterTags,
 } from "./lib/multiCluster";
 import { IS_MAC } from "./lib/keyboard";
+import { goToFleet } from "./lib/clusterTabs";
 import { hotkeyIntent, intentPreventsDefault } from "./lib/hotkeys";
 import { applyThemeCssVars } from "./lib/themeDom";
 import { Icons } from "./components/ui";
@@ -94,6 +104,7 @@ export default function App() {
     (s) => s.contexts.find((c) => c.id === s.selectedContext) ?? null,
   );
   const contexts = useAppStore((s) => s.contexts);
+  const allVirtualContexts = useAppStore((s) => s.virtualContexts);
   // Physical cluster set the app is observing: virtual-context members (or
   // the single selected context) plus any ad-hoc scope extras. Stable
   // identity — effects key on it.
@@ -114,6 +125,24 @@ export default function App() {
         .filter((c): c is NonNullable<typeof c> => c != null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [activeClusterKey, contexts],
+  );
+  // Primary (first) cluster of a tab's scope — feeds the Dock's "new terminal"
+  // default and chat target. Only meaningful for the visible (active) tab;
+  // inactive Dock pairs are hidden, so a best-effort fallback is fine.
+  const tabPrimaryContext = useCallback(
+    (tab: ClusterTab): { id: string; name: string } => {
+      const ids = selectActiveClusterIds({
+        contexts,
+        selectedContext: tab.selectedContext,
+        virtualContexts: allVirtualContexts,
+        selectedVirtualContextId: tab.selectedVirtualContextId,
+        scopeExtras: tab.scopeExtras,
+      });
+      const first = ids[0] ?? "";
+      const c = contexts.find((cc) => cc.id === first);
+      return { id: first, name: c?.name ?? first };
+    },
+    [contexts, allVirtualContexts],
   );
   const multiClusterActive =
     activeVirtualContext !== null || activeClusterIds.length > 1;
@@ -251,6 +280,8 @@ export default function App() {
 
   const dockTabs = useAppStore((s) => s.dockTabs);
   const addDockTab = useAppStore((s) => s.addDockTab);
+  const openTabs = useAppStore((s) => s.openTabs);
+  const activeTabId = useAppStore((s) => s.activeTabId);
   const railMode = useAppStore((s) => s.railMode);
   const dockSize = useAppStore((s) => s.dockSize);
   const clearMetrics = useAppStore((s) => s.clearMetrics);
@@ -432,23 +463,43 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeClusterKey, clearMetrics]);
 
-  // When the operator leaves a cluster, force-drop every still-running
-  // watcher for it. Watchers normally linger ~60 s after their last
-  // subscriber unmounts so kind→kind navigation stays warm; on a scope
-  // switch we don't want to carry that idle traffic on clusters we're
-  // no longer viewing. Diffed against the previous active set so growing
-  // a virtual context (or adding a scope extra) doesn't tear down the
-  // surviving members' warm watchers.
-  const prevActiveIdsRef = useRef<string[]>([]);
+  // The set of physical clusters across ALL open tabs (not just the active
+  // one). A cluster stays connected as long as some open tab references it;
+  // switching tabs must NOT disconnect the cluster you switched away from —
+  // its terminals, chats and node-exec sessions have to survive the switch.
+  const openTabClusterIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const tab of openTabs) {
+      for (const id of selectActiveClusterIds({
+        contexts,
+        selectedContext: tab.selectedContext,
+        virtualContexts: allVirtualContexts,
+        selectedVirtualContextId: tab.selectedVirtualContextId,
+        scopeExtras: tab.scopeExtras,
+      })) {
+        set.add(id);
+      }
+    }
+    return [...set].sort();
+  }, [openTabs, contexts, allVirtualContexts]);
+  const openTabClusterKey = openTabClusterIds.join(String.fromCharCode(0));
+
+  // Disconnect a cluster only when it leaves EVERY open tab — i.e. its tab was
+  // closed, or the operator returned to Fleet (which clears all tabs). This is
+  // the single disconnect path: `closeTab` / `goFleet` shrink `openTabs`, this
+  // effect reconciles the backend by force-dropping watchers (which also reaps
+  // the cluster's terminals, chats and unpinned forwards). Switching between
+  // open tabs never lands here, so warm sessions persist.
+  const prevOpenClusterIdsRef = useRef<string[]>([]);
   useEffect(() => {
-    const prev = prevActiveIdsRef.current;
-    const departed = prev.filter((id) => !activeClusterIds.includes(id));
+    const prev = prevOpenClusterIdsRef.current;
+    const departed = prev.filter((id) => !openTabClusterIds.includes(id));
     for (const cid of departed) {
       api.dropClusterWatchers(cid).catch(logErr("app"));
     }
-    prevActiveIdsRef.current = activeClusterIds;
+    prevOpenClusterIdsRef.current = openTabClusterIds;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeClusterKey]);
+  }, [openTabClusterKey]);
 
   // Subscribe to namespaces on every active cluster so the modal lists the
   // union of what really exists. Side-subscriptions are cheap because
@@ -761,7 +812,7 @@ export default function App() {
         selectedKindLabel={selectedKindLabel}
         unreadNotifications={unreadNotifications}
         activeForwards={activeForwards}
-        onHome={() => selectContext(null)}
+        onHome={() => void goToFleet()}
         onPalette={openPalette}
         onToggleTheme={toggleTheme}
         onOpenNotifications={openNotifications}
@@ -849,24 +900,40 @@ export default function App() {
           clusterId in its state; the Dock-level fallback is the first
           active cluster (covers the multi-cluster view, where there is no
           single `selectedContext`). */}
-      {activeContexts.length > 0 && dockTabs.length > 0 && (
-        <>
-          <Dock
-            mode={themeMode}
-            clusterName={activeContexts[0]!.name}
-            clusterId={activeContexts[0]!.id}
-            leftInset={leftInset}
-            placement="bottom"
-          />
-          <Dock
-            mode={themeMode}
-            clusterName={activeContexts[0]!.name}
-            clusterId={activeContexts[0]!.id}
-            leftInset={leftInset}
-            placement="right"
-          />
-        </>
-      )}
+      {/* One Dock pair per open cluster tab. Only the active tab's pair is
+          visible (`display: contents`); inactive pairs stay mounted but hidden
+          (`display: none`) so their terminals keep their PTY and their chats
+          keep their channel alive across a cluster switch. Tabs with no dock
+          tabs render nothing. */}
+      {openTabs.map((tab) => {
+        const isActive = tab.id === activeTabId;
+        const tabDockTabs = isActive ? dockTabs : tab.slice.dockTabs;
+        if (tabDockTabs.length === 0) return null;
+        const primary = tabPrimaryContext(tab);
+        return (
+          <div
+            key={tab.id}
+            style={{ display: isActive ? "contents" : "none" }}
+          >
+            <Dock
+              mode={themeMode}
+              clusterTabId={tab.id}
+              clusterName={primary.name}
+              clusterId={primary.id}
+              leftInset={leftInset}
+              placement="bottom"
+            />
+            <Dock
+              mode={themeMode}
+              clusterTabId={tab.id}
+              clusterName={primary.name}
+              clusterId={primary.id}
+              leftInset={leftInset}
+              placement="right"
+            />
+          </div>
+        );
+      })}
 
       {/* Bulk action bar — shows when rows are selected. Per-kind action sets
           (pods today, nodes for cordon/drain/delete). Shape per R-03.
