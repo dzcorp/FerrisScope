@@ -214,6 +214,10 @@ export type TableSortEntry = { id: string; desc: boolean };
 export type TableView = {
   sorting: TableSortEntry[];
   column_sizing: Record<string, number>;
+  // Label keys promoted to custom columns for this (scope, kind). Optional
+  // on the wire so older backends (no `label_columns`) round-trip; the
+  // current backend always sends an array (possibly empty).
+  label_columns?: string[];
 };
 export type TableViewsFile = {
   views: Record<string, TableView>;
@@ -397,6 +401,11 @@ export type ColumnDef = {
   id: string;
   header: string;
   kind?: ColumnKind;
+  // Set only on synthetic, frontend-built custom columns derived from a
+  // resource's `metadata.labels`. When present, the cell value is read from
+  // `row.__labels[labelKey]` instead of `row[id]`. The backend never sets
+  // this — it is not part of the wire `ResourceKind.columns` payload.
+  labelKey?: string;
 };
 
 export type ResourceKind = {

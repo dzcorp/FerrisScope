@@ -686,6 +686,31 @@ describe("tableViews", () => {
     });
     expect(Object.keys(useAppStore.getState().tableViews)).toEqual(["ctx::pods"]);
   });
+
+  it("keeps a label-column-only view (no sort/sizing) instead of pruning it", () => {
+    useAppStore.getState().setTableView("ctx", "nodes", {
+      sorting: [],
+      column_sizing: {},
+      label_columns: ["topology.kubernetes.io/zone"],
+    } as never);
+    expect(useAppStore.getState().tableViews["ctx::nodes"]?.label_columns).toEqual([
+      "topology.kubernetes.io/zone",
+    ]);
+  });
+
+  it("prunes once label columns are also cleared", () => {
+    useAppStore.getState().setTableView("ctx", "nodes", {
+      sorting: [],
+      column_sizing: {},
+      label_columns: ["zone"],
+    } as never);
+    useAppStore.getState().setTableView("ctx", "nodes", {
+      sorting: [],
+      column_sizing: {},
+      label_columns: [],
+    } as never);
+    expect(useAppStore.getState().tableViews["ctx::nodes"]).toBeUndefined();
+  });
 });
 
 describe("UI scale", () => {
