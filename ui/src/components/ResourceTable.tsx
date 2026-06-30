@@ -2,6 +2,7 @@ import { logErr } from "../lib/log";
 import {
   createContext,
   memo,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -51,6 +52,14 @@ import { makeTerminalTab } from "./Dock";
 import { confirm, toast } from "../lib/dialog";
 import { latinLetter } from "../lib/keyboard";
 import { parseTableFilter } from "../lib/tableFilter";
+import {
+  cellRaw,
+  headerWidthFloor,
+  labelColumnDef,
+  labelKeyUniverse,
+  placeLabelColumns,
+} from "../lib/labelColumns";
+import { ColumnPicker } from "./ColumnPicker";
 import { useMetricsSubscriptions } from "../lib/useMetricsSubscription";
 import {
   applyScopedDelta,
@@ -235,6 +244,10 @@ type Props = {
   viewScopeId: string;
   kind: ResourceKind;
 };
+
+// Width of the right gutter reserved for the column-picker control. Must
+// match the ColumnPicker button width so the control fills the gutter.
+const COLMENU_W = 30;
 
 // Resource table — the page is the data (P1). No skeleton on poll, no
 // spinner on re-fetch (R-01). Identifiers in mono (R-07), numbers tabular
@@ -667,25 +680,47 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // auto-fit owns the widths and recomputes on container resize.
   const userResizedRef = useRef(false);
 
+  // Label keys the operator promoted to custom columns for this (scope, kind),
+  // persisted alongside the sort. Seeded from disk; the column-picker menu
+  // mutates it.
+  const [labelColumns, setLabelColumns] = useState<string[]>(
+    () => persistedView?.label_columns ?? [],
+  );
+
+  // Distinct label keys across the (filtered) rows — the universe the picker
+  // offers. Sampled inside `labelKeyUniverse` to bound cost on huge tables.
+  const labelKeys = useMemo(() => labelKeyUniverse(filtered), [filtered]);
+
+  const toggleLabelColumn = useCallback((key: string) => {
+    setLabelColumns((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    );
+  }, []);
+
+  // Clear all custom columns back to the default (none).
+  const resetLabelColumns = useCallback(() => setLabelColumns([]), []);
+
   // When the kind / view scope changes, reset to whatever was persisted for
-  // the new (scope, kind). Without this the sort from kind A would leak onto
-  // kind B until the operator clicked something.
+  // the new (scope, kind). Without this the sort (and custom columns) from
+  // kind A would leak onto kind B until the operator clicked something.
   useEffect(() => {
     setSorting(sortingFromPersisted(persistedView?.sorting, kind));
     setColumnSizing({});
+    setLabelColumns(persistedView?.label_columns ?? []);
     userResizedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewScopeId, kind.id]);
 
-  // Debounced persistence (sorting only — widths stay in memory).
+  // Debounced persistence (sorting + custom label columns — widths stay in
+  // memory). `label_columns` must ride along or this write would clobber it.
   useEffect(() => {
     const timeout = setTimeout(() => {
-      const view = { sorting, column_sizing: {} };
+      const view = { sorting, column_sizing: {}, label_columns: labelColumns };
       setTableView(viewScopeId, kind.id, view);
       api.setTableView(viewScopeId, kind.id, view).catch(logErr("table"));
     }, 200);
     return () => clearTimeout(timeout);
-  }, [sorting, viewScopeId, kind.id, setTableView]);
+  }, [sorting, labelColumns, viewScopeId, kind.id, setTableView]);
 
   // Refs so the cell renderer can read fresh values without triggering a
   // columns-memo recompute (which invalidates TanStack's entire row model
@@ -718,11 +753,19 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     const base = kind.columns.filter(
       (c) => !(singleNs && c.id === "namespace"),
     );
-    if (!isMultiCluster) return base;
+    // Custom label columns slot in just before the trailing Age column (so Age
+    // stays rightmost), in the operator's chosen order.
+    const labelCols = labelColumns.map(labelColumnDef);
+    if (!isMultiCluster) return placeLabelColumns(base, labelCols);
     const nsIdx = base.findIndex((c) => c.id === "namespace");
     const insertAt = nsIdx >= 0 ? nsIdx + 1 : Math.min(1, base.length);
-    return [...base.slice(0, insertAt), CLUSTER_COL, ...base.slice(insertAt)];
-  }, [kind, singleNs, isMultiCluster]);
+    const withCluster = [
+      ...base.slice(0, insertAt),
+      CLUSTER_COL,
+      ...base.slice(insertAt),
+    ];
+    return placeLabelColumns(withCluster, labelCols);
+  }, [kind, singleNs, isMultiCluster, labelColumns]);
 
   const columns = useMemo<TanColumnDef<ScopedRow>[]>(() => {
     const cols: TanColumnDef<ScopedRow>[] = visibleColumns.map((c) => {
@@ -834,6 +877,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     body.addEventListener("scroll", onScroll, { passive: true });
     return () => body.removeEventListener("scroll", onScroll);
   }, []);
+
   const virtualizer = useVirtualizer({
     count: sortedRows.length,
     getScrollElement: () => scrollRef.current,
@@ -1146,6 +1190,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
           overflow: "hidden",
           display: "flex",
           flexDirection: "column",
+          position: "relative",
         }}
       >
         {/* Header */}
@@ -1302,6 +1347,15 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
               </div>
             );
           })}
+          {/* Column picker — last header cell, in the gutter reserved by the
+              body's matching paddingRight. As a flex child it stretches to the
+              full header height (no measurement, no half-height bug). */}
+          <ColumnPicker
+            available={labelKeys}
+            enabled={labelColumns}
+            onToggle={toggleLabelColumn}
+            onReset={resetLabelColumns}
+          />
         </div>
 
         {/* Partial-data strip: some members of a merged view failed to
@@ -1352,7 +1406,10 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
 
         <div
           ref={scrollRef}
-          style={{ flex: 1, overflow: "auto", minHeight: 0 }}
+          // paddingRight mirrors the header so columns stay aligned and the
+          // auto-fit (which measures this element's content box) fills the
+          // reduced width. The reserved strip reads as table right-padding.
+          style={{ flex: 1, overflow: "auto", minHeight: 0, paddingRight: COLMENU_W }}
           onClick={(e) => {
             // Delegated row click. Per-row onClick props were the biggest
             // source of GC pressure on large tables — every render
@@ -2220,12 +2277,17 @@ function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
   const font = isMonoCell(c) ? CELL_FONT_MONO : CELL_FONT_TEXT;
   let dataWidth = 0;
   for (const r of sample) {
-    const v = r[c.id];
+    const v = cellRaw(c, r);
     if (typeof v !== "string" && typeof v !== "number") continue;
     const w = measureText(String(v), font);
     if (w > dataWidth) dataWidth = w;
   }
-  return Math.ceil(Math.max(dataWidth, headerWidth)) + CHROME_PAD;
+  // Custom label columns size to their VALUES only — the label-derived header
+  // is often longer than the data (e.g. header "control-plane" over "true"
+  // cells) and would pad the column wide around mostly-short values. The
+  // header ellipsises instead. Built-in columns keep the header floor so the
+  // title stays fully readable.
+  return Math.ceil(Math.max(dataWidth, headerWidthFloor(c, headerWidth))) + CHROME_PAD;
 }
 
 // Natural width for the synthetic Cluster column — the longest *displayed*
@@ -2339,7 +2401,9 @@ function accessorFor(c: ColumnDef) {
     };
   }
   return (row: ResourceRow): string => {
-    const v = row[c.id];
+    // `cellRaw` so synthetic label columns (kind "text") sort by their
+    // `__labels` value rather than a missing top-level field.
+    const v = cellRaw(c, row);
     if (v == null) return "";
     return String(v);
   };
@@ -2442,7 +2506,9 @@ export function renderCell(
   ) => void,
   setSelectedNamespaces: (ns: Set<string>) => void,
 ) {
-  const value = row[c.id];
+  // Label columns read from `__labels`; everything else from the projected
+  // top-level field.
+  const value = cellRaw(c, row);
 
   // CPU / Mem on the Pods table are projected as null on the backend
   // (metrics-server fills them in via a side channel). Keep this branch

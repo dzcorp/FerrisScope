@@ -783,6 +783,22 @@ describe("metrics + prefs + table views", () => {
       view,
     });
   });
+
+  it("setTableView forwards label_columns intact", async () => {
+    const cap = captureNext({});
+    const view: Parameters<typeof api.setTableView>[2] = {
+      sorting: [],
+      column_sizing: {},
+      label_columns: ["topology.kubernetes.io/zone", "kubernetes.io/arch"],
+    };
+    await api.setTableView("ctx", "nodes", view);
+    expect(cap.calls[0]?.cmd).toBe("set_table_view");
+    expect(cap.calls[0]?.args).toEqual({
+      clusterId: "ctx",
+      kindId: "nodes",
+      view,
+    });
+  });
 });
 
 describe("Prometheus", () => {
