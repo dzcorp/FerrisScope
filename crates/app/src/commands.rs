@@ -1346,6 +1346,34 @@ pub(crate) async fn drop_cluster_watchers(
     // tasks stop retrying against the torn-down apiserver (the frontend's panel
     // close may never arrive on a backend-initiated disconnect).
     let logs_dropped = state.drop_cluster_logs(&cluster_id).await;
+    // Close terminal sessions (PTYs) owned by this cluster so they don't keep
+    // running after the operator leaves the tab, and delete each session's
+    // debug pod (kubectl-debug leaves it behind). Done BEFORE `remove_cluster`
+    // so the kube `Client` is still alive for the deletes — same ordering
+    // rationale as the chat close above.
+    let (terminals_closed, term_cleanups) = state
+        .terminals
+        .close_terminals_for_cluster(&cluster_id)
+        .await;
+    if !term_cleanups.is_empty() {
+        match state.get_existing(&cluster_id).await {
+            Some(entry) => {
+                let client = entry.cluster.client();
+                for cleanup in term_cleanups {
+                    spawn_delete_cleanup_pod(client.clone(), cleanup);
+                }
+            }
+            None => tracing::warn!(
+                cluster_id = %cluster_id,
+                "terminal cleanup: cluster entry already gone; debug pods may orphan (server-side TTL is the backstop)"
+            ),
+        }
+    }
+    // Stop UNPINNED simple port-forwards for this cluster. Pinned forwards are
+    // persisted to portforwards.json and intentionally survive a disconnect
+    // (they re-attach on the next connect), so only ephemeral ones are torn
+    // down here.
+    let forwards_stopped = state.portforwards.stop_cluster_forwards(&cluster_id).await;
     let dropped = drop_all_kind_watchers(&state, &cluster_id).await;
     let removed = state.remove_cluster(&cluster_id).await.is_some();
     // Drop the in-memory search-index handle. The writer task flushes its
@@ -1365,6 +1393,8 @@ pub(crate) async fn drop_cluster_watchers(
         cluster_id = %cluster_id,
         chats_closed,
         logs_dropped,
+        terminals_closed,
+        forwards_stopped,
         dropped,
         removed,
         index_closed,
@@ -3424,6 +3454,7 @@ pub(crate) async fn terminal_open_shell(
     state
         .terminals
         .spawn_with_extras(
+            cluster_id,
             on_event,
             SpawnSpec::Shell {
                 kubeconfig_path: path,
@@ -3449,6 +3480,7 @@ pub(crate) async fn terminal_open_exec(
     state
         .terminals
         .spawn_with_extras(
+            cluster_id,
             on_event,
             SpawnSpec::Exec {
                 kubeconfig_path: path,
@@ -3477,6 +3509,7 @@ pub(crate) async fn terminal_open_kubectl(
     state
         .terminals
         .spawn_with_extras(
+            cluster_id,
             on_event,
             SpawnSpec::Kubectl {
                 kubeconfig_path: path,
@@ -3513,66 +3546,69 @@ pub(crate) async fn terminal_resize(
     state.terminals.resize(&session_id, cols, rows).await
 }
 
+/// Best-effort background delete of a terminal session's cleanup pod
+/// (kubectl-debug / node-debug leaves the debug pod behind on exit). Fired as
+/// a detached task so a slow or failing delete never blocks tab teardown or
+/// cluster disconnect. Shared by `terminal_close` (one tab) and
+/// `drop_cluster_watchers` (every terminal owned by a cluster the operator just
+/// left). A `404` is logged at info (already gone, not a leak); anything else
+/// at warn (possible leak — the pod's server-side TTL / activeDeadline is the
+/// backstop). An empty name means the pod's name was never captured from
+/// kubectl output; there's nothing safe to delete, so we just surface it.
+fn spawn_delete_cleanup_pod(client: kube::Client, cleanup: PodCleanup) {
+    if cleanup.name.is_empty() {
+        tracing::warn!(
+            cluster = %cleanup.cluster_id,
+            namespace = %cleanup.namespace,
+            "terminal cleanup: debug pod name was never captured — possible leak"
+        );
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        match ferrisscope_kube_ext::delete_resource(
+            client,
+            "pods",
+            Some(&cleanup.namespace),
+            &cleanup.name,
+            Some(0),
+        )
+        .await
+        {
+            Ok(_) => tracing::info!(
+                namespace = %cleanup.namespace,
+                name = %cleanup.name,
+                "terminal cleanup: deleted debug pod"
+            ),
+            // 404 is expected if the pod was already collected (kubectl debug
+            // had failed to create it, the user deleted it manually, namespace
+            // GC fired, …). Log at info, not warn — it's not a leak.
+            Err(e) if format!("{e}").contains("NotFound") => tracing::info!(
+                namespace = %cleanup.namespace,
+                name = %cleanup.name,
+                "terminal cleanup: debug pod already gone"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                namespace = %cleanup.namespace,
+                name = %cleanup.name,
+                "terminal cleanup: failed to delete debug pod"
+            ),
+        }
+    });
+}
+
 #[tauri::command]
 pub(crate) async fn terminal_close(
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let cleanup = state.terminals.close(&session_id).await;
-    if let Some(c) = cleanup {
-        if c.name.is_empty() {
-            // Name was never captured from kubectl output (session closed
-            // before the debug pod creation line printed, kubectl errored
-            // out, etc.). Nothing safe to delete — skip and surface the leak
-            // for diagnostics.
-            tracing::warn!(
-                cluster = %c.cluster_id,
-                namespace = %c.namespace,
-                "terminal cleanup: debug pod name was never captured — possible leak"
-            );
-            return Ok(());
-        }
-        // Fire-and-forget: the operator already moved on (closed the tab),
-        // and a delete failure shouldn't block tab teardown. We do still log
-        // it so the leak is visible during debugging.
+    if let Some(c) = state.terminals.close(&session_id).await {
+        // Fire-and-forget: the operator already moved on (closed the tab), and
+        // a delete failure shouldn't block tab teardown. `entry` reuses the
+        // (normally still-connected) cluster's client; the delete itself runs
+        // in a detached task via `spawn_delete_cleanup_pod`.
         match state.entry(&c.cluster_id).await {
-            Ok(entry) => {
-                let client = entry.cluster.client();
-                tauri::async_runtime::spawn(async move {
-                    match ferrisscope_kube_ext::delete_resource(
-                        client,
-                        "pods",
-                        Some(&c.namespace),
-                        &c.name,
-                        Some(0),
-                    )
-                    .await
-                    {
-                        Ok(_) => tracing::info!(
-                            namespace = %c.namespace,
-                            name = %c.name,
-                            "terminal cleanup: deleted debug pod"
-                        ),
-                        // 404 is expected if the pod was already collected
-                        // (kubectl debug had failed to create it, the user
-                        // deleted it manually, namespace GC fired, …).
-                        // Log at info, not warn — it's not a leak.
-                        Err(e) if format!("{e}").contains("NotFound") => {
-                            tracing::info!(
-                                namespace = %c.namespace,
-                                name = %c.name,
-                                "terminal cleanup: debug pod already gone"
-                            );
-                        }
-                        Err(e) => tracing::warn!(
-                            error = %e,
-                            namespace = %c.namespace,
-                            name = %c.name,
-                            "terminal cleanup: failed to delete debug pod"
-                        ),
-                    }
-                });
-            }
+            Ok(entry) => spawn_delete_cleanup_pod(entry.cluster.client(), c),
             Err(e) => tracing::warn!(error = %e, "terminal cleanup: cluster gone"),
         }
     }

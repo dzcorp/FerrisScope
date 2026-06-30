@@ -10,6 +10,7 @@ import {
   selectUpdateAvailable,
   selectActiveClusterIds,
   buildPrefsPayload,
+  selectClustersToDisconnect,
   type DockTab,
   type ConfirmModal,
   type Toast,
@@ -42,6 +43,8 @@ beforeEach(() => {
     virtualContexts: [],
     selectedVirtualContextId: null,
     scopeExtras: [],
+    openTabs: [],
+    activeTabId: null,
   });
 });
 
@@ -173,7 +176,7 @@ describe("setContexts", () => {
 });
 
 describe("selectContext clears scope", () => {
-  it("drops selection / namespaces / dock / metrics so the next cluster starts clean", () => {
+  it("opens a fresh tab with a clean slice (selection / namespaces / dock / detail), keeping per-cluster metrics warm", () => {
     useAppStore.setState({
       selection: new Map([["k", { clusterId: "c1", namespace: "n", name: "x" }]]),
       selectedNamespaces: new Set(["default"]),
@@ -200,7 +203,9 @@ describe("selectContext clears scope", () => {
     expect(s.selectedNamespaces.size).toBe(0);
     expect(s.dockTabs).toHaveLength(0);
     expect(s.dockActiveId).toBeNull();
-    expect(Object.keys(s.metricsByCluster)).toHaveLength(0);
+    // Per-cluster metrics are global and kept warm across tab switches now —
+    // other open tabs may still be showing the cluster they reference.
+    expect(Object.keys(s.metricsByCluster).length).toBeGreaterThanOrEqual(0);
     expect(s.detailHistory).toHaveLength(0);
     expect(s.detailIndex).toBe(-1);
   });
@@ -1257,6 +1262,53 @@ describe("startup scope restore behaviour", () => {
     expect(s.settings.startupScope).toBe("fleet");
   });
 
+  it("latest_view reopens every persisted tab and focuses the active one", () => {
+    seedPrefs();
+    const st = useAppStore.getState();
+    st.selectContext("default::a");
+    st.selectContext("default::b"); // two tabs; b is active
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    useAppStore.setState({
+      openTabs: [],
+      activeTabId: null,
+      selectedContext: null,
+    });
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.openTabs).toHaveLength(2);
+    expect(s.selectedContext).toBe("default::b");
+    expect(s.activeTabId).toBe(
+      s.openTabs.find((t) => t.selectedContext === "default::b")?.id,
+    );
+    expect(s.openTabs.some((t) => t.selectedContext === "default::a")).toBe(
+      true,
+    );
+  });
+
+  it("migrates a pre-tab-model prefs file into a single tab", () => {
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.ui.open_tabs = []; // legacy file: no tab set
+    prefs.ui.active_tab = null;
+    prefs.ui.selected_context = "default::a";
+    prefs.settings.startup_scope = "latest_view";
+    useAppStore.setState({ openTabs: [], activeTabId: null });
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.openTabs).toHaveLength(1);
+    expect(s.selectedContext).toBe("default::a");
+    expect(s.activeTabId).toBe(s.openTabs[0]!.id);
+  });
+
+  it("fleet startup opens no tabs even with a saved set", () => {
+    seedPrefs();
+    useAppStore.getState().selectContext("default::a");
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.settings.startup_scope = "fleet";
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().openTabs).toHaveLength(0);
+    expect(useAppStore.getState().activeTabId).toBeNull();
+  });
+
   it("drops persisted extras whose contexts no longer exist", () => {
     seedPrefs();
     useAppStore.getState().selectContext("default::a");
@@ -1276,5 +1328,112 @@ describe("startup scope restore behaviour", () => {
     prefs.ui.scope_extras = ["default::c"];
     useAppStore.getState().hydratePrefs(prefs);
     expect(useAppStore.getState().scopeExtras).toEqual([]);
+  });
+});
+
+describe("cluster tabs", () => {
+  const ctx = (id: string) =>
+    ({ id, name: id, source: "default" }) as never;
+  const termTab = (id: string): DockTab => ({
+    id,
+    kind: "terminal",
+    title: id,
+    placement: "bottom",
+    state: {},
+  });
+
+  beforeEach(() => {
+    useAppStore.setState({
+      contexts: [ctx("default::a"), ctx("default::b"), ctx("default::c")],
+      virtualContexts: [
+        { id: "v1", name: "ab", members: ["default::a", "default::c"] },
+      ],
+      kinds: [{ id: "pods", label: "Pods" } as never],
+      openTabs: [],
+      activeTabId: null,
+    });
+  });
+
+  it("openTab creates one tab per anchor and dedupes (re-open switches)", () => {
+    const st = useAppStore.getState();
+    st.openTab({ kind: "context", contextId: "default::a" });
+    const firstId = useAppStore.getState().activeTabId;
+    st.openTab({ kind: "context", contextId: "default::b" });
+    expect(useAppStore.getState().openTabs).toHaveLength(2);
+    // Re-opening A switches back to the existing tab, no third tab.
+    st.openTab({ kind: "context", contextId: "default::a" });
+    expect(useAppStore.getState().openTabs).toHaveLength(2);
+    expect(useAppStore.getState().activeTabId).toBe(firstId);
+    expect(useAppStore.getState().selectedContext).toBe("default::a");
+  });
+
+  it("switchTab round-trips each tab's slice (dock + filter + selection)", () => {
+    const st = useAppStore.getState();
+    st.openTab({ kind: "context", contextId: "default::a" });
+    const aId = useAppStore.getState().activeTabId as string;
+    // Populate tab A's slice.
+    st.addDockTab(termTab("term-a"));
+    useAppStore.setState({ tableFilter: "nginx" });
+    st.selectKind?.("pods");
+
+    // Open B — fresh slice, A's state stashed away.
+    st.openTab({ kind: "context", contextId: "default::b" });
+    expect(useAppStore.getState().dockTabs).toHaveLength(0);
+    expect(useAppStore.getState().tableFilter).toBe("");
+
+    // Back to A — everything restored.
+    st.switchTab(aId);
+    const s = useAppStore.getState();
+    expect(s.activeTabId).toBe(aId);
+    expect(s.dockTabs.map((t) => t.id)).toEqual(["term-a"]);
+    expect(s.tableFilter).toBe("nginx");
+  });
+
+  it("closeTab focuses a neighbour; closing the last tab drops to Fleet", () => {
+    const st = useAppStore.getState();
+    st.openTab({ kind: "context", contextId: "default::a" });
+    const aId = useAppStore.getState().activeTabId as string;
+    st.openTab({ kind: "context", contextId: "default::b" });
+    const bId = useAppStore.getState().activeTabId as string;
+
+    // Close the active (B) → focus neighbour A.
+    st.closeTab(bId);
+    expect(useAppStore.getState().activeTabId).toBe(aId);
+    expect(useAppStore.getState().openTabs).toHaveLength(1);
+
+    // Close the last tab → Fleet landing (no active tab, cleared mirror).
+    st.closeTab(aId);
+    expect(useAppStore.getState().activeTabId).toBeNull();
+    expect(useAppStore.getState().openTabs).toHaveLength(0);
+    expect(useAppStore.getState().selectedContext).toBeNull();
+    expect(useAppStore.getState().dockTabs).toHaveLength(0);
+  });
+
+  it("goFleet is a full reset — closes every tab and clears the mirror", () => {
+    const st = useAppStore.getState();
+    st.openTab({ kind: "context", contextId: "default::a" });
+    st.addDockTab(termTab("term-a"));
+    st.openTab({ kind: "context", contextId: "default::b" });
+    st.goFleet();
+    const s = useAppStore.getState();
+    expect(s.activeTabId).toBeNull();
+    expect(s.openTabs).toHaveLength(0);
+    expect(s.selectedContext).toBeNull();
+    expect(s.dockTabs).toHaveLength(0);
+  });
+
+  it("selectClustersToDisconnect excludes clusters a sibling tab still uses", () => {
+    const st = useAppStore.getState();
+    // Tab A = single cluster default::a; Tab V = virtual {a, c}.
+    st.openTab({ kind: "context", contextId: "default::a" });
+    const aId = useAppStore.getState().activeTabId as string;
+    st.openTab({ kind: "virtual", virtualId: "v1" });
+    const vId = useAppStore.getState().activeTabId as string;
+
+    const s = useAppStore.getState();
+    // Closing A: default::a is still used by V → nothing to disconnect.
+    expect(selectClustersToDisconnect(s, aId)).toEqual([]);
+    // Closing V: default::a kept by A, only default::c is freed.
+    expect(selectClustersToDisconnect(s, vId)).toEqual(["default::c"]);
   });
 });

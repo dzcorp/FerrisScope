@@ -16,6 +16,7 @@ import {
 } from "../theme";
 import { IS_MAC } from "../lib/keyboard";
 import { ErrorBlock, Icons, Tooltip, resolveKindIcon } from "./ui";
+import { OpenClustersStrip } from "./OpenClustersStrip";
 
 const CATEGORY_ORDER: Category[] = [
   "Workloads",
@@ -271,6 +272,8 @@ export function Rail({}: Props) {
             padding: "10px 0 8px",
           }}
         >
+          {/* Open cluster tabs, above the kind list. Self-hides with <2 tabs. */}
+          <OpenClustersStrip t={t} open={open} />
           {kindsStatus === "error" ? (
             <div
               style={{

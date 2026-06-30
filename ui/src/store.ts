@@ -171,11 +171,57 @@ export type DetailEntry = {
   name: string;
 };
 
+/// Per-tab UI state snapshot. Everything here is scoped to a single open
+/// cluster tab and swapped wholesale by `switchTab`. The top-level store fields
+/// of the same names are the *live working copy* of the currently-active tab;
+/// inactive tabs keep their last-stashed copy in `ClusterTab.slice`. Keeping the
+/// top-level mirror means existing consumers (ResourceTable, DetailPanel, Dock,
+/// AppHeader) read `s.detailHistory` etc. unchanged — only `switchTab` and the
+/// Dock's cross-tab mount pool need to know about slices.
+export type ScopeSlice = {
+  selectedKindId: string | null;
+  selectedNamespaces: Set<string>;
+  selection: Map<string, SelectionMeta>;
+  detailHistory: DetailEntry[];
+  detailIndex: number;
+  pendingDetail: DetailEntry | null;
+  tableFilter: string;
+  filterEditing: boolean;
+  kindClusters: Record<string, string[]>;
+  dockTabs: DockTab[];
+  dockActiveId: string | null;
+  dockMin: Record<DockPlacement, boolean>;
+};
+
+/// One open cluster tab. The anchor (`selectedContext` xor
+/// `selectedVirtualContextId`) plus `scopeExtras` defines the scope; `slice`
+/// holds the preserved UI state. Two tabs may resolve to an overlapping set of
+/// physical clusters (a single-cluster tab and a virtual-context tab that
+/// includes it) — per-cluster backend state (metrics, health, reflectors) is
+/// shared across them, only the UI slice is per-tab.
+export type ClusterTab = {
+  id: string;
+  selectedContext: string | null;
+  selectedVirtualContextId: string | null;
+  scopeExtras: string[];
+  slice: ScopeSlice;
+};
+
 type AppState = {
   contexts: ContextInfo[];
   contextsStatus: Status;
   contextsError: string | null;
   selectedContext: string | null;
+
+  // Open cluster tabs. Each tab preserves its own UI slice (dock tabs,
+  // selection, detail history, filters…). `activeTabId === null` means the
+  // Fleet landing is showing (no tab focused) while open tabs are kept warm in
+  // the background. The top-level `selectedContext` / `selectedVirtualContextId`
+  // / `scopeExtras` plus every `ScopeSlice` field are the live working copy of
+  // the active tab; `switchTab` stashes them back into `openTabs` and hydrates
+  // the target. See `ScopeSlice` / `ClusterTab`.
+  openTabs: ClusterTab[];
+  activeTabId: string | null;
 
   // Saved multi-cluster views (mirrors `prefs.virtual_contexts`). A virtual
   // context opens all member clusters at once; resource tables merge rows
@@ -362,6 +408,23 @@ type AppState = {
   setContextsLoading: () => void;
   selectContext: (name: string | null) => void;
 
+  /// Open a cluster as a tab. If a tab already anchors this context/virtual id,
+  /// switch to it (preserving its state); otherwise stash the active tab and
+  /// push a fresh one. Passing the same id that's already active is a no-op.
+  openTab: (anchor:
+    | { kind: "context"; contextId: string }
+    | { kind: "virtual"; virtualId: string }) => void;
+  /// Switch the active tab. Stashes the current live state into the outgoing
+  /// tab and hydrates the target's slice. No-op if `id` isn't an open tab.
+  switchTab: (id: string) => void;
+  /// Close an open tab, focusing a neighbour (or the Fleet landing when it was
+  /// the last tab). Backend disconnect of now-unused clusters is the caller's
+  /// job — read `selectClustersToDisconnect` first, then call this.
+  closeTab: (id: string) => void;
+  /// Drop to the Fleet landing without losing any open tab's state (stashes the
+  /// active tab, sets `activeTabId = null`).
+  goFleet: () => void;
+
   /// Activate a saved virtual context (or none). Clears `selectedContext`
   /// and applies the same scope-change reset as `selectContext`.
   selectVirtualContext: (id: string | null) => void;
@@ -506,28 +569,180 @@ type AppState = {
   patchUpdateState: (patch: Partial<UpdateStateSlice>) => void;
 };
 
-/// Reset slice applied whenever the cluster scope changes (single-context
-/// switch or virtual-context switch): selection, namespace filter, dock,
-/// metrics, detail history, and the table filter all reference the previous
-/// scope's objects and must drop together.
-function scopeResetSlice() {
+/// Fresh per-tab UI slice for a newly-opened tab. `selectedKindId` is seeded by
+/// the caller (`openTab`) from the global kind list so a new tab lands on a
+/// sensible default kind instead of an empty table.
+function emptyScopeSlice(): ScopeSlice {
   return {
-    scopeExtras: [] as string[],
-    // Dynamic-kind availability is per-scope — the rail republishes after
-    // re-discovering CRDs on the new scope's members.
-    kindClusters: {} as Record<string, string[]>,
-    selection: new Map<string, SelectionMeta>(),
+    selectedKindId: null,
     selectedNamespaces: new Set<string>(),
-    dockTabs: [] as DockTab[],
-    dockActiveId: null as string | null,
-    dockMin: { bottom: false, right: false } as Record<DockPlacement, boolean>,
-    metricsByCluster: {} as Record<string, MetricsSnapshot>,
-    detailHistory: [] as DetailEntry[],
+    selection: new Map<string, SelectionMeta>(),
+    detailHistory: [],
     detailIndex: -1,
     pendingDetail: null,
     tableFilter: "",
     filterEditing: false,
+    // Dynamic-kind availability is per-scope — the rail republishes after
+    // re-discovering CRDs on the new scope's members.
+    kindClusters: {},
+    dockTabs: [],
+    dockActiveId: null,
+    dockMin: { bottom: false, right: false },
   };
+}
+
+/// Capture the active tab's live state (the top-level mirror) into a slice, so
+/// it can be stashed back into `openTabs` on switch / close / fleet.
+function captureScopeSlice(s: AppState): ScopeSlice {
+  return {
+    selectedKindId: s.selectedKindId,
+    selectedNamespaces: s.selectedNamespaces,
+    selection: s.selection,
+    detailHistory: s.detailHistory,
+    detailIndex: s.detailIndex,
+    pendingDetail: s.pendingDetail,
+    tableFilter: s.tableFilter,
+    filterEditing: s.filterEditing,
+    kindClusters: s.kindClusters,
+    dockTabs: s.dockTabs,
+    dockActiveId: s.dockActiveId,
+    dockMin: s.dockMin,
+  };
+}
+
+/// Top-level fields written when no tab is active (Fleet landing) — the live
+/// mirror is emptied so stale rows/dock/detail from the last active tab don't
+/// bleed onto the Fleet view. Anchor fields cleared too. Global per-cluster
+/// state (metrics, health, tableViews) is intentionally NOT touched.
+function fleetTopLevel() {
+  return {
+    selectedContext: null as string | null,
+    selectedVirtualContextId: null as string | null,
+    scopeExtras: [] as string[],
+    ...emptyScopeSlice(),
+  };
+}
+
+/// Write the active tab's live top-level state back into `openTabs`. No-op when
+/// no tab is active (Fleet landing).
+function stashActive(s: AppState): ClusterTab[] {
+  if (s.activeTabId === null) return s.openTabs;
+  return s.openTabs.map((t) =>
+    t.id === s.activeTabId
+      ? {
+          ...t,
+          selectedContext: s.selectedContext,
+          selectedVirtualContextId: s.selectedVirtualContextId,
+          scopeExtras: s.scopeExtras,
+          slice: captureScopeSlice(s),
+        }
+      : t,
+  );
+}
+
+/// Partial state that stashes the active tab and hydrates `id` as the new
+/// active tab. Empty partial (no-op) when `id` isn't open or is already active.
+function switchToTab(s: AppState, id: string): Partial<AppState> {
+  if (s.activeTabId === id) return {};
+  const target = s.openTabs.find((t) => t.id === id);
+  if (!target) return {};
+  return {
+    openTabs: stashActive(s),
+    activeTabId: id,
+    selectedContext: target.selectedContext,
+    selectedVirtualContextId: target.selectedVirtualContextId,
+    scopeExtras: target.scopeExtras,
+    ...target.slice,
+  };
+}
+
+/// Partial state focusing a neighbour after removing tabs in `closeIds` from
+/// `stashed` (which must already include the stashed active tab). Falls back to
+/// the Fleet landing when nothing remains.
+function focusAfterClose(
+  s: AppState,
+  stashed: ClusterTab[],
+  closeIds: string[],
+): Partial<AppState> {
+  const remaining = stashed.filter((t) => !closeIds.includes(t.id));
+  const activeClosed = s.activeTabId !== null && closeIds.includes(s.activeTabId);
+  if (!activeClosed) return { openTabs: remaining };
+  if (remaining.length === 0) {
+    return { openTabs: [], activeTabId: null, ...fleetTopLevel() };
+  }
+  // Prefer the tab that slid into the closed tab's slot (same index, clamped).
+  const oldIdx = stashed.findIndex((t) => t.id === s.activeTabId);
+  const next = remaining[Math.min(Math.max(oldIdx, 0), remaining.length - 1)];
+  if (!next) return { openTabs: [], activeTabId: null, ...fleetTopLevel() };
+  return {
+    openTabs: remaining,
+    activeTabId: next.id,
+    selectedContext: next.selectedContext,
+    selectedVirtualContextId: next.selectedVirtualContextId,
+    scopeExtras: next.scopeExtras,
+    ...next.slice,
+  };
+}
+
+/// Resolve a tab's scope to the set of physical cluster ids it spans (single
+/// context, virtual-context members, plus ad-hoc extras).
+function tabClusterIds(
+  s: Pick<AppState, "contexts" | "virtualContexts">,
+  tab: ClusterTab,
+): string[] {
+  return selectActiveClusterIds({
+    contexts: s.contexts,
+    selectedContext: tab.selectedContext,
+    virtualContexts: s.virtualContexts,
+    selectedVirtualContextId: tab.selectedVirtualContextId,
+    scopeExtras: tab.scopeExtras,
+  });
+}
+
+/// Clusters that closing `tabId` would leave with no remaining open tab — the
+/// set the caller should disconnect backend-side. Clusters shared by another
+/// open tab (e.g. a virtual-context member) are excluded. Pure; call before
+/// `closeTab` and feed the result to `api.closeClusterTab`.
+export function selectClustersToDisconnect(
+  s: Pick<AppState, "openTabs" | "contexts" | "virtualContexts">,
+  tabId: string,
+): string[] {
+  const tab = s.openTabs.find((t) => t.id === tabId);
+  if (!tab) return [];
+  const mine = tabClusterIds(s, tab);
+  const othersUse = new Set<string>();
+  for (const t of s.openTabs) {
+    if (t.id === tabId) continue;
+    for (const c of tabClusterIds(s, t)) othersUse.add(c);
+  }
+  return mine.filter((c) => !othersUse.has(c));
+}
+
+/// Apply `fn` to the dock tab with `id` wherever it lives — the active tab's
+/// live top-level `dockTabs`, or a background tab's stashed slice. A hidden
+/// tab's terminal/chat may still patch its own state (e.g. a chat streaming in
+/// the background); routing by ownership keeps that update off the active tab.
+function patchOwningDockTab(
+  s: AppState,
+  id: string,
+  fn: (t: DockTab) => DockTab,
+): Partial<AppState> {
+  if (s.dockTabs.some((t) => t.id === id)) {
+    return { dockTabs: s.dockTabs.map((t) => (t.id === id ? fn(t) : t)) };
+  }
+  let touched = false;
+  const openTabs = s.openTabs.map((tab) => {
+    if (!tab.slice.dockTabs.some((t) => t.id === id)) return tab;
+    touched = true;
+    return {
+      ...tab,
+      slice: {
+        ...tab.slice,
+        dockTabs: tab.slice.dockTabs.map((t) => (t.id === id ? fn(t) : t)),
+      },
+    };
+  });
+  return touched ? { openTabs } : {};
 }
 
 /// Make sure a detail-navigation target's namespace is visible. An active
@@ -551,6 +766,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   contextsStatus: "idle",
   contextsError: null,
   selectedContext: null,
+
+  openTabs: [],
+  activeTabId: null,
 
   virtualContexts: [],
   selectedVirtualContextId: null,
@@ -662,25 +880,80 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
   setContextsError: (err) =>
     set({ contextsStatus: "error", contextsError: err }),
+  // Opening / switching clusters now goes through the tab model. `null` drops
+  // to the Fleet landing without discarding any open tab's state.
   selectContext: (name) =>
-    set({
-      selectedContext: name,
-      selectedVirtualContextId: null,
-      // Cluster scope changed: drop any selection / dock / ns filter / metrics.
-      ...scopeResetSlice(),
-    }),
+    name === null
+      ? get().goFleet()
+      : get().openTab({ kind: "context", contextId: name }),
 
   selectVirtualContext: (id) =>
+    id === null
+      ? get().goFleet()
+      : get().openTab({ kind: "virtual", virtualId: id }),
+
+  openTab: (anchor) =>
     set((s) => {
-      // Reject ids that don't resolve — a stale palette entry or removed
-      // virtual context must not strand the app on an empty scope.
-      if (id !== null && !s.virtualContexts.some((v) => v.id === id)) return {};
+      // Already open under this anchor → switch, preserving its slice.
+      const existing =
+        anchor.kind === "context"
+          ? s.openTabs.find(
+              (t) =>
+                t.selectedContext === anchor.contextId &&
+                t.selectedVirtualContextId === null,
+            )
+          : s.openTabs.find(
+              (t) => t.selectedVirtualContextId === anchor.virtualId,
+            );
+      if (existing) return switchToTab(s, existing.id);
+
+      // Reject a virtual anchor that doesn't resolve — a stale palette entry or
+      // removed virtual context must not push an empty tab. Plain contexts are
+      // accepted even if not yet in `contexts` (kubeconfig may be transiently
+      // missing or still loading); `selectActiveClusterIds` filters members.
+      if (
+        anchor.kind === "virtual" &&
+        !s.virtualContexts.some((v) => v.id === anchor.virtualId)
+      ) {
+        return {};
+      }
+
+      const slice = emptyScopeSlice();
+      slice.selectedKindId = s.kinds[0]?.id ?? null;
+      const tab: ClusterTab = {
+        id: crypto.randomUUID(),
+        selectedContext: anchor.kind === "context" ? anchor.contextId : null,
+        selectedVirtualContextId:
+          anchor.kind === "virtual" ? anchor.virtualId : null,
+        scopeExtras: [],
+        slice,
+      };
       return {
-        selectedVirtualContextId: id,
-        selectedContext: null,
-        ...scopeResetSlice(),
+        openTabs: [...stashActive(s), tab],
+        activeTabId: tab.id,
+        selectedContext: tab.selectedContext,
+        selectedVirtualContextId: tab.selectedVirtualContextId,
+        scopeExtras: tab.scopeExtras,
+        ...slice,
       };
     }),
+
+  switchTab: (id) => set((s) => switchToTab(s, id)),
+
+  closeTab: (id) =>
+    set((s) => focusAfterClose(s, stashActive(s), [id])),
+
+  // Returning to Fleet is a full reset: close every open tab and clear the
+  // live mirror. App's open-tab→connection reconcile effect then disconnects
+  // all the now-unreferenced clusters (tearing down their watchers, terminals,
+  // chats and unpinned forwards). The caller (`goToFleet`) confirms first when
+  // live sessions would be lost.
+  goFleet: () =>
+    set(() => ({
+      openTabs: [],
+      activeTabId: null,
+      ...fleetTopLevel(),
+    })),
   saveVirtualContext: (name, members) => {
     const id = crypto.randomUUID();
     set((s) => ({
@@ -719,12 +992,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     }),
   deleteVirtualContext: (id) =>
-    set((s) => ({
-      virtualContexts: s.virtualContexts.filter((v) => v.id !== id),
-      ...(s.selectedVirtualContextId === id
-        ? { selectedVirtualContextId: null, ...scopeResetSlice() }
-        : {}),
-    })),
+    set((s) => {
+      const virtualContexts = s.virtualContexts.filter((v) => v.id !== id);
+      // Close any open tab anchored on the deleted virtual context — its scope
+      // no longer resolves.
+      const closeIds = s.openTabs
+        .filter((t) => t.selectedVirtualContextId === id)
+        .map((t) => t.id);
+      if (closeIds.length === 0) return { virtualContexts };
+      return {
+        virtualContexts,
+        ...focusAfterClose(s, stashActive(s), closeIds),
+      };
+    }),
   addScopeExtra: (contextId) =>
     set((s) => {
       if (!s.contexts.some((c) => c.id === contextId)) return {};
@@ -886,6 +1166,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
   closeDockTab: (id) => {
     const s = get();
+    // Defensive: a dock tab owned by a backgrounded cluster tab (closed e.g.
+    // via a background lifecycle) lives in that tab's slice, not the live
+    // top-level. Remove it there and fix that slice's active id.
+    if (!s.dockTabs.some((t) => t.id === id)) {
+      set({
+        openTabs: s.openTabs.map((tab) => {
+          if (!tab.slice.dockTabs.some((t) => t.id === id)) return tab;
+          const rest = tab.slice.dockTabs.filter((t) => t.id !== id);
+          return {
+            ...tab,
+            slice: {
+              ...tab.slice,
+              dockTabs: rest,
+              dockActiveId:
+                tab.slice.dockActiveId === id
+                  ? (rest[rest.length - 1]?.id ?? null)
+                  : tab.slice.dockActiveId,
+            },
+          };
+        }),
+      });
+      return;
+    }
     const closing = s.dockTabs.find((t) => t.id === id);
     const closingPlacement = closing?.placement ?? "bottom";
     const next = s.dockTabs.filter((t) => t.id !== id);
@@ -927,15 +1230,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   setDockSize: (placement, size) =>
     set((s) => ({ dockSize: { ...s.dockSize, [placement]: size } })),
   patchDockTabState: (id, patch) =>
-    set((s) => ({
-      dockTabs: s.dockTabs.map((t) =>
-        t.id === id ? { ...t, state: { ...t.state, ...patch } } : t,
-      ),
-    })),
+    set((s) =>
+      patchOwningDockTab(s, id, (t) => ({
+        ...t,
+        state: { ...t.state, ...patch },
+      })),
+    ),
   patchDockTab: (id, patch) =>
-    set((s) => ({
-      dockTabs: s.dockTabs.map((t) => (t.id === id ? { ...t, ...patch } : t)),
-    })),
+    set((s) => patchOwningDockTab(s, id, (t) => ({ ...t, ...patch }))),
 
   setSelection: (sel) => set({ selection: sel }),
   toggleSelection: (uid, meta) =>
@@ -1098,22 +1400,112 @@ export const useAppStore = create<AppState>((set, get) => ({
                 s.contexts.length === 0 || s.contexts.some((c) => c.id === e),
             )
           : [];
+
+      // Persisted kind, validated against the (possibly not-yet-loaded) kind
+      // list. Used both for the active tab's mirror and to seed restored tabs.
+      const restoredKindId =
+        prefs.ui.selected_kind_id &&
+        (s.kinds.length === 0 ||
+          s.kinds.some((k) => k.id === prefs.ui.selected_kind_id))
+          ? prefs.ui.selected_kind_id
+          : null;
+
+      // Reconstruct the open cluster tabs (refs only — live slices like
+      // terminals/chats can't survive a restart). "fleet" ignores the saved
+      // set; "latest_cluster" keeps only the active tab; "latest_view" reopens
+      // everything. A tab whose anchor no longer resolves is dropped (lenient
+      // while the kubeconfig list is still loading — `s.contexts` empty).
+      const refResolves = (ref: {
+        selected_context: string | null;
+        selected_virtual_context: string | null;
+      }) => {
+        if (ref.selected_virtual_context) {
+          return virtualContexts.some(
+            (v) => v.id === ref.selected_virtual_context,
+          );
+        }
+        if (ref.selected_context) {
+          return (
+            s.contexts.length === 0 ||
+            s.contexts.some((c) => c.id === ref.selected_context)
+          );
+        }
+        return false;
+      };
+      const makeTabSlice = (): ScopeSlice => {
+        const sl = emptyScopeSlice();
+        sl.selectedKindId = restoredKindId;
+        return sl;
+      };
+      // One tab built from the legacy single-anchor fields — used for
+      // "latest_cluster" (which strips vctx + extras above) and as the
+      // migration path for pre-tabs prefs files under "latest_view".
+      const singleAnchorTab = (): ClusterTab[] => {
+        if (selectedContext === null && selectedVirtualContextId === null) {
+          return [];
+        }
+        return [
+          {
+            id: crypto.randomUUID(),
+            selectedContext,
+            selectedVirtualContextId,
+            scopeExtras,
+            slice: makeTabSlice(),
+          },
+        ];
+      };
+
+      let openTabs: ClusterTab[];
+      let activeTabId: string | null;
+      if (startupScope === "fleet") {
+        // Fleet ignores the saved set entirely.
+        openTabs = [];
+        activeTabId = null;
+      } else if (startupScope === "latest_cluster") {
+        openTabs = singleAnchorTab();
+        activeTabId = openTabs[0]?.id ?? null;
+      } else {
+        // latest_view: reopen the full persisted set; fall back to the single
+        // anchor when the file predates the tab model.
+        const refs = (prefs.ui.open_tabs ?? []).filter(refResolves);
+        if (refs.length > 0) {
+          openTabs = refs.map((ref) => ({
+            id: ref.id || crypto.randomUUID(),
+            selectedContext: ref.selected_virtual_context
+              ? null
+              : (ref.selected_context ?? null),
+            selectedVirtualContextId: ref.selected_virtual_context ?? null,
+            scopeExtras: ref.scope_extras ?? [],
+            slice: makeTabSlice(),
+          }));
+          const wantActive = prefs.ui.active_tab ?? null;
+          activeTabId = (
+            openTabs.find((tb) => tb.id === wantActive) ?? openTabs[0]!
+          ).id;
+        } else {
+          openTabs = singleAnchorTab();
+          activeTabId = openTabs[0]?.id ?? null;
+        }
+      }
+      const activeTab = openTabs.find((tb) => tb.id === activeTabId) ?? null;
+
       return {
+      openTabs,
+      activeTabId,
       themeMode,
       themeId,
       paletteId,
       themeOverrides,
       railMode: prefs.ui.rail_mode,
       virtualContexts,
-      selectedVirtualContextId,
-      selectedContext,
-      scopeExtras,
-      selectedKindId:
-        prefs.ui.selected_kind_id &&
-        (s.kinds.length === 0 ||
-          s.kinds.some((k) => k.id === prefs.ui.selected_kind_id))
-          ? prefs.ui.selected_kind_id
-          : s.selectedKindId,
+      // The top-level anchor mirror follows the active tab (which `active_tab`
+      // chose), not the legacy single-selection fields.
+      selectedVirtualContextId: activeTab
+        ? activeTab.selectedVirtualContextId
+        : null,
+      selectedContext: activeTab ? activeTab.selectedContext : null,
+      scopeExtras: activeTab ? activeTab.scopeExtras : [],
+      selectedKindId: activeTab ? activeTab.slice.selectedKindId : null,
       selectedNamespaces: new Set(prefs.ui.selected_namespaces),
       dockSize: {
         right: prefs.ui.dock_size_right,
@@ -1321,6 +1713,8 @@ export function buildPrefsPayload(s: {
   dockSize: Record<DockPlacement, number | null>;
   updateState: UpdateStateSlice;
   virtualContexts: VirtualContext[];
+  openTabs: ClusterTab[];
+  activeTabId: string | null;
 }): Prefs {
   return {
     theme: {
@@ -1350,6 +1744,25 @@ export function buildPrefsPayload(s: {
       rail_mode: s.railMode,
       dock_size_right: s.dockSize.right,
       dock_size_bottom: s.dockSize.bottom,
+      // Open cluster tabs, refs only. The active tab's anchor lives in the live
+      // top-level mirror (the slice in `openTabs` is stale until the next
+      // switch), so overlay it here rather than reading the stashed copy.
+      open_tabs: s.openTabs.map((tab) =>
+        tab.id === s.activeTabId
+          ? {
+              id: tab.id,
+              selected_context: s.selectedContext,
+              selected_virtual_context: s.selectedVirtualContextId,
+              scope_extras: s.scopeExtras,
+            }
+          : {
+              id: tab.id,
+              selected_context: tab.selectedContext,
+              selected_virtual_context: tab.selectedVirtualContextId,
+              scope_extras: tab.scopeExtras,
+            },
+      ),
+      active_tab: s.activeTabId,
     },
     update: {
       last_known_version: s.updateState.lastKnownVersion,

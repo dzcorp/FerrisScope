@@ -43,6 +43,29 @@ fn retain_other_cluster<V>(map: &mut HashMap<StreamId, (ClusterId, V)>, cluster_
     before - map.len()
 }
 
+/// Select the ids of **unpinned** forwards belonging to `cluster_id` — the
+/// ones to stop on disconnect. `forwards` yields `(id, owning_cluster_id,
+/// autostart_default)` for each live forward; `overrides` is the pin side-map
+/// (`PortForwardRegistry::pin_overrides`). A forward is *pinned* iff
+/// `overrides[id]` is set, else its `autostart_default` — the exact rule
+/// `persist_forwards` uses. Pinned forwards survive a disconnect (they
+/// re-attach on the next connect), so only unpinned ones are selected. Pulled
+/// out as a free fn so the pin/cluster decision is unit-testable without a
+/// `ForwardHandle` (which needs a live kube `Client`), mirroring
+/// `retain_other_cluster`. Used by `PortForwardRegistry::stop_cluster_forwards`.
+fn select_unpinned_cluster_forwards<'a>(
+    forwards: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
+    overrides: &HashMap<String, bool>,
+    cluster_id: &str,
+) -> Vec<String> {
+    forwards
+        .into_iter()
+        .filter(|&(_, cid, _)| cid == cluster_id)
+        .filter(|&(id, _, autostart)| !overrides.get(id).copied().unwrap_or(autostart))
+        .map(|(id, _, _)| id.to_owned())
+        .collect()
+}
+
 pub(crate) struct ClusterEntry {
     pub(crate) cluster: Arc<Cluster>,
     /// One refcounted slot per resource kind id (see `ferrisscope_kube_ext::registry`).
@@ -240,6 +263,46 @@ impl Default for PortForwardRegistry {
             pin_overrides: Mutex::new(HashMap::new()),
             status_tx: ferrisscope_kube_ext::new_status_channel(),
         }
+    }
+}
+
+impl PortForwardRegistry {
+    /// Stop every **unpinned** simple forward owned by `cluster_id`, returning
+    /// the count stopped. Called on cluster disconnect
+    /// (`drop_cluster_watchers`). Pinned forwards (persisted in
+    /// `portforwards.json`) are left running so a reconnect re-attaches them;
+    /// only ephemeral forwards are torn down. Dropping each
+    /// `Arc<ForwardHandle>` aborts its listener task; a `Stopped` status is
+    /// broadcast per id so the UI updates without waiting on the now-dead task.
+    /// The pin override for each stopped id is dropped too (it would otherwise
+    /// linger forever). Mirrors `pf_stop`, batched by cluster and pin-aware.
+    ///
+    /// Both locks are held across selection and removal so a concurrent
+    /// pin-toggle / start can't race the decision.
+    pub(crate) async fn stop_cluster_forwards(&self, cluster_id: &str) -> usize {
+        let mut by_id = self.by_id.lock().await;
+        let mut overrides = self.pin_overrides.lock().await;
+        let ids = select_unpinned_cluster_forwards(
+            by_id.values().map(|h| {
+                (
+                    h.spec.id.as_str(),
+                    h.spec.cluster_id.as_str(),
+                    h.spec.autostart,
+                )
+            }),
+            &overrides,
+            cluster_id,
+        );
+        let mut stopped = 0;
+        for id in ids {
+            if let Some(handle) = by_id.remove(&id) {
+                let _ = self.status_tx.send((id.clone(), ForwardStatus::Stopped));
+                drop(handle);
+                overrides.remove(&id);
+                stopped += 1;
+            }
+        }
+        stopped
     }
 }
 
@@ -515,5 +578,41 @@ mod tests {
         // A cluster with nothing registered drops nothing.
         assert_eq!(retain_other_cluster(&mut map, "c-absent"), 0);
         assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn stop_cluster_forwards_selects_only_unpinned_of_cluster() {
+        use super::select_unpinned_cluster_forwards;
+        use std::collections::HashMap;
+
+        // (id, owning cluster, autostart-default-from-spec)
+        let forwards = [
+            ("c1/a", "c1", false), // unpinned             -> stop
+            ("c1/b", "c1", true),  // pinned by spec       -> keep
+            ("c1/c", "c1", false), // override = pinned    -> keep
+            ("c1/d", "c1", true),  // override = unpinned  -> stop
+            ("c2/a", "c2", false), // other cluster        -> keep
+        ];
+        let mut overrides: HashMap<String, bool> = HashMap::new();
+        overrides.insert("c1/c".into(), true);
+        overrides.insert("c1/d".into(), false);
+
+        // Disconnecting c1 stops only its unpinned forwards; pinned ones (by
+        // spec or by override) and every c2 forward survive.
+        let mut got = select_unpinned_cluster_forwards(
+            forwards.iter().map(|&(i, c, a)| (i, c, a)),
+            &overrides,
+            "c1",
+        );
+        got.sort();
+        assert_eq!(got, vec!["c1/a".to_string(), "c1/d".to_string()]);
+
+        // A cluster with no forwards selects nothing.
+        let none = select_unpinned_cluster_forwards(
+            forwards.iter().map(|&(i, c, a)| (i, c, a)),
+            &overrides,
+            "c-absent",
+        );
+        assert!(none.is_empty());
     }
 }

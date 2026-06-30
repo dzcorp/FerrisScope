@@ -276,6 +276,22 @@ export type PrefsUiState = {
   /// Persisted dock pane sizes. `null` ⇒ use the first-launch default.
   dock_size_right: number | null;
   dock_size_bottom: number | null;
+  /// Open cluster tabs (refs only — live slices like terminals/chats are
+  /// ephemeral and never restored). Reopened on launch under
+  /// `startup_scope: "latest_view"` (full set) / `"latest_cluster"` (active
+  /// only); ignored under `"fleet"`. Optional for transitional payloads.
+  open_tabs?: PrefsTabRef[];
+  /// Id of the tab that was active at quit, restored as the focused tab.
+  active_tab?: string | null;
+};
+
+/// One persisted open cluster tab. Anchor is a context id xor a virtual-context
+/// id, plus any ad-hoc scope extras. Mirrors `crates/core/src/prefs.rs::TabRef`.
+export type PrefsTabRef = {
+  id: string;
+  selected_context: string | null;
+  selected_virtual_context: string | null;
+  scope_extras: string[];
 };
 
 /// A saved multi-cluster view: a user-named set of kubeconfig contexts that

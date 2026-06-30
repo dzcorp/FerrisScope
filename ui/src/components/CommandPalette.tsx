@@ -5,6 +5,7 @@ import { Icons, Kbd, resolveKindIcon } from "./ui";
 import { MOD_KEY } from "../lib/keyboard";
 import { api } from "../api";
 import { mergeSearchHits } from "../lib/multiCluster";
+import { goToFleet } from "../lib/clusterTabs";
 import type { SearchHit } from "../types";
 
 type Item = {
@@ -264,9 +265,9 @@ export function CommandPalette({ mode, onClose }: Props) {
           </span>
         ),
         label: "Disconnect from cluster",
-        sub: "Return to the fleet landing screen",
+        sub: "Close all tabs and return to the fleet landing screen",
         keywords: "disconnect home fleet",
-        action: () => selectContext(null),
+        action: () => void goToFleet(),
       });
     }
 

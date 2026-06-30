@@ -104,6 +104,8 @@ const resetVctxState = () =>
       selectedVirtualContextId: null,
       selectedContext: null,
       scopeExtras: [],
+      openTabs: [],
+      activeTabId: null,
     });
   });
 

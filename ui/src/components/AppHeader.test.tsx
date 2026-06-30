@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, cleanup } from "@testing-library/react";
+import { render, cleanup, act, fireEvent } from "@testing-library/react";
+import { useAppStore } from "../store";
 
 // Control IS_MAC per-test. The header is a single row everywhere. On macOS
 // the brand is wrapped in its own block that is `transform: translateY` nudged
@@ -109,5 +110,98 @@ describe("AppHeader layout", () => {
     const { container } = renderHeader();
     const shell = container.firstChild as HTMLElement;
     expect(shell.style.background).not.toContain("rgba");
+  });
+});
+
+describe("AppHeader cluster switcher", () => {
+  const ctx = (id: string) => ({ id, name: id, source: "default" }) as never;
+
+  function seedTwoTabs() {
+    act(() => {
+      useAppStore.setState({
+        contexts: [ctx("default::alpha"), ctx("default::beta")],
+        virtualContexts: [],
+        kinds: [],
+        openTabs: [],
+        activeTabId: null,
+      });
+      useAppStore
+        .getState()
+        .openTab({ kind: "context", contextId: "default::alpha" });
+      useAppStore
+        .getState()
+        .openTab({ kind: "context", contextId: "default::beta" });
+    });
+    return useAppStore;
+  }
+
+  it("shows a switcher dropdown on the active cluster name and switches", () => {
+    const store = seedTwoTabs();
+    const { getByText, queryByTestId, getAllByText } = render(
+      <AppHeader
+        mode="dark"
+        context={ctx("default::beta")}
+        selectedKindLabel={null}
+        unreadNotifications={0}
+        activeForwards={0}
+        onHome={noop}
+        onPalette={noop}
+        onToggleTheme={noop}
+        onOpenNotifications={noop}
+        onOpenSettings={noop}
+        onOpenForwards={noop}
+      />,
+    );
+    // Closed initially.
+    expect(queryByTestId("cluster-switcher-menu")).toBeNull();
+    // Open via the cluster-name button (the breadcrumb shows "default::beta").
+    fireEvent.click(getAllByText("default::beta")[0]!);
+    const menu = queryByTestId("cluster-switcher-menu");
+    expect(menu).toBeTruthy();
+    // Must be a body-portaled fixed overlay above the dock (not absolute inside
+    // the header's stacking context, which would paint behind the terminal),
+    // and scroll when the cluster list is long.
+    expect(menu!.parentElement).toBe(document.body);
+    expect((menu as HTMLElement).style.position).toBe("fixed");
+    expect((menu as HTMLElement).style.overflowY).toBe("auto");
+    // Pick alpha from the menu → store switches.
+    fireEvent.click(getByText("default::alpha"));
+    expect(store.getState().selectedContext).toBe("default::alpha");
+  });
+
+  it("opens a new tab for an available (not-yet-open) cluster", () => {
+    act(() => {
+      useAppStore.setState({
+        contexts: [ctx("default::alpha"), ctx("default::beta")],
+        virtualContexts: [],
+        kinds: [],
+        openTabs: [],
+        activeTabId: null,
+      });
+      // Only alpha is open; beta is available to add.
+      useAppStore
+        .getState()
+        .openTab({ kind: "context", contextId: "default::alpha" });
+    });
+    const { getByText, getAllByText } = render(
+      <AppHeader
+        mode="dark"
+        context={ctx("default::alpha")}
+        selectedKindLabel={null}
+        unreadNotifications={0}
+        activeForwards={0}
+        onHome={noop}
+        onPalette={noop}
+        onToggleTheme={noop}
+        onOpenNotifications={noop}
+        onOpenSettings={noop}
+        onOpenForwards={noop}
+      />,
+    );
+    fireEvent.click(getAllByText("default::alpha")[0]!);
+    // beta appears under "Open another" → click adds it as a new tab.
+    fireEvent.click(getByText("default::beta"));
+    expect(useAppStore.getState().openTabs).toHaveLength(2);
+    expect(useAppStore.getState().selectedContext).toBe("default::beta");
   });
 });

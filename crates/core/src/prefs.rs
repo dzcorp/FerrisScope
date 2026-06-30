@@ -293,6 +293,31 @@ pub struct UiState {
     pub dock_size_right: Option<u32>,
     #[serde(default)]
     pub dock_size_bottom: Option<u32>,
+    /// Open cluster tabs (refs only — live session contents such as terminals
+    /// and chats are ephemeral and never persisted). Reopened on launch under
+    /// `StartupScope::LatestView` (full set) / `LatestCluster` (active tab
+    /// only); ignored under `Fleet`. Empty for pre-tab-model prefs files; the
+    /// frontend migrates the single `selected_context` into one tab in that
+    /// case.
+    #[serde(default)]
+    pub open_tabs: Vec<TabRef>,
+    /// Id of the tab that was active at quit, restored as the focused tab.
+    #[serde(default)]
+    pub active_tab: Option<String>,
+}
+
+/// One persisted open cluster tab. Anchor is a context id xor a virtual-context
+/// id, plus any ad-hoc scope extras. The frontend owns the live UI slice
+/// (selection, dock tabs, detail history); only the scope ref is durable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TabRef {
+    pub id: String,
+    #[serde(default)]
+    pub selected_context: Option<String>,
+    #[serde(default)]
+    pub selected_virtual_context: Option<String>,
+    #[serde(default)]
+    pub scope_extras: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -402,6 +427,49 @@ mod tests {
             prefs.update.auto_check_enabled,
             "auto_check_enabled must default to true so legacy installs opt in"
         );
+    }
+
+    #[test]
+    fn open_tabs_round_trip_through_parse_and_serialize() {
+        let mut prefs = Prefs::default();
+        prefs.ui.open_tabs = vec![
+            TabRef {
+                id: "t1".into(),
+                selected_context: Some("default::a".into()),
+                selected_virtual_context: None,
+                scope_extras: vec![],
+            },
+            TabRef {
+                id: "t2".into(),
+                selected_context: None,
+                selected_virtual_context: Some("v1".into()),
+                scope_extras: vec!["default::c".into()],
+            },
+        ];
+        prefs.ui.active_tab = Some("t2".into());
+
+        let json = serde_json::to_string(&prefs).expect("serialize");
+        let back = parse(&json);
+        assert_eq!(back.ui.open_tabs.len(), 2);
+        assert_eq!(back.ui.open_tabs[0].id, "t1");
+        assert_eq!(
+            back.ui.open_tabs[1].selected_virtual_context.as_deref(),
+            Some("v1")
+        );
+        assert_eq!(back.ui.open_tabs[1].scope_extras, vec!["default::c"]);
+        assert_eq!(back.ui.active_tab.as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn legacy_prefs_without_open_tabs_default_to_empty() {
+        // A prefs.json predating the cluster-tab model must load with an empty
+        // tab set and no active tab — the frontend then migrates the single
+        // `selected_context` into one tab.
+        let legacy = r#"{ "theme": "dark", "ui": { "selected_context": "default::a" } }"#;
+        let prefs = parse(legacy);
+        assert!(prefs.ui.open_tabs.is_empty());
+        assert_eq!(prefs.ui.active_tab, None);
+        assert_eq!(prefs.ui.selected_context.as_deref(), Some("default::a"));
     }
 
     #[test]

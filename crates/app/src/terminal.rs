@@ -83,6 +83,14 @@ pub(crate) enum TerminalEvent {
 }
 
 pub(crate) struct Session {
+    /// Composite cluster id (`ContextInfo::id`) that owns this session —
+    /// recorded so a cluster disconnect can close every terminal it owns
+    /// (`close_terminals_for_cluster`). For kubectl-debug sessions this is
+    /// the same id carried in `cleanup`, but plain Shell / Exec sessions have
+    /// no cleanup pod, so this field is their only owner record. It's the id
+    /// passed to every `terminal_open_*` command, so the values match the one
+    /// `drop_cluster_watchers` is invoked with.
+    cluster_id: String,
     master: StdMutex<Box<dyn MasterPty + Send>>,
     writer: StdMutex<Box<dyn Write + Send>>,
     child: StdMutex<Box<dyn portable_pty::Child + Send + Sync>>,
@@ -132,6 +140,19 @@ impl Session {
         })
         .map_err(|e| std::io::Error::other(e.to_string()))
     }
+
+    /// Force-kill the PTY child now. Same mechanism as `Session::Drop`, but
+    /// callable while other `Arc<Session>` clones are still alive — notably
+    /// the output reader thread, which holds a clone until its next read sees
+    /// EOF. On a backend-initiated close (cluster disconnect) the frontend may
+    /// not have dropped its event channel yet, so `Drop` wouldn't fire and a
+    /// plain local shell would keep running; killing the child makes the
+    /// reader's next read return EOF, so it exits and releases its clone.
+    fn kill_child(&self) {
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -155,6 +176,7 @@ impl TerminalRegistry {
     /// stops — there's nothing useful to do with bytes nobody is listening for.
     pub(crate) async fn spawn_with_extras(
         &self,
+        cluster_id: String,
         on_event: tauri::ipc::Channel<TerminalEvent>,
         spec: SpawnSpec,
         extras: Vec<PathBuf>,
@@ -195,6 +217,7 @@ impl TerminalRegistry {
             _ => None,
         };
         let session = Arc::new(Session {
+            cluster_id,
             master: StdMutex::new(pair.master),
             writer: StdMutex::new(writer),
             child: StdMutex::new(child),
@@ -228,6 +251,51 @@ impl TerminalRegistry {
         let removed = self.sessions.lock().await.remove(id);
         removed.and_then(|s| s.cleanup.lock().ok().and_then(|mut g| g.take()))
     }
+
+    /// Close every terminal session owned by `cluster_id` — the cluster-
+    /// disconnect counterpart of `close`. Force-kills each session's PTY
+    /// child and returns `(closed_count, cleanups)`, where `cleanups` are the
+    /// `PodCleanup` descriptors of the closed sessions that own a debug pod.
+    /// The registry has no kube `Client`, so (exactly like `close`) the actual
+    /// pod delete is a two-step: this returns the descriptors and the command
+    /// layer fires the deletes with a live `Client`. Plain shell / exec
+    /// sessions are closed + counted but contribute no descriptor.
+    pub(crate) async fn close_terminals_for_cluster(
+        &self,
+        cluster_id: &str,
+    ) -> (usize, Vec<PodCleanup>) {
+        let removed = {
+            let mut map = self.sessions.lock().await;
+            drain_cluster_sessions(&mut map, cluster_id, |s| s.cluster_id.as_str())
+        };
+        let closed = removed.len();
+        let mut cleanups = Vec::new();
+        for session in removed {
+            session.kill_child();
+            if let Some(c) = session.cleanup.lock().ok().and_then(|mut g| g.take()) {
+                cleanups.push(c);
+            }
+        }
+        (closed, cleanups)
+    }
+}
+
+/// Remove and return every value in `map` whose owning cluster (via
+/// `cluster_of`) equals `cluster_id`. Pulled out as a free generic so the
+/// cluster-selection logic is unit-testable without constructing a real
+/// `Session` (which needs a live PTY) — same pattern as
+/// `state::retain_other_cluster`. Used by `close_terminals_for_cluster`.
+fn drain_cluster_sessions<V>(
+    map: &mut HashMap<String, V>,
+    cluster_id: &str,
+    cluster_of: impl Fn(&V) -> &str,
+) -> Vec<V> {
+    let ids: Vec<String> = map
+        .iter()
+        .filter(|(_, v)| cluster_of(v) == cluster_id)
+        .map(|(id, _)| id.clone())
+        .collect();
+    ids.into_iter().filter_map(|id| map.remove(&id)).collect()
 }
 
 fn forward_output(
@@ -616,4 +684,32 @@ fn source_context_cluster_user(
     }
     tracing::warn!(?source, %context_name, "scratch kubeconfig: context not found in source");
     (None, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    #[test]
+    fn drain_cluster_sessions_removes_only_named_cluster() {
+        // Values stand in for `Arc<Session>`; the selector returns each
+        // value's owning cluster id. A real `Session` needs a live PTY, so we
+        // exercise the pure selection logic exactly as `state.rs` tests
+        // `retain_other_cluster`.
+        let mut map: HashMap<String, String> = HashMap::new();
+        map.insert("t1".into(), "c1".into());
+        map.insert("t2".into(), "c1".into());
+        map.insert("t3".into(), "c2".into());
+
+        // Closing c1 drains its two sessions and leaves c2's alone.
+        let drained = super::drain_cluster_sessions(&mut map, "c1", |v| v.as_str());
+        assert_eq!(drained.len(), 2, "both c1 sessions drained");
+        assert_eq!(map.len(), 1, "only c2 left");
+        assert!(map.contains_key("t3"));
+
+        // A cluster with no sessions drains nothing and leaves the map intact.
+        let none = super::drain_cluster_sessions(&mut map, "c-absent", |v| v.as_str());
+        assert!(none.is_empty());
+        assert_eq!(map.len(), 1);
+    }
 }
