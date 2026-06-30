@@ -22,7 +22,10 @@ export type RowActionContext = {
 
 // Per HV2PodMenu, pod actions surface in this order with destructive items
 // (Delete) trailing — R-04: never the default action of the group.
-export function actionsForRow(ctx: RowActionContext): MenuItem[] {
+export function actionsForRow(
+  ctx: RowActionContext,
+  opts?: { readOnly?: boolean },
+): MenuItem[] {
   const {
     kind,
     row,
@@ -33,6 +36,9 @@ export function actionsForRow(ctx: RowActionContext): MenuItem[] {
     openPortForward,
     restart,
   } = ctx;
+  // Cluster degraded (unavailable / mid auto-reconnect): every mutating item
+  // disables, but View details / View logs / Copy stay live.
+  const readOnly = opts?.readOnly ?? false;
   const name = String(row.name ?? "");
   const ns = typeof row.namespace === "string" ? row.namespace : null;
   const qualified = ns ? `${ns}/${name}` : name;
@@ -56,21 +62,32 @@ export function actionsForRow(ctx: RowActionContext): MenuItem[] {
         kind: "item",
         label: "Exec shell",
         onClick: openExec,
-        disabled: containers.length === 0,
+        disabled: containers.length === 0 || readOnly,
       });
     if (openYamlEdit)
-      items.push({ kind: "item", label: "Edit YAML", onClick: openYamlEdit });
+      items.push({
+        kind: "item",
+        label: "Edit YAML",
+        onClick: openYamlEdit,
+        disabled: readOnly,
+      });
     if (openPortForward)
       items.push({
         kind: "item",
         label: "Port forward",
         onClick: openPortForward,
+        disabled: readOnly,
       });
   } else if (kind.id === "deployments" || kind.id === "statefulsets") {
     // Aggregated logs over the workload's pods (resolved via its selector).
     items.push({ kind: "item", label: "View logs", onClick: openLogs });
     if (openYamlEdit)
-      items.push({ kind: "item", label: "Edit YAML", onClick: openYamlEdit });
+      items.push({
+        kind: "item",
+        label: "Edit YAML",
+        onClick: openYamlEdit,
+        disabled: readOnly,
+      });
   } else if (
     kind.id === "daemonsets" ||
     kind.id === "replicasets" ||
@@ -79,17 +96,33 @@ export function actionsForRow(ctx: RowActionContext): MenuItem[] {
     items.push({ kind: "item", label: "View logs", onClick: openLogs });
   } else if (kind.id === "nodes") {
     if (openExec)
-      items.push({ kind: "item", label: "Node shell (debug)", onClick: openExec });
+      items.push({
+        kind: "item",
+        label: "Node shell (debug)",
+        onClick: openExec,
+        disabled: readOnly,
+      });
     if (ctx.cordonTo)
       items.push({
         kind: "item",
         label: ctx.cordonTo.target ? "Cordon" : "Uncordon",
         onClick: ctx.cordonTo.run,
+        disabled: readOnly,
       });
     if (ctx.drain)
-      items.push({ kind: "item", label: "Drain", onClick: ctx.drain });
+      items.push({
+        kind: "item",
+        label: "Drain",
+        onClick: ctx.drain,
+        disabled: readOnly,
+      });
     if (openYamlEdit)
-      items.push({ kind: "item", label: "Edit YAML", onClick: openYamlEdit });
+      items.push({
+        kind: "item",
+        label: "Edit YAML",
+        onClick: openYamlEdit,
+        disabled: readOnly,
+      });
   }
 
   items.push({ kind: "separator" });
@@ -119,6 +152,7 @@ export function actionsForRow(ctx: RowActionContext): MenuItem[] {
         kind: "item",
         label: "Restart pod",
         onClick: restart,
+        disabled: readOnly,
       });
     if (ctx.delete)
       items.push({
@@ -126,6 +160,7 @@ export function actionsForRow(ctx: RowActionContext): MenuItem[] {
         label: "Delete pod",
         onClick: ctx.delete,
         danger: true,
+        disabled: readOnly,
       });
   } else if (kind.id === "nodes" && ctx.delete) {
     items.push({ kind: "separator" });
@@ -134,6 +169,7 @@ export function actionsForRow(ctx: RowActionContext): MenuItem[] {
       label: "Delete node",
       onClick: ctx.delete,
       danger: true,
+      disabled: readOnly,
     });
   } else if (kind.id === "helm_charts") {
     // Helm chart rows are synthetic catalog entries — there's no single
@@ -151,6 +187,7 @@ export function actionsForRow(ctx: RowActionContext): MenuItem[] {
       label: "Uninstall release",
       onClick: ctx.delete,
       danger: true,
+      disabled: readOnly,
     });
   } else if (kind.id !== "pods" && kind.id !== "nodes" && ctx.delete) {
     // Generic Delete for every other kind. The dynamic API in
@@ -163,6 +200,7 @@ export function actionsForRow(ctx: RowActionContext): MenuItem[] {
       label: `Delete ${kind.kind.toLowerCase()}`,
       onClick: ctx.delete,
       danger: true,
+      disabled: readOnly,
     });
   }
 

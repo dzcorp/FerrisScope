@@ -52,11 +52,13 @@ function Host({
   serverYaml = BASE_YAML,
   serverRv = "42",
   refreshedAt = 1000,
+  readOnly = false,
 }: {
   onResync?: () => void;
   serverYaml?: string;
   serverRv?: string;
   refreshedAt?: number;
+  readOnly?: boolean;
 }) {
   const [buffer, setBuffer] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -88,6 +90,7 @@ function Host({
         setBuffer(null);
         onResync();
       }}
+      readOnly={readOnly}
     />
   );
 }
@@ -104,6 +107,20 @@ describe("YamlTab", () => {
     // Save is present but inert until something changes.
     const save = screen.getByRole("button", { name: /^save$/i });
     expect(save).toBeDisabled();
+  });
+
+  it("readOnly (degraded cluster) forces the editor read-only and disables Save", () => {
+    render(<Host readOnly />);
+    const editor = screen.getByTestId("editor") as HTMLTextAreaElement;
+    expect(editor.readOnly).toBe(true);
+
+    // The draft is still kept if the operator already typed, but Save never
+    // enables and the status line explains why.
+    fireEvent.change(editor, { target: { value: EDITED_YAML } });
+    expect(
+      screen.getByText(/read-only · cluster unavailable/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
   });
 
   it("Save ships the merge patch + resourceVersion once the doc diverges", async () => {

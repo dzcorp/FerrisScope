@@ -23,7 +23,7 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, onResourceDelta } from "../api";
-import { useAppStore, useResolvedTheme } from "../store";
+import { selectClusterDegraded, useAppStore, useResolvedTheme } from "../store";
 import { formatQuantity } from "./detail";
 import type {
   ColumnDef,
@@ -283,6 +283,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // via ClusterPanel's UnavailableOverlay instead). Record identity only
   // changes on health transitions, so this subscription is near-free.
   const clusterHealth = useAppStore((s) => s.clusterHealth);
+  const clusterReconnecting = useAppStore((s) => s.clusterReconnecting);
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
   const density = useAppStore((s) => s.settings.density);
   const monoTables = useAppStore((s) => s.settings.monoTables);
@@ -1702,6 +1703,12 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
                 },
               },
             ),
+            {
+              readOnly: selectClusterDegraded(
+                { clusterHealth, clusterReconnecting },
+                menu.row.__clusterId,
+              ),
+            },
           )}
         />
       )}

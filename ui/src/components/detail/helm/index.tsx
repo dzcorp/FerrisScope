@@ -10,7 +10,7 @@
 // out of scope for this app for now.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useResolvedTheme } from "../../../store";
+import { selectClusterDegraded, useAppStore, useResolvedTheme } from "../../../store";
 import Editor from "@monaco-editor/react";
 import { api } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, R_MD, FS_MD, FS_SM, FS_XS } from "../../../theme";
@@ -395,7 +395,10 @@ function HelmReleaseView({
   // text. Operators don't need precise diffs here; non-zero is enough
   // for the Save chip's "(N)" badge.
   const dirty = editing ? approxLineDiff(userText, buffer!) : 0;
-  const canEdit = d.helm_available;
+  // Cluster degraded (unavailable / mid auto-reconnect): block upgrades (a
+  // doomed helm write) while leaving the release detail fully readable.
+  const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
+  const canEdit = d.helm_available && !degraded;
 
   const onEnter = () => {
     setUpgradeStatus({ kind: "idle" });
@@ -729,10 +732,16 @@ function HelmReleaseView({
                 />
               ) : (
                 <span
-                  title="Install helm CLI to enable upgrade"
+                  title={
+                    degraded
+                      ? "Cluster unavailable — reconnect to upgrade"
+                      : "Install helm CLI to enable upgrade"
+                  }
                   style={{ fontSize: FS_XS, color: t.textMuted }}
                 >
-                  read-only · helm CLI not found
+                  {degraded
+                    ? "read-only · cluster unavailable"
+                    : "read-only · helm CLI not found"}
                 </span>
               ))}
           </div>
@@ -743,7 +752,10 @@ function HelmReleaseView({
           helm upgrade with that version while preserving any pending
           value edits. Hidden during an in-flight save to avoid two
           competing actions on screen. */}
-      {valuesTab === "user" && d.update_available && upgradeStatus.kind !== "saving" ? (
+      {valuesTab === "user" &&
+      d.update_available &&
+      upgradeStatus.kind !== "saving" &&
+      !degraded ? (
         <UpdateAvailableBanner
           t={t}
           current={d.chart_version}
@@ -782,7 +794,7 @@ function HelmReleaseView({
             value={buffer!}
             onChange={(next) => setBuffer(next)}
             height={320}
-            disabled={upgradeStatus.kind === "saving"}
+            disabled={upgradeStatus.kind === "saving" || degraded}
           />
         ) : (
           <YamlViewer

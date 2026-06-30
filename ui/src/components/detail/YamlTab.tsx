@@ -66,6 +66,11 @@ type Props = {
   // Clear local draft/stale/error and refetch the live object. Used after a
   // successful save and on an explicit Reload.
   onResync: () => void;
+  // True when the cluster is unavailable / mid auto-reconnect. Forces the
+  // editor read-only and blocks Save + Apply-anyway (the draft is preserved so
+  // it can be saved once reconnected). Viewing, Discard, and the server-fields
+  // toggle stay live.
+  readOnly?: boolean;
 };
 
 export function YamlTab({
@@ -90,6 +95,7 @@ export function YamlTab({
   error,
   setError,
   onResync,
+  readOnly = false,
 }: Props) {
   const monoFont = useResolvedTheme().typography.fontMono;
 
@@ -136,7 +142,7 @@ export function YamlTab({
 
   const editable = baseline.original != null;
   const dirty = buffer !== null && !diff.empty && !diff.parseError;
-  const canSave = editable && dirty && !saving && !showRaw;
+  const canSave = editable && dirty && !saving && !showRaw && !readOnly;
 
   const save = async (ignoreVersion: boolean) => {
     if (baseline.original == null) {
@@ -196,6 +202,11 @@ export function YamlTab({
   let statusTone: "muted" | "accent" | "bad" = "muted";
   if (showRaw) {
     statusText = "read-only · all server fields shown";
+  } else if (readOnly) {
+    statusText = dirty
+      ? "read-only · cluster unavailable · changes kept"
+      : "read-only · cluster unavailable";
+    statusTone = "bad";
   } else if (!editable) {
     statusText = "read-only · server YAML could not be parsed";
     statusTone = "bad";
@@ -350,6 +361,7 @@ export function YamlTab({
             t={t}
             message={stale.message}
             saving={saving}
+            applyDisabled={readOnly}
             onReload={reload}
             onApplyAnyway={() => save(true)}
           />
@@ -363,12 +375,12 @@ export function YamlTab({
           theme={mode === "dark" ? "vs-dark" : "light"}
           value={value}
           onChange={(next) => {
-            if (showRaw || saving) return;
+            if (showRaw || saving || readOnly) return;
             setBuffer(next ?? "");
           }}
           onMount={installClipboardShortcuts}
           options={{
-            readOnly: showRaw || saving || !editable,
+            readOnly: showRaw || saving || !editable || readOnly,
             minimap: { enabled: false },
             fontSize: 12.5,
             fontFamily: monoFont,
@@ -392,12 +404,16 @@ function StaleBanner({
   t,
   message,
   saving,
+  applyDisabled = false,
   onReload,
   onApplyAnyway,
 }: {
   t: Tokens;
   message: string;
   saving: boolean;
+  // Blocks "Apply my changes anyway" when the cluster is degraded (it's a
+  // write). Reload stays enabled — it's a read that refetches the live object.
+  applyDisabled?: boolean;
   onReload: () => void;
   onApplyAnyway: () => void;
 }) {
@@ -444,9 +460,9 @@ function StaleBanner({
         <button
           type="button"
           onClick={onApplyAnyway}
-          disabled={saving}
+          disabled={saving || applyDisabled}
           style={{
-            ...chipBtnStyle(t, "ghost", saving),
+            ...chipBtnStyle(t, "ghost", saving || applyDisabled),
             background: "rgba(244,63,94,0.16)",
             color: t.bad,
           }}

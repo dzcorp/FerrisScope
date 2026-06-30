@@ -14,7 +14,11 @@
 // dispatch so we can recover both halves here.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useResolvedTheme } from "../../../store";
+import {
+  selectClusterDegraded,
+  useAppStore,
+  useResolvedTheme,
+} from "../../../store";
 import Editor from "@monaco-editor/react";
 import { api } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, R_MD, FS_MD, FS_SM, FS_XS } from "../../../theme";
@@ -185,8 +189,14 @@ export function HelmChartSummary(props: {
     return <ErrorBlock t={t} message={state.message} kindLabel="helm chart" />;
 
   const d = state.detail;
+  // Cluster degraded (unavailable / mid auto-reconnect): block install (a
+  // doomed helm write) while leaving the chart browseable.
+  const degraded = useAppStore((s) =>
+    selectClusterDegraded(s, props.clusterId),
+  );
   const canInstall =
     d.helm_available &&
+    !degraded &&
     namespace.trim().length > 0 &&
     releaseName.trim().length > 0 &&
     installStatus.kind !== "saving";
@@ -455,7 +465,9 @@ export function HelmChartSummary(props: {
           value={valuesBuffer}
           onChange={setValuesBuffer}
           height={360}
-          disabled={!d.helm_available || installStatus.kind === "saving"}
+          disabled={
+            !d.helm_available || installStatus.kind === "saving" || degraded
+          }
         />
       </div>
 

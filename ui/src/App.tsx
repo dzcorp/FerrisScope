@@ -14,6 +14,7 @@ import { api, onPortForwardStatus, onResourceDelta } from "./api";
 import {
   buildPrefsPayload,
   selectActiveClusterIds,
+  selectClusterDegraded,
   useActiveClusterIds,
   useAppStore,
   useResolvedTheme,
@@ -191,6 +192,23 @@ export default function App() {
 
   const selection = useAppStore((s) => s.selection);
   const clearSelection = useAppStore((s) => s.clearSelection);
+  const bulkClusterHealth = useAppStore((s) => s.clusterHealth);
+  const bulkClusterReconnecting = useAppStore((s) => s.clusterReconnecting);
+  // True when the current selection touches any degraded cluster. Mutating
+  // bulk actions disable; read actions (Copy/Compare/Observe) stay live.
+  const selectionDegraded = useMemo(
+    () =>
+      Array.from(selection.values()).some((m) =>
+        selectClusterDegraded(
+          {
+            clusterHealth: bulkClusterHealth,
+            clusterReconnecting: bulkClusterReconnecting,
+          },
+          m.clusterId,
+        ),
+      ),
+    [selection, bulkClusterHealth, bulkClusterReconnecting],
+  );
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
   // Display name for a cluster id in bulk-failure prefixes. Imperative read —
   // resolved inside click handlers, so no store subscription is needed.
@@ -953,6 +971,7 @@ export default function App() {
               confirmDestructive,
               clearSelection,
               clusterLabelFor,
+              selectionDegraded,
             ),
           ]}
         />
@@ -972,6 +991,7 @@ export default function App() {
                 selection,
                 clearSelection,
                 clusterLabelFor,
+                selectionDegraded,
               ),
             ]}
           />
@@ -999,6 +1019,7 @@ export default function App() {
                 confirmDestructive,
                 clearSelection,
                 clusterLabelFor,
+                selectionDegraded,
               ),
             ]}
           />
@@ -1092,6 +1113,7 @@ function buildPodBulkActions(
   confirmDestructive: boolean,
   clearSelection: () => void,
   labelFor: (clusterId: string) => string,
+  degraded: boolean,
 ) {
   const entries = Array.from(selection.entries());
   const count = entries.length;
@@ -1139,6 +1161,7 @@ function buildPodBulkActions(
     {
       icon: Icons.refresh,
       label: "Restart",
+      disabled: degraded,
       onClick: () => {
         void (async () => {
           if (confirmDestructive) {
@@ -1225,6 +1248,7 @@ function buildPodBulkActions(
     {
       icon: Icons.trash,
       label: "Delete",
+      disabled: degraded,
       separatorBefore: true,
       danger: true,
       onClick: () => {
@@ -1256,6 +1280,7 @@ function buildNodeBulkActions(
   selection: Map<string, SelectionMeta>,
   clearSelection: () => void,
   labelFor: (clusterId: string) => string,
+  degraded: boolean,
 ) {
   const entries = Array.from(selection.entries());
   const count = entries.length;
@@ -1329,6 +1354,7 @@ function buildNodeBulkActions(
     {
       icon: Icons.eye,
       label: "Cordon",
+      disabled: degraded,
       onClick: () => {
         void (async () => {
           const ok = await confirm({
@@ -1346,6 +1372,7 @@ function buildNodeBulkActions(
     {
       icon: Icons.check,
       label: "Uncordon",
+      disabled: degraded,
       onClick: () => {
         void runForAll("Uncordon", (m) =>
           api.cordonNode(m.clusterId, m.name, false),
@@ -1355,6 +1382,7 @@ function buildNodeBulkActions(
     {
       icon: Icons.refresh,
       label: "Drain",
+      disabled: degraded,
       onClick: () => {
         void (async () => {
           const ok = await confirm({
@@ -1384,6 +1412,7 @@ function buildNodeBulkActions(
     {
       icon: Icons.trash,
       label: "Delete",
+      disabled: degraded,
       separatorBefore: true,
       danger: true,
       onClick: () => {
@@ -1421,6 +1450,7 @@ function buildGenericBulkActions(
   confirmDestructive: boolean,
   clearSelection: () => void,
   labelFor: (clusterId: string) => string,
+  degraded: boolean,
 ) {
   const entries = Array.from(selection.entries());
   const count = entries.length;
@@ -1442,6 +1472,7 @@ function buildGenericBulkActions(
     actions.push({
       icon: Icons.refresh,
       label: "Restart",
+      disabled: degraded,
       onClick: () => {
         void (async () => {
           if (confirmDestructive) {
@@ -1519,6 +1550,7 @@ function buildGenericBulkActions(
     {
       icon: Icons.trash,
       label: "Delete",
+      disabled: degraded,
       separatorBefore: true,
       danger: true,
       onClick: () => {

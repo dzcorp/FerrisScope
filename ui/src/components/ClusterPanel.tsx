@@ -22,7 +22,8 @@ type Props = {
 // with VirtualClusterPanel, which runs one per member).
 export function ClusterPanel({ mode, context }: Props) {
   const t = useResolvedTheme().tokens;
-  const { state, cancel, reconnect } = useClusterConnection(context);
+  const { state, cancel, reconnect, autoReconnect } =
+    useClusterConnection(context);
   const selectedKind = useAppStore((s) =>
     s.kinds.find((k) => k.id === s.selectedKindId) ?? null,
   );
@@ -59,6 +60,7 @@ export function ClusterPanel({ mode, context }: Props) {
             unavailable={healthStatus === "unavailable"}
             reason={healthReason}
             onReconnect={reconnect}
+            autoReconnect={autoReconnect}
           >
             {selectedKind ? (
               <ResourceTable
@@ -76,13 +78,27 @@ export function ClusterPanel({ mode, context }: Props) {
             )}
           </UnavailableOverlay>
         ) : state.status === "error" ? (
-          <ReconnectBanner
-            mode={mode}
-            title="Could not connect to this cluster"
-            reason={state.message}
-            onReconnect={reconnect}
-            diagnoseContext={context}
-          />
+          autoReconnect ? (
+            // Hard-down mid auto-reconnect: the connect itself is failing, so
+            // there's no table to keep alive — show the silent-retry progress
+            // instead of the terminal "could not connect" banner.
+            <ReconnectBanner
+              mode={mode}
+              title="Reconnecting…"
+              reason={state.message}
+              onReconnect={reconnect}
+              busy
+              progress={autoReconnect}
+            />
+          ) : (
+            <ReconnectBanner
+              mode={mode}
+              title="Could not connect to this cluster"
+              reason={state.message}
+              onReconnect={reconnect}
+              diagnoseContext={context}
+            />
+          )
         ) : state.status === "cancelled" ? (
           <ReconnectBanner
             mode={mode}
@@ -156,6 +172,8 @@ export function ReconnectBanner({
   reason,
   onReconnect,
   diagnoseContext,
+  busy = false,
+  progress,
 }: {
   mode: ThemeMode;
   title: string;
@@ -165,6 +183,14 @@ export function ReconnectBanner({
   /// diagnostics for this context. Omitted where diagnosis makes no sense
   /// (a healthy cluster gone temporarily unavailable, a cancelled connect).
   diagnoseContext?: ContextInfo;
+  /// True while a silent auto-reconnect session is mid-retry. Switches the
+  /// dot to a pulsing animation and relabels the primary button to
+  /// "Reconnect now" (force an immediate attempt without waiting out the
+  /// backoff). The same banner shape is reused — not forked.
+  busy?: boolean;
+  /// `{attempt, max}` of the active auto-reconnect session, rendered as a
+  /// "(2/3)" suffix next to the title when `busy`.
+  progress?: { attempt: number; max: number };
 }) {
   const t = useResolvedTheme().tokens;
   const [showDiag, setShowDiag] = useState(false);
@@ -183,6 +209,7 @@ export function ReconnectBanner({
     >
       <span
         aria-hidden
+        className={busy ? "fs-pulse-dot" : undefined}
         style={{
           display: "inline-block",
           width: 8,
@@ -195,6 +222,11 @@ export function ReconnectBanner({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ color: t.text, fontSize: FS_MD, fontWeight: 600 }}>
           {title}
+          {busy && progress && (
+            <span style={{ marginLeft: 6, color: t.textDim, fontWeight: 400 }}>
+              ({progress.attempt}/{progress.max})
+            </span>
+          )}
         </div>
         {reason && (
           <div style={{ marginTop: 2 }} title={reason}>
@@ -218,7 +250,7 @@ export function ReconnectBanner({
         </Btn>
       )}
       <Btn t={t} variant="primary" size="sm" onClick={onReconnect}>
-        Reconnect
+        {busy ? "Reconnect now" : "Reconnect"}
       </Btn>
       {diagnoseContext && showDiag && (
         <ConnectionDiagnosticsModal
@@ -233,24 +265,34 @@ export function ReconnectBanner({
 }
 
 // Renders the resource table with a `ReconnectBanner` on top when the
-// cluster's heartbeat probe has flipped to unavailable. Last-known rows
-// stay rendered (dimmed) so the operator's in-flight inspection isn't
-// jarringly cleared — but data is stale and any new subscribe call
-// returns an "unavailable" error from the backend until Reconnect lands.
-function UnavailableOverlay({
+// cluster's heartbeat probe has flipped to unavailable (or while we're
+// silently auto-reconnecting). Last-known rows stay rendered (dimmed) so the
+// operator's in-flight inspection isn't jarringly cleared — data is stale, but
+// the table stays *interactive* on purpose: clicking a row opens its detail
+// (cached row + a best-effort live fetch) and cross-kind navigation still
+// works. Write affordances self-gate to read-only via `selectClusterDegraded`
+// (see store.ts) — so we deliberately do NOT kill pointer events here.
+export function UnavailableOverlay({
   mode,
   unavailable,
   reason,
   onReconnect,
+  autoReconnect,
   children,
 }: {
   mode: ThemeMode;
   unavailable: boolean;
   reason: string | null;
   onReconnect: () => void;
+  /// Non-null while a silent auto-reconnect session is retrying — swaps the
+  /// terminal "Cluster unavailable" banner for the busy progress variant.
+  autoReconnect: { attempt: number; max: number } | null;
   children: ReactNode;
 }) {
-  if (!unavailable) return <>{children}</>;
+  // Show the overlay through the whole session: a wedged cluster's retry may
+  // momentarily reconnect (health reads healthy) between attempts, but we keep
+  // the dim + busy banner until the session ends so the UI doesn't flicker.
+  if (!unavailable && !autoReconnect) return <>{children}</>;
   return (
     <div
       style={{
@@ -261,21 +303,34 @@ function UnavailableOverlay({
         minHeight: 0,
       }}
     >
-      <ReconnectBanner
-        mode={mode}
-        title="Cluster unavailable"
-        reason={
-          reason ??
-          "No response from the apiserver for 30s. Watchers and metrics have been torn down."
-        }
-        onReconnect={onReconnect}
-      />
+      {autoReconnect ? (
+        <ReconnectBanner
+          mode={mode}
+          title="Reconnecting…"
+          reason={
+            reason ??
+            "Lost contact with the apiserver. Retrying with a fresh connection."
+          }
+          onReconnect={onReconnect}
+          busy
+          progress={autoReconnect}
+        />
+      ) : (
+        <ReconnectBanner
+          mode={mode}
+          title="Cluster unavailable"
+          reason={
+            reason ??
+            "No response from the apiserver for 30s. Watchers and metrics have been torn down."
+          }
+          onReconnect={onReconnect}
+        />
+      )}
       <div
         style={{
           flex: 1,
           minHeight: 0,
           opacity: 0.5,
-          pointerEvents: "none",
         }}
       >
         {children}
