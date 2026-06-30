@@ -85,3 +85,48 @@ describe("actionsForRow — View logs availability", () => {
     expect(ctx.openLogs).toHaveBeenCalledOnce();
   });
 });
+
+describe("actionsForRow — read-only gating", () => {
+  // A pod ctx wired with every optional write callback so all mutating items
+  // are present in the menu (they're only pushed when their callback exists).
+  const podCtx = (): RowActionContext => ({
+    ...ctxFor(kindOf("pods", "Pod"), { containers: ["app"] }),
+    openExec: vi.fn(),
+    openYamlEdit: vi.fn(),
+    openPortForward: vi.fn(),
+    restart: vi.fn(),
+    delete: vi.fn(),
+  });
+
+  const disabledFor = (label: string, readOnly: boolean): boolean | undefined => {
+    const item = actionsForRow(podCtx(), { readOnly }).find(
+      (i) => i.kind === "item" && i.label === label,
+    );
+    return item?.kind === "item" ? item.disabled : undefined;
+  };
+
+  it("disables every write action when readOnly", () => {
+    for (const label of [
+      "Delete pod",
+      "Restart pod",
+      "Exec shell",
+      "Edit YAML",
+      "Port forward",
+    ]) {
+      expect(disabledFor(label, true)).toBe(true);
+      expect(disabledFor(label, false)).toBeFalsy();
+    }
+  });
+
+  it("keeps read/navigation actions enabled when readOnly", () => {
+    // Namespaced row → the copy item is labelled "Copy namespace/name".
+    for (const label of [
+      "View details",
+      "View logs",
+      "Copy namespace/name",
+      "Copy UID",
+    ]) {
+      expect(disabledFor(label, true)).toBeFalsy();
+    }
+  });
+});

@@ -22,6 +22,7 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import { api } from "../../api";
+import { selectClusterDegraded, useAppStore } from "../../store";
 import type { ApplyResult } from "../../types";
 import type { ApplyTarget } from "./edit";
 
@@ -50,6 +51,11 @@ type EditingMap = Record<string, boolean>;
 
 type SessionApi = {
   target: ApplyTarget;
+  // True when the cluster is unavailable / mid auto-reconnect. Editors keep
+  // rendering their *current* values (read-only) but pencils won't open and
+  // the global Save is blocked — a doomed SSA against a dead apiserver helps
+  // no one. Cleared automatically when the cluster reconnects.
+  readOnly: boolean;
   // Editor-side: register callbacks (mount/unmount). Returns unregister.
   register(id: string, field: RegisteredField): () => void;
   // Editor-side: tell the session whether this field is currently dirty.
@@ -100,6 +106,14 @@ export function EditSessionProvider({
     }),
     [targetProp.clusterId, targetProp.kindId, targetProp.namespace, targetProp.name],
   );
+
+  // Read-only when the cluster can't take writes (unavailable / mid
+  // auto-reconnect). Reactive so editors collapse their pencils the moment the
+  // health probe flips. Mirrored into a ref so `saveAll` can bail without
+  // taking `readOnly` as a dependency (which would churn its identity).
+  const readOnly = useAppStore((s) => selectClusterDegraded(s, target.clusterId));
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
 
   // Mutable callback registry — editors stash fresh closures here every
   // render so the session always sees the latest serialize / reset /
@@ -175,6 +189,18 @@ export function EditSessionProvider({
 
   const saveAll = useCallback(
     async (force = false) => {
+      // Hard stop if the cluster went unavailable while a row was mid-edit.
+      // The buffer is kept (operator can save once reconnected); we just don't
+      // fire the doomed apply. GlobalSaveBar also disables Save, but a row can
+      // already be dirty when health flips, so guard here too.
+      if (readOnlyRef.current) {
+        setState({
+          saving: false,
+          conflict: null,
+          error: "Cluster unavailable — reconnect to save.",
+        });
+        return;
+      }
       const dirtyIds = Object.entries(dirtyMapRef.current)
         .filter(([, v]) => v)
         .map(([k]) => k);
@@ -264,6 +290,7 @@ export function EditSessionProvider({
   const value = useMemo<SessionApi>(
     () => ({
       target,
+      readOnly,
       register,
       setDirty,
       dirty,
@@ -278,6 +305,7 @@ export function EditSessionProvider({
     }),
     [
       target,
+      readOnly,
       register,
       setDirty,
       dirty,
@@ -352,7 +380,9 @@ export function useEditField<B>(opts: {
   const editing = session?.isEditing(opts.id) ?? false;
 
   const enter = useCallback(() => {
-    if (!session) return;
+    // Don't open the editor for a degraded cluster — the operator would type
+    // into a field they can't save. The pencil renders disabled (see below).
+    if (!session || session.readOnly) return;
     setBuffer(initialRef.current());
     session.setEditing(opts.id, true);
   }, [session, opts.id]);
@@ -375,6 +405,9 @@ export function useEditField<B>(opts: {
     saving: session?.saving ?? false,
     conflict: session?.conflict ?? null,
     error: session?.error ?? null,
+    // True when the cluster can't take writes. `enter` already no-ops; editors
+    // pass this to EditModeChrome so the pencil renders disabled with a hint.
+    readOnly: session?.readOnly ?? false,
   };
 }
 

@@ -4,7 +4,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { render, cleanup, act, screen, fireEvent } from "@testing-library/react";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
-import { resetEventMock } from "../test/tauri-event-mock";
+import { resetEventMock, emitMock } from "../test/tauri-event-mock";
 import { useAppStore } from "../store";
 import { VirtualClusterPanel } from "./VirtualClusterPanel";
 import type { ContextInfo } from "../types";
@@ -111,6 +111,47 @@ describe("VirtualClusterPanel", () => {
     expect(screen.getByText("prod-us: could not connect")).toBeTruthy();
     expect(screen.getByText("Reconnect")).toBeTruthy();
     // The healthy member still drives the main pane (no kind → hint).
+    expect(screen.getByText("Pick a resource kind")).toBeTruthy();
+  });
+
+  it("a member mid auto-reconnect shows a busy strip, not the failed one", async () => {
+    setMockInvoke((cmd) => {
+      switch (cmd) {
+        case "connect_context":
+          return { server_version: "1.30", node_count: 1 };
+        case "subscribe_resource":
+          return { rows: [], init_done: true };
+        default:
+          return undefined;
+      }
+    });
+    await act(async () => {
+      render(
+        <VirtualClusterPanel
+          mode="dark"
+          title="prod fleet"
+          viewScopeId="vctx:t1"
+          contexts={MEMBERS}
+        />,
+      );
+    });
+    await act(async () => {});
+
+    // The health probe declares prod-us unavailable. The hook arms an
+    // auto-reconnect session synchronously (autoReconnect is set before the
+    // backoff timer fires), so the busy strip renders immediately.
+    act(() => {
+      emitMock("cluster-health://default::prod-us", {
+        status: "unavailable",
+        reason: "timeout",
+      });
+    });
+
+    expect(screen.getByText("prod-us: reconnecting…")).toBeTruthy();
+    expect(screen.getByText("(1/10)")).toBeTruthy();
+    expect(screen.getByText("Reconnect now")).toBeTruthy();
+    // Not the terminal banner — and the healthy member still drives the pane.
+    expect(screen.queryByText("prod-us: unavailable")).toBeNull();
     expect(screen.getByText("Pick a resource kind")).toBeTruthy();
   });
 

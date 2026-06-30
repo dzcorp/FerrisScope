@@ -21,6 +21,7 @@ type MemberConn = {
   state: ConnectState;
   cancel: () => void;
   reconnect: () => void;
+  autoReconnect: { attempt: number; max: number } | null;
 };
 
 type Props = {
@@ -46,13 +47,14 @@ function MemberConnection({
   context: ContextInfo;
   onUpdate: (id: string, conn: MemberConn) => void;
 }) {
-  const { state, cancel, reconnect } = useClusterConnection(context);
+  const { state, cancel, reconnect, autoReconnect } =
+    useClusterConnection(context);
   useEffect(() => {
-    onUpdate(context.id, { state, cancel, reconnect });
-    // cancel/reconnect are fresh closures each render; state identity is
-    // what actually drives meaningful updates.
+    onUpdate(context.id, { state, cancel, reconnect, autoReconnect });
+    // cancel/reconnect are fresh closures each render; state identity +
+    // autoReconnect identity are what drive meaningful updates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context.id, state, onUpdate]);
+  }, [context.id, state, autoReconnect, onUpdate]);
   return null;
 }
 
@@ -107,12 +109,19 @@ export function VirtualClusterPanel({ mode, title, viewScopeId, contexts }: Prop
     [contexts, conns, colorIdx],
   );
 
+  // Members mid silent auto-reconnect. Takes precedence over failed/unavailable
+  // so a member shows exactly one strip (the busy one) while retrying — it can
+  // be in `error` (hard-down) or `ok`+unavailable (wedged) underneath.
+  const reconnecting = contexts.filter((c) => conns[c.id]?.autoReconnect != null);
+  const reconnectingIds = new Set(reconnecting.map((c) => c.id));
   const failed = contexts.filter((c) => {
+    if (reconnectingIds.has(c.id)) return false;
     const st = conns[c.id]?.state.status;
     return st === "error" || st === "cancelled";
   });
   const unavailable = contexts.filter(
     (c) =>
+      !reconnectingIds.has(c.id) &&
       conns[c.id]?.state.status === "ok" &&
       clusterHealth[c.id] === "unavailable",
   );
@@ -141,6 +150,25 @@ export function VirtualClusterPanel({ mode, title, viewScopeId, contexts }: Prop
         conns={conns}
         colorIdx={colorIdx}
       />
+
+      {/* Per-member silent auto-reconnect strips, shown first (precedence over
+          failed/unavailable). "Reconnect now" forces an immediate attempt. */}
+      {reconnecting.map((c) => (
+        <ReconnectBanner
+          key={c.id}
+          mode={mode}
+          title={`${c.name}: reconnecting…`}
+          reason={
+            clusterHealthReason[c.id] ??
+            (conns[c.id]?.state.status === "error"
+              ? (conns[c.id]?.state as { message: string }).message
+              : "Lost contact with the apiserver. Retrying with a fresh connection.")
+          }
+          onReconnect={() => conns[c.id]?.reconnect()}
+          busy
+          progress={conns[c.id]?.autoReconnect ?? undefined}
+        />
+      ))}
 
       {/* Per-member failure strips. One row per broken member with its own
           Reconnect; the table below keeps rendering the healthy members. */}
@@ -312,6 +340,11 @@ function VirtualClusterBar({
   };
 
   const stateDot = (c: ContextInfo): { color: string; label: string } => {
+    // Auto-reconnecting wins over the underlying error/unavailable state so the
+    // dot matches the single "reconnecting…" strip the operator sees.
+    if (conns[c.id]?.autoReconnect != null) {
+      return { color: t.warn, label: "reconnecting" };
+    }
     const st = conns[c.id]?.state.status;
     if (st === "ok") {
       return clusterHealth[c.id] === "unavailable"

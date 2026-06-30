@@ -18,10 +18,15 @@ export function NamespaceForwardButton({
   t,
   clusterId,
   namespace,
+  disabled = false,
 }: {
   t: Tokens;
   clusterId: string;
   namespace: string;
+  // True when the cluster is degraded — blocks *starting* a new forward (a
+  // doomed connect). Stopping an existing session stays allowed so the
+  // operator can still tear down a now-dead forward.
+  disabled?: boolean;
 }) {
   const globalForwards = useAppStore((s) => s.globalForwards);
   const upsertGlobalForward = useAppStore((s) => s.upsertGlobalForward);
@@ -75,7 +80,7 @@ export function NamespaceForwardButton({
       size="lg"
       title={title}
       active={!!session}
-      disabled={busy}
+      disabled={busy || (disabled && !session)}
       onClick={toggle}
     >
       {Icons.forward}

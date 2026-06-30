@@ -2,7 +2,7 @@ import { logErr } from "../lib/log";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, onResourceDelta } from "../api";
 import { parseYaml, stripYaml, type Json } from "../lib/yamlEdit";
-import { useAppStore, useResolvedTheme } from "../store";
+import { selectClusterDegraded, useAppStore, useResolvedTheme } from "../store";
 import type {
   ContainerDetail,
   ContainerLastState,
@@ -392,6 +392,10 @@ export function DetailPanel({
   const detailBack = useAppStore((s) => s.detailBack);
   const detailForward = useAppStore((s) => s.detailForward);
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
+  // Cluster can't take writes (unavailable / mid auto-reconnect). Disables
+  // every mutating action + exec/forward in the title bar and forces the YAML
+  // tab read-only, while reads/navigation/copy stay live.
+  const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
   const canBack = detailIndex > 0;
   const canForward = detailIndex >= 0 && detailIndex < detailHistory.length - 1;
   const prevEntry = canBack ? detailHistory[detailIndex - 1] : null;
@@ -897,7 +901,7 @@ export function DetailPanel({
                       ? `Open shell (${podContainers[0]})`
                       : "Open shell…"
                 }
-                disabled={podContainers.length === 0 || !onOpenExec}
+                disabled={podContainers.length === 0 || !onOpenExec || degraded}
                 active={actionMenu?.kind === "shell"}
                 onClick={() => {
                   if (!onOpenExec) return;
@@ -915,7 +919,7 @@ export function DetailPanel({
                 t={t}
                 size="lg"
                 title="Rollout restart owner workload"
-                disabled={restarting || !target.namespace}
+                disabled={restarting || !target.namespace || degraded}
                 onClick={runRestart}
               >
                 {Icons.refresh}
@@ -926,7 +930,7 @@ export function DetailPanel({
                 size="lg"
                 title="Delete…"
                 danger
-                disabled={deleting}
+                disabled={deleting || degraded}
                 active={actionMenu?.kind === "delete"}
                 onClick={() =>
                   openActionMenu("delete", deleteBtnRef.current)
@@ -963,7 +967,7 @@ export function DetailPanel({
                 t={t}
                 size="lg"
                 title={`Open shell on node (kubectl debug node/${target.name})`}
-                disabled={!onOpenExec}
+                disabled={!onOpenExec || degraded}
                 onClick={() => onOpenExec?.(null)}
               >
                 {Icons.shell}
@@ -977,7 +981,7 @@ export function DetailPanel({
                     ? "Uncordon node — re-enable scheduling"
                     : "Cordon node — block new scheduling"
                 }
-                disabled={cordoning}
+                disabled={cordoning || degraded}
                 onClick={runCordon}
               >
                 {nodeCordoned ? Icons.nodeUncordon : Icons.nodeCordon}
@@ -987,7 +991,7 @@ export function DetailPanel({
                 t={t}
                 size="lg"
                 title="Drain node — cordon and evict pods"
-                disabled={draining}
+                disabled={draining || degraded}
                 onClick={runDrain}
               >
                 {Icons.nodeDrain}
@@ -998,7 +1002,7 @@ export function DetailPanel({
                 size="lg"
                 title="Delete…"
                 danger
-                disabled={deleting}
+                disabled={deleting || degraded}
                 active={actionMenu?.kind === "delete"}
                 onClick={() =>
                   openActionMenu("delete", deleteBtnRef.current)
@@ -1039,7 +1043,7 @@ export function DetailPanel({
                   t={t}
                   size="lg"
                   title={`Rollout restart ${kind.kind.toLowerCase()}`}
-                  disabled={restarting || !target.namespace}
+                  disabled={restarting || !target.namespace || degraded}
                   onClick={runRestartWorkload}
                 >
                   {Icons.refresh}
@@ -1050,6 +1054,7 @@ export function DetailPanel({
                   t={t}
                   clusterId={clusterId}
                   namespace={target.name}
+                  disabled={degraded}
                 />
               )}
               <IconBtn
@@ -1058,7 +1063,7 @@ export function DetailPanel({
                 size="lg"
                 title="Delete…"
                 danger
-                disabled={deleting}
+                disabled={deleting || degraded}
                 active={actionMenu?.kind === "delete"}
                 onClick={() =>
                   openActionMenu("delete", deleteBtnRef.current)
@@ -1226,6 +1231,7 @@ export function DetailPanel({
                 kindLabel={kind.kind.toLowerCase()}
                 namespace={target.namespace}
                 name={target.name}
+                readOnly={degraded}
                 buffer={yamlBuffer}
                 setBuffer={setYamlBuffer}
                 saving={yamlSaving}

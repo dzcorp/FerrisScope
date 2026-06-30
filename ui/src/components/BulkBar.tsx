@@ -9,6 +9,9 @@ export type BulkAction = {
   onClick: () => void;
   danger?: boolean;
   separatorBefore?: boolean;
+  // Disabled when the selection spans a degraded cluster (unavailable / mid
+  // auto-reconnect). Read actions (Copy/Compare/Observe) leave this unset.
+  disabled?: boolean;
 };
 type Action = BulkAction;
 
@@ -95,6 +98,7 @@ export function BulkBar({ count, actions, onClear, children }: Props) {
             label={a.label}
             onClick={a.onClick}
             danger={a.danger}
+            disabled={a.disabled}
           />
         </span>
       ))}
@@ -140,17 +144,22 @@ function BulkActionButton({
   label,
   onClick,
   danger,
+  disabled = false,
 }: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
   danger?: boolean;
+  disabled?: boolean;
 }) {
   const [hover, setHover] = useState(false);
+  const showHover = hover && !disabled;
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      title={disabled ? "Cluster unavailable — reconnect to run this" : undefined}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
@@ -163,16 +172,17 @@ function BulkActionButton({
         whiteSpace: "nowrap",
         borderRadius: R_MD,
         border: "none",
-        background: hover
+        background: showHover
           ? danger
             ? "rgba(244,63,94,0.18)"
             : "rgba(255,255,255,0.10)"
           : "transparent",
-        color: danger ? (hover ? "#fca5a5" : "#f87171") : "#ffffff",
+        color: danger ? (showHover ? "#fca5a5" : "#f87171") : "#ffffff",
         fontFamily: "inherit",
         fontSize: FS_MD,
         fontWeight: 500,
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.4 : 1,
         transition: "background .12s, color .12s",
       }}
     >

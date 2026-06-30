@@ -360,6 +360,12 @@ type AppState = {
   // Reason string from the last unavailable event, keyed the same way.
   // Surfaced verbatim in the banner so the operator can debug.
   clusterHealthReason: Record<string, string | null>;
+  // True while `useClusterConnection` is mid auto-reconnect for a cluster.
+  // Distinct from `clusterHealth` because a wedged cluster's freshly-rebuilt
+  // client can read momentarily "healthy" between retries — this flag keeps
+  // the read-only gate + reconnecting banner steady across the whole session.
+  // Set/cleared only by the hook; never persisted.
+  clusterReconnecting: Record<string, boolean>;
 
   // Active port-forwards keyed by id. Initially hydrated by api.pfList() at
   // App boot; mutated on every `portforward://status` event. Detail-panel
@@ -513,6 +519,7 @@ type AppState = {
     reason: string | null,
   ) => void;
   clearClusterHealth: (clusterId: string) => void;
+  setClusterReconnecting: (clusterId: string, value: boolean) => void;
 
   hydrateForwards: (entries: ForwardEntry[]) => void;
   upsertForward: (entry: ForwardEntry) => void;
@@ -819,6 +826,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clusterHealth: {},
   clusterHealthReason: {},
+  clusterReconnecting: {},
 
   forwards: {},
   forwardsOpen: false,
@@ -1275,6 +1283,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       const { [clusterId]: _h, ...rest } = s.clusterHealth;
       const { [clusterId]: _r, ...restR } = s.clusterHealthReason;
       return { clusterHealth: rest, clusterHealthReason: restR };
+    }),
+  setClusterReconnecting: (clusterId, value) =>
+    set((s) => {
+      if ((s.clusterReconnecting[clusterId] ?? false) === value) return s;
+      if (value) {
+        return {
+          clusterReconnecting: { ...s.clusterReconnecting, [clusterId]: true },
+        };
+      }
+      const { [clusterId]: _x, ...rest } = s.clusterReconnecting;
+      return { clusterReconnecting: rest };
     }),
 
   hydrateForwards: (entries) =>
@@ -1802,6 +1821,26 @@ export function selectActiveClusterIds(s: {
     if (exists(id) && !base.includes(id)) base.push(id);
   }
   return base;
+}
+
+/// True when a cluster is not currently usable for writes: either the health
+/// probe declared it unavailable, or the connection hook is mid auto-reconnect
+/// (a freshly-rebuilt-but-unverified client). Read by every write affordance
+/// (row menu, bulk bar, detail buttons, inline edit, YAML/Helm save) to gate
+/// itself down to read-only. Pure — usable from reducers, imperative menu
+/// builders, and tests. The backend stays the final arbiter; this is courtesy
+/// disabling so the operator isn't firing doomed mutations at a dead apiserver.
+export function selectClusterDegraded(
+  s: {
+    clusterHealth: Record<string, ClusterHealthStatus>;
+    clusterReconnecting: Record<string, boolean>;
+  },
+  clusterId: string,
+): boolean {
+  return (
+    s.clusterHealth[clusterId] === "unavailable" ||
+    s.clusterReconnecting[clusterId] === true
+  );
 }
 
 /// Hook form of `selectActiveClusterIds` with a referentially-stable result:

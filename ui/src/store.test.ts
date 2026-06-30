@@ -9,6 +9,7 @@ import {
   semverGt,
   selectUpdateAvailable,
   selectActiveClusterIds,
+  selectClusterDegraded,
   buildPrefsPayload,
   selectClustersToDisconnect,
   type DockTab,
@@ -1435,5 +1436,39 @@ describe("cluster tabs", () => {
     expect(selectClustersToDisconnect(s, aId)).toEqual([]);
     // Closing V: default::a kept by A, only default::c is freed.
     expect(selectClustersToDisconnect(s, vId)).toEqual(["default::c"]);
+  });
+});
+
+describe("cluster degraded state", () => {
+  it("selectClusterDegraded is true for unavailable OR reconnecting", () => {
+    const base = { clusterHealth: {}, clusterReconnecting: {} };
+    expect(selectClusterDegraded(base, "c1")).toBe(false);
+    expect(
+      selectClusterDegraded(
+        { clusterHealth: { c1: "unavailable" }, clusterReconnecting: {} },
+        "c1",
+      ),
+    ).toBe(true);
+    expect(
+      selectClusterDegraded(
+        { clusterHealth: { c1: "healthy" }, clusterReconnecting: { c1: true } },
+        "c1",
+      ),
+    ).toBe(true);
+    // A healthy, non-reconnecting cluster is not degraded.
+    expect(
+      selectClusterDegraded(
+        { clusterHealth: { c1: "healthy" }, clusterReconnecting: { c1: false } },
+        "c1",
+      ),
+    ).toBe(false);
+  });
+
+  it("setClusterReconnecting toggles the flag and prunes on false", () => {
+    const st = useAppStore.getState();
+    st.setClusterReconnecting("c1", true);
+    expect(useAppStore.getState().clusterReconnecting.c1).toBe(true);
+    st.setClusterReconnecting("c1", false);
+    expect("c1" in useAppStore.getState().clusterReconnecting).toBe(false);
   });
 });

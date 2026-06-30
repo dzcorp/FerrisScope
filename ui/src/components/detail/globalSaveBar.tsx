@@ -15,7 +15,8 @@ import { useEditSession } from "./editSession";
 export function GlobalSaveBar({ t }: { t: Tokens }) {
   const session = useEditSession();
   if (!session) return null;
-  const { dirty, saving, conflict, error, saveAll, cancelAll } = session;
+  const { dirty, saving, conflict, error, saveAll, cancelAll, readOnly } =
+    session;
   if (dirty === 0 && !conflict && !error) return null;
   return (
     <div
@@ -49,11 +50,13 @@ export function GlobalSaveBar({ t }: { t: Tokens }) {
             color: t.textDim,
           }}
         >
-          {dirty > 0
-            ? `${dirty} pending change${dirty === 1 ? "" : "s"}`
-            : conflict
-              ? "Save conflicted"
-              : "Save failed"}
+          {readOnly
+            ? "Cluster unavailable — reconnect to save"
+            : dirty > 0
+              ? `${dirty} pending change${dirty === 1 ? "" : "s"}`
+              : conflict
+                ? "Save conflicted"
+                : "Save failed"}
         </span>
         <span style={{ flex: 1 }} />
         <Btn
@@ -71,7 +74,7 @@ export function GlobalSaveBar({ t }: { t: Tokens }) {
             variant="primary"
             size="sm"
             onClick={() => saveAll(true)}
-            disabled={saving}
+            disabled={saving || readOnly}
             kbd="Force"
           >
             Force takeover
@@ -82,7 +85,7 @@ export function GlobalSaveBar({ t }: { t: Tokens }) {
             variant="primary"
             size="sm"
             onClick={() => saveAll(false)}
-            disabled={saving || dirty === 0}
+            disabled={saving || dirty === 0 || readOnly}
             kbd={saving ? "…" : "↵"}
           >
             Save ({dirty})
