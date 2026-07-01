@@ -24,6 +24,11 @@ export type LogViewSource = {
   namespace: string;
   pod: string;
   container: string;
+  /// When true, stream the previously-terminated container instance (crash
+  /// diagnosis — see issue #63) rather than the live one. Folded into `key`
+  /// so toggling it restarts + isolates the stream. Only single-pod surfaces
+  /// set this; aggregated/workload views are always live (`false`).
+  previous: boolean;
   /// Short prefix label shown on every line when more than one source is
   /// active ("" possible for a lone source).
   label: string;
@@ -51,8 +56,12 @@ export function sourceKey(
   namespace: string,
   pod: string,
   container: string,
+  // Live vs previous instance are distinct streams: fold into the key so
+  // flipping the toggle tears the old one down and swaps the ring (no line
+  // bleed between the two). Defaults false so existing callers/keys are stable.
+  previous = false,
 ): string {
-  return [clusterId, namespace, pod, container].join("\u0000");
+  return [clusterId, namespace, pod, container, previous ? "prev" : "live"].join("\u0000");
 }
 
 /// Expand pods × containers into log sources, capped at `MAX_LOG_SOURCES`.
@@ -111,6 +120,9 @@ export function buildLogSources(
         namespace: p.namespace,
         pod: p.name,
         container,
+        // Aggregated / workload views are always live — previous-instance
+        // logs are a single-pod affair (see issue #63).
+        previous: false,
         label,
         colorIdx: sources.length,
       });

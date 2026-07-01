@@ -1017,3 +1017,33 @@ describe("applyYaml / dev memory", () => {
     for (const c of cap.calls) expect(c.args).toBeUndefined();
   });
 });
+
+describe("log streaming", () => {
+  it("startLogStream → 'start_log_stream' forwarding the previous flag + a channel", async () => {
+    const cap = captureNext("stream-1");
+    const handle = await api.startLogStream(
+      "ctx",
+      "default",
+      "api-0",
+      "app",
+      true,
+      () => {},
+    );
+    expect(cap.calls[0]?.cmd).toBe("start_log_stream");
+    const args = cap.calls[0]?.args ?? {};
+    expect(args.clusterId).toBe("ctx");
+    expect(args.namespace).toBe("default");
+    expect(args.pod).toBe("api-0");
+    expect(args.container).toBe("app");
+    expect(args.previous).toBe(true);
+    expect(args.onEvent).toBeDefined(); // the IPC Channel
+    expect(handle.streamId).toBe("stream-1");
+  });
+
+  it("startLogStream defaults to the live instance when previous=false", async () => {
+    const cap = captureNext("stream-2");
+    await api.startLogStream("ctx", "default", "api-0", null, false, () => {});
+    expect(cap.calls[0]?.args?.previous).toBe(false);
+    expect(cap.calls[0]?.args?.container).toBeNull();
+  });
+});

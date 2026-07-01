@@ -295,6 +295,178 @@ async fn open_stream(
     }
 }
 
+/// Live follow loop: open (polling through container start-up), pump lines,
+/// and reconnect across mid-stream drops / container restarts without
+/// re-emitting already-shown output. Ends when the container is gone for good
+/// or the reconnect budget is exhausted.
+async fn run_live(
+    api: &Api<Pod>,
+    pod: &str,
+    container: Option<&str>,
+    tx: &broadcast::Sender<LogEvent>,
+) {
+    // Timestamp of the last line we forwarded. On reconnect the apiserver
+    // re-sends an overlapping `tail_lines` window; we skip anything at or
+    // before this so reconnects don't duplicate already-shown output.
+    let mut last_ts: Option<String> = None;
+    let mut dead_reconnects: u32 = 0;
+
+    loop {
+        let params = LogParams {
+            follow: true,
+            tail_lines: Some(TAIL_LINES),
+            container: container.map(ToOwned::to_owned),
+            // Apiserver prepends an RFC3339Nano timestamp per line; the
+            // frontend parses + reformats it for the gutter, and we use it
+            // for reconnect de-duplication. Cheap (~30 bytes/line) and avoids
+            // a second round trip.
+            timestamps: true,
+            ..Default::default()
+        };
+
+        // ---- open (polls through container start-up) ----
+        let stream = match open_stream(api, pod, &params, tx).await {
+            Some(s) => s,
+            None => return, // `open_stream` already sent `Ended`
+        };
+
+        // ---- pump lines ----
+        let mut reader = stream.lines();
+        // Lines at/<= this timestamp were already forwarded before a
+        // reconnect — skip until we cross the boundary.
+        let mut skip_through = last_ts.clone();
+        let mut produced = false;
+        let end = loop {
+            match reader.next().await {
+                Some(Ok(line)) => {
+                    if let Some(skip) = skip_through.as_deref() {
+                        match line_timestamp(&line) {
+                            Some(ts) if ts <= skip => continue,
+                            // Crossed the boundary (or an un-timestamped
+                            // line) — stop skipping.
+                            _ => skip_through = None,
+                        }
+                    }
+                    if let Some(ts) = line_timestamp(&line) {
+                        last_ts = Some(ts.to_owned());
+                    }
+                    produced = true;
+                    // send returns Err when no receivers; that's fine.
+                    let _ = tx.send(LogEvent::Line { text: line });
+                }
+                Some(Err(e)) => break StreamEnd::Error(e.to_string()),
+                None => break StreamEnd::Closed,
+            }
+        };
+
+        // ---- reconnect, or finish for good ----
+        if produced {
+            dead_reconnects = 0;
+        }
+        let liveness = probe_container(api, pod, container).await;
+        match liveness {
+            ContainerLiveness::Active | ContainerLiveness::Waiting(_)
+                if dead_reconnects < MAX_DEAD_RECONNECTS =>
+            {
+                if !produced {
+                    dead_reconnects += 1;
+                }
+                let detail = match &liveness {
+                    ContainerLiveness::Waiting(r) => r.clone(),
+                    _ => match &end {
+                        StreamEnd::Error(e) => e.clone(),
+                        StreamEnd::Closed => "stream closed".to_owned(),
+                    },
+                };
+                let _ = tx.send(LogEvent::Waiting {
+                    reason: format!("reconnecting — {detail}"),
+                });
+                tokio::time::sleep(RECONNECT_DELAY).await;
+                // loop back round to re-open
+            }
+            ContainerLiveness::Active | ContainerLiveness::Waiting(_) => {
+                // Hit the dead-reconnect cap — stop churning.
+                let _ = tx.send(LogEvent::Ended {
+                    reason: format!(
+                        "stopped after {MAX_DEAD_RECONNECTS} reconnect \
+                         attempts with no output"
+                    ),
+                });
+                return;
+            }
+            ContainerLiveness::Done | ContainerLiveness::Unknown => {
+                let _ = tx.send(LogEvent::Ended {
+                    reason: match end {
+                        StreamEnd::Closed => "stream closed".to_owned(),
+                        StreamEnd::Error(e) => format!("read error: {e}"),
+                    },
+                });
+                return;
+            }
+        }
+    }
+}
+
+/// `LogParams` for a one-shot read of the previously-terminated container
+/// instance. `follow: false` (nothing to follow — the instance is gone),
+/// `previous: true`, and no `tail_lines` cap so the whole prior log comes
+/// back (matches `kubectl logs --previous`); the frontend ring bounds what
+/// it keeps in memory. Pure, so it can be unit-tested.
+fn previous_log_params(container: Option<&str>) -> LogParams {
+    LogParams {
+        follow: false,
+        previous: true,
+        container: container.map(ToOwned::to_owned),
+        tail_lines: None,
+        timestamps: true,
+        ..Default::default()
+    }
+}
+
+/// One-shot dump of the previously-terminated container instance's logs.
+///
+/// Unlike the live path there is deliberately no reconnect/probe loop: a
+/// terminated instance won't produce more output, and probing liveness would
+/// wrongly tail the *current* restarted instance. Any open error is terminal —
+/// e.g. `previous terminated container "x" in pod "y" not found` (a 400) when
+/// the container has never restarted — and is surfaced as `Ended` rather than
+/// polled through start-up like the live path does.
+async fn run_previous(
+    api: &Api<Pod>,
+    pod: &str,
+    container: Option<&str>,
+    tx: &broadcast::Sender<LogEvent>,
+) {
+    let params = previous_log_params(container);
+    let stream = match api.log_stream(pod, &params).await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tx.send(LogEvent::Ended {
+                reason: clean_kube_message(&e),
+            });
+            return;
+        }
+    };
+    let mut reader = stream.lines();
+    loop {
+        match reader.next().await {
+            Some(Ok(line)) => {
+                let _ = tx.send(LogEvent::Line { text: line });
+            }
+            Some(Err(e)) => {
+                let _ = tx.send(LogEvent::Ended {
+                    reason: format!("read error: {e}"),
+                });
+                return;
+            }
+            None => break,
+        }
+    }
+    let _ = tx.send(LogEvent::Ended {
+        reason: "reached end of previous instance logs".to_owned(),
+    });
+}
+
 pub struct LogStream {
     tx: broadcast::Sender<LogEvent>,
     /// Receiver subscribed *before* the reader task starts producing, so the
@@ -317,6 +489,7 @@ impl LogStream {
         namespace: &str,
         pod: &str,
         container: Option<&str>,
+        previous: bool,
     ) -> Result<Arc<Self>> {
         let api: Api<Pod> = Api::namespaced(client, namespace);
         let pod = pod.to_owned();
@@ -331,106 +504,12 @@ impl LogStream {
         let tx_task = tx.clone();
 
         let task = tokio::spawn(async move {
-            // Timestamp of the last line we forwarded. On reconnect the
-            // apiserver re-sends an overlapping `tail_lines` window; we
-            // skip anything at or before this so reconnects don't
-            // duplicate already-shown output.
-            let mut last_ts: Option<String> = None;
-            let mut dead_reconnects: u32 = 0;
-
-            loop {
-                let params = LogParams {
-                    follow: true,
-                    tail_lines: Some(TAIL_LINES),
-                    container: container.clone(),
-                    // Apiserver prepends an RFC3339Nano timestamp per line;
-                    // the frontend parses + reformats it for the gutter,
-                    // and we use it for reconnect de-duplication. Cheap
-                    // (~30 bytes/line) and avoids a second round trip.
-                    timestamps: true,
-                    ..Default::default()
-                };
-
-                // ---- open (polls through container start-up) ----
-                let stream = match open_stream(&api, &pod, &params, &tx_task).await {
-                    Some(s) => s,
-                    None => return, // `open_stream` already sent `Ended`
-                };
-
-                // ---- pump lines ----
-                let mut reader = stream.lines();
-                // Lines at/<= this timestamp were already forwarded before
-                // a reconnect — skip until we cross the boundary.
-                let mut skip_through = last_ts.clone();
-                let mut produced = false;
-                let end = loop {
-                    match reader.next().await {
-                        Some(Ok(line)) => {
-                            if let Some(skip) = skip_through.as_deref() {
-                                match line_timestamp(&line) {
-                                    Some(ts) if ts <= skip => continue,
-                                    // Crossed the boundary (or an
-                                    // un-timestamped line) — stop skipping.
-                                    _ => skip_through = None,
-                                }
-                            }
-                            if let Some(ts) = line_timestamp(&line) {
-                                last_ts = Some(ts.to_owned());
-                            }
-                            produced = true;
-                            // send returns Err when no receivers; that's fine.
-                            let _ = tx_task.send(LogEvent::Line { text: line });
-                        }
-                        Some(Err(e)) => break StreamEnd::Error(e.to_string()),
-                        None => break StreamEnd::Closed,
-                    }
-                };
-
-                // ---- reconnect, or finish for good ----
-                if produced {
-                    dead_reconnects = 0;
-                }
-                let liveness = probe_container(&api, &pod, container.as_deref()).await;
-                match liveness {
-                    ContainerLiveness::Active | ContainerLiveness::Waiting(_)
-                        if dead_reconnects < MAX_DEAD_RECONNECTS =>
-                    {
-                        if !produced {
-                            dead_reconnects += 1;
-                        }
-                        let detail = match &liveness {
-                            ContainerLiveness::Waiting(r) => r.clone(),
-                            _ => match &end {
-                                StreamEnd::Error(e) => e.clone(),
-                                StreamEnd::Closed => "stream closed".to_owned(),
-                            },
-                        };
-                        let _ = tx_task.send(LogEvent::Waiting {
-                            reason: format!("reconnecting — {detail}"),
-                        });
-                        tokio::time::sleep(RECONNECT_DELAY).await;
-                        // loop back round to re-open
-                    }
-                    ContainerLiveness::Active | ContainerLiveness::Waiting(_) => {
-                        // Hit the dead-reconnect cap — stop churning.
-                        let _ = tx_task.send(LogEvent::Ended {
-                            reason: format!(
-                                "stopped after {MAX_DEAD_RECONNECTS} reconnect \
-                                 attempts with no output"
-                            ),
-                        });
-                        return;
-                    }
-                    ContainerLiveness::Done | ContainerLiveness::Unknown => {
-                        let _ = tx_task.send(LogEvent::Ended {
-                            reason: match end {
-                                StreamEnd::Closed => "stream closed".to_owned(),
-                                StreamEnd::Error(e) => format!("read error: {e}"),
-                            },
-                        });
-                        return;
-                    }
-                }
+            if previous {
+                // One-shot dump of the previously-terminated instance — no
+                // follow, no reconnect (see `run_previous`).
+                run_previous(&api, &pod, container.as_deref(), &tx_task).await;
+            } else {
+                run_live(&api, &pod, container.as_deref(), &tx_task).await;
             }
         });
 
@@ -511,6 +590,24 @@ mod tests {
             rx2.try_recv().is_err(),
             "second subscriber is fresh (post-subscribe only)"
         );
+    }
+
+    #[test]
+    fn previous_params_are_a_bounded_one_shot() {
+        // Previous-instance logs must NOT follow (the instance is gone) and
+        // must carry `previous: true`; no tail cap so the whole prior log is
+        // returned (matches `kubectl logs --previous`). Regression guard: if
+        // this drifts to `follow: true` the reader would hang waiting on a
+        // dead instance, and dropping `previous` would tail the live one.
+        let p = previous_log_params(Some("app"));
+        assert!(!p.follow, "previous logs are one-shot, never followed");
+        assert!(p.previous, "must request the terminated instance");
+        assert_eq!(p.tail_lines, None, "no tail cap — full previous log");
+        assert!(p.timestamps, "timestamps drive the gutter");
+        assert_eq!(p.container.as_deref(), Some("app"));
+
+        // Container omitted (single-container pod) round-trips as None.
+        assert_eq!(previous_log_params(None).container, None);
     }
 
     #[test]

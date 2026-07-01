@@ -304,6 +304,7 @@ export function LogView({ t, sources, onStateChange }: Props) {
             src.namespace,
             src.pod,
             src.container,
+            src.previous,
             (evt) => {
               if (!mountedRef.current || !wantedRef.current.has(src.key)) return;
               // `waiting` carries no line — the container just isn't up yet.
