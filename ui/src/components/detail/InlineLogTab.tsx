@@ -3,6 +3,7 @@ import { useConsoleTokens, useResolvedTheme } from "../../store";
 import { FF_MONO, type ThemeMode, FS_SM, FS_XS } from "../../theme";
 import { EmptyState, ErrorBlock, LoadingLine, Select } from "../ui";
 import { LogView, type LogViewState } from "../log/LogView";
+import { PreviousLogsBanner, PreviousLogsToggle } from "../log/PreviousControls";
 import { streamStatusDetail, streamStatusLabel } from "../log/status";
 import { useObservedPods } from "../LogPanel";
 import {
@@ -55,6 +56,9 @@ export function InlineLogTab({
       ? defaultContainer
       : containers[0]) ?? null;
   const [container, setContainer] = useState<string | null>(initialContainer);
+  // Show the previously-terminated container instance instead of the live one
+  // (crash diagnosis — issue #63). Single-pod only.
+  const [previous, setPrevious] = useState(false);
   const [view, setView] = useState<LogViewState>({
     status: { kind: "starting" },
     paused: false,
@@ -87,17 +91,18 @@ export function InlineLogTab({
       container
         ? [
             {
-              key: sourceKey(clusterId, namespace, name, container),
+              key: sourceKey(clusterId, namespace, name, container, previous),
               clusterId,
               namespace,
               pod: name,
               container,
+              previous,
               label: "",
               colorIdx: 0,
             },
           ]
         : [],
-    [clusterId, namespace, name, container],
+    [clusterId, namespace, name, container, previous],
   );
 
   // Terse label — the full reason behind `ended` / `error` / `waiting`
@@ -165,6 +170,7 @@ export function InlineLogTab({
             container: {container ?? "—"}
           </span>
         )}
+        <PreviousLogsToggle t={t} active={previous} onToggle={setPrevious} />
         <span
           title={statusDetail ?? undefined}
           style={{
@@ -176,6 +182,7 @@ export function InlineLogTab({
           {statusLabel}
         </span>
       </div>
+      {previous && <PreviousLogsBanner t={t} />}
       <LogView t={consoleT} sources={sources} onStateChange={onStateChange} />
     </div>
   );

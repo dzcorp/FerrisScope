@@ -645,6 +645,9 @@ export const api = {
     namespace: string,
     pod: string,
     container: string | null,
+    // When true, stream the previously-terminated container instance instead
+    // of the live one (crash diagnosis — see issue #63). One-shot, no follow.
+    previous: boolean,
     onEvent: (evt: LogEvent) => void,
   ): Promise<{ streamId: string; close: () => void }> => {
     const channel = new Channel<LogEvent>();
@@ -654,6 +657,7 @@ export const api = {
       namespace,
       pod,
       container,
+      previous,
       onEvent: channel,
     });
     return {

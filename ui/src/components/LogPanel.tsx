@@ -21,6 +21,7 @@ import {
   Tooltip,
 } from "./ui";
 import { LogView, type LogStatus, type LogViewState } from "./log/LogView";
+import { PreviousLogsBanner, PreviousLogsToggle } from "./log/PreviousControls";
 import { MetricsPane } from "./log/MetricsPane";
 import { streamStatusDetail, streamStatusLabel } from "./log/status";
 import { api } from "../api";
@@ -278,6 +279,9 @@ export function LogPanel({
   const [container, setContainer] = useState<string | null>(
     defaultContainer ?? null,
   );
+  // Show the previously-terminated container instance instead of the live one
+  // (crash diagnosis — issue #63). Single-pod only; aggregated views stay live.
+  const [previous, setPrevious] = useState(false);
   const [view, setView] = useState<LogViewState>({
     status: { kind: "starting" },
     paused: false,
@@ -321,11 +325,13 @@ export function LogPanel({
               singlePod.namespace,
               singlePod.name,
               activeContainer,
+              previous,
             ),
             clusterId: singlePod.clusterId,
             namespace: singlePod.namespace,
             pod: singlePod.name,
             container: activeContainer,
+            previous,
             label: "",
             colorIdx: 0,
           },
@@ -334,7 +340,7 @@ export function LogPanel({
       };
     }
     return buildLogSources(state.pods, clusterNameFor);
-  }, [state, singlePod, activeContainer, clusterNameFor]);
+  }, [state, singlePod, activeContainer, previous, clusterNameFor]);
 
   if (targets.length === 0) return null;
 
@@ -480,6 +486,13 @@ export function LogPanel({
                   {built.dropped > 0 ? ` (+${built.dropped} over cap)` : ""}
                 </span>
               ) : null}
+              {singlePod && tab === "logs" && (
+                <PreviousLogsToggle
+                  t={t}
+                  active={previous}
+                  onToggle={setPrevious}
+                />
+              )}
               {tab === "logs" && state.kind === "ready" && (
                 <StreamStatus
                   status={view.status}
@@ -583,11 +596,14 @@ export function LogPanel({
               }
             />
           ) : tab === "logs" ? (
-            <LogView
-              t={consoleT}
-              sources={built.sources}
-              onStateChange={onStateChange}
-            />
+            <>
+              {singlePod && previous && <PreviousLogsBanner t={t} />}
+              <LogView
+                t={consoleT}
+                sources={built.sources}
+                onStateChange={onStateChange}
+              />
+            </>
           ) : (
             <MetricsPane pods={state.pods} />
           )}

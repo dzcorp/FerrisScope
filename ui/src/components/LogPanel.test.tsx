@@ -131,6 +131,42 @@ describe("LogPanel target resolution", () => {
     expect(utils.getByText("container: app")).toBeInTheDocument();
   });
 
+  it("single pod: 'Previous' toggle restarts the stream with previous:true and shows a banner", async () => {
+    const m = mockBackend({});
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <LogPanel
+          mode="dark"
+          targets={[podTarget("api-0", ["app"])]}
+          onClose={() => {}}
+        />,
+      );
+    });
+    // Live stream first — previous defaults false.
+    const firstStreams = m.calls.filter((c) => c.cmd === "start_log_stream");
+    expect(firstStreams).toHaveLength(1);
+    expect(firstStreams[0]!.args?.previous).toBe(false);
+    expect(utils.queryByRole("status")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(utils.getByRole("button", { name: "Previous" }));
+      await Promise.resolve();
+    });
+
+    // Folding `previous` into the source key tears the live stream down and
+    // opens a new one against the terminated instance.
+    const prevStream = m.calls
+      .filter((c) => c.cmd === "start_log_stream")
+      .find((c) => c.args?.previous === true);
+    expect(prevStream?.args?.pod).toBe("api-0");
+    expect(m.calls.some((c) => c.cmd === "stop_log_stream")).toBe(true);
+    // Banner warns the operator this isn't the live runtime.
+    expect(utils.getByRole("status").textContent).toContain(
+      "previous terminated instance",
+    );
+  });
+
   it("workload targets resolve to pods and stream each container", async () => {
     const m = mockBackend({
       resolve: () => ({

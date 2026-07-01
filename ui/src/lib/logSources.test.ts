@@ -6,6 +6,7 @@ import {
   isFullSourceSwap,
   MAX_LOG_SOURCES,
   reconcileStreams,
+  sourceKey,
   suggestedLogFileName,
   type LogStatus,
   type ObservedPod,
@@ -81,6 +82,9 @@ describe("buildLogSources", () => {
     expect(sources).toHaveLength(1);
     expect(sources[0]!.label).toBe("api-7f9c-x1");
     expect(sources[0]!.container).toBe("app");
+    // Aggregated/workload sources are always the live instance — previous-log
+    // viewing is a single-pod affair (issue #63).
+    expect(sources[0]!.previous).toBe(false);
   });
 
   it("compresses shared pod-name prefixes like the table compresses cluster names", () => {
@@ -247,6 +251,28 @@ describe("suggestedLogFileName", () => {
     ).sources;
     expect(suggestedLogFileName(sources, now)).toBe(
       "logs-2-pods-20260612-090507.log",
+    );
+  });
+});
+
+describe("sourceKey", () => {
+  it("distinguishes live from previous so toggling swaps the stream", () => {
+    const live = sourceKey("kc::eu", "default", "api-0", "app", false);
+    const prev = sourceKey("kc::eu", "default", "api-0", "app", true);
+    expect(live).not.toBe(prev);
+    // Defaulting the flag matches the live key (stable for existing callers).
+    expect(sourceKey("kc::eu", "default", "api-0", "app")).toBe(live);
+  });
+
+  it("still separates cluster / namespace / pod / container", () => {
+    const base = sourceKey("kc::eu", "default", "api-0", "app", true);
+    expect(sourceKey("kc::us", "default", "api-0", "app", true)).not.toBe(base);
+    expect(sourceKey("kc::eu", "kube-system", "api-0", "app", true)).not.toBe(
+      base,
+    );
+    expect(sourceKey("kc::eu", "default", "api-1", "app", true)).not.toBe(base);
+    expect(sourceKey("kc::eu", "default", "api-0", "sidecar", true)).not.toBe(
+      base,
     );
   });
 });
