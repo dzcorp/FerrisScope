@@ -1027,6 +1027,7 @@ describe("log streaming", () => {
       "api-0",
       "app",
       true,
+      1000,
       () => {},
     );
     expect(cap.calls[0]?.cmd).toBe("start_log_stream");
@@ -1036,14 +1037,39 @@ describe("log streaming", () => {
     expect(args.pod).toBe("api-0");
     expect(args.container).toBe("app");
     expect(args.previous).toBe(true);
+    expect(args.tailLines).toBe(1000);
     expect(args.onEvent).toBeDefined(); // the IPC Channel
     expect(handle.streamId).toBe("stream-1");
   });
 
   it("startLogStream defaults to the live instance when previous=false", async () => {
     const cap = captureNext("stream-2");
-    await api.startLogStream("ctx", "default", "api-0", null, false, () => {});
+    await api.startLogStream(
+      "ctx",
+      "default",
+      "api-0",
+      null,
+      false,
+      200,
+      () => {},
+    );
     expect(cap.calls[0]?.args?.previous).toBe(false);
     expect(cap.calls[0]?.args?.container).toBeNull();
+  });
+
+  it("startLogStream forwards a null tail as whole-history (kubectl --tail=-1)", async () => {
+    const cap = captureNext("stream-3");
+    await api.startLogStream(
+      "ctx",
+      "default",
+      "api-0",
+      "app",
+      false,
+      null,
+      () => {},
+    );
+    // null must survive to the wire — a dropped/undefined arg would make the
+    // backend fall back to a default cap instead of dumping the full log.
+    expect(cap.calls[0]?.args).toHaveProperty("tailLines", null);
   });
 });

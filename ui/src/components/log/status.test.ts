@@ -1,6 +1,37 @@
 import { describe, expect, it } from "vitest";
+import { tokens } from "../../theme";
 import type { LogStatus } from "./LogView";
-import { streamStatusDetail, streamStatusLabel } from "./status";
+import {
+  logStatusColor,
+  streamStatusDetail,
+  streamStatusLabel,
+} from "./status";
+
+const t = tokens("dark");
+
+describe("logStatusColor", () => {
+  it("paused always reads as warn regardless of underlying status", () => {
+    expect(logStatusColor({ kind: "streaming" }, true, t)).toBe(t.warn);
+    expect(logStatusColor({ kind: "error", message: "x" }, true, t)).toBe(
+      t.warn,
+    );
+  });
+
+  it("maps each stream state to its semantic bucket when not paused", () => {
+    expect(logStatusColor({ kind: "streaming" }, false, t)).toBe(t.good);
+    expect(logStatusColor({ kind: "error", message: "x" }, false, t)).toBe(
+      t.bad,
+    );
+    expect(
+      logStatusColor({ kind: "waiting", reason: "PodInitializing" }, false, t),
+    ).toBe(t.warn);
+    // starting / ended fall through to the muted default.
+    expect(logStatusColor({ kind: "starting" }, false, t)).toBe(t.textMuted);
+    expect(logStatusColor({ kind: "ended", reason: "done" }, false, t)).toBe(
+      t.textMuted,
+    );
+  });
+});
 
 describe("streamStatusLabel", () => {
   it("is terse for every status — never inlines the reason/message", () => {
