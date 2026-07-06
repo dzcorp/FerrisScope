@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FF_MONO, type ThemeMode, R_LG, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../theme";
 import { useAppStore, useResolvedTheme } from "../store";
-import { Btn, Icons, Kbd } from "./ui";
+import { Btn, Icons, Kbd, KindIcons } from "./ui";
 
 // Treat anything in the kube-* family plus the dashboard add-ons as "system."
 // Surfaced behind the Settings → General → Show system namespaces toggle.
@@ -30,9 +30,11 @@ type Props = {
   onClose: () => void;
 };
 
-// HV2NamespaceModal — multi-select with a top "All namespaces" pseudo-row.
-// Empty selection means "all" (matches HV2 semantics). Apply is the canonical
-// action (P2); Clear is secondary; Esc cancels.
+// HV2NamespaceModal — plain click single-selects (replaces the selection);
+// the checkbox glyph or a ⌘/Ctrl-click adds to a multi-selection. A top "All
+// namespaces" pseudo-row clears to the empty set. Empty selection means "all"
+// (matches HV2 semantics). Apply is the canonical action (P2); Clear is
+// secondary; Esc cancels. Selected-at-open namespaces float to the top.
 export function NamespaceModal({
   namespaces,
   counts,
@@ -45,6 +47,12 @@ export function NamespaceModal({
   const showSystemNs = useAppStore((s) => s.settings.showSystemNs);
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<Set<string>>(new Set(initial));
+  // Snapshot of the committed selection, captured once at open. Drives the
+  // "selected float to the top" ordering without reshuffling rows live as the
+  // draft changes mid-session (that would make rows jump under the cursor).
+  // Refreshes on the next open, so a just-applied selection sorts to the top
+  // the next time the modal is shown.
+  const [pinned] = useState<Set<string>>(() => new Set(initial));
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -59,22 +67,36 @@ export function NamespaceModal({
     () =>
       showSystemNs
         ? namespaces
-        : namespaces.filter((n) => !isSystemNs(n) || draft.has(n)),
-    [namespaces, showSystemNs, draft],
+        : namespaces.filter(
+            (n) => !isSystemNs(n) || draft.has(n) || pinned.has(n),
+          ),
+    [namespaces, showSystemNs, draft, pinned],
   );
+
+  // Namespaces selected at open float to the top; each group stays alpha
+  // (`visible` is already sorted upstream). Frozen via `pinned` so the order is
+  // stable for the whole session and only refreshes on the next open.
+  const ordered = useMemo(() => {
+    const sel: string[] = [];
+    const rest: string[] = [];
+    for (const n of visible) (pinned.has(n) ? sel : rest).push(n);
+    return [...sel, ...rest];
+  }, [visible, pinned]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return needle
-      ? visible.filter((n) => n.toLowerCase().includes(needle))
-      : visible;
-  }, [q, visible]);
+      ? ordered.filter((n) => n.toLowerCase().includes(needle))
+      : ordered;
+  }, [q, ordered]);
 
   const allMode = draft.size === 0;
   const apply = () => onApply(new Set(draft));
   const reset = () => setDraft(new Set());
   const selectAll = () => setDraft(new Set());
 
+  // Additive toggle — the multi-select path. Reached via the checkbox glyph or
+  // a ⌘/Ctrl-click on the row.
   const toggleNs = (ns: string) => {
     setDraft((prev) => {
       const next = new Set(prev);
@@ -82,6 +104,16 @@ export function NamespaceModal({
       else next.add(ns);
       return next;
     });
+  };
+
+  // Single-select — a plain click on the row body replaces the whole selection
+  // with just this namespace. "All namespaces" (the empty set) is reached via
+  // the pseudo-row above, not by toggling the last one off.
+  const selectOnly = (ns: string) => setDraft(new Set([ns]));
+
+  const onRowClick = (ns: string, e: React.MouseEvent) => {
+    if (e.metaKey || e.ctrlKey) toggleNs(ns);
+    else selectOnly(ns);
   };
 
   const onKey = (e: React.KeyboardEvent) => {
@@ -216,11 +248,22 @@ export function NamespaceModal({
               }}
             />
           </div>
+          <div
+            style={{
+              marginTop: 8,
+              fontSize: FS_XS,
+              color: t.textDim,
+              fontFamily: FF_MONO,
+            }}
+          >
+            Click selects one · ⌘/Ctrl-click or the box for multiple
+          </div>
         </div>
 
         <button
           type="button"
           onClick={selectAll}
+          aria-pressed={allMode}
           style={{
             display: "flex",
             alignItems: "center",
@@ -232,7 +275,7 @@ export function NamespaceModal({
             textAlign: "left",
             borderBottom: `1px solid ${t.borderSoft}`,
             fontFamily: "inherit",
-            color: t.text,
+            color: allMode ? t.accent : t.text,
           }}
           onMouseEnter={(e) => {
             if (!allMode) e.currentTarget.style.background = t.hover;
@@ -241,29 +284,22 @@ export function NamespaceModal({
             if (!allMode) e.currentTarget.style.background = "transparent";
           }}
         >
+          {/* Namespace kind glyph — "all namespaces" reads thematically; the
+              accent colour + accentSoft row background carry the active state,
+              so no radio ring is needed. */}
           <span
+            aria-hidden
             style={{
-              width: 14,
-              height: 14,
-              borderRadius: "50%",
-              border: `1.5px solid ${allMode ? t.accent : t.border}`,
-              boxSizing: "border-box",
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
               flexShrink: 0,
+              width: 16,
+              height: 16,
+              color: allMode ? t.accent : t.textMuted,
             }}
           >
-            {allMode && (
-              <span
-                style={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: "50%",
-                  background: t.accent,
-                }}
-              />
-            )}
+            {KindIcons.Namespace}
           </span>
           <span style={{ fontSize: FS_MD, fontWeight: 600, flex: 1 }}>
             All namespaces
@@ -298,7 +334,8 @@ export function NamespaceModal({
                 <button
                   key={ns}
                   type="button"
-                  onClick={() => toggleNs(ns)}
+                  onClick={(e) => onRowClick(ns, e)}
+                  title="Click to select only this · ⌘/Ctrl-click for multiple"
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -320,33 +357,63 @@ export function NamespaceModal({
                       e.currentTarget.style.background = "transparent";
                   }}
                 >
+                  {/* Enlarged left hit-zone: a near-miss around the box still
+                      toggles (multi) instead of single-selecting the row. Eats
+                      the row's left padding and stretches full height so the
+                      whole left column is the checkbox target. */}
                   <span
+                    role="checkbox"
+                    aria-checked={checked}
+                    aria-label={`Toggle ${ns}`}
+                    onClick={(e) => {
+                      // The box is the additive path — never collapse to a
+                      // single selection. Stop the row's single-select click.
+                      e.stopPropagation();
+                      toggleNs(ns);
+                    }}
                     style={{
-                      width: 14,
-                      height: 14,
-                      borderRadius: R_SM,
-                      border: `1.5px solid ${checked ? t.accent : t.border}`,
-                      background: checked ? t.accent : "transparent",
+                      alignSelf: "stretch",
+                      marginTop: -8,
+                      marginBottom: -8,
+                      marginLeft: -18,
+                      paddingLeft: 18,
+                      paddingRight: 4,
                       display: "inline-flex",
                       alignItems: "center",
                       justifyContent: "center",
                       flexShrink: 0,
+                      cursor: "pointer",
                     }}
                   >
-                    {checked && (
-                      <svg
-                        width="9"
-                        height="9"
-                        viewBox="0 0 10 10"
-                        fill="none"
-                        stroke="white"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M2 5l2 2 4-4" />
-                      </svg>
-                    )}
+                    <span
+                      aria-hidden
+                      style={{
+                        width: 14,
+                        height: 14,
+                        borderRadius: R_SM,
+                        border: `1.5px solid ${checked ? t.accent : t.border}`,
+                        background: checked ? t.accent : "transparent",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {checked && (
+                        <svg
+                          width="9"
+                          height="9"
+                          viewBox="0 0 10 10"
+                          fill="none"
+                          stroke="white"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M2 5l2 2 4-4" />
+                        </svg>
+                      )}
+                    </span>
                   </span>
                   <span
                     style={{
