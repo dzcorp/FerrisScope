@@ -7,7 +7,7 @@
 // additional renders.
 
 import { describe, it, expect, afterEach } from "vitest";
-import { render, cleanup, act } from "@testing-library/react";
+import { render, cleanup, act, fireEvent } from "@testing-library/react";
 import { Profiler, type ProfilerOnRenderCallback } from "react";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
 import { useAppStore } from "../store";
@@ -138,5 +138,133 @@ describe("Rail CRD discovery across active clusters", () => {
     });
     await act(async () => {});
     expect(useAppStore.getState().kindClusters).toEqual({});
+  });
+});
+
+describe("Rail CRD group expand/collapse + domain sort", () => {
+  const crd = (group: string, kind: string) => ({
+    id: `crd:${group}|v1|${kind.toLowerCase()}s|${kind}|ns`,
+    group,
+    version: "v1",
+    kind,
+    plural: `${kind.toLowerCase()}s`,
+    namespaced: true,
+    category: "CustomResources" as const,
+    columns: [],
+  });
+
+  // Three groups; auto.gke.io + gke.io share a family, cert-manager.io does
+  // not. A plain lexicographic sort would order these
+  // auto.gke.io / cert-manager.io / gke.io — splitting the gke family.
+  const AUTO = crd("auto.gke.io", "AutoPilot");
+  const CERT = crd("cert-manager.io", "Certificate");
+  const MANAGED = crd("gke.io", "Managed");
+  const GROUP_NAMES = ["auto.gke.io", "cert-manager.io", "gke.io"];
+
+  const mountRail = async () => {
+    setMockInvoke((cmd) => {
+      if (cmd === "list_resource_kinds") return [];
+      if (cmd === "list_custom_resource_kinds") return [AUTO, CERT, MANAGED];
+      return undefined;
+    });
+    act(() => {
+      useAppStore.setState({
+        contexts: [
+          {
+            id: "default::a",
+            name: "a",
+            cluster: "c",
+            user: null,
+            namespace: null,
+            is_current: false,
+            group: "Default",
+            source_id: "default",
+            source_path: null,
+          },
+        ],
+        virtualContexts: [{ id: "v1", name: "a", members: ["default::a"] }],
+        selectedVirtualContextId: "v1",
+        selectedContext: null,
+        scopeExtras: [],
+        selectedKindId: null,
+        railMode: "pinned",
+      });
+    });
+    let container!: HTMLElement;
+    await act(async () => {
+      ({ container } = render(<Rail mode="dark" />));
+    });
+    await act(async () => {});
+    return container;
+  };
+
+  // Group headers are the <button>s whose text contains an API group name.
+  // Longest-match-first so "auto.gke.io" isn't mistaken for "gke.io".
+  const groupHeaders = (c: HTMLElement) =>
+    Array.from(c.querySelectorAll("button"))
+      .map((b) => {
+        const txt = b.textContent ?? "";
+        const name = [...GROUP_NAMES]
+          .sort((a, z) => z.length - a.length)
+          .find((g) => txt.includes(g));
+        return name ? { name, button: b } : null;
+      })
+      .filter((x): x is { name: string; button: HTMLButtonElement } => !!x);
+
+  const header = (c: HTMLElement, group: string) => {
+    const h = groupHeaders(c).find((x) => x.name === group);
+    if (!h) throw new Error(`no group header for ${group}`);
+    return h.button;
+  };
+
+  // A kind's row is the <button> whose trimmed text is exactly the kind name.
+  const kindVisible = (c: HTMLElement, kind: string) =>
+    Array.from(c.querySelectorAll("button")).some(
+      (b) => b.textContent?.trim() === kind,
+    );
+
+  it("orders group headers by domain hierarchy, keeping a family contiguous", async () => {
+    const c = await mountRail();
+    expect(groupHeaders(c).map((h) => h.name)).toEqual([
+      "cert-manager.io",
+      "gke.io",
+      "auto.gke.io",
+    ]);
+  });
+
+  it("expands a group on header click and collapses it again (round-trip)", async () => {
+    const c = await mountRail();
+    // Default: all groups collapsed.
+    expect(kindVisible(c, "Managed")).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(header(c, "gke.io"));
+    });
+    expect(kindVisible(c, "Managed")).toBe(true);
+
+    await act(async () => {
+      fireEvent.click(header(c, "gke.io"));
+    });
+    expect(kindVisible(c, "Managed")).toBe(false);
+  });
+
+  it("lets the operator collapse the group holding the current selection", async () => {
+    // Regression: previously `isOpen = expanded.has(g) || activeGroup === g`
+    // pinned the selected CRD's group permanently open, so the toggle
+    // silently no-op'd. The selected group now auto-expands but stays
+    // collapsible.
+    const c = await mountRail();
+    expect(kindVisible(c, "Managed")).toBe(false); // collapsed by default
+
+    // Real user path: select the CRD, which lives in the gke.io group.
+    await act(async () => {
+      useAppStore.getState().selectKind(MANAGED.id);
+    });
+    expect(kindVisible(c, "Managed")).toBe(true); // auto-expanded on selection
+
+    await act(async () => {
+      fireEvent.click(header(c, "gke.io"));
+    });
+    expect(kindVisible(c, "Managed")).toBe(false); // and can be hidden back
   });
 });
