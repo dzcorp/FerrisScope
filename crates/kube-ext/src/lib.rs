@@ -14,7 +14,7 @@ pub mod watcher;
 pub mod well_known;
 
 pub use fetch::{
-    apply_resource, apply_yaml, delete_resource, discover_crds, drain_node,
+    apply_resource, apply_yaml, delete_resource, discover_crds, drain_node, evict_pod,
     get_cluster_role_binding_detail, get_cluster_role_detail, get_config_map_detail,
     get_cron_job_detail, get_custom_resource_definition_detail, get_custom_resource_detail,
     get_daemon_set_detail, get_deployment_detail, get_endpoint_slice_detail, get_endpoints_detail,

@@ -3,8 +3,13 @@
 // detailVersion bumps, compose shared primitives, dispatch from DetailPanel.
 
 import { logErr } from "../../../lib/log";
+import { confirm, toast } from "../../../lib/dialog";
 import { useEffect, useRef, useState } from "react";
-import { useResolvedTheme } from "../../../store";
+import {
+  selectClusterDegraded,
+  useAppStore,
+  useResolvedTheme,
+} from "../../../store";
 import { api, onResourceDelta } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
 import {  } from "../../../theme";
@@ -693,6 +698,7 @@ function PodsOnNodeSection(props: {
               key={row.uid}
               t={t}
               mode={mode}
+              clusterId={props.clusterId}
               row={row}
               onNavigate={props.onNavigate}
             />
@@ -705,16 +711,23 @@ function PodsOnNodeSection(props: {
 function PodOnNodeRow({
   t,
   mode,
+  clusterId,
   row,
   onNavigate,
 }: {
   t: Tokens;
   mode: ThemeMode;
+  clusterId: string;
   row: ResourceRow;
   onNavigate?: DetailNavigate;
 }) {
   const name = String(row.name ?? "");
   const ns = typeof row.namespace === "string" ? row.namespace : null;
+  // Match the row menu / bulk bar: skip the prompt when the user has turned
+  // off destructive confirmations globally, and disable the button while the
+  // cluster is unavailable / mid auto-reconnect.
+  const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
+  const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
   const phase = typeof row.phase === "string" ? row.phase : "Unknown";
   const ready = typeof row.ready === "string" ? row.ready : "";
   const restarts =
@@ -723,6 +736,34 @@ function PodOnNodeRow({
       : Number(row.restarts) || 0;
   const created =
     typeof row.creation_timestamp === "string" ? row.creation_timestamp : null;
+
+  // Graceful, PDB-aware eviction of this pod off the node being inspected.
+  // The list is fed by live pod deltas, so a successful evict removes the row
+  // on its own (Terminating → delete) — no manual refetch here.
+  const doEvict = () => {
+    void (async () => {
+      if (!ns) {
+        toast.bad("Pod has no namespace — can't evict.");
+        return;
+      }
+      if (confirmDestructive) {
+        const ok = await confirm({
+          title: `Evict pod ${ns}/${name}?`,
+          body: "Graceful, PDB-aware eviction off this node. Blocked if it would breach a PodDisruptionBudget. A controller-owned pod is rescheduled elsewhere; a bare pod is gone.",
+          confirmLabel: "Evict",
+          tone: "danger",
+        });
+        if (!ok) return;
+      }
+      try {
+        await api.evictPod(clusterId, ns, name);
+        toast.ok(`Evicted pod ${ns}/${name}.`);
+      } catch (e) {
+        // 429 → apiserver's disruption-budget message, surfaced verbatim.
+        toast.bad(`Evict failed: ${String(e)}`);
+      }
+    })();
+  };
 
   return (
     <DetailRow t={t} label={ns ?? "—"}>
@@ -770,6 +811,35 @@ function PodOnNodeRow({
           {ageFromIso(created)}
         </span>
       )}
+      <button
+        type="button"
+        disabled={degraded}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (degraded) return;
+          doEvict();
+        }}
+        title={
+          degraded
+            ? "Cluster unavailable — can't evict right now"
+            : "Evict pod (graceful, PDB-aware)"
+        }
+        style={{
+          marginLeft: created ? 8 : "auto",
+          fontFamily: FF_MONO,
+          fontSize: FS_XS,
+          color: degraded ? t.textMuted : t.bad,
+          background: "transparent",
+          border: `1px solid ${t.border}`,
+          borderRadius: R_SM,
+          padding: "1px 8px",
+          cursor: degraded ? "not-allowed" : "pointer",
+          opacity: degraded ? 0.5 : 1,
+          lineHeight: 1.6,
+        }}
+      >
+        Evict
+      </button>
     </DetailRow>
   );
 }

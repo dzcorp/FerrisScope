@@ -1246,10 +1246,39 @@ function buildPodBulkActions(
       },
     },
     {
+      // Graceful, PDB-aware bulk eviction. Sits ahead of Delete (raw DELETE)
+      // so the budget-respecting path is the first destructive option, and
+      // carries the divider that opens the destructive group.
+      icon: Icons.podDrain,
+      label: "Evict",
+      disabled: degraded,
+      separatorBefore: true,
+      danger: true,
+      onClick: () => {
+        void (async () => {
+          if (confirmDestructive) {
+            const ok = await confirm({
+              title: `Evict ${count} pod${count === 1 ? "" : "s"}?`,
+              body: `Graceful, PDB-aware eviction. A pod protected by a PodDisruptionBudget is refused (reported in the summary), not force-killed. Controller-owned pods reschedule; bare pods are gone.\n\n${summary}${more}`,
+              confirmLabel: "Evict",
+              tone: "danger",
+            });
+            if (!ok) return;
+          }
+          await runForAll("Evict", (m) => {
+            // Pods are namespaced; guard anyway so a malformed selection lands
+            // in the failure summary instead of a bad backend call.
+            if (!m.namespace)
+              return Promise.reject(new Error("pod has no namespace"));
+            return api.evictPod(m.clusterId, m.namespace, m.name);
+          });
+        })();
+      },
+    },
+    {
       icon: Icons.trash,
       label: "Delete",
       disabled: degraded,
-      separatorBefore: true,
       danger: true,
       onClick: () => {
         void (async () => {

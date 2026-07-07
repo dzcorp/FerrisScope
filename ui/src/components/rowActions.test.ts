@@ -86,6 +86,29 @@ describe("actionsForRow — View logs availability", () => {
   });
 });
 
+describe("actionsForRow — Evict pod", () => {
+  it("pods with an evict callback surface a danger 'Evict pod' item", () => {
+    const ctx: RowActionContext = {
+      ...ctxFor(kindOf("pods", "Pod"), { containers: ["app"] }),
+      evict: vi.fn(),
+    };
+    const item = actionsForRow(ctx).find(
+      (i) => i.kind === "item" && i.label === "Evict pod",
+    );
+    expect(item).toBeTruthy();
+    expect(item!.kind === "item" && item!.danger).toBe(true);
+    if (item?.kind === "item") item.onClick();
+    expect(ctx.evict).toHaveBeenCalledOnce();
+  });
+
+  it("no 'Evict pod' item without the callback, and never for non-pods", () => {
+    expect(labels(ctxFor(kindOf("pods", "Pod")))).not.toContain("Evict pod");
+    expect(
+      labels({ ...ctxFor(kindOf("nodes", "Node")), evict: vi.fn() }),
+    ).not.toContain("Evict pod");
+  });
+});
+
 describe("actionsForRow — read-only gating", () => {
   // A pod ctx wired with every optional write callback so all mutating items
   // are present in the menu (they're only pushed when their callback exists).
@@ -95,6 +118,7 @@ describe("actionsForRow — read-only gating", () => {
     openYamlEdit: vi.fn(),
     openPortForward: vi.fn(),
     restart: vi.fn(),
+    evict: vi.fn(),
     delete: vi.fn(),
   });
 
@@ -108,6 +132,7 @@ describe("actionsForRow — read-only gating", () => {
   it("disables every write action when readOnly", () => {
     for (const label of [
       "Delete pod",
+      "Evict pod",
       "Restart pod",
       "Exec shell",
       "Edit YAML",

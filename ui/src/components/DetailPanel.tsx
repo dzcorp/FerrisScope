@@ -14,7 +14,16 @@ import type {
   ResourceKind,
   ResourceRow,
 } from "../types";
-import { FF_MONO, type ThemeMode, type Tokens, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
+import {
+  FF_MONO,
+  type ThemeMode,
+  type Tokens,
+  FS_LG,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+  R_SM,
+} from "../theme";
 import {
   Chip,
   ContainerDots,
@@ -1837,6 +1846,13 @@ function PodSummary({
   detailVersion: number;
 }) {
   const t = useResolvedTheme().tokens;
+  // Honour the same "confirm destructive actions" setting the row menu / bulk
+  // bar respect, so the inline Evict button doesn't prompt when the user has
+  // opted out globally. Read before the early returns to keep hook order stable.
+  const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
+  // Disable the inline Evict button while the cluster is unavailable / mid
+  // auto-reconnect — same gate the row menu and bulk bar use.
+  const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
   const [state, setState] = useState<DetailState>({ kind: "loading" });
   const [refetch, setRefetch] = useState(0);
   const reqId = useRef(0);
@@ -2056,6 +2072,56 @@ function PodSummary({
             >
               {d.node}
             </LinkValue>
+            <button
+              type="button"
+              disabled={degraded}
+              onClick={() => {
+                if (degraded) return;
+                void (async () => {
+                  const ns = d.namespace;
+                  if (!ns) {
+                    toast.bad("Pod has no namespace — can't evict.");
+                    return;
+                  }
+                  if (confirmDestructive) {
+                    const ok = await confirm({
+                      title: `Evict pod ${ns}/${d.name}?`,
+                      body: `Graceful, PDB-aware eviction off node ${d.node}. Blocked if it would breach a PodDisruptionBudget. A controller-owned pod is rescheduled elsewhere; a bare pod is gone.`,
+                      confirmLabel: "Evict",
+                      tone: "danger",
+                    });
+                    if (!ok) return;
+                  }
+                  try {
+                    await api.evictPod(clusterId, ns, d.name);
+                    toast.ok(`Evicted pod ${ns}/${d.name}.`);
+                  } catch (e) {
+                    // 429 → apiserver's disruption-budget message, verbatim.
+                    toast.bad(`Evict failed: ${String(e)}`);
+                  }
+                })();
+              }}
+              title={
+                degraded
+                  ? "Cluster unavailable — can't evict right now"
+                  : "Evict this pod off the node (graceful, PDB-aware)"
+              }
+              style={{
+                marginLeft: 8,
+                fontFamily: FF_MONO,
+                fontSize: FS_XS,
+                color: degraded ? t.textMuted : t.bad,
+                background: "transparent",
+                border: `1px solid ${t.border}`,
+                borderRadius: R_SM,
+                padding: "1px 8px",
+                cursor: degraded ? "not-allowed" : "pointer",
+                opacity: degraded ? 0.5 : 1,
+                lineHeight: 1.6,
+              }}
+            >
+              Evict
+            </button>
           </DetailRow>
         )}
         {d.host_ips.length > 0 && (

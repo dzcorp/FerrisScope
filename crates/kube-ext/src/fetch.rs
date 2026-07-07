@@ -2381,6 +2381,34 @@ pub async fn list_pods_on_node(client: Client, node: &str) -> Result<Vec<Value>,
     Ok(rows)
 }
 
+/// Evict a single pod via the policy/v1 Eviction subresource. Unlike a plain
+/// DELETE this is graceful *and* PDB-aware: the apiserver refuses with 429 if
+/// the eviction would violate a PodDisruptionBudget, which we surface as a
+/// `Conflict` carrying the apiserver's own reason rather than a bare kube
+/// string. The pod's owning controller (if any) reschedules a replacement;
+/// a bare pod is simply gone — same as `kubectl drain` treats it, but here the
+/// caller has already chosen the pod explicitly so we don't gate on `force`.
+pub async fn evict_pod(client: Client, namespace: &str, name: &str) -> Result<(), FetchError> {
+    let pods: Api<Pod> = Api::namespaced(client, namespace);
+    let ep = EvictParams::default();
+    match pods.evict(name, &ep).await {
+        Ok(_) => Ok(()),
+        // 404 == the pod is already gone (raced our list, or someone else
+        // deleted it). Eviction is idempotent from the operator's intent —
+        // the goal is "this pod off the node" and it already is. Report
+        // success rather than a scary NotFound.
+        Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
+        // 429 TooManyRequests == the eviction would breach a PDB. Surface the
+        // apiserver's explanation ("Cannot evict pod as it would violate the
+        // pod's disruption budget.") so the operator knows to retry later or
+        // scale up first, instead of an opaque error code.
+        Err(kube::Error::Api(status)) if status.code == 429 => {
+            Err(FetchError::Conflict(status.message))
+        }
+        Err(e) => Err(FetchError::Kube(e)),
+    }
+}
+
 // ── Multi-doc YAML apply (Create-from-YAML) ────────────────────────────────
 
 /// Per-document outcome from `apply_yaml`. The frontend renders a list of

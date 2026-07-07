@@ -1869,6 +1869,30 @@ function buildRowActionContext(
         }
       })();
     };
+    ctx.evict = () => {
+      void (async () => {
+        if (!ns) {
+          toast.bad("Pod has no namespace — can't evict.");
+          return;
+        }
+        if (confirmDestructive) {
+          const ok = await confirm({
+            title: `Evict pod ${qualified}?`,
+            body: "Graceful, PDB-aware eviction. Blocked if it would breach a PodDisruptionBudget. If owned by a controller it's rescheduled; a bare pod is gone.",
+            confirmLabel: "Evict",
+            tone: "danger",
+          });
+          if (!ok) return;
+        }
+        try {
+          await api.evictPod(clusterId, ns, name);
+          toast.ok(`Evicted pod ${qualified}.`);
+        } catch (e) {
+          // Surfaces the apiserver's disruption-budget message on a 429 block.
+          toast.bad(`Evict failed: ${String(e)}`);
+        }
+      })();
+    };
   } else if (kind.id === "nodes") {
     ctx.openExec = () => {
       openNodeDebugTab(clusterId, contextLabel, name, addDockTab);

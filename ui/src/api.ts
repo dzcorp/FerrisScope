@@ -611,6 +611,13 @@ export const api = {
   listPodsOnNode: (clusterId: string, node: string) =>
     invoke<ResourceRow[]>("list_pods_on_node_cmd", { clusterId, node }),
 
+  // Gracefully evict a single pod (policy/v1 Eviction subresource, PDB-aware).
+  // Rejects with the apiserver's disruption-budget message when a PDB blocks
+  // it; unlike deleteResource this respects budgets and lets the owning
+  // controller reschedule a replacement.
+  evictPod: (clusterId: string, namespace: string, name: string) =>
+    invoke<void>("evict_pod_cmd", { clusterId, namespace, name }),
+
   // Trigger `kubectl rollout restart`-equivalent for the pod's owning
   // workload (Deployment/STS/DS). Returns [ownerKind, ownerName].
   restartPod: (clusterId: string, namespace: string, name: string) =>
