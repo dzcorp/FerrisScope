@@ -15,6 +15,7 @@ import {
   vibrantSurface,
 } from "../theme";
 import { IS_MAC } from "../lib/keyboard";
+import { compareApiGroups } from "../lib/crdGroups";
 import { ErrorBlock, Icons, Tooltip, resolveKindIcon } from "./ui";
 import { OpenClustersStrip } from "./OpenClustersStrip";
 
@@ -640,14 +641,34 @@ function CustomResourcesBody({
     arr.push(k);
     buckets.set(k.group, arr);
   }
-  const groupNames = Array.from(buckets.keys()).sort();
+  // Sort by domain hierarchy (root-first) so a vendor's groups stay
+  // contiguous — gke.io / auto.gke.io / node.gke.io group together instead
+  // of being split apart by an unrelated group that sorts between them
+  // lexicographically (e.g. cert-manager.io).
+  const groupNames = Array.from(buckets.keys()).sort(compareApiGroups);
 
   // Collapse state per group. Default: collapsed — busy clusters can have
   // 30+ CRDs across many vendors, so showing all of them by default makes
   // the rail unscannable. Auto-expand the group that contains the active
   // selection so the user always sees where they are.
   const activeGroup = dynamic.find((k) => k.id === selectedId)?.group ?? null;
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  // `expanded` is the single source of truth for which groups are open. Seed
+  // it with the active group so a restored/preselected CRD reveals its group
+  // on mount without a flash of collapsed state.
+  const [expanded, setExpanded] = useState<Set<string>>(() =>
+    activeGroup ? new Set([activeGroup]) : new Set(),
+  );
+  // Auto-expand the group holding the selection, but only when the selection
+  // *moves* into a new group — never on every render. Folding this into
+  // `isOpen` (as `|| activeGroup === g`) pinned the selected group open and
+  // silently no-op'd the collapse toggle; seeding `expanded` instead lets the
+  // operator collapse it again afterward.
+  useEffect(() => {
+    if (!activeGroup) return;
+    setExpanded((prev) =>
+      prev.has(activeGroup) ? prev : new Set(prev).add(activeGroup),
+    );
+  }, [activeGroup]);
   const toggle = (g: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -670,7 +691,7 @@ function CustomResourcesBody({
         />
       ))}
       {groupNames.map((g) => {
-        const isOpen = expanded.has(g) || activeGroup === g;
+        const isOpen = expanded.has(g);
         const groupItems = buckets.get(g) ?? [];
         return (
           <div key={g} style={{ marginTop: 4 }}>
