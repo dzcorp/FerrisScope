@@ -1,7 +1,17 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useAppStore, useResolvedTheme } from "../store";
-import type { Notification } from "../store";
-import { FF_MONO, FONT_SANS, type ThemeMode, type Tokens, R_SM, FS_MD, FS_SM, FS_XS } from "../theme";
+import type { Notification, NotificationDetail, NotificationMeta } from "../store";
+import {
+  FF_MONO,
+  FONT_SANS,
+  type ThemeMode,
+  type Tokens,
+  R_SM,
+  R_MD,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+} from "../theme";
 import { Btn, Eyebrow, IconBtn, Icons, EmptyState } from "./ui";
 
 type Props = { mode: ThemeMode };
@@ -115,7 +125,27 @@ export function NotificationsPanel({ mode }: Props) {
   );
 }
 
+// Flatten a notification's structured meta into an ordered label/value list.
+// Fixed order puts the operator's most-asked question first (which context /
+// cluster did this happen against), then resource identity, then the reason.
+// Empty fields are skipped; caller `extra` pairs append in their own order.
+function metaRows(m: NotificationMeta): NotificationDetail[] {
+  const out: NotificationDetail[] = [];
+  const push = (label: string, value?: string | null, mono?: boolean) => {
+    if (value != null && value !== "") out.push({ label, value, mono });
+  };
+  push("Context", m.context);
+  push("Cluster", m.cluster, true);
+  push("Namespace", m.namespace, true);
+  push("Kind", m.kind);
+  push("Resource", m.name, true);
+  push("Reason", m.reason, true);
+  if (m.extra) for (const d of m.extra) push(d.label, d.value, d.mono);
+  return out;
+}
+
 function Row({ t, n }: { t: Tokens; n: Notification }) {
+  const [open, setOpen] = useState(false);
   const accent =
     n.tone === "ok"
       ? t.good
@@ -124,6 +154,12 @@ function Row({ t, n }: { t: Tokens; n: Notification }) {
         : n.tone === "bad"
           ? t.bad
           : t.accent;
+
+  const rows = n.meta ? metaRows(n.meta) : [];
+  // Only rows with something to reveal get an expand affordance. A bare
+  // one-line toast with no meta and no body stays a static card.
+  const hasDetail = rows.length > 0 || !!n.body;
+
   return (
     <div
       style={{
@@ -145,33 +181,97 @@ function Row({ t, n }: { t: Tokens; n: Notification }) {
         }}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontSize: FS_MD,
-            color: t.text,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            lineHeight: 1.5,
-            fontWeight: n.body ? 600 : 400,
-          }}
-        >
-          {n.text}
-        </div>
-        {n.body && (
-          <div
+        {hasDetail ? (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            title={open ? "Collapse" : "Show detail"}
             style={{
-              marginTop: 4,
-              fontSize: FS_SM,
-              color: t.textDim,
-              fontFamily: FF_MONO,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-              lineHeight: 1.45,
+              display: "grid",
+              gridTemplateColumns: "1fr auto",
+              alignItems: "start",
+              gap: 8,
+              width: "100%",
+              padding: 0,
+              border: "none",
+              background: "transparent",
+              textAlign: "left",
+              cursor: "pointer",
+              color: "inherit",
+              font: "inherit",
             }}
           >
-            {n.body}
+            <span
+              style={{
+                fontSize: FS_MD,
+                color: t.text,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                lineHeight: 1.5,
+                fontWeight: 600,
+              }}
+            >
+              {n.text}
+            </span>
+            <span
+              aria-hidden
+              style={{
+                display: "inline-flex",
+                color: t.textMuted,
+                marginTop: 2,
+                transition: "color .12s",
+              }}
+            >
+              {open ? Icons.chevD : Icons.chevR}
+            </span>
+          </button>
+        ) : (
+          <div
+            style={{
+              fontSize: FS_MD,
+              color: t.text,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              lineHeight: 1.5,
+            }}
+          >
+            {n.text}
           </div>
         )}
+
+        {open && hasDetail && (
+          <div
+            style={{
+              marginTop: 8,
+              padding: "8px 10px",
+              background: t.chip,
+              border: `1px solid ${t.borderSoft}`,
+              borderRadius: R_MD,
+              display: "grid",
+              gridTemplateColumns: "auto 1fr",
+              columnGap: 12,
+              rowGap: 5,
+              alignItems: "baseline",
+            }}
+          >
+            {rows.map((d, i) => (
+              <DetailLine key={`${d.label}-${i}`} t={t} d={d} />
+            ))}
+            <DetailLine
+              t={t}
+              d={{
+                label: "Time",
+                value: new Date(n.createdAt).toLocaleString(),
+                mono: true,
+              }}
+            />
+            {n.body && (
+              <DetailLine t={t} d={{ label: "Details", value: n.body, mono: true }} />
+            )}
+          </div>
+        )}
+
         <div
           style={{
             marginTop: 4,
@@ -184,6 +284,38 @@ function Row({ t, n }: { t: Tokens; n: Notification }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// One label/value line inside the expanded detail box. Label column is dim and
+// nowrap; value wraps and is selectable so operators can copy it out.
+function DetailLine({ t, d }: { t: Tokens; d: NotificationDetail }) {
+  return (
+    <>
+      <span
+        style={{
+          fontSize: FS_XS,
+          color: t.textMuted,
+          fontFamily: FF_MONO,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {d.label}
+      </span>
+      <span
+        style={{
+          fontSize: FS_SM,
+          color: t.text,
+          fontFamily: d.mono ? FF_MONO : FONT_SANS,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          lineHeight: 1.45,
+          userSelect: "text",
+        }}
+      >
+        {d.value}
+      </span>
+    </>
   );
 }
 

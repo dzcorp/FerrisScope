@@ -243,6 +243,25 @@ describe("toasts + notifications cap", () => {
     expect(s.notifications[0]?.id).toBe("n5");
   });
 
+  it("copies structured meta from the toast into the notification log entry", () => {
+    const meta = {
+      context: "prod-eu-1",
+      cluster: "gke_acme_prod",
+      namespace: "default",
+      kind: "Pod",
+      name: "nginx-7f",
+    };
+    useAppStore.getState().pushToast({ ...t("m"), meta });
+    const note = useAppStore.getState().notifications[0];
+    expect(note?.meta).toEqual(meta);
+    // Bare toast (no meta) leaves the log entry meta-free.
+    useAppStore.getState().pushToast(t("plain"));
+    const plain = useAppStore
+      .getState()
+      .notifications.find((x) => x.id === "plain");
+    expect(plain?.meta).toBeUndefined();
+  });
+
   it("carries a routed toast's route into both the toast and the notification log", () => {
     const routed: Toast = {
       id: "upd",

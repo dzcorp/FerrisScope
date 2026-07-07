@@ -18,8 +18,9 @@ export function logErr(scope: string): (e: unknown) => void {
 /**
  * `.catch` sink that logs AND shows a warn toast. For data flows whose
  * silent failure strands the operator (prefs, saved views, restored
- * port-forwards): the headline says what's missing, the body carries
- * the raw error for the notifications panel.
+ * port-forwards): the headline says what's missing, and the raw error is
+ * carried as structured `reason` (plus the scope tag) so the operator can
+ * expand the notification and read the full failure.
  */
 export function reportErr(
   scope: string,
@@ -28,6 +29,11 @@ export function reportErr(
   return (e) => {
     // eslint-disable-next-line no-console
     console.warn(`[${scope}]`, e);
-    toast.warn(`${headline}\n${String(e)}`);
+    toast.warn(headline, {
+      meta: {
+        reason: String(e),
+        extra: [{ label: "Scope", value: scope, mono: true }],
+      },
+    });
   };
 }

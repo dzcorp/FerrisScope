@@ -120,6 +120,27 @@ export type ConfirmModal = {
 };
 
 export type ToastTone = "info" | "ok" | "warn" | "bad";
+
+// One free-form label/value pair shown in a notification's expanded detail.
+// `mono` renders the value monospaced (ids, names, error text).
+export type NotificationDetail = { label: string; value: string; mono?: boolean };
+
+// Structured context for a notification, surfaced only in the expanded row of
+// the NotificationsPanel (never in the one-line toast/headline). The active
+// kube `context`/`cluster` are auto-captured at emit time (see lib/dialog.ts);
+// richer call sites add namespace/kind/name/reason. All fields optional so the
+// common toast keeps working; a notification with no populated field carries no
+// `meta` at all (the viewer then shows no expand affordance).
+export type NotificationMeta = {
+  context?: string | null; // kube context display name (ContextInfo.name)
+  cluster?: string | null; // kubeconfig cluster (ContextInfo.cluster)
+  namespace?: string | null;
+  kind?: string | null;
+  name?: string | null;
+  reason?: string | null; // event reason / raw error text
+  extra?: NotificationDetail[]; // arbitrary extras (ports, versions…)
+};
+
 export type Toast = {
   id: string;
   tone: ToastTone;
@@ -133,6 +154,8 @@ export type Toast = {
   // opens Settings at this target instead of the notifications panel. Used by
   // the "update available" toast to jump straight to About → What's new.
   route?: SettingsTarget;
+  // Structured context surfaced only in the NotificationsPanel expanded row.
+  meta?: NotificationMeta;
 };
 
 // Persistent in-memory copy of every toast ever pushed (per session). Toasts
@@ -147,6 +170,9 @@ export type Notification = {
   // Mirrors `Toast.route` so a logged notification stays clickable after its
   // toast auto-dismisses (e.g. the update notice deep-links to About).
   route?: SettingsTarget;
+  // Mirrors `Toast.meta` — structured detail shown when the operator expands
+  // this entry in the NotificationsPanel.
+  meta?: NotificationMeta;
 };
 
 export const NOTIFICATION_LOG_CAP = 50;
@@ -1591,6 +1617,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         body: toast.body,
         createdAt: Date.now(),
         route: toast.route,
+        meta: toast.meta,
       };
       const next = [...s.notifications, note];
       // Drop oldest if over the cap so the log stays bounded.
