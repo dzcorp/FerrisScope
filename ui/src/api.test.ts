@@ -442,6 +442,17 @@ describe("node operations", () => {
     expect(cap.calls[0]?.cmd).toBe("list_pods_on_node_cmd");
     expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx", node: "worker-1" });
   });
+
+  it("evictPod → evict_pod_cmd with namespace + name", async () => {
+    const cap = captureNext(undefined);
+    await api.evictPod("ctx", "default", "api-0");
+    expect(cap.calls[0]?.cmd).toBe("evict_pod_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      clusterId: "ctx",
+      namespace: "default",
+      name: "api-0",
+    });
+  });
 });
 
 describe("pod / workload restart", () => {

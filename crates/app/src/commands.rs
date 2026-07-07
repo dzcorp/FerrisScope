@@ -22,18 +22,19 @@ use ferrisscope_core::sources::{
 use ferrisscope_core::ssh as ssh_keychain;
 use ferrisscope_core::table_views::{self, TableView, TableViewsFile};
 use ferrisscope_kube_ext::{
-    apply_resource, delete_resource, discover_crds, drain_node, get_cluster_role_binding_detail,
-    get_cluster_role_detail, get_config_map_detail, get_cron_job_detail,
-    get_custom_resource_definition_detail, get_custom_resource_detail, get_daemon_set_detail,
-    get_deployment_detail, get_endpoint_slice_detail, get_endpoints_detail, get_event_detail,
-    get_helm_chart_detail, get_helm_release_detail, get_horizontal_pod_autoscaler_detail,
-    get_ingress_class_detail, get_ingress_detail, get_job_detail, get_lease_detail,
-    get_limit_range_detail, get_mutating_webhook_configuration_detail, get_namespace_detail,
-    get_network_policy_detail, get_node_detail, get_persistent_volume_claim_detail,
-    get_persistent_volume_detail, get_pod_detail, get_pod_disruption_budget_detail,
-    get_priority_class_detail, get_replica_set_detail, get_replication_controller_detail,
-    get_resource_quota_detail, get_resource_yaml, get_role_binding_detail, get_role_detail,
-    get_secret_detail, get_service_account_detail, get_service_detail, get_stateful_set_detail,
+    apply_resource, delete_resource, discover_crds, drain_node, evict_pod,
+    get_cluster_role_binding_detail, get_cluster_role_detail, get_config_map_detail,
+    get_cron_job_detail, get_custom_resource_definition_detail, get_custom_resource_detail,
+    get_daemon_set_detail, get_deployment_detail, get_endpoint_slice_detail, get_endpoints_detail,
+    get_event_detail, get_helm_chart_detail, get_helm_release_detail,
+    get_horizontal_pod_autoscaler_detail, get_ingress_class_detail, get_ingress_detail,
+    get_job_detail, get_lease_detail, get_limit_range_detail,
+    get_mutating_webhook_configuration_detail, get_namespace_detail, get_network_policy_detail,
+    get_node_detail, get_persistent_volume_claim_detail, get_persistent_volume_detail,
+    get_pod_detail, get_pod_disruption_budget_detail, get_priority_class_detail,
+    get_replica_set_detail, get_replication_controller_detail, get_resource_quota_detail,
+    get_resource_yaml, get_role_binding_detail, get_role_detail, get_secret_detail,
+    get_service_account_detail, get_service_detail, get_stateful_set_detail,
     get_storage_class_detail, get_validating_webhook_configuration_detail, get_well_known_detail,
     helm_install_chart, helm_repo_update, helm_uninstall, helm_upgrade,
     list_config_maps_in_namespace, list_namespace_names,
@@ -2206,6 +2207,22 @@ pub(crate) async fn list_pods_on_node_cmd(
 ) -> Result<Vec<Value>, String> {
     let entry = state.entry(&cluster_id).await?;
     list_pods_on_node(entry.cluster.client(), &node)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Gracefully evict a single pod via the policy/v1 Eviction subresource
+/// (PDB-aware). A blocked eviction (429) surfaces as the apiserver's own
+/// disruption-budget message so the frontend can toast it verbatim.
+#[tauri::command]
+pub(crate) async fn evict_pod_cmd(
+    cluster_id: String,
+    namespace: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let entry = state.entry(&cluster_id).await?;
+    evict_pod(entry.cluster.client(), &namespace, &name)
         .await
         .map_err(|e| e.to_string())
 }

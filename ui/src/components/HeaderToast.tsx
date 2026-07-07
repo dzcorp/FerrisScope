@@ -91,15 +91,20 @@ function HeaderToastCard({
     dismissToast(toast.id);
   };
 
+  // Hover tooltip keeps the strip single-line (per Helmsman) but still surfaces
+  // the body and the kube context this happened against; the full structured
+  // detail lives in the notifications panel behind the expand affordance.
+  const titleLines = [toast.text];
+  if (toast.body) titleLines.push(toast.body);
+  if (toast.meta?.context) titleLines.push(`Context: ${toast.meta.context}`);
+  titleLines.push("", "Click to open notifications");
+  const title = titleLines.join("\n");
+
   return (
     <button
       type="button"
       onClick={onCardClick}
-      title={
-        toast.body
-          ? `${toast.text}\n${toast.body}\n\nClick to open notifications`
-          : "Click to open notifications"
-      }
+      title={title}
       style={{
         display: "grid",
         gridTemplateColumns: queued > 0

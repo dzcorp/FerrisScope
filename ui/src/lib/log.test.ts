@@ -32,13 +32,20 @@ describe("reportErr", () => {
     warn.mockRestore();
   });
 
-  it("logs and pushes a warn toast with headline + error body", () => {
+  it("logs and pushes a warn toast with headline + structured error reason", () => {
     reportErr("prefs", "Couldn't load preferences")(new Error("disk on fire"));
     expect(warn).toHaveBeenCalledTimes(1);
     const toasts = useAppStore.getState().toasts;
     expect(toasts).toHaveLength(1);
     expect(toasts[0]?.tone).toBe("warn");
+    // Headline stays clean; the raw error moves into structured meta so the
+    // notifications panel can show it in the expanded row.
     expect(toasts[0]?.text).toBe("Couldn't load preferences");
-    expect(toasts[0]?.body).toContain("disk on fire");
+    expect(toasts[0]?.meta?.reason).toContain("disk on fire");
+    expect(toasts[0]?.meta?.extra).toContainEqual({
+      label: "Scope",
+      value: "prefs",
+      mono: true,
+    });
   });
 });

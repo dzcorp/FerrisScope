@@ -3,7 +3,7 @@
 // window.alert.
 
 import { useAppStore } from "../store";
-import type { Toast, ToastTone } from "../store";
+import type { NotificationMeta, Toast, ToastTone } from "../store";
 import type { SettingsTarget } from "../types";
 
 export type ConfirmOpts = {
@@ -41,11 +41,45 @@ const DEFAULT_TOAST_MS: Record<ToastTone, number> = {
 
 /// Extra, optional toast behaviour. `route` deep-links the toast (and its
 /// notification-log entry) to a Settings target instead of the notifications
-/// panel — see `Toast.route`.
+/// panel — see `Toast.route`. `meta` carries structured context for the
+/// NotificationsPanel's expanded row (see `Toast.meta`); the active kube
+/// context/cluster is auto-captured when the caller doesn't supply them.
 export type ToastOptions = {
   durationMs?: number;
   route?: SettingsTarget;
+  meta?: NotificationMeta;
 };
+
+// Merge the caller's `meta` over the active kube context/cluster resolved from
+// the live store. Caller-supplied fields win. Returns `undefined` when nothing
+// is populated so plain toasts stay meta-free (no expand affordance, existing
+// tests/rows unchanged). Kept side-effect free beyond the one `getState()` read
+// so it's callable from any (non-React) context, like the rest of this module.
+function resolveMeta(callerMeta?: NotificationMeta): NotificationMeta | undefined {
+  const s = useAppStore.getState();
+  const active =
+    s.selectedContext != null
+      ? (s.contexts.find((c) => c.id === s.selectedContext) ?? null)
+      : null;
+  const merged: NotificationMeta = {
+    context: callerMeta?.context ?? active?.name ?? undefined,
+    cluster: callerMeta?.cluster ?? active?.cluster ?? undefined,
+    namespace: callerMeta?.namespace ?? undefined,
+    kind: callerMeta?.kind ?? undefined,
+    name: callerMeta?.name ?? undefined,
+    reason: callerMeta?.reason ?? undefined,
+    extra: callerMeta?.extra,
+  };
+  const hasField =
+    merged.context != null ||
+    merged.cluster != null ||
+    merged.namespace != null ||
+    merged.kind != null ||
+    merged.name != null ||
+    merged.reason != null ||
+    (merged.extra?.length ?? 0) > 0;
+  return hasField ? merged : undefined;
+}
 
 function emit(tone: ToastTone, text: string, opts?: ToastOptions): string {
   const id = makeId();
@@ -63,6 +97,7 @@ function emit(tone: ToastTone, text: string, opts?: ToastOptions): string {
     body,
     durationMs: opts?.durationMs ?? DEFAULT_TOAST_MS[tone],
     route: opts?.route,
+    meta: resolveMeta(opts?.meta),
   };
   useAppStore.getState().pushToast(toast);
   return id;

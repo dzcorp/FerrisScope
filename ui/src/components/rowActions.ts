@@ -11,6 +11,9 @@ export type RowActionContext = {
   openYamlEdit?: () => void;
   openPortForward?: () => void;
   restart?: () => void;
+  // Graceful, PDB-aware single-pod eviction (pods only). Distinct from
+  // `delete` (raw DELETE) — surfaces the disruption-budget block when present.
+  evict?: () => void;
   delete?: () => void;
   // Node-only operations. `cordon` is null when the node action makes no
   // sense (non-node row); when present, it carries the *target* state — i.e.
@@ -145,13 +148,23 @@ export function actionsForRow(
     onClick: () => copy(row.uid),
   });
 
-  if (kind.id === "pods" && (restart || ctx.delete)) {
+  if (kind.id === "pods" && (restart || ctx.evict || ctx.delete)) {
     items.push({ kind: "separator" });
     if (restart)
       items.push({
         kind: "item",
         label: "Restart pod",
         onClick: restart,
+        disabled: readOnly,
+      });
+    // Evict = graceful, PDB-aware. Sits above Delete (raw DELETE) so the
+    // budget-respecting path is the first destructive option operators reach.
+    if (ctx.evict)
+      items.push({
+        kind: "item",
+        label: "Evict pod",
+        onClick: ctx.evict,
+        danger: true,
         disabled: readOnly,
       });
     if (ctx.delete)

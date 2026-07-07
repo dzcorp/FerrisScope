@@ -102,3 +102,50 @@ describe("toast", () => {
     expect(useAppStore.getState().notifications).toHaveLength(1);
   });
 });
+
+describe("toast meta (active-context auto-capture)", () => {
+  const activeContext = {
+    id: "ctx-1",
+    name: "prod-eu-1",
+    cluster: "gke_acme_prod",
+    user: null,
+    namespace: null,
+    is_current: true,
+    group: "",
+    source_id: "src",
+    source_path: null,
+  };
+
+  it("no active context → no meta on the toast", () => {
+    // beforeEach already reset selectedContext/contexts to their (null/empty)
+    // initial values, so a plain toast stays meta-free.
+    toast.ok("saved");
+    expect(useAppStore.getState().toasts[0]?.meta).toBeUndefined();
+  });
+
+  it("auto-attaches the active context + cluster when one is selected", () => {
+    useAppStore.setState({
+      selectedContext: "ctx-1",
+      contexts: [activeContext],
+    });
+    toast.ok("saved");
+    const meta = useAppStore.getState().toasts[0]?.meta;
+    expect(meta?.context).toBe("prod-eu-1");
+    expect(meta?.cluster).toBe("gke_acme_prod");
+  });
+
+  it("caller-supplied meta wins per-field over the auto-captured context", () => {
+    useAppStore.setState({
+      selectedContext: "ctx-1",
+      contexts: [activeContext],
+    });
+    toast.bad("Evict failed", {
+      meta: { context: "staging", namespace: "kube-system", reason: "boom" },
+    });
+    const meta = useAppStore.getState().toasts[0]?.meta;
+    expect(meta?.context).toBe("staging"); // caller override
+    expect(meta?.cluster).toBe("gke_acme_prod"); // filled from active context
+    expect(meta?.namespace).toBe("kube-system");
+    expect(meta?.reason).toBe("boom");
+  });
+});

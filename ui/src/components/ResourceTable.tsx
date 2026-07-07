@@ -1804,6 +1804,17 @@ function buildRowActionContext(
     openLogs: base.openLogs,
   };
 
+  // Structured notification detail for this row's actions. The active kube
+  // context/cluster is auto-attached by `emit`; here we add the resource
+  // identity (and, on failures, the raw error) so the notifications panel can
+  // show what was acted on and — for errors — the full apiserver message.
+  const rowMeta = (reason?: string) => ({
+    kind: kind.kind,
+    namespace: ns,
+    name,
+    ...(reason !== undefined ? { reason } : {}),
+  });
+
   if (kind.id === "pods") {
     ctx.openExec = () => {
       if (!ns) {
@@ -1840,9 +1851,9 @@ function buildRowActionContext(
         }
         try {
           await api.deleteResource(clusterId, "pods", ns, name, null);
-          toast.ok(`Deleted pod ${qualified}.`);
+          toast.ok(`Deleted pod ${qualified}.`, { meta: rowMeta() });
         } catch (e) {
-          toast.bad(`Delete failed: ${String(e)}`);
+          toast.bad(`Delete failed: ${String(e)}`, { meta: rowMeta(String(e)) });
         }
       })();
     };
@@ -1863,9 +1874,37 @@ function buildRowActionContext(
         }
         try {
           const [k, n] = await api.restartPod(clusterId, ns, name);
-          toast.ok(`Restarted ${k} ${ns}/${n}.`);
+          toast.ok(`Restarted ${k} ${ns}/${n}.`, {
+            meta: { kind: k, namespace: ns, name: n },
+          });
         } catch (e) {
-          toast.bad(`Restart failed: ${String(e)}`);
+          toast.bad(`Restart failed: ${String(e)}`, {
+            meta: rowMeta(String(e)),
+          });
+        }
+      })();
+    };
+    ctx.evict = () => {
+      void (async () => {
+        if (!ns) {
+          toast.bad("Pod has no namespace — can't evict.");
+          return;
+        }
+        if (confirmDestructive) {
+          const ok = await confirm({
+            title: `Evict pod ${qualified}?`,
+            body: "Graceful, PDB-aware eviction. Blocked if it would breach a PodDisruptionBudget. If owned by a controller it's rescheduled; a bare pod is gone.",
+            confirmLabel: "Evict",
+            tone: "danger",
+          });
+          if (!ok) return;
+        }
+        try {
+          await api.evictPod(clusterId, ns, name);
+          toast.ok(`Evicted pod ${qualified}.`, { meta: rowMeta() });
+        } catch (e) {
+          // Surfaces the apiserver's disruption-budget message on a 429 block.
+          toast.bad(`Evict failed: ${String(e)}`, { meta: rowMeta(String(e)) });
         }
       })();
     };
@@ -1889,11 +1928,13 @@ function buildRowActionContext(
           }
           try {
             await api.cordonNode(clusterId, name, target);
-            toast.ok(target ? `Cordoned ${name}.` : `Uncordoned ${name}.`);
+            toast.ok(target ? `Cordoned ${name}.` : `Uncordoned ${name}.`, {
+              meta: rowMeta(),
+            });
           } catch (e) {
-            toast.bad(
-              `${target ? "Cordon" : "Uncordon"} failed: ${String(e)}`,
-            );
+            toast.bad(`${target ? "Cordon" : "Uncordon"} failed: ${String(e)}`, {
+              meta: rowMeta(String(e)),
+            });
           }
         })();
       },
@@ -1911,7 +1952,7 @@ function buildRowActionContext(
           const report = await api.drainNode(clusterId, name, false);
           summarizeDrain(name, report);
         } catch (e) {
-          toast.bad(`Drain failed: ${String(e)}`);
+          toast.bad(`Drain failed: ${String(e)}`, { meta: rowMeta(String(e)) });
         }
       })();
     };
@@ -1926,9 +1967,9 @@ function buildRowActionContext(
         if (!ok) return;
         try {
           await api.deleteResource(clusterId, "nodes", null, name, null);
-          toast.ok(`Deleted node ${name}.`);
+          toast.ok(`Deleted node ${name}.`, { meta: rowMeta() });
         } catch (e) {
-          toast.bad(`Delete failed: ${String(e)}`);
+          toast.bad(`Delete failed: ${String(e)}`, { meta: rowMeta(String(e)) });
         }
       })();
     };
@@ -1954,9 +1995,11 @@ function buildRowActionContext(
         }
         try {
           await api.deleteResource(clusterId, kind.id, ns, name, null);
-          toast.ok(`Uninstalled release ${qualified}.`);
+          toast.ok(`Uninstalled release ${qualified}.`, { meta: rowMeta() });
         } catch (e) {
-          toast.bad(`Uninstall failed: ${String(e)}`);
+          toast.bad(`Uninstall failed: ${String(e)}`, {
+            meta: rowMeta(String(e)),
+          });
         }
       })();
     };
@@ -1979,9 +2022,9 @@ function buildRowActionContext(
         }
         try {
           await api.deleteResource(clusterId, kind.id, ns, name, null);
-          toast.ok(`Deleted ${kindLabel} ${qualified}.`);
+          toast.ok(`Deleted ${kindLabel} ${qualified}.`, { meta: rowMeta() });
         } catch (e) {
-          toast.bad(`Delete failed: ${String(e)}`);
+          toast.bad(`Delete failed: ${String(e)}`, { meta: rowMeta(String(e)) });
         }
       })();
     };
