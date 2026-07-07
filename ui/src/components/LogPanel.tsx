@@ -21,12 +21,15 @@ import {
   Tooltip,
 } from "./ui";
 import { LogView, type LogStatus, type LogViewState } from "./log/LogView";
-import { PreviousLogsBanner, PreviousLogsToggle } from "./log/PreviousControls";
+import { PreviousLogsBanner } from "./log/PreviousControls";
 import { MetricsPane } from "./log/MetricsPane";
+import { LogToolbar } from "./log/LogToolbar";
 import { streamStatusDetail, streamStatusLabel } from "./log/status";
 import { api } from "../api";
 import {
   buildLogSources,
+  containerUniverse,
+  DEFAULT_TAIL_LINES,
   sourceKey,
   type LogViewSource,
   type ObservedPod,
@@ -282,6 +285,20 @@ export function LogPanel({
   // Show the previously-terminated container instance instead of the live one
   // (crash diagnosis — issue #63). Single-pod only; aggregated views stay live.
   const [previous, setPrevious] = useState(false);
+  // First-open fetch tail (200 by default; up to whole history). Folded into
+  // the stream key so changing it restarts cleanly.
+  const [tailLines, setTailLines] = useState<number | null>(DEFAULT_TAIL_LINES);
+  // Containers muted across an aggregated view (noisy sidecars). Excluded from
+  // every pod's merged stream; ignored in single-pod mode.
+  const [excluded, setExcluded] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleContainer = useCallback((c: string) => {
+    setExcluded((prev) => {
+      const next = new Set(prev);
+      if (next.has(c)) next.delete(c);
+      else next.add(c);
+      return next;
+    });
+  }, []);
   const [view, setView] = useState<LogViewState>({
     status: { kind: "starting" },
     paused: false,
@@ -326,12 +343,14 @@ export function LogPanel({
               singlePod.name,
               activeContainer,
               previous,
+              tailLines,
             ),
             clusterId: singlePod.clusterId,
             namespace: singlePod.namespace,
             pod: singlePod.name,
             container: activeContainer,
             previous,
+            tailLines,
             label: "",
             colorIdx: 0,
           },
@@ -339,8 +358,18 @@ export function LogPanel({
         dropped: 0,
       };
     }
-    return buildLogSources(state.pods, clusterNameFor);
-  }, [state, singlePod, activeContainer, previous, clusterNameFor]);
+    return buildLogSources(state.pods, clusterNameFor, {
+      tailLines,
+      excludedContainers: excluded,
+    });
+  }, [state, singlePod, activeContainer, previous, tailLines, excluded, clusterNameFor]);
+
+  // Distinct container names across the aggregated pod set (single-pod uses
+  // the container Select instead). Drives the toolbar's mute chips.
+  const universe = useMemo(
+    () => (singlePod ? [] : containerUniverse(state.kind === "ready" ? state.pods : [])),
+    [singlePod, state],
+  );
 
   if (targets.length === 0) return null;
 
@@ -447,7 +476,47 @@ export function LogPanel({
                 flexWrap: "wrap",
               }}
             >
-              {singlePod && singlePod.containers.length > 1 ? (
+              {tab === "logs" ? (
+                state.kind === "ready" && (
+                  <LogToolbar
+                    t={t}
+                    mode={
+                      singlePod
+                        ? {
+                            kind: "single",
+                            containers: singlePod.containers,
+                            active: activeContainer,
+                            onContainer: setContainer,
+                            previous,
+                            onPrevious: setPrevious,
+                          }
+                        : {
+                            kind: "aggregated",
+                            podCount: state.pods.length,
+                            streamCount: built.sources.length,
+                            dropped: built.dropped,
+                            universe,
+                            excluded,
+                            onToggleContainer: toggleContainer,
+                          }
+                    }
+                    tailLines={tailLines}
+                    onTailLines={setTailLines}
+                    statusNode={
+                      <StreamStatus
+                        status={view.status}
+                        paused={view.paused}
+                        bufferedCount={view.bufferedCount}
+                        t={t}
+                        mode={mode}
+                      />
+                    }
+                    style={{ width: "100%" }}
+                  />
+                )
+              ) : /* Metrics tab: only the source picker/summary is relevant —
+                   previous/tail/status are log-specific. */
+              singlePod && singlePod.containers.length > 1 ? (
                 <Select
                   t={t}
                   fullWidth={false}
@@ -482,26 +551,9 @@ export function LogPanel({
                     fontFamily: FF_MONO,
                   }}
                 >
-                  {state.pods.length} pods · {built.sources.length} streams
-                  {built.dropped > 0 ? ` (+${built.dropped} over cap)` : ""}
+                  {state.pods.length} pods
                 </span>
               ) : null}
-              {singlePod && tab === "logs" && (
-                <PreviousLogsToggle
-                  t={t}
-                  active={previous}
-                  onToggle={setPrevious}
-                />
-              )}
-              {tab === "logs" && state.kind === "ready" && (
-                <StreamStatus
-                  status={view.status}
-                  paused={view.paused}
-                  bufferedCount={view.bufferedCount}
-                  t={t}
-                  mode={mode}
-                />
-              )}
             </div>
           </div>
           <IconBtn t={t} title="Close (Esc)" onClick={onClose}>
@@ -600,6 +652,7 @@ export function LogPanel({
               {singlePod && previous && <PreviousLogsBanner t={t} />}
               <LogView
                 t={consoleT}
+                chromeT={t}
                 sources={built.sources}
                 onStateChange={onStateChange}
               />

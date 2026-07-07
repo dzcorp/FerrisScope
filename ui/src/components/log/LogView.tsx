@@ -118,7 +118,14 @@ class LineRing {
 }
 
 type Props = {
+  // Console tokens for the scrollable log BODY — the terminal surface, which
+  // stays dark when `darkConsole` is on regardless of the app's light/dark mode.
   t: Tokens;
+  // App-theme tokens for the CHROME (footer bar + find bar). Follows day/night
+  // like the rest of the app so the footer buttons aren't stuck dark. Defaults
+  // to `t` when omitted, preserving the old all-console look for any caller that
+  // hasn't opted in.
+  chromeT?: Tokens;
   // The streams to run — one per (cluster, namespace, pod, container)
   // tuple, built by the parent (see `lib/logSources.buildLogSources`).
   // Streams restart whenever the key set changes. Empty while the parent
@@ -129,7 +136,7 @@ type Props = {
   onStateChange?: (state: LogViewState) => void;
 };
 
-export function LogView({ t, sources, onStateChange }: Props) {
+export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
   const [lines, setLines] = useState<LineEntry[]>([]);
   const [status, setStatus] = useState<LogStatus>({ kind: "starting" });
   const [autoScroll, setAutoScroll] = useState(true);
@@ -305,6 +312,7 @@ export function LogView({ t, sources, onStateChange }: Props) {
             src.pod,
             src.container,
             src.previous,
+            src.tailLines,
             (evt) => {
               if (!mountedRef.current || !wantedRef.current.has(src.key)) return;
               // `waiting` carries no line — the container just isn't up yet.
@@ -642,7 +650,7 @@ export function LogView({ t, sources, onStateChange }: Props) {
     >
       {findOpen && (
         <LogFindBar
-          t={t}
+          t={chromeT}
           inputRef={findInputRef}
           query={query}
           onQueryChange={(v) => {
@@ -742,9 +750,12 @@ export function LogView({ t, sources, onStateChange }: Props) {
       <div
         style={{
           padding: "6px 14px",
-          borderTop: `1px solid ${t.borderSoft}`,
+          // Chrome (theme) background so the footer follows day/night while the
+          // log body above stays terminal-dark.
+          background: chromeT.surfaceAlt,
+          borderTop: `1px solid ${chromeT.borderSoft}`,
           fontSize: FS_SM,
-          color: t.textMuted,
+          color: chromeT.textMuted,
           fontFamily: FF_MONO,
           display: "flex",
           alignItems: "center",
@@ -763,10 +774,10 @@ export function LogView({ t, sources, onStateChange }: Props) {
             alignItems: "center",
             gap: 6,
             padding: "2px 10px",
-            border: `1px solid ${t.border}`,
+            border: `1px solid ${chromeT.border}`,
             borderRadius: 4,
-            background: paused ? t.warn : t.surface,
-            color: paused ? t.bg : t.text,
+            background: paused ? chromeT.warn : chromeT.surface,
+            color: paused ? chromeT.bg : chromeT.text,
             fontFamily: FF_MONO,
             fontSize: FS_SM,
             cursor: "pointer",
@@ -787,7 +798,7 @@ export function LogView({ t, sources, onStateChange }: Props) {
             type="checkbox"
             checked={autoScroll}
             onChange={(e) => setAutoScroll(e.target.checked)}
-            style={{ accentColor: t.accent }}
+            style={{ accentColor: chromeT.accent }}
           />
           auto-scroll
         </label>
@@ -803,7 +814,7 @@ export function LogView({ t, sources, onStateChange }: Props) {
             type="checkbox"
             checked={showTs}
             onChange={(e) => setShowTs(e.target.checked)}
-            style={{ accentColor: t.accent }}
+            style={{ accentColor: chromeT.accent }}
           />
           timestamps
         </label>
@@ -815,10 +826,10 @@ export function LogView({ t, sources, onStateChange }: Props) {
             alignItems: "center",
             gap: 6,
             padding: "2px 10px",
-            border: `1px solid ${t.border}`,
+            border: `1px solid ${chromeT.border}`,
             borderRadius: 4,
-            background: findOpen ? t.accentSoft : t.surface,
-            color: findOpen ? t.accent : t.text,
+            background: findOpen ? chromeT.accentSoft : chromeT.surface,
+            color: findOpen ? chromeT.accent : chromeT.text,
             fontFamily: FF_MONO,
             fontSize: FS_SM,
             cursor: "pointer",
@@ -836,10 +847,10 @@ export function LogView({ t, sources, onStateChange }: Props) {
             alignItems: "center",
             gap: 6,
             padding: "2px 10px",
-            border: `1px solid ${t.border}`,
+            border: `1px solid ${chromeT.border}`,
             borderRadius: 4,
-            background: t.surface,
-            color: lines.length === 0 || downloading ? t.textMuted : t.text,
+            background: chromeT.surface,
+            color: lines.length === 0 || downloading ? chromeT.textMuted : chromeT.text,
             fontFamily: FF_MONO,
             fontSize: FS_SM,
             cursor: lines.length === 0 || downloading ? "default" : "pointer",
@@ -858,7 +869,7 @@ export function LogView({ t, sources, onStateChange }: Props) {
         >
           keep
           <Select
-            t={t}
+            t={chromeT}
             fullWidth={false}
             value={String(lineCap)}
             onChange={(v) => changeLineCap(Number(v))}

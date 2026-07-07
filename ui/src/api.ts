@@ -655,6 +655,10 @@ export const api = {
     // When true, stream the previously-terminated container instance instead
     // of the live one (crash diagnosis — see issue #63). One-shot, no follow.
     previous: boolean,
+    // First-open live tail: a positive line count, or `null` for the whole
+    // available history. Ignored on the `previous` path (always full). The
+    // backend reconnect bridge is bounded regardless of this value.
+    tailLines: number | null,
     onEvent: (evt: LogEvent) => void,
   ): Promise<{ streamId: string; close: () => void }> => {
     const channel = new Channel<LogEvent>();
@@ -665,6 +669,7 @@ export const api = {
       pod,
       container,
       previous,
+      tailLines,
       onEvent: channel,
     });
     return {

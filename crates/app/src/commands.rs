@@ -2240,6 +2240,9 @@ pub(crate) async fn start_log_stream(
     // When true, stream the previously-terminated container instance instead
     // of the live one (crash diagnosis — see issue #63). One-shot, no follow.
     previous: bool,
+    // First-open live tail: `Some(n)` = last n lines, `None` = whole available
+    // history. Ignored on the `previous` path (always dumped in full).
+    tail_lines: Option<i64>,
     on_event: tauri::ipc::Channel<LogEvent>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -2250,6 +2253,7 @@ pub(crate) async fn start_log_stream(
         &pod,
         container.as_deref(),
         previous,
+        tail_lines,
     )
     .map_err(|e| e.to_string())?;
 

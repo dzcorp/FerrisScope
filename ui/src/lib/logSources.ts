@@ -29,12 +29,35 @@ export type LogViewSource = {
   /// so toggling it restarts + isolates the stream. Only single-pod surfaces
   /// set this; aggregated/workload views are always live (`false`).
   previous: boolean;
+  /// First-open fetch tail: a positive line count, or `null` for the whole
+  /// available history. Folded into `key` so changing it restarts the stream
+  /// cleanly (same mechanism as `previous`). Ignored by the backend on the
+  /// previous path (that instance is always dumped in full).
+  tailLines: number | null;
   /// Short prefix label shown on every line when more than one source is
   /// active ("" possible for a lone source).
   label: string;
   /// Index into the cluster-accent palette (see `theme.clusterAccent`).
   colorIdx: number;
 };
+
+/// Frontend mirror of the backend's default first-open tail
+/// (`ferrisscope_core::logs::DEFAULT_TAIL_LINES`). Kept in sync by hand — the
+/// two are independent constants, but drifting them would confuse operators who
+/// see "200" in the picker yet get a different burst.
+export const DEFAULT_TAIL_LINES = 200;
+
+/// The tail sizes the picker offers. `null` = whole available history. Ordered
+/// smallest→largest with "all" last so the menu reads as an escalation.
+export const TAIL_OPTIONS: ReadonlyArray<{
+  value: number | null;
+  label: string;
+}> = [
+  { value: 200, label: "200 lines" },
+  { value: 1000, label: "1k lines" },
+  { value: 5000, label: "5k lines" },
+  { value: null, label: "all history" },
+];
 
 /// Mirrors the per-stream status union in `components/log/LogView`. Defined
 /// here so the aggregation logic stays pure and testable; LogView re-exports
@@ -60,9 +83,35 @@ export function sourceKey(
   // flipping the toggle tears the old one down and swaps the ring (no line
   // bleed between the two). Defaults false so existing callers/keys are stable.
   previous = false,
+  // Fetch tail is part of the stream's identity — a larger tail can't be
+  // satisfied from an existing follow, so changing it must restart the stream.
+  // `null` = whole history. Defaults to the standard tail.
+  tailLines: number | null = DEFAULT_TAIL_LINES,
 ): string {
-  return [clusterId, namespace, pod, container, previous ? "prev" : "live"].join("\u0000");
+  const tailSeg = tailLines == null ? "all" : String(tailLines);
+  return [
+    clusterId,
+    namespace,
+    pod,
+    container,
+    previous ? "prev" : "live",
+    tailSeg,
+  ].join("\u0000");
 }
+
+/// Every distinct container name across a resolved pod set, sorted. Drives the
+/// source rail's per-container mute checkboxes: muting a name here excludes that
+/// container across *all* pods (e.g. drop `istio-proxy` from a whole workload's
+/// merged view). Pure for testing.
+export function containerUniverse(pods: ObservedPod[]): string[] {
+  const seen = new Set<string>();
+  for (const p of pods) for (const c of p.containers) seen.add(c);
+  return [...seen].sort();
+}
+
+/// Shared empty exclusion set — avoids allocating a fresh `Set` per call when
+/// no container is muted.
+const EMPTY_EXCLUDED: ReadonlySet<string> = new Set();
 
 /// Expand pods × containers into log sources, capped at `MAX_LOG_SOURCES`.
 ///
@@ -71,10 +120,25 @@ export function sourceKey(
 ///   pod/container                pod has several containers
 ///   ns/pod                       same pod name appears twice
 ///   cluster pod                  sources span clusters (short cluster names)
+export type BuildLogSourceOpts = {
+  /// First-open fetch tail applied to every stream. `null` = whole history.
+  /// Defaults to the standard tail when omitted.
+  tailLines?: number | null;
+  /// Container names to drop from the merged view (across all pods). Muting
+  /// `istio-proxy` here removes the sidecar from every pod's streams. Excluded
+  /// containers are skipped *before* the `MAX_LOG_SOURCES` cap, so silencing a
+  /// noisy sidecar frees slots for the containers you care about.
+  excludedContainers?: ReadonlySet<string>;
+};
+
 export function buildLogSources(
   pods: ObservedPod[],
   clusterNameFor: (clusterId: string) => string,
+  opts: BuildLogSourceOpts = {},
 ): { sources: LogViewSource[]; dropped: number } {
+  const tailLines =
+    opts.tailLines === undefined ? DEFAULT_TAIL_LINES : opts.tailLines;
+  const excluded = opts.excludedContainers ?? EMPTY_EXCLUDED;
   const clusterIds = [...new Set(pods.map((p) => p.clusterId))];
   const multiCluster = clusterIds.length > 1;
   const clusterShorts = multiCluster
@@ -99,13 +163,15 @@ export function buildLogSources(
   let dropped = 0;
   for (const p of pods) {
     const short = podShorts[p.name] ?? p.name;
-    const ambiguous =
-      (nameCount.get(`${p.clusterId}\u0000${short}`) ?? 0) > 1;
+    const ambiguous = (nameCount.get(`${p.clusterId}\u0000${short}`) ?? 0) > 1;
     const podLabel = ambiguous ? `${p.namespace}/${short}` : short;
     const clusterPrefix = multiCluster
       ? `${clusterShorts[clusterNameFor(p.clusterId)] ?? clusterNameFor(p.clusterId)} `
       : "";
     for (const container of p.containers) {
+      // Muted container (rail checkbox off) — skip before the cap so it never
+      // costs a slot.
+      if (excluded.has(container)) continue;
       if (sources.length >= MAX_LOG_SOURCES) {
         dropped += 1;
         continue;
@@ -115,7 +181,14 @@ export function buildLogSources(
           ? `${clusterPrefix}${podLabel}/${container}`
           : `${clusterPrefix}${podLabel}`;
       sources.push({
-        key: sourceKey(p.clusterId, p.namespace, p.name, container),
+        key: sourceKey(
+          p.clusterId,
+          p.namespace,
+          p.name,
+          container,
+          false,
+          tailLines,
+        ),
         clusterId: p.clusterId,
         namespace: p.namespace,
         pod: p.name,
@@ -123,6 +196,7 @@ export function buildLogSources(
         // Aggregated / workload views are always live — previous-instance
         // logs are a single-pod affair (see issue #63).
         previous: false,
+        tailLines,
         label,
         colorIdx: sources.length,
       });
@@ -168,7 +242,8 @@ export function isFullSourceSwap(
 export function aggregateLogStatus(statuses: LogStatus[]): LogStatus {
   if (statuses.length === 0) return { kind: "starting" };
   if (statuses.length === 1) return statuses[0]!;
-  if (statuses.some((s) => s.kind === "streaming")) return { kind: "streaming" };
+  if (statuses.some((s) => s.kind === "streaming"))
+    return { kind: "streaming" };
   const waiting = statuses.find((s) => s.kind === "waiting");
   if (waiting) return waiting;
   if (statuses.some((s) => s.kind === "starting")) return { kind: "starting" };

@@ -2,12 +2,15 @@ import { describe, it, expect } from "vitest";
 import {
   aggregateLogStatus,
   buildLogSources,
+  containerUniverse,
+  DEFAULT_TAIL_LINES,
   formatLogExport,
   isFullSourceSwap,
   MAX_LOG_SOURCES,
   reconcileStreams,
   sourceKey,
   suggestedLogFileName,
+  TAIL_OPTIONS,
   type LogStatus,
   type ObservedPod,
 } from "./logSources";
@@ -152,6 +155,99 @@ describe("buildLogSources", () => {
       nameFor,
     );
     expect(sources.map((s) => s.colorIdx)).toEqual([0, 1, 2]);
+  });
+
+  it("stamps the chosen tail on every source and folds it into the key", () => {
+    const { sources } = buildLogSources(
+      [pod("kc::prod-eu", "default", "api-0", ["app"])],
+      nameFor,
+      { tailLines: 5000 },
+    );
+    expect(sources[0]!.tailLines).toBe(5000);
+    expect(sources[0]!.key).toBe(
+      sourceKey("kc::prod-eu", "default", "api-0", "app", false, 5000),
+    );
+    // Different tail ⇒ different stream identity (must restart, not reuse).
+    expect(sources[0]!.key).not.toBe(
+      sourceKey("kc::prod-eu", "default", "api-0", "app", false, 200),
+    );
+  });
+
+  it("defaults tail to DEFAULT_TAIL_LINES when unspecified", () => {
+    const { sources } = buildLogSources(
+      [pod("kc::prod-eu", "default", "api-0", ["app"])],
+      nameFor,
+    );
+    expect(sources[0]!.tailLines).toBe(DEFAULT_TAIL_LINES);
+  });
+
+  it("carries a null tail (whole history) through unchanged", () => {
+    const { sources } = buildLogSources(
+      [pod("kc::prod-eu", "default", "api-0", ["app"])],
+      nameFor,
+      { tailLines: null },
+    );
+    expect(sources[0]!.tailLines).toBeNull();
+    expect(sources[0]!.key).toContain("all");
+  });
+
+  it("excludes a muted container across every pod", () => {
+    const { sources } = buildLogSources(
+      [
+        pod("kc::prod-eu", "default", "web-0", ["app", "istio-proxy"]),
+        pod("kc::prod-eu", "default", "web-1", ["app", "istio-proxy"]),
+      ],
+      nameFor,
+      { excludedContainers: new Set(["istio-proxy"]) },
+    );
+    expect(sources.map((s) => s.container)).toEqual(["app", "app"]);
+  });
+
+  it("skips excluded containers before the cap so real ones aren't dropped", () => {
+    // 24 real "app" containers + 24 noisy "sidecar" — without pre-cap
+    // exclusion the sidecars would consume half the MAX_LOG_SOURCES budget and
+    // drop real app streams. Excluding the sidecar must keep all apps.
+    const pods = Array.from({ length: MAX_LOG_SOURCES }, (_, i) =>
+      pod("kc::prod-eu", "default", `p${i}`, ["app", "sidecar"]),
+    );
+    const { sources, dropped } = buildLogSources(pods, nameFor, {
+      excludedContainers: new Set(["sidecar"]),
+    });
+    expect(sources).toHaveLength(MAX_LOG_SOURCES);
+    expect(sources.every((s) => s.container === "app")).toBe(true);
+    expect(dropped).toBe(0);
+  });
+
+  it("returns nothing when every container is muted", () => {
+    const { sources, dropped } = buildLogSources(
+      [pod("kc::prod-eu", "default", "web-0", ["app", "istio-proxy"])],
+      nameFor,
+      { excludedContainers: new Set(["app", "istio-proxy"]) },
+    );
+    expect(sources).toHaveLength(0);
+    expect(dropped).toBe(0);
+  });
+});
+
+describe("containerUniverse", () => {
+  it("returns the sorted distinct container names across pods", () => {
+    const u = containerUniverse([
+      pod("kc::eu", "default", "web-0", ["app", "istio-proxy"]),
+      pod("kc::eu", "default", "web-1", ["app", "istio-proxy"]),
+      pod("kc::eu", "default", "job-0", ["worker"]),
+    ]);
+    expect(u).toEqual(["app", "istio-proxy", "worker"]);
+  });
+
+  it("is empty for no pods", () => {
+    expect(containerUniverse([])).toEqual([]);
+  });
+});
+
+describe("TAIL_OPTIONS", () => {
+  it("offers the default tail and a full-history choice", () => {
+    expect(TAIL_OPTIONS.some((o) => o.value === DEFAULT_TAIL_LINES)).toBe(true);
+    expect(TAIL_OPTIONS.some((o) => o.value === null)).toBe(true);
   });
 });
 

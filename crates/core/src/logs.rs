@@ -60,7 +60,12 @@ pub enum LogEvent {
 }
 
 const LINE_BUFFER: usize = 512;
-const TAIL_LINES: i64 = 200;
+/// Tail size used only when *reconnecting* a live stream. The first open
+/// honours the operator's chosen tail (passed into `run_live`); reconnects
+/// bridge with this bounded value so picking "all history" doesn't re-pull the
+/// entire log on every network blip — `last_ts` de-duplication drops the
+/// overlap either way. Also the frontend's default first-open tail.
+pub const DEFAULT_TAIL_LINES: i64 = 200;
 /// Poll cadence while a container is still starting.
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 /// Cap on the start-up wait (~5 min at `RETRY_INTERVAL`). Past this we give
@@ -304,25 +309,30 @@ async fn run_live(
     pod: &str,
     container: Option<&str>,
     tx: &broadcast::Sender<LogEvent>,
+    // Operator-chosen first-open tail: `Some(n)` = last n lines, `None` = the
+    // whole available history (`kubectl logs --tail=-1`). Only the initial open
+    // uses it; reconnects fall back to `DEFAULT_TAIL_LINES` (see below).
+    tail_lines: Option<i64>,
 ) {
     // Timestamp of the last line we forwarded. On reconnect the apiserver
     // re-sends an overlapping `tail_lines` window; we skip anything at or
     // before this so reconnects don't duplicate already-shown output.
     let mut last_ts: Option<String> = None;
     let mut dead_reconnects: u32 = 0;
+    let mut first = true;
 
     loop {
-        let params = LogParams {
-            follow: true,
-            tail_lines: Some(TAIL_LINES),
-            container: container.map(ToOwned::to_owned),
-            // Apiserver prepends an RFC3339Nano timestamp per line; the
-            // frontend parses + reformats it for the gutter, and we use it
-            // for reconnect de-duplication. Cheap (~30 bytes/line) and avoids
-            // a second round trip.
-            timestamps: true,
-            ..Default::default()
+        // First open honours the operator's tail; reconnects bridge with a
+        // bounded tail so picking "all history" doesn't re-pull the entire log
+        // on every network blip. When a finite tail was chosen we re-request it
+        // verbatim — `last_ts` de-duplication drops the overlap regardless.
+        let this_tail = if first {
+            tail_lines
+        } else {
+            Some(tail_lines.unwrap_or(DEFAULT_TAIL_LINES))
         };
+        first = false;
+        let params = live_log_params(container, this_tail);
 
         // ---- open (polls through container start-up) ----
         let stream = match open_stream(api, pod, &params, tx).await {
@@ -407,6 +417,23 @@ async fn run_live(
     }
 }
 
+/// `LogParams` for the live follow path. `follow: true`, timestamps on (the
+/// gutter reformats them and reconnect de-dup keys off them), and a
+/// caller-chosen `tail_lines`: `Some(n)` = last n lines, `None` = whole
+/// available history (`kubectl logs --tail=-1`). Pure, so it can be unit-tested.
+fn live_log_params(container: Option<&str>, tail_lines: Option<i64>) -> LogParams {
+    LogParams {
+        follow: true,
+        tail_lines,
+        container: container.map(ToOwned::to_owned),
+        // Apiserver prepends an RFC3339Nano timestamp per line; the frontend
+        // parses + reformats it for the gutter, and we use it for reconnect
+        // de-duplication. Cheap (~30 bytes/line) and avoids a second round trip.
+        timestamps: true,
+        ..Default::default()
+    }
+}
+
 /// `LogParams` for a one-shot read of the previously-terminated container
 /// instance. `follow: false` (nothing to follow — the instance is gone),
 /// `previous: true`, and no `tail_lines` cap so the whole prior log comes
@@ -484,12 +511,17 @@ impl LogStream {
     /// Start following logs for `pod` (in `namespace`), targeting `container`.
     /// Returns immediately; the reader task fills the broadcast channel in the
     /// background.
+    /// `tail_lines` chooses the first-open live tail: `Some(n)` = last n lines,
+    /// `None` = whole available history. Ignored on the `previous` path (a
+    /// terminated instance is always dumped in full). Reconnects bridge with
+    /// `DEFAULT_TAIL_LINES`.
     pub fn start(
         client: Client,
         namespace: &str,
         pod: &str,
         container: Option<&str>,
         previous: bool,
+        tail_lines: Option<i64>,
     ) -> Result<Arc<Self>> {
         let api: Api<Pod> = Api::namespaced(client, namespace);
         let pod = pod.to_owned();
@@ -499,7 +531,7 @@ impl LogStream {
         // the first consumer is guaranteed to be attached for the very first
         // `send` — closing the race where the reader's tail burst lands before
         // the forwarder subscribes (broadcast receivers never see pre-subscribe
-        // sends, and the 200-line tail can outrun the subscribe gap).
+        // sends, and the initial tail burst can outrun the subscribe gap).
         let (tx, initial_rx) = broadcast::channel(LINE_BUFFER);
         let tx_task = tx.clone();
 
@@ -509,7 +541,7 @@ impl LogStream {
                 // follow, no reconnect (see `run_previous`).
                 run_previous(&api, &pod, container.as_deref(), &tx_task).await;
             } else {
-                run_live(&api, &pod, container.as_deref(), &tx_task).await;
+                run_live(&api, &pod, container.as_deref(), &tx_task, tail_lines).await;
             }
         });
 
@@ -608,6 +640,38 @@ mod tests {
 
         // Container omitted (single-container pod) round-trips as None.
         assert_eq!(previous_log_params(None).container, None);
+    }
+
+    #[test]
+    fn live_params_follow_with_chosen_tail() {
+        // Live path must follow, carry timestamps, never request the previous
+        // instance, and honour a finite operator tail verbatim.
+        let p = live_log_params(Some("app"), Some(1000));
+        assert!(p.follow, "live logs follow");
+        assert!(!p.previous, "live path is the running instance");
+        assert!(
+            p.timestamps,
+            "timestamps drive the gutter + reconnect de-dup"
+        );
+        assert_eq!(p.tail_lines, Some(1000), "finite tail passed through");
+        assert_eq!(p.container.as_deref(), Some("app"));
+
+        // Default first-open tail matches the historical 200.
+        assert_eq!(
+            live_log_params(None, Some(DEFAULT_TAIL_LINES)).tail_lines,
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn live_params_none_tail_is_full_history() {
+        // `None` = whole available history (`kubectl logs --tail=-1`), not a
+        // silent fallback to the default cap. Regression guard: if this maps to
+        // Some(200) the "all history" UI option would quietly truncate.
+        let p = live_log_params(None, None);
+        assert_eq!(p.tail_lines, None, "None tail means full history");
+        assert!(p.follow);
+        assert_eq!(p.container, None, "single-container pod omits container");
     }
 
     #[test]

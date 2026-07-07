@@ -1,3 +1,4 @@
+import type { Tokens } from "../../theme";
 import type { LogStatus } from "./LogView";
 
 // Terse, glanceable label for a log stream's status — rendered in the
@@ -42,5 +43,28 @@ export function streamStatusDetail(status: LogStatus): string | null {
       return status.message;
     default:
       return null;
+  }
+}
+
+/// Status-pill colour for a log stream. Paused always reads as `warn` (the
+/// operator deliberately stopped the flow); otherwise the stream state maps to
+/// the semantic buckets. Single source of truth — the three log surfaces
+/// (overlay panel + single-pod tab + workload tab) all call this instead of
+/// re-deriving the same ternary.
+export function logStatusColor(
+  status: LogStatus,
+  paused: boolean,
+  t: Tokens,
+): string {
+  if (paused) return t.warn;
+  switch (status.kind) {
+    case "error":
+      return t.bad;
+    case "streaming":
+      return t.good;
+    case "waiting":
+      return t.warn;
+    default:
+      return t.textMuted;
   }
 }
