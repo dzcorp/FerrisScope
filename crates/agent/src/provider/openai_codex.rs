@@ -298,9 +298,18 @@ impl ChatProvider for OpenAICodexProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        // Codex doesn't expose a public catalogue endpoint at the
-        // chatgpt.com host. Surface the curated allow-list. The same
-        // list opencode hard-codes in `plugin/codex.ts`.
+        // Codex doesn't expose a public `/models` endpoint at the
+        // chatgpt.com host, so we source the list from the models.dev
+        // `openai` catalogue (the same list opencode serves for the OAuth
+        // path — it does not restrict by auth mode). A few catalogue
+        // models may not be accepted by the Codex responses endpoint and
+        // will 400 on use; that's the accepted trade for staying fresh.
+        // The curated static list is the offline / not-yet-loaded
+        // fallback so the picker is never empty on a cold start.
+        let cat = crate::provider::catalogue::list_models(crate::config::ProviderKind::OpenAI);
+        if !cat.is_empty() {
+            return Ok(cat);
+        }
         Ok(meta::static_models(crate::config::ProviderKind::OpenAI)
             .iter()
             .map(|(id, name)| ModelInfo {

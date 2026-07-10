@@ -126,6 +126,52 @@ impl OpenAICompatibleProvider {
         }
         h
     }
+
+    /// Fetch the provider's live model list from its OpenAI-compatible
+    /// `GET /models` endpoint. The freshest source when available;
+    /// `list_models` falls back to the models.dev catalogue / static list
+    /// when this errors or returns nothing.
+    async fn fetch_live_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        let resp = self
+            .client
+            .get(self.url("/models"))
+            .headers(self.headers())
+            .send()
+            .await
+            .map_err(|e| ProviderError::transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::from_http_status(status, body));
+        }
+        let parsed: OaModelsResponse = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::Decode(e.to_string()))?;
+        Ok(parsed
+            .data
+            .into_iter()
+            .map(|m| ModelInfo {
+                id: m.id,
+                name: m.name,
+                context_length: m.context_length,
+            })
+            .collect())
+    }
+
+    /// The curated per-provider static model list — the offline / cold-start
+    /// fallback used when neither the live endpoint nor models.dev yield
+    /// anything.
+    fn static_models(&self) -> Vec<ModelInfo> {
+        meta::static_models(self.kind)
+            .iter()
+            .map(|(id, name)| ModelInfo {
+                id: (*id).to_string(),
+                name: Some((*name).to_string()),
+                context_length: None,
+            })
+            .collect()
+    }
 }
 
 // ─── OpenAI-compatible request/response shapes (subset we need) ─────────────
@@ -297,44 +343,47 @@ impl ChatProvider for OpenAICompatibleProvider {
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         match self.models_endpoint {
             ModelsEndpoint::OpenAiCompatible => {
-                let resp = self
-                    .client
-                    .get(self.url("/models"))
-                    .headers(self.headers())
-                    .send()
-                    .await
-                    .map_err(|e| ProviderError::transport(e.to_string()))?;
-                if !resp.status().is_success() {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(ProviderError::from_http_status(status, body));
+                // Live `/models` is the freshest source (OpenRouter alone
+                // ships hundreds, updated constantly). On failure or an
+                // empty list, fall back to the models.dev catalogue, then
+                // the static list. Only surface the live error when we
+                // have nothing at all to show.
+                let live = self.fetch_live_models().await;
+                if let Ok(list) = &live {
+                    if !list.is_empty() {
+                        return Ok(live.unwrap_or_default());
+                    }
                 }
-                let parsed: OaModelsResponse = resp
-                    .json()
-                    .await
-                    .map_err(|e| ProviderError::Decode(e.to_string()))?;
-                Ok(parsed
-                    .data
-                    .into_iter()
-                    .map(|m| ModelInfo {
-                        id: m.id,
-                        name: m.name,
-                        context_length: m.context_length,
-                    })
-                    .collect())
+                let cat = catalogue::list_models(self.kind);
+                if !cat.is_empty() {
+                    return Ok(cat);
+                }
+                match live {
+                    // Live succeeded but was empty — surface the empty list
+                    // rather than an error (the provider genuinely has none
+                    // reachable, or the catalogue simply isn't loaded).
+                    Ok(list) => Ok(list),
+                    Err(e) => {
+                        let fallback = self.static_models();
+                        if fallback.is_empty() {
+                            Err(e)
+                        } else {
+                            Ok(fallback)
+                        }
+                    }
+                }
             }
             ModelsEndpoint::Static | ModelsEndpoint::AnthropicCatalogue => {
-                // AnthropicCatalogue lands here only if the OpenAI-compat
-                // provider has been mis-wired; fall back to the static
-                // list rather than fail.
-                Ok(meta::static_models(self.kind)
-                    .iter()
-                    .map(|(id, name)| ModelInfo {
-                        id: (*id).to_string(),
-                        name: Some((*name).to_string()),
-                        context_length: None,
-                    })
-                    .collect())
+                // No enumerable live endpoint (Z.AI, MiniMax; AnthropicCatalogue
+                // only lands here on a mis-wire). models.dev is the source of
+                // truth; the static list is the offline / not-yet-loaded
+                // fallback so the picker is never empty on a cold start.
+                let cat = catalogue::list_models(self.kind);
+                if cat.is_empty() {
+                    Ok(self.static_models())
+                } else {
+                    Ok(cat)
+                }
             }
         }
     }
@@ -699,5 +748,31 @@ mod tests {
         let content = v["content"].as_str().unwrap();
         assert!(content.starts_with("describe"));
         assert!(content.contains("does not support image input"));
+    }
+
+    #[tokio::test]
+    async fn static_kind_falls_back_to_static_models_when_catalogue_empty() {
+        // Z.AI has no enumerable live endpoint. With the models.dev
+        // catalogue unloaded (the default in a unit test — nothing seeds
+        // the global slot), list_models must return the curated static
+        // list rather than an empty picker. No network is touched: the
+        // Static branch never calls the live `/models` endpoint.
+        use crate::config::{Credential, ProviderKind};
+        // Building a reqwest client needs a process-global rustls crypto
+        // provider; main.rs installs it in the app, tests install it here.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let p = OpenAICompatibleProvider::for_kind(
+            ProviderKind::Zai,
+            &Credential::ApiKey { key: "x".into() },
+            None,
+            None,
+        );
+        let models = p.list_models().await.expect("static fallback");
+        assert!(!models.is_empty());
+        let static_ids: std::collections::HashSet<&str> = meta::static_models(ProviderKind::Zai)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(models.iter().all(|m| static_ids.contains(m.id.as_str())));
     }
 }

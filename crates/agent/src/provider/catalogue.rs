@@ -23,6 +23,7 @@
 
 use crate::config::ProviderKind;
 use crate::provider::meta;
+use crate::provider::ModelInfo;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -86,6 +87,13 @@ struct Catalogue {
     cost_by_id: HashMap<(String, String), f64>,
     /// (provider_models_dev_id, model_id) → capability flags.
     caps_by_id: HashMap<(String, String), ModelCapabilities>,
+    /// provider_models_dev_id → the provider's full model list, as the
+    /// picker's source of truth. Populated from the same parse as the
+    /// lookup maps above. `list_models` reads this; the per-provider
+    /// `ChatProvider::list_models` impls fall back to it when their live
+    /// `/models` call fails (and use it as the *primary* source for
+    /// providers with no live endpoint — Codex OAuth, Z.AI, MiniMax).
+    models_by_provider: HashMap<String, Vec<ModelInfo>>,
     fetched_unix_ms: i64,
 }
 
@@ -105,6 +113,10 @@ struct ProviderEntry {
 
 #[derive(Debug, Deserialize)]
 struct ModelEntry {
+    /// Human-readable display name (models.dev `name`). Surfaced in the
+    /// picker as `id — name`. Absent → picker shows the bare id.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     limit: Option<ModelLimitJson>,
     #[serde(default)]
@@ -244,11 +256,12 @@ pub async fn load_from_disk(cache_root: PathBuf) {
     let Ok(resp) = serde_json::from_slice::<ApiResponse>(&bytes) else {
         return;
     };
-    let (next, next_cost, next_caps) = parse_catalogue(resp);
+    let (next, next_cost, next_caps, next_models) = parse_catalogue(resp);
     let mut g = slot().write().await;
     g.by_id = next;
     g.cost_by_id = next_cost;
     g.caps_by_id = next_caps;
+    g.models_by_provider = next_models;
     g.fetched_unix_ms = chrono::Utc::now().timestamp_millis();
     tracing::debug!(count = g.by_id.len(), "models.dev: loaded from disk cache");
 }
@@ -294,12 +307,13 @@ pub async fn refresh(cache_root: PathBuf) {
         }
     };
 
-    let (next, next_cost, next_caps) = parse_catalogue(parsed);
+    let (next, next_cost, next_caps, next_models) = parse_catalogue(parsed);
     {
         let mut g = slot().write().await;
         g.by_id = next;
         g.cost_by_id = next_cost;
         g.caps_by_id = next_caps;
+        g.models_by_provider = next_models;
         g.fetched_unix_ms = chrono::Utc::now().timestamp_millis();
         tracing::info!(count = g.by_id.len(), "models.dev: refreshed");
     }
@@ -317,18 +331,29 @@ type CatalogueMaps = (
     HashMap<(String, String), ModelLimits>,
     HashMap<(String, String), f64>,
     HashMap<(String, String), ModelCapabilities>,
+    HashMap<String, Vec<ModelInfo>>,
 );
 
 fn parse_catalogue(resp: ApiResponse) -> CatalogueMaps {
     let mut by_id = HashMap::new();
     let mut cost_by_id = HashMap::new();
     let mut caps_by_id = HashMap::new();
+    let mut models_by_provider: HashMap<String, Vec<ModelInfo>> = HashMap::new();
     for (provider_id, entry) in resp.0 {
         for (model_id, m) in entry.models {
             let key = (provider_id.clone(), model_id.clone());
+            let context_length = parse_limits(m.limit.as_ref()).map(|l| l.context);
             if let Some(limits) = parse_limits(m.limit.as_ref()) {
                 by_id.insert(key.clone(), limits);
             }
+            models_by_provider
+                .entry(provider_id.clone())
+                .or_default()
+                .push(ModelInfo {
+                    id: model_id.clone(),
+                    name: m.name.clone(),
+                    context_length,
+                });
             if let Some(c) = m.cost.as_ref().and_then(|c| c.input) {
                 cost_by_id.insert(key.clone(), c.max(0.0));
             }
@@ -363,7 +388,15 @@ fn parse_catalogue(resp: ApiResponse) -> CatalogueMaps {
     by_id.shrink_to_fit();
     cost_by_id.shrink_to_fit();
     caps_by_id.shrink_to_fit();
-    (by_id, cost_by_id, caps_by_id)
+    // Sort each provider's list once here (read-mostly afterwards) so
+    // `list_models` is a cheap clone. Same default ordering the call
+    // sites already apply to ids downstream.
+    for models in models_by_provider.values_mut() {
+        sort_model_infos(models);
+        models.shrink_to_fit();
+    }
+    models_by_provider.shrink_to_fit();
+    (by_id, cost_by_id, caps_by_id, models_by_provider)
 }
 
 /// Per-model capability lookup. Returns `None` when models.dev hasn't
@@ -411,23 +444,48 @@ const DEFAULT_PRIORITY: &[&str] = &["gpt-5", "claude-sonnet-4", "big-pickle", "g
 /// in the id, then alphabetical descending so newer-versioned ids
 /// (`*-2026-…`) come ahead of older ones at the tail.
 pub fn sort_for_default<T: AsRef<str>>(models: &mut [T]) {
-    models.sort_by(|a, b| {
-        let ai = priority_index(a.as_ref());
-        let bi = priority_index(b.as_ref());
-        // Higher index wins (opencode's `desc`). Models that don't match
-        // any priority entry get -1 and lose to anything that does.
-        bi.cmp(&ai)
-            .then_with(|| {
-                // "latest" first (asc on the boolean — false sorts before
-                // true, so we negate by mapping latest→0 and other→1).
-                latest_rank(a.as_ref()).cmp(&latest_rank(b.as_ref()))
-            })
-            .then_with(|| {
-                // Alphabetical descending among ties so newer date-tagged
-                // ids show up first.
-                b.as_ref().cmp(a.as_ref())
-            })
-    });
+    models.sort_by(|a, b| default_order(a.as_ref(), b.as_ref()));
+}
+
+/// The default-model comparator, keyed on a model id. Shared by
+/// `sort_for_default` (id lists at the call sites) and `sort_model_infos`
+/// (the `ModelInfo` lists stored in the catalogue) so both orderings stay
+/// identical.
+fn default_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let ai = priority_index(a);
+    let bi = priority_index(b);
+    // Higher index wins (opencode's `desc`). Models that don't match
+    // any priority entry get -1 and lose to anything that does.
+    bi.cmp(&ai)
+        .then_with(|| latest_rank(a).cmp(&latest_rank(b)))
+        .then_with(|| b.cmp(a))
+}
+
+/// Sort a `ModelInfo` list by the default ordering (keyed on id). Applied
+/// once per catalogue refresh so `list_models` stays a cheap clone.
+fn sort_model_infos(models: &mut [ModelInfo]) {
+    models.sort_by(|a, b| default_order(&a.id, &b.id));
+}
+
+/// A provider's full model list from models.dev, pre-sorted by the
+/// default ordering. Empty when the catalogue hasn't loaded yet, the
+/// lock is contended, or `kind` has no models.dev id (e.g. Ollama —
+/// local models aren't in the catalogue). Callers treat empty as "fall
+/// back to my own source" (live `/models` or the static list).
+pub fn list_models(kind: ProviderKind) -> Vec<ModelInfo> {
+    let Some(mdid) = meta::models_dev_id(kind) else {
+        return Vec::new();
+    };
+    let Ok(g) = slot().try_read() else {
+        return Vec::new();
+    };
+    models_for(&g.models_by_provider, mdid)
+}
+
+/// Pure lookup + clone, split from `list_models` so it's unit-testable
+/// without seeding the global slot. Stored vecs are already sorted.
+fn models_for(map: &HashMap<String, Vec<ModelInfo>>, mdid: &str) -> Vec<ModelInfo> {
+    map.get(mdid).cloned().unwrap_or_default()
 }
 
 fn priority_index(id: &str) -> i32 {
@@ -521,7 +579,7 @@ mod tests {
             }
         });
         let resp: ApiResponse = serde_json::from_value(raw).unwrap();
-        let (_limits, _cost, caps) = parse_catalogue(resp);
+        let (_limits, _cost, caps, _models) = parse_catalogue(resp);
         let reasoner = caps
             .get(&("deepseek".to_string(), "deepseek-reasoner".to_string()))
             .expect("deepseek-reasoner caps");
@@ -557,7 +615,7 @@ mod tests {
             }
         });
         let resp: ApiResponse = serde_json::from_value(raw).unwrap();
-        let (_limits, _cost, caps) = parse_catalogue(resp);
+        let (_limits, _cost, caps, _models) = parse_catalogue(resp);
         assert!(
             caps.get(&("anthropic".to_string(), "claude-opus".to_string()))
                 .unwrap()
@@ -592,12 +650,50 @@ mod tests {
             }
         });
         let resp: ApiResponse = serde_json::from_value(raw).unwrap();
-        let (_limits, _cost, caps) = parse_catalogue(resp);
+        let (_limits, _cost, caps, _models) = parse_catalogue(resp);
         let m = caps
             .get(&("openai".to_string(), "legacy".to_string()))
             .expect("legacy caps");
         // Bare `interleaved: true` is parsed but ignored — we only act
         // when the field name is supplied.
         assert!(m.interleaved_field.is_none());
+    }
+
+    #[test]
+    fn parse_catalogue_builds_model_list_with_names_and_context() {
+        let raw = serde_json::json!({
+            "zai": {
+                "models": {
+                    "glm-4.5": { "name": "GLM-4.5", "limit": { "context": 128000 } },
+                    "glm-4.6": { "name": "GLM-4.6", "limit": { "context": 200000 } },
+                }
+            }
+        });
+        let resp: ApiResponse = serde_json::from_value(raw).unwrap();
+        let (_l, _c, _caps, models) = parse_catalogue(resp);
+        let list = models_for(&models, "zai");
+        assert_eq!(list.len(), 2);
+        // Display name + context window carried from the catalogue.
+        let glm46 = list.iter().find(|m| m.id == "glm-4.6").expect("glm-4.6");
+        assert_eq!(glm46.name.as_deref(), Some("GLM-4.6"));
+        assert_eq!(glm46.context_length, Some(200_000));
+        // Pre-sorted by the default ordering: neither id matches the
+        // priority list nor "latest", so alphabetical-descending wins and
+        // the newer 4.6 sorts ahead of 4.5.
+        assert_eq!(list[0].id, "glm-4.6");
+        assert_eq!(list[1].id, "glm-4.5");
+    }
+
+    #[test]
+    fn models_for_unknown_provider_is_empty() {
+        let map: HashMap<String, Vec<ModelInfo>> = HashMap::new();
+        assert!(models_for(&map, "nope").is_empty());
+    }
+
+    #[test]
+    fn list_models_empty_for_provider_without_models_dev_id() {
+        // Ollama serves local models absent from models.dev — no id, so
+        // the catalogue never supplies a list (caller stays on live).
+        assert!(list_models(ProviderKind::Ollama).is_empty());
     }
 }
