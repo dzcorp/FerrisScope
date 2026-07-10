@@ -32,6 +32,7 @@ import {
   hexWithAlpha,
 } from "../../theme";
 import { Btn, ErrorBlock, Field, SectionHeader, Select, Toggle } from "../ui";
+import { PROVIDER_ORDER } from "../../lib/providers";
 import {
   KvEditor,
   kvBufferFromPairs,
@@ -182,26 +183,12 @@ export function AiSection({}: { mode: ThemeMode }) {
     }
   };
 
-  // Render rows in the order Rust's ProviderKind::all() returns. We mirror
-  // that order on the wire so the UI doesn't have to know it. OpenCode
-  // Zen leads — it's the default for fresh installs and works without
-  // a key (free tier) so a brand-new user can chat immediately.
-  const providerOrder: ProviderKind[] = [
-    "opencode_zen",
-    "openai",
-    "anthropic",
-    "open_router",
-    "zai",
-    "minimax",
-    "groq",
-    "deepseek",
-    "mistral",
-    "together",
-    "ollama",
-  ];
-  const visibleProviders = providerOrder
-    .map((kind) => settings.providers[kind])
-    .filter((p): p is ProviderStatusWire => Boolean(p));
+  // Render rows in the shared PROVIDER_ORDER (mirrors Rust's
+  // ProviderKind::all()); the chat-header switcher uses the same list so
+  // muscle memory carries between the two surfaces.
+  const visibleProviders = PROVIDER_ORDER.map(
+    (kind) => settings.providers[kind],
+  ).filter((p): p is ProviderStatusWire => Boolean(p));
 
   return (
     <div>

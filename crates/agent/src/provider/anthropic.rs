@@ -226,6 +226,13 @@ impl ChatProvider for AnthropicProvider {
                 return Err(ProviderError::Auth(body));
             }
         }
+        // Live `/models` unreachable. Prefer the models.dev catalogue
+        // (stays fresh across releases), then the curated static list as
+        // the offline / cold-start fallback so the picker is never empty.
+        let cat = crate::provider::catalogue::list_models(crate::config::ProviderKind::Anthropic);
+        if !cat.is_empty() {
+            return Ok(cat);
+        }
         Ok(meta::static_models(crate::config::ProviderKind::Anthropic)
             .iter()
             .map(|(id, name)| ModelInfo {

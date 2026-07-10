@@ -243,9 +243,15 @@ pub fn models_dev_id(kind: ProviderKind) -> Option<&'static str> {
         ProviderKind::Deepseek => "deepseek",
         ProviderKind::Mistral => "mistral",
         ProviderKind::Together => "togetherai",
-        // Z.AI / MiniMax / Ollama aren't reliably on models.dev — fall
-        // through to per-provider defaults.
-        ProviderKind::Zai | ProviderKind::Minimax | ProviderKind::Ollama => return None,
+        // Z.AI / MiniMax are on models.dev under their bare ids — this
+        // both drives the catalogue-backed model list (their live
+        // endpoints aren't enumerable) and enables context-window /
+        // capability enrichment for them.
+        ProviderKind::Zai => "zai",
+        ProviderKind::Minimax => "minimax",
+        // Ollama serves local models that aren't in models.dev — keep it
+        // on the live `/models` path.
+        ProviderKind::Ollama => return None,
     })
 }
 
@@ -284,5 +290,25 @@ pub fn static_models(kind: ProviderKind) -> &'static [(&'static str, &'static st
             ("gpt-5.2", "GPT-5.2"),
         ],
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn models_dev_id_maps_zai_and_minimax() {
+        // These drive catalogue-backed model lists (no enumerable live
+        // endpoint) plus context/capability enrichment.
+        assert_eq!(models_dev_id(ProviderKind::Zai), Some("zai"));
+        assert_eq!(models_dev_id(ProviderKind::Minimax), Some("minimax"));
+    }
+
+    #[test]
+    fn models_dev_id_none_for_ollama() {
+        // Ollama serves local models absent from models.dev — must stay on
+        // the live `/models` path.
+        assert_eq!(models_dev_id(ProviderKind::Ollama), None);
     }
 }
