@@ -3,6 +3,7 @@ import { useResolvedTheme } from "../../store";
 import { FF_MONO, FONT_SANS, type ThemeMode, R_LG, FS_MD, FS_XS } from "../../theme";
 import { Btn, Icons } from "../ui";
 import type { AiSettingsWire, ProviderKind } from "../../types";
+import { PROVIDER_ORDER } from "../../lib/providers";
 
 type Props = {
   mode: ThemeMode;
@@ -52,25 +53,12 @@ export function ProviderPickerPopover({
     };
   }, [onClose]);
 
-  // Render in the same order Settings → AI uses (mirrors Rust's
-  // `ProviderKind::all()`), so muscle memory carries between the two
-  // surfaces.
-  const order: ProviderKind[] = [
-    "opencode_zen",
-    "openai",
-    "anthropic",
-    "open_router",
-    "zai",
-    "minimax",
-    "groq",
-    "deepseek",
-    "mistral",
-    "together",
-    "ollama",
-  ];
-  const rows = order
-    .map((kind) => settings.providers[kind])
-    .filter((p): p is NonNullable<typeof p> => Boolean(p));
+  // Render in the shared PROVIDER_ORDER — the same list Settings → AI uses
+  // (mirrors Rust's `ProviderKind::all()`) — so muscle memory carries
+  // between the two surfaces.
+  const rows = PROVIDER_ORDER.map((kind) => settings.providers[kind]).filter(
+    (p): p is NonNullable<typeof p> => Boolean(p),
+  );
 
   return (
     <div
