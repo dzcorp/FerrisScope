@@ -1,4 +1,3 @@
-import { logErr } from "../lib/log";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, onResourceDelta } from "../api";
 import { parseYaml, stripYaml, type Json } from "../lib/yamlEdit";
@@ -1263,6 +1262,7 @@ export function DetailPanel({
             <ObjectEvents
               mode={mode}
               clusterId={clusterId}
+              targetNamespace={target.namespace}
               targetUid={target.uid}
             />
           ) : null}
@@ -1580,91 +1580,62 @@ type EventState =
   | { kind: "ready"; rows: ResourceRow[] }
   | { kind: "error"; message: string };
 
-function ObjectEvents({
+export function ObjectEvents({
   mode,
   clusterId,
+  targetNamespace,
   targetUid,
 }: {
   mode: ThemeMode;
   clusterId: string;
+  targetNamespace: string | null;
   targetUid: string;
 }) {
   const t = useResolvedTheme().tokens;
   const [state, setState] = useState<EventState>({ kind: "loading" });
-  const rowsRef = useRef<Map<string, ResourceRow>>(new Map());
-  const initialDoneRef = useRef(false);
-  const watcherInitDoneRef = useRef(false);
   const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
     let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    rowsRef.current = new Map();
-    initialDoneRef.current = false;
-    watcherInitDoneRef.current = false;
+    let inFlight = false;
     setState({ kind: "loading" });
 
-    (async () => {
+    const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
-        unlisten = await onResourceDelta(clusterId, "events", null, (delta) => {
-          if (cancelled) return;
-
-          if (delta.kind === "init_done") {
-            watcherInitDoneRef.current = true;
-            if (initialDoneRef.current) {
-              setState({ kind: "ready", rows: Array.from(rowsRef.current.values()) });
-            }
-            return;
-          }
-
-          const next = new Map(rowsRef.current);
-          if (delta.kind === "upsert") {
-            if (delta.row.involved_uid === targetUid) {
-              next.set(delta.row.uid, delta.row);
-            }
-          } else {
-            next.delete(delta.uid);
-          }
-          rowsRef.current = next;
-
-          if (initialDoneRef.current) {
-            // Only transition to ready if the watcher is fully synced, OR we have at least one event.
-            if (watcherInitDoneRef.current || next.size > 0) {
-              setState({ kind: "ready", rows: Array.from(next.values()) });
-            }
-          }
-        });
-
-        const result = await api.subscribeResource(clusterId, "events", null);
-        if (cancelled) return;
-
-        if (result.init_done) {
-          watcherInitDoneRef.current = true;
-        }
-
-        const merged = new Map<string, ResourceRow>(rowsRef.current);
-        for (const row of result.rows) {
-          if (row.involved_uid === targetUid) merged.set(row.uid, row);
-        }
-        rowsRef.current = merged;
-        initialDoneRef.current = true;
-
-        if (watcherInitDoneRef.current || merged.size > 0) {
-          setState({ kind: "ready", rows: Array.from(merged.values()) });
+        const rows = await api.listObjectEvents(
+          clusterId,
+          targetNamespace,
+          targetUid,
+        );
+        if (!cancelled) {
+          setState({
+            kind: "ready",
+            // Keep UID validation client-side as a defensive check against an
+            // apiserver or proxy that ignores unsupported field selectors.
+            rows: rows.filter((row) => row.involved_uid === targetUid),
+          });
         }
       } catch (e) {
         if (!cancelled) setState({ kind: "error", message: String(e) });
+      } finally {
+        inFlight = false;
       }
-    })();
+    };
+
+    void load();
 
     const tick = setInterval(() => setNow(Date.now()), 1000);
+    const poll = setInterval(() => {
+      if (typeof document === "undefined" || !document.hidden) void load();
+    }, DETAIL_POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(tick);
-      if (unlisten) unlisten();
-      api.unsubscribeResource(clusterId, "events").catch(logErr("detail-panel"));
+      clearInterval(poll);
     };
-  }, [clusterId, targetUid]);
+  }, [clusterId, targetNamespace, targetUid]);
 
   const sorted = useMemo(() => {
     if (state.kind !== "ready") return [];
@@ -1764,9 +1735,7 @@ function ObjectEvents({
             >
               <td style={{ padding: "8px 14px" }}>
                 <StatusPill
-                  status={
-                    String(r.type ?? "") === "Warning" ? "Warning" : "Running"
-                  }
+                  status={String(r.type ?? "Normal")}
                   t={t}
                   mode={mode}
                   dense

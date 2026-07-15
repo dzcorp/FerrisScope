@@ -184,6 +184,30 @@ pub async fn get_event_detail(
     Ok(events::project_detail(&api.get(name).await?))
 }
 
+const OBJECT_EVENTS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Fetch only Events attached to one concrete Kubernetes object. The UID field
+/// selector is evaluated by the apiserver, avoiding the detail panel's former
+/// cluster-wide Event reflector and client-side filtering.
+pub async fn list_object_events(
+    client: Client,
+    namespace: Option<&str>,
+    uid: &str,
+) -> Result<Vec<Value>, FetchError> {
+    let api: Api<Event> = match namespace.filter(|ns| !ns.is_empty()) {
+        Some(ns) => Api::namespaced(client, ns),
+        None => Api::all(client),
+    };
+    let params = ListParams::default().fields(&format!("involvedObject.uid={uid}"));
+    let list = tokio::time::timeout(OBJECT_EVENTS_TIMEOUT, api.list(&params))
+        .await
+        .map_err(|_| {
+            FetchError::Timeout("listing object events timed out after 15s".to_owned())
+        })??;
+
+    Ok(list.items.iter().filter_map(events::project_row).collect())
+}
+
 pub async fn get_service_detail(
     client: Client,
     namespace: &str,

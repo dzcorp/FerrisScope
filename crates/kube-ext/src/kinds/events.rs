@@ -6,6 +6,30 @@ use crate::registry::{Category, ColumnDef, ColumnKind, KindSpec, ResourceKind};
 
 pub struct EventSpec;
 
+fn event_count(ev: &Event) -> i32 {
+    ev.series
+        .as_ref()
+        .and_then(|series| series.count)
+        .or(ev.count)
+        .unwrap_or(1)
+}
+
+fn event_last_seen(ev: &Event) -> Option<String> {
+    ev.series
+        .as_ref()
+        .and_then(|series| series.last_observed_time.as_ref())
+        .map(|time| time.0.to_string())
+        .or_else(|| ev.last_timestamp.as_ref().map(|time| time.0.to_string()))
+        .or_else(|| ev.event_time.as_ref().map(|time| time.0.to_string()))
+        .or_else(|| ev.first_timestamp.as_ref().map(|time| time.0.to_string()))
+        .or_else(|| {
+            ev.metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|time| time.0.to_string())
+        })
+}
+
 impl KindSpec for EventSpec {
     type K = Event;
 
@@ -66,13 +90,9 @@ impl KindSpec for EventSpec {
             (None, Some(n)) => n.clone(),
             _ => String::new(),
         };
-        // Prefer event_time (microtime) → last_timestamp → first_timestamp.
-        let last_seen = ev
-            .event_time
-            .as_ref()
-            .map(|t| t.0.to_string())
-            .or_else(|| ev.last_timestamp.as_ref().map(|t| t.0.to_string()))
-            .or_else(|| ev.first_timestamp.as_ref().map(|t| t.0.to_string()));
+        // Modern repeated Events advance series.lastObservedTime while their
+        // eventTime remains the first observation.
+        let last_seen = event_last_seen(ev);
         let source = ev.source.as_ref().and_then(|s| s.component.clone());
 
         json!({
@@ -82,7 +102,7 @@ impl KindSpec for EventSpec {
             "reason": ev.reason.clone().unwrap_or_default(),
             "object": object_label,
             "message": ev.message.clone().unwrap_or_default(),
-            "count": ev.count.unwrap_or(0),
+            "count": event_count(ev),
             "last_seen": last_seen,
             "source": source,
             // For per-object filtering on the detail panel.
@@ -92,6 +112,17 @@ impl KindSpec for EventSpec {
             "involved_name": involved.name.clone(),
         })
     }
+}
+
+/// Project a fetched Event into the same row shape used by the reflector.
+/// Real API objects always carry a UID; malformed rows without one are skipped
+/// so the frontend never receives an unstable table key.
+pub fn project_row(ev: &Event) -> Option<Value> {
+    let uid = ev.metadata.uid.clone()?;
+    let mut row = EventSpec::project(ev);
+    row.as_object_mut()?
+        .insert("uid".to_owned(), Value::String(uid));
+    Some(row)
 }
 
 // Rich projection used by the event detail panel. The interesting structure
@@ -138,7 +169,7 @@ pub fn project_detail(ev: &Event) -> Value {
         "type": ev.type_.clone().unwrap_or_else(|| "Normal".to_owned()),
         "reason": ev.reason.clone(),
         "message": ev.message.clone(),
-        "count": ev.count.unwrap_or(0),
+        "count": event_count(ev),
         "action": ev.action.clone(),
         "reporting_controller": ev.reporting_component.clone(),
         "reporting_instance": ev.reporting_instance.clone(),
@@ -150,4 +181,71 @@ pub fn project_detail(ev: &Event) -> Value {
         "related": related,
         "series": series,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn modern_series_drives_row_recency_and_count() {
+        let event: Event = serde_json::from_value(json!({
+            "metadata": {
+                "name": "pod-started.abc",
+                "namespace": "default",
+                "uid": "event-uid",
+                "creationTimestamp": "2026-07-15T08:00:00Z"
+            },
+            "involvedObject": {
+                "kind": "Pod",
+                "namespace": "default",
+                "name": "api-0",
+                "uid": "pod-uid"
+            },
+            "type": "Normal",
+            "reason": "Started",
+            "eventTime": "2026-07-15T08:01:00.000000Z",
+            "lastTimestamp": "2026-07-15T08:02:00Z",
+            "count": 2,
+            "series": {
+                "count": 7,
+                "lastObservedTime": "2026-07-15T08:07:00.000000Z"
+            }
+        }))
+        .expect("valid Event fixture");
+
+        let row = project_row(&event).expect("API Event has a UID");
+        assert_eq!(row["uid"], "event-uid");
+        assert_eq!(row["involved_uid"], "pod-uid");
+        assert_eq!(row["count"], 7);
+        assert_eq!(row["last_seen"], "2026-07-15T08:07:00Z");
+
+        let detail = project_detail(&event);
+        assert_eq!(detail["count"], 7);
+    }
+
+    #[test]
+    fn singleton_event_defaults_to_count_one_and_creation_time() {
+        let event: Event = serde_json::from_value(json!({
+            "metadata": {
+                "name": "scheduled.abc",
+                "namespace": "default",
+                "uid": "event-uid",
+                "creationTimestamp": "2026-07-15T08:00:00Z"
+            },
+            "involvedObject": {
+                "kind": "Pod",
+                "namespace": "default",
+                "name": "api-0",
+                "uid": "pod-uid"
+            },
+            "reason": "Scheduled"
+        }))
+        .expect("valid Event fixture");
+
+        let row = EventSpec::project(&event);
+        assert_eq!(row["count"], 1);
+        assert_eq!(row["last_seen"], "2026-07-15T08:00:00Z");
+    }
 }

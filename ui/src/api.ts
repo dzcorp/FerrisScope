@@ -237,6 +237,16 @@ export const api = {
     invoke<NamespaceDetail>("get_namespace_detail_cmd", { clusterId, name }),
   getEventDetail: (clusterId: string, namespace: string, name: string) =>
     invoke<EventDetail>("get_event_detail_cmd", { clusterId, namespace, name }),
+  listObjectEvents: (
+    clusterId: string,
+    namespace: string | null,
+    uid: string,
+  ) =>
+    invoke<ResourceRow[]>("list_object_events_cmd", {
+      clusterId,
+      namespace,
+      uid,
+    }),
   getServiceDetail: (clusterId: string, namespace: string, name: string) =>
     invoke<ServiceDetail>("get_service_detail_cmd", {
       clusterId,

@@ -930,6 +930,7 @@ export type StatusBucket = "good" | "warn" | "bad" | "info" | "unknown";
 
 const GOOD = new Set([
   "Running",
+  "Normal",
   "Ready",
   "Active",
   "Available",
