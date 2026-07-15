@@ -802,7 +802,9 @@ export function DetailPanel({
           display: "flex",
           flexDirection: "column",
           zIndex: 31,
-          animation: "fs-slide-from-right .22s cubic-bezier(.2,.7,.2,1)",
+          // Do not transform-animate this large scrollable subtree. WebKit can
+          // strand the promoted layer after the animation, leaving a black
+          // panel whose children repaint only when hovered.
         }}
       >
         <header

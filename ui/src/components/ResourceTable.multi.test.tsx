@@ -237,7 +237,7 @@ describe("ResourceTable — pendingDetail resolution", () => {
     expect(useAppStore.getState().pendingDetail).not.toBeNull();
   });
 
-  it("resolves against the origin cluster when its row is present", async () => {
+  it("resolves against the origin cluster and mounts a compositor-safe detail panel", async () => {
     // Resolution opens the DetailPanel, which fetches the ConfigMap detail —
     // serve a minimal one so the panel renders instead of crashing.
     setMockInvoke((cmd, args) => {
@@ -285,6 +285,10 @@ describe("ResourceTable — pendingDetail resolution", () => {
     });
     await act(async () => {});
     expect(useAppStore.getState().pendingDetail).toBeNull();
+    const close = screen.getByRole("button", { name: "Close (Esc)" });
+    const panel = close.closest("header")?.parentElement;
+    expect(panel).not.toBeNull();
+    expect(panel?.style.animation).toBe("");
   });
 
   it("times out an unresolvable navigation with a warning toast", async () => {
