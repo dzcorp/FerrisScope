@@ -797,7 +797,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         // sortingFn reads from the ref so a metrics tick doesn't force
         // a columns rebuild; sort comparator is invoked at sort time
         // and picks up the current podMetrics ref then.
-        sortingFn: sortingFnFor(c, podMetricsRef, isPods),
+        sortingFn: sortingFnFor<ScopedRow>(c, podMetricsRef, isPods),
         accessorFn: accessorFor(c),
         cell: (ctx) =>
           renderCell(
@@ -2457,7 +2457,7 @@ function accessorFor(c: ColumnDef) {
 // metrics-server values, joined here so the sort matches what's rendered.
 // Takes the metrics *ref* (not a snapshot) — the comparator runs at sort
 // time, long after the columns were built, and must see live values.
-export function sortingFnFor(
+export function sortingFnFor<RowData extends ResourceRow = ResourceRow>(
   c: ColumnDef,
   podMetricsRef: {
     readonly current: Record<
@@ -2468,7 +2468,7 @@ export function sortingFnFor(
   isPods: boolean,
 ) {
   if (c.kind === "phase") {
-    return (a: TanRow<ResourceRow>, b: TanRow<ResourceRow>) => {
+    return (a: TanRow<RowData>, b: TanRow<RowData>) => {
       const av = phaseRank(String(a.original[c.id] ?? ""));
       const bv = phaseRank(String(b.original[c.id] ?? ""));
       return av - bv;
@@ -2478,7 +2478,7 @@ export function sortingFnFor(
     // The ref holds clusterId → ("ns/name" → metric); each row joins
     // through its own origin cluster so a merged view sorts correctly.
     const metricFor = (
-      r: TanRow<ResourceRow>,
+      r: TanRow<RowData>,
     ): { cpu_milli: number; mem_mib: number } | null => {
       const byCluster = podMetricsRef.current;
       if (!byCluster) return null;
@@ -2488,7 +2488,7 @@ export function sortingFnFor(
       const key = `${r.original.namespace ?? ""}/${r.original.name ?? ""}`;
       return byCluster[cid]?.[key] ?? null;
     };
-    return (a: TanRow<ResourceRow>, b: TanRow<ResourceRow>) => {
+    return (a: TanRow<RowData>, b: TanRow<RowData>) => {
       const av = metricFor(a);
       const bv = metricFor(b);
       const an = av ? (c.id === "cpu" ? av.cpu_milli : av.mem_mib) : -1;
