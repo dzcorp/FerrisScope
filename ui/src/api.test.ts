@@ -234,6 +234,19 @@ describe("detail getters", () => {
     expect(cap.calls[0]?.cmd).toBe("get_node_detail_cmd");
     expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx", name: "worker-1" });
   });
+
+  it("listObjectEvents sends namespace + UID to the filtered command", async () => {
+    const cap = captureNext([]);
+    await api.listObjectEvents("ctx", "default", "pod-uid");
+    expect(cap.calls[0]).toEqual({
+      cmd: "list_object_events_cmd",
+      args: {
+        clusterId: "ctx",
+        namespace: "default",
+        uid: "pod-uid",
+      },
+    });
+  });
 });
 
 describe("getResourceYaml", () => {

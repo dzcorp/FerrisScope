@@ -178,6 +178,7 @@ fn main() {
             commands::get_node_detail_cmd,
             commands::get_namespace_detail_cmd,
             commands::get_event_detail_cmd,
+            commands::list_object_events_cmd,
             commands::get_service_detail_cmd,
             commands::get_endpoints_detail_cmd,
             commands::get_endpoint_slice_detail_cmd,

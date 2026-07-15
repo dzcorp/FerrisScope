@@ -66,6 +66,7 @@ describe("statusBucket — known buckets", () => {
   // (e.g. a phase becomes warn instead of bad) this test will catch it.
   it.each([
     ["Running", "good"],
+    ["Normal", "good"],
     ["Ready", "good"],
     ["Active", "good"],
     ["Bound", "good"],

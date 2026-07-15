@@ -37,7 +37,7 @@ use ferrisscope_kube_ext::{
     get_service_account_detail, get_service_detail, get_stateful_set_detail,
     get_storage_class_detail, get_validating_webhook_configuration_detail, get_well_known_detail,
     helm_install_chart, helm_repo_update, helm_uninstall, helm_upgrade,
-    list_config_maps_in_namespace, list_namespace_names,
+    list_config_maps_in_namespace, list_namespace_names, list_object_events,
     list_persistent_volume_claims_in_namespace, list_pods_on_node, list_secrets_in_namespace,
     list_services_in_namespace, lookup, merge_patch_resource, registry, restart_pod_owner,
     restart_pods_owners, restart_workload, set_node_cordon, start_forward, ApplyResult,
@@ -1784,6 +1784,23 @@ detail_cmd! { get_cron_job_detail_cmd => get_cron_job_detail, namespaced }
 detail_cmd! { get_node_detail_cmd => get_node_detail, cluster }
 detail_cmd! { get_namespace_detail_cmd => get_namespace_detail, cluster }
 detail_cmd! { get_event_detail_cmd => get_event_detail, namespaced }
+
+/// Events attached to one object, filtered by UID at the apiserver. A
+/// namespaced target uses a namespaced Event API so pod detail does not require
+/// cluster-wide Event permissions or wait for every namespace to load.
+#[tauri::command]
+pub(crate) async fn list_object_events_cmd(
+    cluster_id: String,
+    namespace: Option<String>,
+    uid: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<Value>, String> {
+    let entry = state.entry(&cluster_id).await?;
+    list_object_events(entry.cluster.client(), namespace.as_deref(), &uid)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 detail_cmd! { get_service_detail_cmd => get_service_detail, namespaced }
 detail_cmd! { get_endpoints_detail_cmd => get_endpoints_detail, namespaced }
 detail_cmd! { get_endpoint_slice_detail_cmd => get_endpoint_slice_detail, namespaced }
