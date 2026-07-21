@@ -27,6 +27,7 @@ import {
   Chip,
   ContainerDots,
   ErrorBlock,
+  ErrorBoundary,
   Eyebrow,
   IconBtn,
   Icons,
@@ -38,6 +39,7 @@ import {
 import type { ContainerLite } from "./ui";
 import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
 import { confirm, toast } from "../lib/dialog";
+import { logErr } from "../lib/log";
 import {
   Mono,
   ChipStrip,
@@ -1194,7 +1196,22 @@ export function DetailPanel({
             background: t.surfaceAlt,
           }}
         >
-          {tab === "summary" && hasSummary ? (
+          <ErrorBoundary
+            // A crash in any tab's body (summary / related / events / metrics)
+            // is contained here instead of unwinding to the React root and
+            // whiting out the whole window. Keyed on the object + tab so a
+            // fault resets automatically when the operator navigates elsewhere.
+            key={`${kind.id} ${target.namespace ?? ""} ${target.name} ${tab}`}
+            onError={logErr("detail-panel")}
+            fallback={(err) => (
+              <ErrorBlock
+                t={t}
+                message={err.message || String(err)}
+                kindLabel="this resource"
+              />
+            )}
+          >
+            {tab === "summary" && hasSummary ? (
             isPod ? (
               <PodSummary
                 mode={mode}
@@ -1319,6 +1336,7 @@ export function DetailPanel({
               controllerKind={workloadControllerKind}
             />
           ) : null}
+          </ErrorBoundary>
         </div>
       </div>
     </>

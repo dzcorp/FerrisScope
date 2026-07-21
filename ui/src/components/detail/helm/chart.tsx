@@ -160,6 +160,16 @@ export function HelmChartSummary(props: {
     kind: "idle",
   });
 
+  // Cluster degraded (unavailable / mid auto-reconnect): block install (a
+  // doomed helm write) while leaving the chart browseable. MUST stay above the
+  // early returns below — calling it after the loading/error guards changed the
+  // hook count between the loading and ready renders, which threw "Rendered
+  // more hooks than during the previous render" and (no error boundary exists)
+  // whited out the whole window the instant the chart finished loading.
+  const degraded = useAppStore((s) =>
+    selectClusterDegraded(s, props.clusterId),
+  );
+
   // Seed defaults from the loaded chart on first ready (or when the
   // chart changes). Re-seed values only when the operator hasn't typed
   // anything custom — match by string equality with the prior seed.
@@ -189,11 +199,6 @@ export function HelmChartSummary(props: {
     return <ErrorBlock t={t} message={state.message} kindLabel="helm chart" />;
 
   const d = state.detail;
-  // Cluster degraded (unavailable / mid auto-reconnect): block install (a
-  // doomed helm write) while leaving the chart browseable.
-  const degraded = useAppStore((s) =>
-    selectClusterDegraded(s, props.clusterId),
-  );
   const canInstall =
     d.helm_available &&
     !degraded &&
