@@ -392,6 +392,12 @@ type AppState = {
   // the read-only gate + reconnecting banner steady across the whole session.
   // Set/cleared only by the hook; never persisted.
   clusterReconnecting: Record<string, boolean>;
+  // Monotonic reconnect counter per cluster, bumped by `clearClusterHealth`
+  // (i.e. on every manual or auto reconnect). Lets connection-independent
+  // effects that would otherwise stay keyed on a same-cluster reconnect —
+  // notably the Rail's CRD discovery — re-run and clear stale errors after a
+  // reconnect fixes the underlying auth/reachability problem. Never persisted.
+  clusterEpoch: Record<string, number>;
 
   // Active port-forwards keyed by id. Initially hydrated by api.pfList() at
   // App boot; mutated on every `portforward://status` event. Detail-panel
@@ -853,6 +859,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   clusterHealth: {},
   clusterHealthReason: {},
   clusterReconnecting: {},
+  clusterEpoch: {},
 
   forwards: {},
   forwardsOpen: false,
@@ -1308,7 +1315,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const { [clusterId]: _h, ...rest } = s.clusterHealth;
       const { [clusterId]: _r, ...restR } = s.clusterHealthReason;
-      return { clusterHealth: rest, clusterHealthReason: restR };
+      // Bump the reconnect epoch so effects keyed on it (Rail CRD discovery)
+      // re-run against the freshly-rebuilt client and drop any stale error.
+      return {
+        clusterHealth: rest,
+        clusterHealthReason: restR,
+        clusterEpoch: {
+          ...s.clusterEpoch,
+          [clusterId]: (s.clusterEpoch[clusterId] ?? 0) + 1,
+        },
+      };
     }),
   setClusterReconnecting: (clusterId, value) =>
     set((s) => {
@@ -1885,6 +1901,19 @@ export function useActiveClusterIds(): string[] {
     () => (joined === "" ? [] : joined.split("\u0000")),
     [joined],
   );
+}
+
+/// Combined reconnect-epoch of every active cluster. Bumps whenever any active
+/// cluster is reconnected (`clearClusterHealth`). A plain number so effects can
+/// add it to their dependency array to re-run on reconnect even when the active
+/// id set itself is unchanged (same-cluster reconnect). Epochs only ever
+/// increase, so summing is a sound change-detector.
+export function useActiveClusterEpoch(): number {
+  return useAppStore((s) => {
+    let sum = 0;
+    for (const id of selectActiveClusterIds(s)) sum += s.clusterEpoch[id] ?? 0;
+    return sum;
+  });
 }
 
 /// Resolve the active theme into a ready-to-use bag of tokens, typography,

@@ -683,6 +683,20 @@ describe("cluster health", () => {
     expect(useAppStore.getState().clusterHealth["ctx"]).toBeUndefined();
     expect(useAppStore.getState().clusterHealthReason["ctx"]).toBeUndefined();
   });
+
+  it("clearClusterHealth bumps the per-cluster reconnect epoch monotonically", () => {
+    // Discovery effects key on this epoch so a same-cluster reconnect re-runs
+    // CRD discovery and clears any stale error. Each reconnect must advance it.
+    expect(useAppStore.getState().clusterEpoch["ctx"] ?? 0).toBe(0);
+    useAppStore.getState().clearClusterHealth("ctx");
+    expect(useAppStore.getState().clusterEpoch["ctx"]).toBe(1);
+    useAppStore.getState().clearClusterHealth("ctx");
+    expect(useAppStore.getState().clusterEpoch["ctx"]).toBe(2);
+    // A different cluster keeps its own independent counter.
+    useAppStore.getState().clearClusterHealth("other");
+    expect(useAppStore.getState().clusterEpoch["other"]).toBe(1);
+    expect(useAppStore.getState().clusterEpoch["ctx"]).toBe(2);
+  });
 });
 
 describe("tableViews", () => {
