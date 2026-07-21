@@ -185,9 +185,21 @@ export function useClusterConnection(context: ContextInfo): {
           scheduleNext();
           return;
         }
-        // Connected: optimistically recovered, but a wedged cluster may re-flag
-        // ~30s later. Hold the session open through a dwell; if no unavailable
-        // arrives, declare recovery and reset.
+        // Connected. Drop the *user-visible* reconnecting state right now so the
+        // data plane un-grays and the banner disappears the instant the cluster
+        // is actually back — data is already flowing through the rebuilt client.
+        // Holding the grayed table + banner through the full re-flag dwell read
+        // as "stuck reconnecting" even though the connection had recovered (only
+        // a manual reconnect, which resets immediately, cleared it).
+        setClusterReconnecting(cidRef.current, false);
+        if (mountedRef.current) setAutoReconnect(null);
+        // The *session* stays open through a quiet dwell, though: a wedged
+        // cluster may re-flag ~30s later (the backend probe emits one
+        // `unavailable` then exits, so recovery is only provable by a connect
+        // succeeding). Keeping the counter alive means a re-flag inside the
+        // dwell resumes the retry sequence instead of restarting at attempt 1
+        // and risking an unbounded loop on a flapping cluster. If no unavailable
+        // arrives, `endSession(true)` declares recovery and resets the counter.
         if (dwellTimerRef.current != null) window.clearTimeout(dwellTimerRef.current);
         dwellTimerRef.current = window.setTimeout(
           () => endSession(true),

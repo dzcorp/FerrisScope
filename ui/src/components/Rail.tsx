@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { useActiveClusterIds, useAppStore, useResolvedTheme } from "../store";
+import {
+  useActiveClusterEpoch,
+  useActiveClusterIds,
+  useAppStore,
+  useResolvedTheme,
+} from "../store";
 import type { Category, PrefsRailMode, ResourceKind } from "../types";
 import {
   tokens,
@@ -61,6 +66,11 @@ export function Rail({}: Props) {
   // or the single selection). NUL-joined key — ids contain "::"/spaces.
   const activeClusterIds = useActiveClusterIds();
   const activeClusterKey = activeClusterIds.join(String.fromCharCode(0));
+  // Bumps on every reconnect of an active cluster (see `useActiveClusterEpoch`).
+  // Kept in the discovery effect's deps so a same-cluster reconnect — which
+  // leaves `activeClusterKey` unchanged — still re-runs discovery and clears a
+  // stale "CRD discovery: …" auth error once the reconnect fixes the client.
+  const reconnectEpoch = useActiveClusterEpoch();
   const setKinds = useAppStore((s) => s.setKinds);
   const setKindClusters = useAppStore((s) => s.setKindClusters);
   const setKindsLoading = useAppStore((s) => s.setKindsLoading);
@@ -201,7 +211,7 @@ export function Rail({}: Props) {
     return () => {
       cancelled = true;
     };
-  }, [activeClusterKey, setKinds, setKindClusters]);
+  }, [activeClusterKey, reconnectEpoch, setKinds, setKindClusters]);
 
   const grouped = useMemo(() => {
     const map = new Map<Category, ResourceKind[]>();

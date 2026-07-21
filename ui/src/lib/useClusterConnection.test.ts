@@ -173,23 +173,48 @@ describe("useClusterConnection auto-reconnect", () => {
     expect(reconnectCluster).toHaveBeenCalledTimes(1);
   });
 
-  it("recovery dwell: a sustained reconnect ends the session and re-arms fresh", async () => {
+  it("successful reconnect clears the banner + grayed state immediately, not after the dwell", async () => {
+    // Regression: the recovery dwell used to hold `clusterReconnecting` true (so
+    // the pod table stayed grayed and the banner stayed up) for the full 60s
+    // after data was already flowing, reading as "stuck reconnecting". A connect
+    // success must drop the user-visible state at once.
     const { result } = renderHook(() => useClusterConnection(CTX));
     await flush();
 
     fireHealth(UNAVAIL);
+    expect(useAppStore.getState().clusterReconnecting[CTX.id]).toBe(true);
+
     await flush(2000); // attempt 1 fires, connect resolves ok
     expect(reconnectCluster).toHaveBeenCalledTimes(1);
-    expect(result.current.autoReconnect).toEqual({ attempt: 1, max: MAX });
-
-    // 60s with no further unavailable -> declared recovered.
-    await flush(60_000);
+    // Banner gone + table un-grayed the moment the connection is confirmed —
+    // no waiting on the dwell.
     expect(result.current.autoReconnect).toBeNull();
     expect(useAppStore.getState().clusterReconnecting[CTX.id]).toBeUndefined();
 
-    // A fresh outage starts a brand-new session at attempt 1 (counter reset).
+    // The session is still open internally through the dwell; once it elapses
+    // quietly the counter resets, so a fresh outage starts at attempt 1.
+    await flush(60_000);
     fireHealth(UNAVAIL);
     expect(result.current.autoReconnect).toEqual({ attempt: 1, max: MAX });
+  });
+
+  it("re-flag inside the dwell resumes the retry counter instead of restarting at 1", async () => {
+    // The dwell keeps the session (counter) alive even though the banner is
+    // hidden: a wedged cluster that re-flags within 60s must continue the retry
+    // sequence, not reset to attempt 1 and risk an unbounded flap loop.
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+
+    fireHealth(UNAVAIL);
+    await flush(2000); // attempt 1 fires, connect ok -> banner cleared, session open
+    expect(reconnectCluster).toHaveBeenCalledTimes(1);
+    expect(result.current.autoReconnect).toBeNull();
+
+    // Re-flag before the 60s dwell elapses: the session is still alive, so this
+    // arms attempt 2 (not a fresh attempt 1) and re-shows the banner.
+    fireHealth(UNAVAIL);
+    expect(result.current.autoReconnect).toEqual({ attempt: 2, max: MAX });
+    expect(useAppStore.getState().clusterReconnecting[CTX.id]).toBe(true);
   });
 
   it("unmount mid-backoff fires no further reconnects", async () => {
