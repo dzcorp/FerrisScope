@@ -2254,9 +2254,13 @@ export type ProviderKind =
   | "minimax"
   | "groq"
   | "deepseek"
+  | "moonshot"
+  | "kimi_coding"
   | "mistral"
   | "together"
-  | "ollama";
+  | "ollama"
+  | "custom_openai"
+  | "custom_anthropic";
 
 export type AuthMode = "api_key" | "oauth";
 
@@ -2280,6 +2284,9 @@ export type ProviderStatusWire = {
   auth_mode: AuthMode | null;
   configured: boolean;
   account_label: string | null;
+  /// Operator-supplied extra model ids, merged into the enumerated list.
+  /// The only model source for endpoints that can't enumerate models.
+  custom_models: string[];
 };
 
 export type ApprovalMode = "approve_per_write" | "allow_all_writes";
@@ -2346,9 +2353,16 @@ export type ProviderBaseUrlPatch = {
   base_url: string;
 };
 
+export type ProviderCustomModelsPatch = {
+  provider: ProviderKind;
+  /// Whole-list replace; the backend trims / drops empties / dedupes.
+  models: string[];
+};
+
 export type AiSettingsPatch = {
   active_provider?: ProviderKind;
   provider_base_url?: ProviderBaseUrlPatch;
+  provider_custom_models?: ProviderCustomModelsPatch;
   default_model?: string;
   default_approval_mode?: ApprovalMode;
   system_prompt_override?: string;
@@ -2363,6 +2377,7 @@ export type AiSettingsPatch = {
 export type ProviderTestRequest = {
   provider: ProviderKind;
   base_url: string | null;
+  /// Empty string = validate the already-saved credential instead.
   api_key: string;
 };
 
@@ -2634,4 +2649,15 @@ export type ChatEvent =
       summary: string;
     }
   | { type: "error"; message: string }
+  /// A transient provider failure is being retried after a backoff.
+  /// Informational only — cleared by the next assistant_start / error.
+  /// Usage-limit (quota/billing) errors don't use this; they arrive as a
+  /// terminal assistant message with no retries attempted.
+  | {
+      type: "retrying";
+      attempt: number;
+      max: number;
+      reason: string;
+      delay_ms: number;
+    }
   | { type: "title_updated"; title: string };

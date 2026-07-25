@@ -86,10 +86,10 @@ pub(crate) async fn load_persisted() -> PersistedSettings {
                                 .and_then(|x| x.as_str())
                                 .map(|s| s.to_string())
                                 .filter(|s| !s.is_empty());
-                            p.settings
-                                .providers
-                                .entry(kind)
-                                .or_insert(ProviderConfig { base_url });
+                            p.settings.providers.entry(kind).or_insert(ProviderConfig {
+                                base_url,
+                                ..ProviderConfig::default()
+                            });
                         }
                     }
                 }

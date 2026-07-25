@@ -211,6 +211,71 @@ const META_OLLAMA: ProviderMeta = ProviderMeta {
     default_context_window: 32_768,
 };
 
+const META_MOONSHOT: ProviderMeta = ProviderMeta {
+    id: "moonshot",
+    display_name: "Moonshot (Kimi)",
+    // International endpoint. Operators in mainland China can override
+    // the base URL to `https://api.moonshot.cn/v1` via the row's
+    // base-URL field — the wire shape is identical.
+    default_base_url: "https://api.moonshot.ai/v1",
+    auth_modes: &[AuthMode::ApiKey],
+    // `GET /v1/models` is enumerable with a key (verified: 401 without
+    // one), so the picker is fed live; models.dev (`moonshotai`) is the
+    // fallback when the endpoint is unreachable.
+    models_endpoint: ModelsEndpoint::OpenAiCompatible,
+    flavor: ProviderFlavor::OpenAiCompat,
+    // Kimi K2 generation is 256k; older moonshot-v1 models are 128k.
+    default_context_window: 131_072,
+};
+
+const META_CUSTOM_OPENAI: ProviderMeta = ProviderMeta {
+    id: "custom_openai",
+    display_name: "Custom (OpenAI-compatible)",
+    // No canonical endpoint — the operator must supply one via the
+    // base-URL field. The placeholder matches Ollama-style local
+    // gateways; it's only a hint, never a sensible default.
+    default_base_url: "http://localhost:8080/v1",
+    auth_modes: &[AuthMode::ApiKey],
+    // Probe `GET /models`; when the endpoint can't enumerate, the
+    // operator's custom model list carries the picker.
+    models_endpoint: ModelsEndpoint::OpenAiCompatible,
+    flavor: ProviderFlavor::OpenAiCompat,
+    // Unknown upstream — conservative middle; custom models get the
+    // same fallback unless the operator's gateway reports limits.
+    default_context_window: 131_072,
+};
+
+const META_CUSTOM_ANTHROPIC: ProviderMeta = ProviderMeta {
+    id: "custom_anthropic",
+    display_name: "Custom (Anthropic-compatible)",
+    default_base_url: "http://localhost:8080/v1",
+    auth_modes: &[AuthMode::ApiKey],
+    // Anthropic's `GET /v1/models` shape (`{data:[{id, display_name}]}`).
+    models_endpoint: ModelsEndpoint::AnthropicCatalogue,
+    flavor: ProviderFlavor::AnthropicMessages,
+    default_context_window: 200_000,
+};
+
+const META_KIMI_CODING: ProviderMeta = ProviderMeta {
+    id: "kimi_coding",
+    display_name: "Kimi For Coding",
+    // The kimi.com coding subscription — a separate product from the
+    // Moonshot platform (different keys, different model set). Verified
+    // against the live API: Anthropic-Messages wire (`x-api-key` +
+    // `anthropic-version`, `event:`-line SSE), enumerable
+    // `GET /v1/models`, thinking blocks always on
+    // (`supports_thinking_type: "only"` — streamed as `thinking_delta`,
+    // which our SSE machine skips), tolerant of assistant history
+    // without thinking blocks, and `budget_tokens` accepted.
+    default_base_url: "https://api.kimi.com/coding/v1",
+    auth_modes: &[AuthMode::ApiKey],
+    models_endpoint: ModelsEndpoint::AnthropicCatalogue,
+    flavor: ProviderFlavor::AnthropicMessages,
+    // kimi-for-coding / k3-256k are 256k; k3 is 1M. Conservative
+    // fallback; models.dev (`kimi-for-coding`) enriches per model.
+    default_context_window: 262_144,
+};
+
 pub fn for_kind(kind: ProviderKind) -> &'static ProviderMeta {
     match kind {
         ProviderKind::OpencodeZen => &META_OPENCODE_ZEN,
@@ -224,6 +289,10 @@ pub fn for_kind(kind: ProviderKind) -> &'static ProviderMeta {
         ProviderKind::Mistral => &META_MISTRAL,
         ProviderKind::Together => &META_TOGETHER,
         ProviderKind::Ollama => &META_OLLAMA,
+        ProviderKind::Moonshot => &META_MOONSHOT,
+        ProviderKind::KimiCoding => &META_KIMI_CODING,
+        ProviderKind::CustomOpenAi => &META_CUSTOM_OPENAI,
+        ProviderKind::CustomAnthropic => &META_CUSTOM_ANTHROPIC,
     }
 }
 
@@ -249,9 +318,19 @@ pub fn models_dev_id(kind: ProviderKind) -> Option<&'static str> {
         // capability enrichment for them.
         ProviderKind::Zai => "zai",
         ProviderKind::Minimax => "minimax",
+        // Moonshot's international catalogue on models.dev. (There's a
+        // separate `moonshotai-cn` entry for the China endpoint; we key
+        // enrichment off the international one — model ids overlap.)
+        ProviderKind::Moonshot => "moonshotai",
+        // Separate catalogue entry from `moonshotai` — different product,
+        // different models (`kimi-for-coding`, `k3`), different limits.
+        ProviderKind::KimiCoding => "kimi-for-coding",
         // Ollama serves local models that aren't in models.dev — keep it
-        // on the live `/models` path.
-        ProviderKind::Ollama => return None,
+        // on the live `/models` path. Custom endpoints are by definition
+        // not in the community catalogue.
+        ProviderKind::Ollama | ProviderKind::CustomOpenAi | ProviderKind::CustomAnthropic => {
+            return None;
+        }
     })
 }
 
@@ -270,6 +349,23 @@ pub fn static_models(kind: ProviderKind) -> &'static [(&'static str, &'static st
             ("MiniMax-M2", "MiniMax-M2"),
             ("MiniMax-Text-01", "MiniMax-Text-01"),
             ("abab6.5s-chat", "abab6.5s"),
+        ],
+        // Moonshot — offline / cold-start fallback only; the live
+        // `/models` endpoint is enumerable with a key and models.dev
+        // covers the rest. Ids mirror the public model index.
+        ProviderKind::Moonshot => &[
+            ("kimi-k2.5", "Kimi K2.5"),
+            ("kimi-k2-thinking", "Kimi K2 Thinking"),
+            ("kimi-k2-0905-preview", "Kimi K2 (0905 preview)"),
+            ("moonshot-v1-128k", "Moonshot v1 128k"),
+        ],
+        // Kimi For Coding — offline fallback only; live `/v1/models` is
+        // enumerable with a key (verified).
+        ProviderKind::KimiCoding => &[
+            ("kimi-for-coding", "K2.7 Coding"),
+            ("kimi-for-coding-highspeed", "K2.7 Coding Highspeed"),
+            ("k3", "K3 (1M)"),
+            ("k3-256k", "K3 256k"),
         ],
         // Anthropic — used by the Anthropic provider when the live
         // catalogue call fails. Names mirror the public model index.
@@ -310,5 +406,67 @@ mod tests {
         // Ollama serves local models absent from models.dev — must stay on
         // the live `/models` path.
         assert_eq!(models_dev_id(ProviderKind::Ollama), None);
+    }
+
+    #[test]
+    fn moonshot_metadata_points_at_enumerable_openai_endpoint() {
+        let m = for_kind(ProviderKind::Moonshot);
+        assert_eq!(m.id, "moonshot");
+        assert_eq!(m.default_base_url, "https://api.moonshot.ai/v1");
+        assert!(matches!(
+            m.models_endpoint,
+            ModelsEndpoint::OpenAiCompatible
+        ));
+        assert!(matches!(m.flavor, ProviderFlavor::OpenAiCompat));
+        assert_eq!(models_dev_id(ProviderKind::Moonshot), Some("moonshotai"));
+        assert!(!static_models(ProviderKind::Moonshot).is_empty());
+    }
+
+    #[test]
+    fn custom_providers_have_no_catalogue_and_unique_ids() {
+        // Custom endpoints aren't on models.dev (catalogue enrichment /
+        // fallback list would be wrong for an arbitrary gateway), and
+        // their keychain account ids must not collide with built-ins.
+        for kind in [ProviderKind::CustomOpenAi, ProviderKind::CustomAnthropic] {
+            assert_eq!(models_dev_id(kind), None);
+            assert!(static_models(kind).is_empty());
+        }
+        let ids: std::collections::HashSet<&str> = ProviderKind::all()
+            .iter()
+            .map(|k| for_kind(*k).id)
+            .collect();
+        assert_eq!(ids.len(), ProviderKind::all().len());
+        assert!(matches!(
+            for_kind(ProviderKind::CustomAnthropic).flavor,
+            ProviderFlavor::AnthropicMessages
+        ));
+    }
+
+    #[test]
+    fn kimi_coding_is_anthropic_wired_with_own_catalogue() {
+        // The kimi.com coding subscription is a separate product from
+        // the Moonshot platform: Anthropic-Messages wire, its own
+        // models.dev entry, its own keychain id. Verified against the
+        // live API (2026-07): `GET /coding/v1/models` + `/messages` SSE
+        // both speak the Anthropic shapes with `x-api-key` auth.
+        let m = for_kind(ProviderKind::KimiCoding);
+        assert_eq!(m.id, "kimi_coding");
+        assert_eq!(m.default_base_url, "https://api.kimi.com/coding/v1");
+        assert!(matches!(
+            m.models_endpoint,
+            ModelsEndpoint::AnthropicCatalogue
+        ));
+        assert!(matches!(m.flavor, ProviderFlavor::AnthropicMessages));
+        assert_eq!(
+            models_dev_id(ProviderKind::KimiCoding),
+            Some("kimi-for-coding")
+        );
+        assert!(static_models(ProviderKind::KimiCoding)
+            .iter()
+            .any(|(id, _)| *id == "kimi-for-coding"));
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::KimiCoding).unwrap(),
+            "\"kimi_coding\""
+        );
     }
 }

@@ -73,6 +73,11 @@ type OpenChat = {
     totalTokens: number;
   } | null;
   compacting: number | null;
+  /// Transient provider retry in flight (429 / 5xx / connection reset),
+  /// from the `retrying` event. Cleared by the next assistant_start /
+  /// terminal error. Renders a small note so a 30s backoff doesn't look
+  /// like a hung turn.
+  retry: { attempt: number; max: number; reason: string } | null;
   /// Most recently observed context window for the chat's bound model.
   /// `0` ⇒ catalogue not loaded yet — UI falls back to "<used> tok" only.
   /// Updated by `ChatOpenResult`, the `usage` event (each turn re-resolves
@@ -162,6 +167,7 @@ export function DockChat({ mode, tab, visible }: Props) {
   const streaming = active?.streaming ?? false;
   const usage = active?.usage ?? null;
   const compacting = active?.compacting ?? null;
+  const retry = active?.retry ?? null;
   const activeChatId = active?.chatId ?? null;
   const contextLimit = active?.contextLimit ?? 0;
   const usableContext = active?.usableContext ?? 0;
@@ -185,14 +191,24 @@ export function DockChat({ mode, tab, visible }: Props) {
       let nextStreaming = cur.streaming;
       let nextUsage = cur.usage;
       let nextCompacting = cur.compacting;
+      let nextRetry = cur.retry;
       let nextMeta = cur.meta;
       let nextContextLimit = cur.contextLimit;
       let nextUsableContext = cur.usableContext;
       for (const e of queue) {
         nextView = applyChatEvent(nextView, e);
-        if (e.type === "assistant_start") nextStreaming = true;
-        else if (e.type === "assistant_end" || e.type === "error") {
+        if (e.type === "assistant_start") {
+          nextStreaming = true;
+          nextRetry = null;
+        } else if (e.type === "assistant_end" || e.type === "error") {
           nextStreaming = false;
+          if (e.type === "error") nextRetry = null;
+        } else if (e.type === "retrying") {
+          nextRetry = {
+            attempt: e.attempt,
+            max: e.max,
+            reason: e.reason,
+          };
         } else if (e.type === "usage") {
           nextUsage = {
             promptTokens: e.prompt_tokens,
@@ -234,6 +250,7 @@ export function DockChat({ mode, tab, visible }: Props) {
           streaming: nextStreaming,
           usage: nextUsage,
           compacting: nextCompacting,
+          retry: nextRetry,
           meta: nextMeta,
           contextLimit: nextContextLimit,
           usableContext: nextUsableContext,
@@ -440,6 +457,7 @@ export function DockChat({ mode, tab, visible }: Props) {
             streaming: false,
             usage: seededUsage,
             compacting: null,
+            retry: null,
             contextLimit: opened.contextLimit,
             usableContext: opened.usableContext,
           },
@@ -991,6 +1009,7 @@ export function DockChat({ mode, tab, visible }: Props) {
             streaming={streaming}
             chatId={activeChatId}
             compacting={compacting !== null}
+            retry={retry}
           />
         )}
       </div>

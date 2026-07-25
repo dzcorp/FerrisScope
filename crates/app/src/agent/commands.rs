@@ -45,11 +45,11 @@ pub(crate) async fn ai_get_settings(
     let mut providers = HashMap::with_capacity(ProviderKind::all().len());
     for kind in ProviderKind::all() {
         let m: &ProviderMeta = meta::for_kind(*kind);
-        let base_url_override = p
-            .settings
-            .providers
-            .get(kind)
-            .and_then(|c| c.base_url.clone());
+        let provider_cfg = p.settings.providers.get(kind);
+        let base_url_override = provider_cfg.and_then(|c| c.base_url.clone());
+        let custom_models = provider_cfg
+            .map(|c| c.custom_models.clone())
+            .unwrap_or_default();
         let cred = read_credential(*kind).await;
         // Providers with a public fallback (OpenCode Zen's free tier)
         // report as configured even without an operator credential —
@@ -92,6 +92,7 @@ pub(crate) async fn ai_get_settings(
                 auth_mode,
                 configured: cred.is_some() || public_fallback_active,
                 account_label,
+                custom_models,
             },
         );
     }
@@ -126,6 +127,18 @@ pub(crate) async fn ai_set_settings(
         } else {
             Some(bu.base_url)
         };
+    }
+    if let Some(cm) = patch.provider_custom_models {
+        let cfg = p.settings.providers.entry(cm.provider).or_default();
+        // Normalise: trim, drop empties, dedupe preserving operator order.
+        let mut seen = HashSet::new();
+        cfg.custom_models = cm
+            .models
+            .into_iter()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .filter(|m| seen.insert(m.clone()))
+            .collect();
     }
     if let Some(m) = patch.default_model {
         p.settings.default_model = if m.is_empty() { None } else { Some(m) };
@@ -228,28 +241,102 @@ pub(crate) async fn ai_test_provider(
     req: ProviderTestRequest,
     _state: State<'_, AgentState>,
 ) -> Result<ProviderTestResult, String> {
-    let cred = Credential::ApiKey { key: req.api_key };
-    let provider = match build_provider(req.provider, &cred, req.base_url, None, None) {
-        Ok(p) => p,
-        Err(e) => {
-            return Ok(ProviderTestResult {
-                ok: false,
-                model_count: 0,
-                error: Some(e),
-            })
-        }
+    // Blank key = "test the saved credential" — the settings row lets the
+    // operator re-validate an already-persisted connection without
+    // re-pasting the secret (which never round-trips to the frontend).
+    // With nothing stored we still probe unauthenticated: open endpoints
+    // (local Ollama, some gateways) answer `GET /models` with no auth,
+    // and closed ones 401 — which is itself the correct test result.
+    let cred = if req.api_key.trim().is_empty() {
+        read_credential(req.provider)
+            .await
+            .unwrap_or(Credential::ApiKey { key: String::new() })
+    } else {
+        Credential::ApiKey { key: req.api_key }
     };
-    match provider.list_models().await {
-        Ok(models) => Ok(ProviderTestResult {
-            ok: true,
-            model_count: models.len(),
-            error: None,
-        }),
+
+    // Probe the live `GET /models` endpoint directly rather than going
+    // through `ChatProvider::list_models` — that path deliberately falls
+    // back to the models.dev catalogue / static list when the network
+    // fails, which would mask a bad key or wrong base URL behind a
+    // phantom "OK · N models". The test button exists to validate the
+    // *connection*, so only a live 200 counts.
+    let m: &ProviderMeta = meta::for_kind(req.provider);
+    let base_url = req
+        .base_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| m.default_base_url.to_string());
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let key = match &cred {
+        Credential::ApiKey { key } => key.trim().to_string(),
+        Credential::OAuth { access, .. } => access.clone(),
+    };
+    let mut http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(&url);
+    if !key.is_empty() {
+        http = match m.flavor {
+            // Anthropic's first-party auth style (`x-api-key` + version);
+            // every OpenAI-shaped endpoint takes a Bearer token.
+            ferrisscope_agent::ProviderFlavor::AnthropicMessages => http
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01"),
+            _ => http.bearer_auth(&key),
+        };
+    }
+    match http.send().await {
         Err(e) => Ok(ProviderTestResult {
             ok: false,
             model_count: 0,
-            error: Some(e.to_string()),
+            error: Some(format!("cannot reach {url}: {e}")),
         }),
+        Ok(resp) => {
+            let status = resp.status();
+            if !status.is_success() {
+                let code = status.as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                // Trim noisy HTML / long JSON error bodies for the chip.
+                let trimmed = body.trim();
+                let snippet = if trimmed.len() > 200 {
+                    format!("{}…", &trimmed[..200])
+                } else {
+                    trimmed.to_string()
+                };
+                return Ok(ProviderTestResult {
+                    ok: false,
+                    model_count: 0,
+                    error: Some(if snippet.is_empty() {
+                        format!("HTTP {code} from {url}")
+                    } else {
+                        format!("HTTP {code}: {snippet}")
+                    }),
+                });
+            }
+            // Both shapes we care about (`{data:[{id}]}` OpenAI-style and
+            // Anthropic's `{data:[{id, display_name}]}`) hang the list off
+            // `data`; count entries without parsing the full shape.
+            let body = resp.text().await.unwrap_or_default();
+            let count = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("data")?.as_array().map(Vec::len));
+            match count {
+                Some(n) => Ok(ProviderTestResult {
+                    ok: true,
+                    model_count: n,
+                    error: None,
+                }),
+                None => Ok(ProviderTestResult {
+                    ok: false,
+                    model_count: 0,
+                    error: Some(
+                        "reachable but `GET /models` returned no `data` list — this endpoint may not enumerate models; add custom models below".to_string(),
+                    ),
+                }),
+            }
+        }
     }
 }
 
@@ -517,6 +604,27 @@ async fn mcp_test_remote(config: &McpServerConfig) -> McpTestResult {
     }
 }
 
+/// Merge the operator's custom model ids into an enumerated list. Ids
+/// already present (live `/models`, catalogue, or static) win so their
+/// display name / context length survive; new ids append bare. This is
+/// the only model source for endpoints that can't enumerate at all.
+fn merge_custom_models(
+    models: &mut Vec<ModelInfo>,
+    cfg: Option<&ferrisscope_agent::ProviderConfig>,
+) {
+    let Some(cfg) = cfg else { return };
+    let existing: HashSet<String> = models.iter().map(|m| m.id.clone()).collect();
+    for id in &cfg.custom_models {
+        if !existing.contains(id.as_str()) {
+            models.push(ModelInfo {
+                id: id.clone(),
+                name: None,
+                context_length: None,
+            });
+        }
+    }
+}
+
 /// List models for a provider. Defaults to `active_provider` when
 /// `provider` is absent so the existing single-provider call sites keep
 /// working. The provider must already be configured (credential set).
@@ -547,10 +655,24 @@ pub(crate) async fn ai_list_models(
         .get(&kind)
         .and_then(|c| c.base_url.clone());
     let provider_impl = build_provider(kind, &cred, base_url, None, None)?;
-    let mut models = provider_impl
-        .list_models()
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut models = match provider_impl.list_models().await {
+        Ok(m) => m,
+        Err(e) => {
+            // Enumeration failed (endpoint down, bad key, or no `/models`
+            // at all). If the operator maintains a custom list, return
+            // that instead of erroring — for custom gateways it's the
+            // designed path, and for built-ins it still leaves the
+            // picker usable while surfacing nothing misleading (the
+            // custom ids are the operator's own).
+            let mut v = Vec::new();
+            merge_custom_models(&mut v, p.settings.providers.get(&kind));
+            if v.is_empty() {
+                return Err(e.to_string());
+            }
+            return Ok(v);
+        }
+    };
+    merge_custom_models(&mut models, p.settings.providers.get(&kind));
     // OpenCode Zen on the public tier — drop everything the catalogue
     // marks as paid. Mirrors opencode's `cost.input === 0` filter.
     // When the catalogue hasn't loaded yet for this provider we leave
@@ -607,6 +729,7 @@ pub(crate) async fn chat_create_session(
                 .and_then(|c| c.base_url.clone());
             if let Ok(provider_impl) = build_provider(kind, &cred, base_url, None, None) {
                 if let Ok(mut list) = provider_impl.list_models().await {
+                    merge_custom_models(&mut list, p.settings.providers.get(&kind));
                     let public_fallback_active = matches!(cred, Credential::ApiKey { ref key } if Some(key.as_str()) == kind.public_fallback_key());
                     if public_fallback_active
                         && ferrisscope_agent::provider::catalogue::has_data_for(kind)

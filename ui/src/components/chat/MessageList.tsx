@@ -32,6 +32,9 @@ type Props = {
   streaming: boolean;
   chatId: string | null;
   compacting: boolean;
+  /// Transient provider retry in flight — renders a small note under the
+  /// transcript so a multi-second backoff doesn't read as a hung turn.
+  retry: { attempt: number; max: number; reason: string } | null;
 };
 
 // 12 px between adjacent bubbles. The original render relied on the parent's
@@ -47,7 +50,7 @@ const ROW_GAP = 12;
 // tables). Footer surfaces (pending approvals, compacting bubble) sit
 // below the virtual container — small fixed count, easier than folding
 // them into the row array.
-export function MessageList({ mode, state, streaming, chatId, compacting }: Props) {
+export function MessageList({ mode, state, streaming, chatId, compacting, retry }: Props) {
   const t = useResolvedTheme().tokens;
   const { scrollRef, stuck, snapToBottom } = useStickToBottom();
   // Filter out messages that MessageBubble would render as null
@@ -308,6 +311,7 @@ export function MessageList({ mode, state, streaming, chatId, compacting }: Prop
           />
         )}
         {compacting && <CompactingBubble t={t} />}
+        {retry && !compacting && <RetryBubble t={t} retry={retry} />}
       </div>
       {showJumpButton && (
         <JumpToLatestButton t={t} streaming={streaming} onClick={snapToBottom} />
@@ -489,5 +493,70 @@ function Dot({
         animation: `fs-compact-dot 1.2s ${delay}ms infinite ease-in-out`,
       }}
     />
+  );
+}
+
+// Transient provider retry note — a 429 / 5xx / connection reset is
+// being backed off and re-issued. Distinct from CompactingBubble (muted
+// warn tone, no accent dots) and cleared the moment the next attempt
+// starts streaming (or the retry budget exhausts into an error bubble).
+// Usage-limit (quota/billing) failures never render this — they arrive
+// as a terminal assistant message instead.
+function RetryBubble({
+  t,
+  retry,
+}: {
+  t: ReturnType<typeof tokens>;
+  retry: { attempt: number; max: number; reason: string };
+}) {
+  return (
+    <div style={{ display: "flex", justifyContent: "flex-start", gap: 8 }}>
+      <div
+        style={{
+          maxWidth: "92%",
+          background: t.surface,
+          border: `1px solid ${t.border}`,
+          borderRadius: R_LG,
+          padding: "9px 13px 10px",
+          color: t.text,
+          fontSize: FS_MD,
+          lineHeight: 1.55,
+          boxShadow: "0 1px 3px rgba(15,20,30,0.05)",
+        }}
+      >
+        <div
+          style={{
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
+            color: t.warn,
+            letterSpacing: 0.6,
+            textTransform: "uppercase",
+            marginBottom: 5,
+            fontWeight: 700,
+            opacity: 0.9,
+          }}
+        >
+          Provider hiccup
+        </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            color: t.textDim,
+            fontSize: FS_MD,
+          }}
+        >
+          <span>
+            {retry.reason} — retrying (attempt {retry.attempt}/{retry.max})
+          </span>
+          <span style={{ display: "inline-flex", gap: 3 }}>
+            <Dot t={t} delay={0} />
+            <Dot t={t} delay={150} />
+            <Dot t={t} delay={300} />
+          </span>
+        </div>
+      </div>
+    </div>
   );
 }

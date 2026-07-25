@@ -3,7 +3,7 @@
 // never accidentally carry them.
 
 import { describe, it, expect } from "vitest";
-import { chatStateFromMessages } from "./chatStreaming";
+import { applyChatEvent, chatStateFromMessages } from "./chatStreaming";
 import type { AgentChatMessage } from "../../types";
 
 describe("chatStateFromMessages — image attachments", () => {
@@ -40,5 +40,24 @@ describe("chatStateFromMessages — image attachments", () => {
     const { messages } = chatStateFromMessages(msgs);
     expect(messages[0]!.role).toBe("assistant");
     expect(messages[0]!.images).toBeUndefined();
+  });
+});
+
+describe("applyChatEvent — retrying", () => {
+  it("leaves the view state untouched (handled at the session level)", () => {
+    // The `retrying` event drives the per-session RetryBubble in DockChat,
+    // not the transcript view — the reducer must not materialise a bubble
+    // or disturb an in-flight stream when it passes through applyChatEvent.
+    const prev = chatStateFromMessages([
+      { role: "user", content: "hi" },
+    ]);
+    const next = applyChatEvent(prev, {
+      type: "retrying",
+      attempt: 2,
+      max: 5,
+      reason: "rate limited",
+      delay_ms: 4000,
+    });
+    expect(next).toBe(prev);
   });
 });

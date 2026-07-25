@@ -18,7 +18,7 @@ use super::{
     dropped_images_note, merge_top_level, ChatProvider, CompletionEvent, CompletionFinal,
     CompletionRequest, EventSink, FinishReason, ModelInfo, ProviderError, Usage,
 };
-use crate::config::Credential;
+use crate::config::{Credential, ProviderKind};
 use crate::provider::meta::{self, ProviderMeta};
 use crate::types::{ChatMessage, MessageRole, ToolCall};
 use async_trait::async_trait;
@@ -33,11 +33,16 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    /// Drives catalogue / capability lookups and the default base URL.
+    /// `ProviderKind::Anthropic` for the first-party provider;
+    /// `ProviderKind::CustomAnthropic` for operator-defined
+    /// Anthropic-Messages-compatible gateways.
+    kind: ProviderKind,
 }
 
 impl AnthropicProvider {
-    pub fn new(cred: &Credential, base_url_override: Option<String>) -> Self {
-        let m: &ProviderMeta = meta::for_kind(crate::config::ProviderKind::Anthropic);
+    pub fn new(cred: &Credential, base_url_override: Option<String>, kind: ProviderKind) -> Self {
+        let m: &ProviderMeta = meta::for_kind(kind);
         let key = match cred {
             Credential::ApiKey { key } => key.trim().to_string(),
             // OAuth path is out of scope; if it gets here, send the
@@ -55,6 +60,7 @@ impl AnthropicProvider {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| m.default_base_url.to_string()),
             api_key: key,
+            kind,
         }
     }
 
@@ -194,7 +200,7 @@ struct AnthropicModelEntry {
 #[async_trait]
 impl ChatProvider for AnthropicProvider {
     fn name(&self) -> &'static str {
-        "anthropic"
+        meta::for_kind(self.kind).id
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -229,11 +235,14 @@ impl ChatProvider for AnthropicProvider {
         // Live `/models` unreachable. Prefer the models.dev catalogue
         // (stays fresh across releases), then the curated static list as
         // the offline / cold-start fallback so the picker is never empty.
-        let cat = crate::provider::catalogue::list_models(crate::config::ProviderKind::Anthropic);
+        // Custom gateways have no catalogue entry — `list_models` returns
+        // empty for them and the static list is empty too, surfacing the
+        // live error to the operator instead of a phantom model list.
+        let cat = crate::provider::catalogue::list_models(self.kind);
         if !cat.is_empty() {
             return Ok(cat);
         }
-        Ok(meta::static_models(crate::config::ProviderKind::Anthropic)
+        Ok(meta::static_models(self.kind)
             .iter()
             .map(|(id, name)| ModelInfo {
                 id: (*id).to_string(),
@@ -251,10 +260,7 @@ impl ChatProvider for AnthropicProvider {
         // Drop image blocks only when models.dev positively says the
         // model is text-only; unknown models default to "try it" and let
         // the apiserver be the arbiter.
-        let supports_vision = crate::provider::catalogue::supports_vision(
-            crate::config::ProviderKind::Anthropic,
-            &req.model,
-        );
+        let supports_vision = crate::provider::catalogue::supports_vision(self.kind, &req.model);
         let (system, messages) = build_messages(&req.messages, supports_vision);
 
         let mut body = json!({
@@ -331,6 +337,30 @@ impl ChatProvider for AnthropicProvider {
                 "message_delta" => state.on_message_delta(&value),
                 "message_start" => state.on_message_start(&value),
                 "message_stop" => break,
+                // Mid-stream failure (`event: error` with
+                // `{type:"error", error:{type:"rate_limit_error"|
+                // "overloaded_error"|…, message}}` on an HTTP 200).
+                // Failing the round keeps it out of the empty-turn
+                // retry path and lets the classifier decide: transient
+                // (rate limit / overload) or terminal (quota).
+                "error" => {
+                    let err_type = value
+                        .pointer("/error/type")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
+                    let err_msg = value
+                        .pointer("/error/message")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
+                    return Err(ProviderError::Http {
+                        status: None,
+                        body: if err_type.is_empty() && err_msg.is_empty() {
+                            ev.data.clone()
+                        } else {
+                            format!("{err_type}: {err_msg}")
+                        },
+                    });
+                }
                 _ => {}
             }
         }

@@ -26,9 +26,13 @@ describe("PROVIDER_ORDER", () => {
       "minimax",
       "groq",
       "deepseek",
+      "moonshot",
+      "kimi_coding",
       "mistral",
       "together",
       "ollama",
+      "custom_openai",
+      "custom_anthropic",
     ];
     expect([...PROVIDER_ORDER].sort()).toEqual([...expected].sort());
   });
