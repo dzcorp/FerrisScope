@@ -18,10 +18,10 @@ use crate::state::AppState;
 
 use super::{
     assemble_system_prompt, build_cluster_context_block, build_view_context_block,
-    context_limits_for, execute_tool_call, is_context_overflow_error, is_transient_error,
-    maybe_run_compaction, maybe_spill, redact_secrets, repair_orphan_tool_calls,
-    run_compaction_internal, tools_to_schemas, transient_retry_delay_ms, ChatEvent, ChatRuntime,
-    PersistedSettings,
+    classify_usage_limit, context_limits_for, execute_tool_call, is_context_overflow_error,
+    is_transient_error, maybe_run_compaction, maybe_spill, redact_secrets,
+    repair_orphan_tool_calls, run_compaction_internal, tools_to_schemas, transient_retry_delay_ms,
+    ChatEvent, ChatRuntime, PersistedSettings,
 };
 
 /// Hard cap on tool-call rounds within a single user turn. Defends against
@@ -183,7 +183,7 @@ pub(crate) fn build_provider(
             session_id.clone(),
         )),
         ProviderFlavor::AnthropicMessages => {
-            Box::new(AnthropicProvider::new(cred, base_url_override))
+            Box::new(AnthropicProvider::new(cred, base_url_override, kind))
         }
         ProviderFlavor::OpenAiResponses => {
             Box::new(OpenAICodexProvider::new(cred, session_id, on_refresh))
@@ -226,7 +226,13 @@ pub(crate) fn resolve_provider_options(
         // Effort is ignored — Anthropic doesn't have an `effort` field;
         // when only `effort` is set we use the Sonnet-recommended
         // 16k mid budget, scaling with the effort knob.
-        ProviderKind::Anthropic => {
+        // Anthropic Messages: `thinking: { type, budget_tokens }`.
+        // Effort is ignored — Anthropic doesn't have an `effort` field;
+        // when only `effort` is set we use the Sonnet-recommended
+        // 16k mid budget, scaling with the effort knob. Kimi For Coding
+        // shares the wire (verified: accepts `budget_tokens`, thinking
+        // is always-on there regardless).
+        ProviderKind::Anthropic | ProviderKind::CustomAnthropic | ProviderKind::KimiCoding => {
             let budget = r.budget_tokens.or_else(|| {
                 effort_label.map(|e| match e {
                     "low" => 4096,
@@ -291,8 +297,10 @@ pub(crate) fn resolve_provider_options(
         | ProviderKind::Together
         | ProviderKind::Zai
         | ProviderKind::Minimax
+        | ProviderKind::Moonshot
         | ProviderKind::Ollama
-        | ProviderKind::OpencodeZen => {
+        | ProviderKind::OpencodeZen
+        | ProviderKind::CustomOpenAi => {
             if let Some(label) = effort_label {
                 out.insert("reasoning_effort".to_string(), serde_json::json!(label));
             }
@@ -608,6 +616,15 @@ pub(crate) async fn run_turn_loop(
                 round = round.saturating_sub(1);
                 continue;
             }
+            ProviderRoundOutcome::UsageLimited => {
+                // The bubble content is already persisted + streamed by
+                // run_provider_round (TokenDelta + AssistantEnd), which
+                // also clears the frontend's streaming state — no Error
+                // event here or the message would double-render. All
+                // that's left is ending the turn without retrying.
+                runtime.lock().await.cancel = None;
+                return;
+            }
             ProviderRoundOutcome::TransientFailure {
                 reason,
                 original_error,
@@ -663,6 +680,18 @@ pub(crate) async fn run_turn_loop(
                     error = %original_error,
                     "agent: transient provider failure; backing off and retrying"
                 );
+                // Surface the retry to the operator — otherwise a 30s
+                // backoff looks identical to a hung turn. Cleared
+                // frontend-side by the next assistant_start / error.
+                {
+                    let g = runtime.lock().await;
+                    let _ = g.channel.send(ChatEvent::Retrying {
+                        attempt: transient_retries,
+                        max: MAX_TRANSIENT_RETRIES,
+                        reason: reason.clone(),
+                        delay_ms,
+                    });
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 // Don't burn a round — the failed attempt produced no
                 // output. Next iteration re-issues the same transcript.
@@ -928,6 +957,15 @@ enum ProviderRoundOutcome {
     /// round against the unchanged transcript and the next attempt
     /// usually produces real content. Bounded by `MAX_EMPTY_RETRIES`.
     EmptyTurn,
+    /// Account-level usage limit (quota exhausted, billing required,
+    /// plan restriction). Terminal: retrying against a hard quota just
+    /// adds minutes of dead air, so `run_provider_round` renders +
+    /// persists the operator-facing message itself, and the loop stops
+    /// the turn immediately instead of entering the transient-retry
+    /// path. Mirrors opencode's `retry.ts` distinction between
+    /// retryable 429s and quota-shaped bodies, taken to its conclusion
+    /// (our retry budget is bounded).
+    UsageLimited,
     /// Transient infrastructure failure: 5xx from the provider, an
     /// upstream LB connection reset (Envoy "upstream connect error /
     /// disconnect/reset"), rate-limit (429), or a network timeout. The
@@ -1106,6 +1144,55 @@ async fn run_provider_round(
             return ProviderRoundOutcome::Stopped;
         }
         Err(e) => {
+            // Usage-limit (quota / billing / plan)? Terminal — don't
+            // enter the transient-retry loop for an error a backoff
+            // can't fix. Checked BEFORE context-overflow and transient:
+            // a 429-with-quota-body would otherwise be swallowed by
+            // "rate limited" and retried into the ground.
+            if let Some(limit_reason) = classify_usage_limit(&e) {
+                let err_text = format!(
+                    "**Usage limit reached.** {limit_reason}.\n\n\
+                     ```text\n{}\n```\n\n\
+                     _Retrying won't help until the limit resets. Wait it out, switch provider or \
+                     model in the chat header, or check your plan / billing on the provider's dashboard._",
+                    redact_secrets(&e.to_string())
+                );
+                if let Ok(mut g) = text_accum.lock() {
+                    g.push_str(&err_text);
+                }
+                send(ChatEvent::TokenDelta {
+                    delta: err_text.clone(),
+                })
+                .await;
+                runtime.lock().await.in_flight_message_id = None;
+                let assistant_msg = ChatMessage {
+                    role: MessageRole::Assistant,
+                    content: err_text.clone(),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    name: None,
+                    reasoning_content: None,
+                    images: vec![],
+                };
+                let now = chrono::Utc::now().timestamp_millis();
+                let _ = store
+                    .append(
+                        cluster_id,
+                        session_id,
+                        SessionEvent::Message {
+                            message: assistant_msg.clone(),
+                            ts: now,
+                        },
+                    )
+                    .await;
+                runtime.lock().await.messages.push(assistant_msg);
+                send(ChatEvent::AssistantEnd {
+                    message_id: message_id.clone(),
+                    finish_reason: FinishReason::Other,
+                })
+                .await;
+                return ProviderRoundOutcome::UsageLimited;
+            }
             // Context-overflow-shaped error? Hand it back to the loop as a
             // recoverable signal: don't render anything, don't persist —
             // the loop will run a forced compaction and re-issue the round

@@ -33,7 +33,31 @@ pub enum ProviderKind {
     Deepseek,
     Mistral,
     Together,
+    /// Moonshot AI (Kimi). OpenAI-compatible wire at
+    /// `https://api.moonshot.ai/v1`; `GET /models` is enumerable with a
+    /// key so the picker is fed live, with the models.dev catalogue
+    /// (`moonshotai`) as fallback.
+    Moonshot,
+    /// Kimi For Coding — the kimi.com coding subscription. Separate
+    /// product from the Moonshot platform: distinct base URL
+    /// (`https://api.kimi.com/coding/v1`), Anthropic-Messages wire
+    /// (models.dev `npm: @ai-sdk/anthropic`), its own model set
+    /// (`kimi-for-coding`, `k3`, …), and its own API keys.
+    #[serde(rename = "kimi_coding")]
+    KimiCoding,
     Ollama,
+    /// Operator-defined OpenAI-compatible endpoint (proxy / gateway /
+    /// self-hosted). No canonical base URL — the operator supplies one;
+    /// we probe `GET /models` and fall back to the operator's custom
+    /// model list when the endpoint isn't enumerable.
+    #[serde(rename = "custom_openai")]
+    CustomOpenAi,
+    /// Operator-defined Anthropic-Messages-compatible endpoint (e.g. a
+    /// gateway fronting Claude, or Kimi's `/anthropic` transport).
+    /// Same probing strategy as `CustomOpenAi` against Anthropic's
+    /// `GET /v1/models` shape.
+    #[serde(rename = "custom_anthropic")]
+    CustomAnthropic,
 }
 
 impl ProviderKind {
@@ -49,9 +73,13 @@ impl ProviderKind {
             Self::Minimax,
             Self::Groq,
             Self::Deepseek,
+            Self::Moonshot,
+            Self::KimiCoding,
             Self::Mistral,
             Self::Together,
             Self::Ollama,
+            Self::CustomOpenAi,
+            Self::CustomAnthropic,
         ]
     }
 
@@ -120,6 +148,14 @@ pub struct ProviderConfig {
     /// `None` = use the canonical default. Empty string = treat as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Operator-supplied extra model ids, merged into whatever the
+    /// provider enumerates (live `/models`, models.dev catalogue, or the
+    /// static list). This is the only source for endpoints that can't
+    /// enumerate models at all, and the escape hatch for brand-new
+    /// models the catalogue hasn't picked up yet. Duplicates of an
+    /// enumerated id are dropped at merge time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -302,7 +338,7 @@ pub struct AgentSettings {
 
 #[cfg(test)]
 mod mcp_config_tests {
-    use super::{McpServerConfig, McpTransport};
+    use super::{McpServerConfig, McpTransport, ProviderConfig, ProviderKind};
 
     #[test]
     fn legacy_config_deserializes_with_transport_and_trust_defaults() {
@@ -362,5 +398,40 @@ mod mcp_config_tests {
         assert!(!McpTransport::Stdio.is_remote());
         assert!(McpTransport::Sse.is_remote());
         assert!(McpTransport::Http.is_remote());
+    }
+
+    #[test]
+    fn provider_kind_custom_variants_use_stable_serde_ids() {
+        // Consecutive capitals would snake_case-mangle without the
+        // explicit renames (`CustomOpenAi` → `custom_open_ai`). The
+        // frontend union + keychain accounts depend on the stable ids.
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::CustomOpenAi).unwrap(),
+            "\"custom_openai\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::CustomAnthropic).unwrap(),
+            "\"custom_anthropic\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Moonshot).unwrap(),
+            "\"moonshot\""
+        );
+        let back: ProviderKind = serde_json::from_str("\"custom_openai\"").unwrap();
+        assert_eq!(back, ProviderKind::CustomOpenAi);
+    }
+
+    #[test]
+    fn provider_config_custom_models_round_trip_and_default_empty() {
+        // Legacy configs (no `custom_models` key) must parse with an
+        // empty list rather than erroring.
+        let cfg: ProviderConfig = serde_json::from_str(r#"{ "base_url": null }"#).unwrap();
+        assert!(cfg.custom_models.is_empty());
+        let cfg: ProviderConfig =
+            serde_json::from_str(r#"{ "custom_models": ["kimi-k2.5", "my-fine-tune"] }"#).unwrap();
+        assert_eq!(cfg.custom_models, vec!["kimi-k2.5", "my-fine-tune"]);
+        // Empty lists don't serialize (keeps prefs.json sparse).
+        let s = serde_json::to_string(&ProviderConfig::default()).unwrap();
+        assert!(!s.contains("custom_models"), "{s}");
     }
 }

@@ -274,6 +274,12 @@ struct OaStreamEvent {
     choices: Vec<OaStreamChoice>,
     #[serde(default)]
     usage: Option<OaUsage>,
+    /// Mid-stream error payload (`{"error":{code,message}}` on an HTTP
+    /// 200). OpenAI-compat gateways deliver some failures this way —
+    /// without reading it, the stream looks like a clean-but-empty
+    /// completion and the caller retries a hard error in a loop.
+    #[serde(default)]
+    error: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -510,6 +516,22 @@ impl ChatProvider for OpenAICompatibleProvider {
                     continue;
                 }
             };
+
+            // In-stream error payload — fail the round with the raw body
+            // so the classifier sees the vendor code (status: None is
+            // deliberate; the HTTP status was 200).
+            if let Some(err) = parsed.error {
+                let code = err.get("code").and_then(|x| x.as_str()).unwrap_or("");
+                let msg = err.get("message").and_then(|x| x.as_str()).unwrap_or("");
+                return Err(ProviderError::Http {
+                    status: None,
+                    body: if code.is_empty() && msg.is_empty() {
+                        ev.data.clone()
+                    } else {
+                        format!("{code}: {msg}")
+                    },
+                });
+            }
 
             for choice in parsed.choices {
                 if let Some(text) = choice.delta.content {

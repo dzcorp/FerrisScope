@@ -60,6 +60,10 @@ pub(crate) struct ProviderStatusWire {
     /// is the ChatGPT-Account-Id (helps operators tell their personal
     /// vs work subscription apart). For API key it's `None`.
     pub account_label: Option<String>,
+    /// Operator-supplied extra model ids, merged into the provider's
+    /// enumerated list (live `/models` / catalogue / static). The only
+    /// model source for endpoints that can't enumerate (custom gateways).
+    pub custom_models: Vec<String>,
 }
 
 /// What the frontend posts when changing global settings. Per-provider
@@ -72,6 +76,9 @@ pub(crate) struct AiSettingsPatch {
     /// Set the base URL override for `provider`. Empty string clears it.
     #[serde(default)]
     pub provider_base_url: Option<ProviderBaseUrlPatch>,
+    /// Replace the custom model list for `provider`.
+    #[serde(default)]
+    pub provider_custom_models: Option<ProviderCustomModelsPatch>,
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(default)]
@@ -98,6 +105,14 @@ pub(crate) struct AiSettingsPatch {
 pub(crate) struct ProviderBaseUrlPatch {
     pub provider: ProviderKind,
     pub base_url: String,
+}
+
+/// Whole-list replace of a provider's custom model ids. The backend
+/// normalises (trim, drop empties, dedupe) before persisting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ProviderCustomModelsPatch {
+    pub provider: ProviderKind,
+    pub models: Vec<String>,
 }
 
 /// Per-MCP-server status, emitted as part of `ChatEvent::McpStatus`. One
@@ -282,6 +297,22 @@ pub(crate) enum ChatEvent {
     /// Streaming error. The chat is left intact; the frontend can retry by
     /// sending another message.
     Error { message: String },
+    /// A transient provider failure (5xx, connection reset, plain 429)
+    /// is being retried after a backoff. Purely informational — the
+    /// frontend renders a small "retrying" note and clears it when the
+    /// next `assistant_start` (or terminal `error`) lands. Usage-limit
+    /// errors (quota / billing) do NOT take this path; they surface as
+    /// a terminal `Error` immediately instead of being retried.
+    Retrying {
+        /// 1-indexed attempt that just failed.
+        attempt: u8,
+        /// Cap after which the turn gives up (`MAX_TRANSIENT_RETRIES`).
+        max: u8,
+        /// Short label: "rate limited", "upstream 503", …
+        reason: String,
+        /// Backoff before the next attempt, in milliseconds.
+        delay_ms: u64,
+    },
     /// Auto-generated session title landed. Fired once per chat after the
     /// dedicated title-gen request (spawned the moment the operator's
     /// first message lands, in parallel with the assistant turn)

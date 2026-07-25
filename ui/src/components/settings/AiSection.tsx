@@ -225,6 +225,11 @@ export function AiSection({}: { mode: ThemeMode }) {
                   provider_base_url: { provider: p.kind, base_url: url },
                 })
               }
+              onSetCustomModels={(models) =>
+                save({
+                  provider_custom_models: { provider: p.kind, models },
+                })
+              }
             />
           ))}
         </div>
@@ -452,6 +457,7 @@ function ProviderRow({
   onOauthLogin,
   onOauthCancel,
   onSetBaseUrl,
+  onSetCustomModels,
 }: {
   t: ReturnType<typeof tokens>;
   provider: ProviderStatusWire;
@@ -461,23 +467,36 @@ function ProviderRow({
   onOauthLogin: () => Promise<void>;
   onOauthCancel: () => Promise<void>;
   onSetBaseUrl: (url: string) => Promise<void>;
+  onSetCustomModels: (models: string[]) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
   const [baseUrlDraft, setBaseUrlDraft] = useState(
     provider.base_url_override ?? "",
   );
+  const [customModelDraft, setCustomModelDraft] = useState("");
   const [oauthInFlight, setOauthInFlight] = useState(false);
+  const [testRunning, setTestRunning] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
   const supportsOauth = provider.auth_modes.includes("oauth" as AuthMode);
   const supportsKey = provider.auth_modes.includes("api_key" as AuthMode);
+  // Endpoints that may legitimately be unauthenticated (local Ollama,
+  // open gateways) — the backend treats a blank key as "no auth header".
+  const allowsBlankKey =
+    provider.kind === "ollama" ||
+    provider.kind === "custom_openai" ||
+    provider.kind === "custom_anthropic";
 
   const onTest = async () => {
+    setTestRunning(true);
     setTestResult(null);
     try {
+      // Empty key = validate the already-saved credential backend-side.
+      // Base URL comes from the *draft* so the operator can probe an
+      // override before committing it (blur-save).
       const res = await api.aiTestProvider({
         provider: provider.kind,
-        base_url: provider.base_url_override,
+        base_url: baseUrlDraft.trim() ? baseUrlDraft.trim() : null,
         api_key: keyDraft.trim(),
       });
       setTestResult(
@@ -487,6 +506,8 @@ function ProviderRow({
       );
     } catch (e) {
       setTestResult(String(e));
+    } finally {
+      setTestRunning(false);
     }
   };
 
@@ -664,20 +685,31 @@ function ProviderRow({
                   variant="secondary"
                   size="sm"
                   onClick={onTest}
-                  disabled={busy || !keyDraft.trim()}
+                  disabled={
+                    testRunning ||
+                    busy ||
+                    (!keyDraft.trim() &&
+                      !provider.configured &&
+                      !allowsBlankKey)
+                  }
+                  title={
+                    keyDraft.trim()
+                      ? "Probe GET /models with the key in the field"
+                      : "Probe GET /models with the saved credential"
+                  }
                 >
-                  Test
+                  {testRunning ? "Testing…" : "Test"}
                 </Btn>
                 <Btn
                   t={t}
                   variant="primary"
                   size="sm"
                   onClick={async () => {
-                    if (!keyDraft.trim()) return;
+                    if (!keyDraft.trim() && !allowsBlankKey) return;
                     await onSetKey(keyDraft.trim());
                     setKeyDraft("");
                   }}
-                  disabled={busy || !keyDraft.trim()}
+                  disabled={busy || (!keyDraft.trim() && !allowsBlankKey)}
                 >
                   Save
                 </Btn>
@@ -732,6 +764,112 @@ function ProviderRow({
               }}
             />
           </div>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
+            }}
+          >
+            <div
+              style={{
+                fontSize: FS_XS,
+                color: t.textMuted,
+                fontFamily: FF_MONO,
+              }}
+            >
+              Custom models — appended to whatever the provider enumerates.
+              Required for endpoints with no <span style={{ color: t.text }}>GET /models</span>.
+            </div>
+            {provider.custom_models.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                {provider.custom_models.map((id) => (
+                  <span
+                    key={id}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      fontFamily: FF_MONO,
+                      fontSize: FS_SM,
+                      color: t.text,
+                      background: t.surface,
+                      border: `1px solid ${t.borderSoft}`,
+                      borderRadius: R_MD,
+                      padding: "2px 6px",
+                    }}
+                  >
+                    {id}
+                    <button
+                      type="button"
+                      title="Remove custom model"
+                      disabled={busy}
+                      onClick={() =>
+                        onSetCustomModels(
+                          provider.custom_models.filter((m) => m !== id),
+                        )
+                      }
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        color: t.bad,
+                        cursor: "pointer",
+                        fontFamily: FF_MONO,
+                        fontSize: FS_MD,
+                        padding: 0,
+                      }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                type="text"
+                value={customModelDraft}
+                onChange={(e) => setCustomModelDraft(e.target.value)}
+                onKeyDown={async (e) => {
+                  if (e.key !== "Enter") return;
+                  const id = customModelDraft.trim();
+                  if (!id) return;
+                  if (!provider.custom_models.includes(id)) {
+                    await onSetCustomModels([...provider.custom_models, id]);
+                  }
+                  setCustomModelDraft("");
+                }}
+                placeholder="model id, e.g. kimi-k2.5"
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  background: t.surface,
+                  border: `1px solid ${t.borderSoft}`,
+                  color: t.text,
+                  borderRadius: R_MD,
+                  padding: "6px 8px",
+                  fontFamily: FF_MONO,
+                  fontSize: FS_MD,
+                }}
+              />
+              <Btn
+                t={t}
+                variant="secondary"
+                size="sm"
+                disabled={busy || !customModelDraft.trim()}
+                onClick={async () => {
+                  const id = customModelDraft.trim();
+                  if (!id) return;
+                  if (!provider.custom_models.includes(id)) {
+                    await onSetCustomModels([...provider.custom_models, id]);
+                  }
+                  setCustomModelDraft("");
+                }}
+              >
+                Add
+              </Btn>
+            </div>
+          </div>
           {provider.configured && (
             <div>
               <Btn
@@ -781,6 +919,45 @@ function providerBlurb(kind: ProviderKind): ReactNode | null {
           to unlock the full catalogue.
         </>
       );
+    case "moonshot":
+      return (
+        <>
+          Moonshot AI's Kimi models over an OpenAI-compatible wire. The model
+          list is fetched live from the API once a key is saved. Operators in
+          mainland China can point the base URL at{" "}
+          <span style={{ fontFamily: FF_MONO }}>
+            https://api.moonshot.cn/v1
+          </span>
+          .
+        </>
+      );
+    case "kimi_coding":
+      return (
+        <>
+          The kimi.com <strong>coding subscription</strong> — a separate
+          product from the Moonshot platform, with its own keys and its own
+          model set (K2.7 Coding, K3). Speaks Anthropic's Messages API;
+          models are listed live once a key is saved.
+        </>
+      );
+    case "custom_openai":
+      return (
+        <>
+          Any endpoint speaking OpenAI's Chat Completions API (proxy,
+          gateway, self-hosted). Set the base URL and key, hit{" "}
+          <strong>Test</strong> to probe <strong>GET /models</strong>; if the
+          endpoint can't enumerate models, add model ids under{" "}
+          <strong>Custom models</strong> below.
+        </>
+      );
+    case "custom_anthropic":
+      return (
+        <>
+          Any endpoint speaking Anthropic's Messages API (e.g. a Claude
+          gateway or Kimi's <strong>/anthropic</strong> transport). Same
+          probing rules as the OpenAI-compatible entry.
+        </>
+      );
     default:
       return null;
   }
@@ -796,10 +973,17 @@ function keyPlaceholder(kind: ProviderKind): string {
       return "sk-or-v1-…";
     case "groq":
       return "gsk_…";
+    case "moonshot":
+      return "sk-…";
+    case "kimi_coding":
+      return "sk-kimi-…";
     case "opencode_zen":
       return "(blank = free tier)";
     case "ollama":
       return "(blank for local)";
+    case "custom_openai":
+    case "custom_anthropic":
+      return "(blank if endpoint is open)";
     default:
       return "API key";
   }

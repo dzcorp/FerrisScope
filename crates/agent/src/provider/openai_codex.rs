@@ -389,8 +389,29 @@ impl ChatProvider for OpenAICodexProvider {
                     break;
                 }
                 "response.failed" | "response.cancelled" => {
+                    // In-stream failure: the HTTP status was 200, so the
+                    // only place the error exists is the terminal event's
+                    // payload (`response.error.code` — e.g.
+                    // `insufficient_quota`, `usage_not_included`).
+                    // Swallowing it here produces an empty turn, which
+                    // the loop retries — the operator watches
+                    // "thinking…" appear and vanish in a loop while a
+                    // hard quota error goes unreported. Surface it
+                    // instead so the classifier can stop the turn (or
+                    // retry with the reason visible). Mirrors opencode's
+                    // `parseStreamError` path.
+                    if let Some(err) = codex_stream_error(&value) {
+                        return Err(err);
+                    }
                     state.finish_reason = FinishReason::Other;
                     break;
+                }
+                // Bare error event (no `response.` prefix) — same
+                // reasoning: never let it degrade to an empty turn.
+                "error" => {
+                    if let Some(err) = codex_stream_error(&value) {
+                        return Err(err);
+                    }
                 }
                 _ => {}
             }
@@ -420,6 +441,44 @@ impl OpenAICodexProvider {
             .await
             .map_err(|e| ProviderError::transport(e.to_string()))
     }
+}
+
+/// Extract a `ProviderError` from an in-stream failure event. The Codex
+/// Responses endpoint can report errors two ways: a non-2xx HTTP status
+/// (handled at `send()` time) or, mid-stream on an HTTP 200, a terminal
+/// `response.failed` / bare `error` SSE event carrying
+/// `{ error: { code, message } }`. Probe the documented nesting spots:
+/// `response.error` (Responses-API object), `response.status_details.
+/// error` (earlier drafts), and the bare event's own `error` / `message`.
+/// `status: None` on the returned error is deliberate — the classifier
+/// keys on the vendor codes inside the body instead.
+fn codex_stream_error(v: &Value) -> Option<ProviderError> {
+    // Probe the documented nesting spots: `response.error` (Responses-API
+    // object), `response.status_details.error` (earlier drafts), and the
+    // bare event's own `error`.
+    let candidates = [
+        v.pointer("/response/error"),
+        v.pointer("/response/status_details/error"),
+        v.get("error"),
+    ];
+    let err = candidates.into_iter().flatten().next()?;
+    let code = err.get("code").and_then(|x| x.as_str());
+    let message = err
+        .get("message")
+        .and_then(|x| x.as_str())
+        .or_else(|| v.get("message").and_then(|x| x.as_str()));
+    if code.is_none() && message.is_none() {
+        return None;
+    }
+    // Render a compact single-line body: classifier substring-matches on
+    // it, and it's what the operator sees inside the error bubble.
+    let body = match (code, message) {
+        (Some(c), Some(m)) => format!("{c}: {m}"),
+        (Some(c), None) => c.to_string(),
+        (None, Some(m)) => m.to_string(),
+        (None, None) => unreachable!(),
+    };
+    Some(ProviderError::Http { status: None, body })
 }
 
 fn build_request_body(req: &CompletionRequest, instructions: &str, input: &[Value]) -> Value {
@@ -754,5 +813,70 @@ mod tests {
         assert!(evs
             .iter()
             .any(|e| matches!(e, CompletionEvent::ToolCallEnd{ id } if id == "c1")));
+    }
+
+    #[test]
+    fn stream_error_extracts_quota_code_from_response_failed() {
+        // The exact shape opencode's `parseStreamError` matches: a
+        // `response.failed` terminal event on an HTTP 200 carrying
+        // `response.error.code`. Must become a ProviderError whose body
+        // names the code — the app-layer classifier turns this into a
+        // terminal "usage limit reached" instead of an empty-turn retry
+        // loop.
+        let v = json!({
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {
+                    "code": "insufficient_quota",
+                    "message": "You have used up your ChatGPT Codex allowance. Try again later."
+                }
+            }
+        });
+        let err = codex_stream_error(&v).expect("error extracted");
+        let text = err.to_string();
+        assert!(text.contains("insufficient_quota"), "{text}");
+        assert!(text.contains("allowance"), "{text}");
+        // No HTTP status — the stream was 200; classification must key
+        // on the body, not a status code.
+        match err {
+            ProviderError::Http { status, .. } => assert_eq!(status, None),
+            other => panic!("expected Http, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_error_handles_bare_error_event_and_status_details() {
+        // Bare `{type:"error", error:{...}}` event (opencode's shape).
+        let v = json!({
+            "type": "error",
+            "error": { "code": "usage_not_included", "message": "upgrade to Plus" }
+        });
+        let err = codex_stream_error(&v).expect("bare error event");
+        assert!(err.to_string().contains("usage_not_included"));
+
+        // status_details nesting (earlier Responses drafts).
+        let v = json!({
+            "type": "response.failed",
+            "response": {
+                "status_details": {
+                    "error": { "code": "server_is_overloaded" }
+                }
+            }
+        });
+        let err = codex_stream_error(&v).expect("status_details error");
+        assert!(err.to_string().contains("server_is_overloaded"));
+    }
+
+    #[test]
+    fn stream_error_none_without_error_payload() {
+        // `response.cancelled` (operator abort) carries no error —
+        // must not fabricate one (the loop treats cancellation
+        // separately from failures).
+        let v = json!({ "type": "response.cancelled", "response": { "status": "cancelled" } });
+        assert!(codex_stream_error(&v).is_none());
+        // Empty error object → no code, no message → None.
+        let v = json!({ "type": "error", "error": {} });
+        assert!(codex_stream_error(&v).is_none());
     }
 }

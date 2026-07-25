@@ -19,9 +19,13 @@ const ORDER_INDEX = {
   minimax: 5,
   groq: 6,
   deepseek: 7,
-  mistral: 8,
-  together: 9,
-  ollama: 10,
+  moonshot: 8,
+  kimi_coding: 9,
+  mistral: 10,
+  together: 11,
+  ollama: 12,
+  custom_openai: 13,
+  custom_anthropic: 14,
 } satisfies Record<ProviderKind, number>;
 
 export const PROVIDER_ORDER: readonly ProviderKind[] = (
