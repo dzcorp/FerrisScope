@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferrisscope_kube_ext::registry::lookup;
-use ferrisscope_kube_ext::watcher::{DrainedBatch, NsScope, ResourceDrainer};
+use ferrisscope_kube_ext::watcher::{DrainedBatch, NsScope, ResourceDrainer, Row};
 use ferrisscope_test_support::kind::{ensure_two_clusters, KindCluster};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
@@ -74,8 +74,7 @@ async fn reflector_emits_pods_for_namespace_and_clears_on_unsubscribe() {
             }
             let batch = drainer.drain();
             if upsert_matches(&batch, |row| {
-                row.get("namespace").and_then(|v| v.as_str()) == Some(ns)
-                    && row.get("name").and_then(|v| v.as_str()) == Some("alpha")
+                row.namespace.as_deref() == Some(ns) && row.name.as_deref() == Some("alpha")
             }) {
                 return true;
             }
@@ -133,8 +132,8 @@ async fn two_clusters_have_independent_reflector_state() {
                     break;
                 }
                 let batch = drainer.drain();
-                for (_, row) in &batch.upserts {
-                    if let Some(n) = row.get("name").and_then(|v| v.as_str()) {
+                for row in batch.upserts.values() {
+                    if let Some(n) = row.name.as_deref() {
                         names.push(n.to_owned());
                     }
                 }
@@ -167,7 +166,7 @@ async fn two_clusters_have_independent_reflector_state() {
     let _ = b.kubectl(&["delete", "namespace", ns_b, "--wait=false"]);
 }
 
-fn upsert_matches(batch: &DrainedBatch, predicate: impl Fn(&serde_json::Value) -> bool) -> bool {
+fn upsert_matches(batch: &DrainedBatch, predicate: impl Fn(&Row) -> bool) -> bool {
     batch.upserts.values().any(predicate)
 }
 
