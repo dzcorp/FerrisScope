@@ -49,4 +49,4 @@ pub use registry::{
     clear_printer_column_cache, lookup, registry, Category, ColumnDef, ColumnKind, DiscoveredCrd,
     DiscoveredPrinterColumn, KindSpec, ResourceKind, ResourceKindEntry,
 };
-pub use watcher::{NsScope, ResourceDelta, ResourceWatcher};
+pub use watcher::{NsScope, ResourceDelta, ResourceWatcher, Row, RowJson};

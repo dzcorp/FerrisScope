@@ -142,12 +142,33 @@ impl SearchIndex {
                 return;
             }
         };
+        self.upsert_raw(kind_id, uid, namespace.as_deref(), &name, &blob);
+    }
+
+    /// [`Self::upsert`] for a caller that already holds the row's encoded
+    /// JSON and its `namespace` / `name`.
+    ///
+    /// This is the watcher path. Rows arrive from the reflector already
+    /// serialised (`ferrisscope_kube_ext::RowJson`), so re-deriving the blob
+    /// with `serde_json::to_string` — as [`Self::upsert`] must, since it only
+    /// has a `Value` — would re-encode every row a second time on the
+    /// forwarder task: ~830 ns/row against ~13 ns for the memcpy this does
+    /// instead. [`Self::upsert`] stays for the connect-time bootstrap, which
+    /// LISTs into `Value`s and has no pre-encoded form to hand over.
+    pub fn upsert_raw(
+        &self,
+        kind_id: &str,
+        uid: &str,
+        namespace: Option<&str>,
+        name: &str,
+        blob: &str,
+    ) {
         let _ = self.tx.send(IndexCommand::Write(WriteOp::Upsert {
             kind_id: kind_id.to_owned(),
             uid: uid.to_owned(),
-            namespace,
-            name,
-            blob,
+            namespace: namespace.map(str::to_owned),
+            name: name.to_owned(),
+            blob: blob.to_owned(),
         }));
     }
 
@@ -263,5 +284,75 @@ mod tests {
         let (ns, name) = extract_ns_name(&json!({ "namespace": 7, "name": null }));
         assert_eq!(ns, None);
         assert_eq!(name, None);
+    }
+
+    /// A handle wired to a channel the test owns, so we can inspect the
+    /// `WriteOp` each entry point enqueues without standing up SQLite.
+    fn probe() -> (SearchIndex, mpsc::UnboundedReceiver<IndexCommand>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (SearchIndex { tx }, rx)
+    }
+
+    fn took_upsert(rx: &mut mpsc::UnboundedReceiver<IndexCommand>) -> WriteOp {
+        match rx.try_recv() {
+            Ok(IndexCommand::Write(op)) => op,
+            _ => panic!("expected a queued write"),
+        }
+    }
+
+    /// The watcher path (`upsert_raw`, pre-encoded blob) and the bootstrap
+    /// path (`upsert`, re-encodes a `Value`) must enqueue the same row.
+    /// If these ever diverge, search results silently differ depending on
+    /// whether a kind was bootstrapped or watched.
+    #[test]
+    fn upsert_raw_matches_the_value_path() {
+        let row = json!({ "namespace": "default", "name": "api-0", "phase": "Running" });
+        let blob = serde_json::to_string(&row).unwrap();
+
+        let (idx, mut rx) = probe();
+        idx.upsert("pods", "u1", &row);
+        let via_value = took_upsert(&mut rx);
+
+        let (idx, mut rx) = probe();
+        idx.upsert_raw("pods", "u1", Some("default"), "api-0", &blob);
+        let via_raw = took_upsert(&mut rx);
+
+        let fields = |op: WriteOp| match op {
+            WriteOp::Upsert {
+                kind_id,
+                uid,
+                namespace,
+                name,
+                blob,
+            } => (kind_id, uid, namespace, name, blob),
+            _ => panic!("expected Upsert"),
+        };
+        assert_eq!(fields(via_value), fields(via_raw));
+    }
+
+    /// `upsert` drops nameless rows (nothing renderable to show as a hit).
+    /// `upsert_raw` takes `name` as a required argument instead — the
+    /// watcher does the skipping, so the two agree by construction.
+    #[test]
+    fn upsert_skips_a_row_with_no_name() {
+        let (idx, mut rx) = probe();
+        idx.upsert("pods", "u1", &json!({ "namespace": "default" }));
+        assert!(rx.try_recv().is_err(), "nameless row must not be queued");
+    }
+
+    /// A cluster-scoped row carries no namespace; it must still be indexed.
+    #[test]
+    fn upsert_raw_accepts_a_missing_namespace() {
+        let (idx, mut rx) = probe();
+        idx.upsert_raw("nodes", "u1", None, "node-1", r#"{"name":"node-1"}"#);
+        match took_upsert(&mut rx) {
+            WriteOp::Upsert {
+                namespace, name, ..
+            } => {
+                assert_eq!(namespace, None);
+                assert_eq!(name, "node-1");
+            }
+            _ => panic!("expected Upsert"),
+        }
     }
 }

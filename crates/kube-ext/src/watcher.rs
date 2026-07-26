@@ -1,13 +1,42 @@
 //! Generic kube watcher → snapshot + delta firehose.
 //!
-//! Erases the kube type behind `serde_json::Value` so a single command pair
+//! Erases the kube type behind JSON so a single command pair
 //! (`subscribe_resource` / `unsubscribe_resource`) can serve every kind in
-//! the registry. Only the projected `Value` row is retained; the typed
+//! the registry. Only the projected row is retained; the typed
 //! Kubernetes object is dropped immediately after projection so we don't
 //! pay the full PodSpec/status/managedFields footprint × N pods × N kinds.
 //!
 //! Each row is always `{ "uid": "...", ... }` — the watcher injects `uid`
 //! after [`KindSpec::project`] so spec implementations don't have to.
+//!
+//! **Rows are cached pre-serialised** ([`RowJson`] = `Arc<RawValue>`), not
+//! as a live `serde_json::Value` tree. [`KindSpec::project`] still returns
+//! a `Value` — that's the ergonomic shape for a projection — but the
+//! watcher serialises it once, immediately, and drops the tree. Everything
+//! downstream (the `subscribe_resource` snapshot, the IPC delta batch, the
+//! search-index blob) reuses those same bytes.
+//!
+//! Measured on a 5000-row Pods cache with a median two-container /
+//! five-label projection — `cargo run --release -p ferrisscope-kube-ext
+//! --example rowbench` (see `examples/rowbench.rs`), release build:
+//!
+//! | | `HashMap<String, Value>` | `HashMap<String, RowJson>` |
+//! |---|---|---|
+//! | cache residency | 4735 B/row (23.1 MiB) | 923 B/row (4.4 MiB) |
+//! | `snapshot()` | 26.2 ms + 22.6 MiB transient | 0.04 ms + 78 KiB |
+//! | snapshot → JSON (command return) | 3.53 ms | 0.15 ms |
+//! | 1000-delta emit batch → JSON | 0.63 ms | 0.045 ms |
+//! | search-index blob per row | 906 ns | 13 ns |
+//! | no-op suppression compare | 299 ns (tree walk) | 8 ns (memcmp) |
+//!
+//! Residency is from a counting `GlobalAlloc` (exact bytes). The in-repo
+//! example can't use one — the workspace forbids `unsafe` — so it reports
+//! an RSS delta instead and shows a shallower 3.6×; page rounding and
+//! allocator slack inflate both sides.
+//!
+//! The one cost moved *onto* the watcher task is the serialise itself
+//! (~775 ns/row, replacing a ~1200 ns/row deep `Value::clone`), so even
+//! the producer side comes out ahead.
 //!
 //! The watcher → forwarder pipe is a **coalescing dirty channel**, not a
 //! bounded broadcast. The previous design used `tokio::sync::broadcast`
@@ -34,12 +63,103 @@ use kube::{
     runtime::{watcher, WatchStreamExt},
     Client, ResourceExt,
 };
-use serde::Serialize;
+use serde::{Serialize, Serializer};
+use serde_json::value::RawValue;
 use serde_json::Value;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::registry::KindSpec;
+
+/// A projected row, already serialised to JSON.
+///
+/// Cheap to clone (one refcount bump) and cheap to compare (a `memcmp` of
+/// the encoded bytes instead of a `Value` tree walk). Serialising a
+/// `RowJson` splices the stored bytes straight into the output — serde
+/// never re-encodes it — which is what makes the emit batch and the
+/// subscribe snapshot nearly free. See the module docs for numbers.
+///
+/// The bytes are whatever `serde_json` produced for the projected
+/// `Value`, so the wire format the frontend sees is byte-identical to
+/// what the previous `Value`-cached watcher emitted.
+#[derive(Clone, Debug)]
+pub struct RowJson(Arc<RawValue>);
+
+impl RowJson {
+    /// Serialise a projected row. Fails only if the projection contains
+    /// something `serde_json` refuses to encode (a non-string map key, a
+    /// non-finite float) — neither is reachable from a `Value`, but the
+    /// error is surfaced rather than swallowed so a future projection
+    /// that hand-rolls `Serialize` can't silently drop rows.
+    pub fn from_value(v: &Value) -> Result<Self, serde_json::Error> {
+        Ok(Self(Arc::from(serde_json::value::to_raw_value(v)?)))
+    }
+
+    /// The encoded row, e.g. `{"uid":"…","name":"nginx",…}`.
+    pub fn get(&self) -> &str {
+        self.0.get()
+    }
+}
+
+impl PartialEq for RowJson {
+    fn eq(&self, other: &Self) -> bool {
+        // Pointer equality first: the common steady-state compare is a
+        // row against the very `Arc` already in the cache only when the
+        // watcher re-emits an unchanged object, so the memcmp is the
+        // real path — but the pointer check costs nothing.
+        Arc::ptr_eq(&self.0, &other.0) || self.0.get() == other.0.get()
+    }
+}
+
+impl Eq for RowJson {}
+
+impl Serialize for RowJson {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // `RawValue`'s own impl splices the stored bytes verbatim.
+        self.0.serialize(s)
+    }
+}
+
+/// A projected row plus the two fields the search index needs, hoisted out
+/// while the `Value` tree is still in hand.
+///
+/// Pulling `namespace` / `name` here means the forwarder never has to parse
+/// [`RowJson`] back into a `Value` to feed the index — which would undo the
+/// whole point of caching the encoded form. All three fields are refcounted,
+/// so cloning a `Row` into the dirty channel is three atomic increments.
+#[derive(Clone, Debug)]
+pub struct Row {
+    pub json: RowJson,
+    pub namespace: Option<Arc<str>>,
+    /// `None` for a projection with no (or an empty) `name` — the search
+    /// index skips those, since a hit with no name is unrenderable.
+    pub name: Option<Arc<str>>,
+}
+
+impl Row {
+    /// Finish a projection into a cacheable row: inject `uid`, attach
+    /// `__labels`, hoist `namespace` / `name`, then serialise once.
+    pub(crate) fn build(
+        uid: &str,
+        projected: Value,
+        labels: Option<&BTreeMap<String, String>>,
+    ) -> Result<Self, serde_json::Error> {
+        let v = with_labels(with_uid(uid.to_owned(), projected), labels);
+        let field = |key: &str| -> Option<Arc<str>> {
+            v.get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(Arc::from)
+        };
+        let namespace = field("namespace");
+        let name = field("name");
+        Ok(Self {
+            json: RowJson::from_value(&v)?,
+            namespace,
+            name,
+        })
+    }
+}
 
 /// Namespace scope for a single [`ResourceWatcher`]. The operator's
 /// namespace selection in the UI is mapped onto one of these by the
@@ -114,7 +234,7 @@ struct DirtyChannel {
 struct DirtyState {
     /// uid → latest projected row. An `Upsert` overwrites any prior value;
     /// a `Delete` removes the entry here and inserts the uid into `deleted`.
-    changed: HashMap<String, Value>,
+    changed: HashMap<String, Row>,
     /// uids that were deleted after their last upsert in this window. The
     /// drain emits these as `ResourceDelta::Delete`. Kept disjoint from
     /// `changed` so a Delete-then-Upsert sequence ends as a single Upsert
@@ -134,7 +254,7 @@ struct DirtyState {
 /// [`ResourceDrainer::drain`].
 #[derive(Debug, Default)]
 pub struct DrainedBatch {
-    pub upserts: HashMap<String, Value>,
+    pub upserts: HashMap<String, Row>,
     pub deletes: HashSet<String>,
     pub init_done: bool,
 }
@@ -164,7 +284,7 @@ impl DirtyChannel {
         }
     }
 
-    fn record_upsert(&self, uid: String, row: Value) {
+    fn record_upsert(&self, uid: String, row: Row) {
         let mut s = self.state.lock_recover();
         if s.closed {
             return;
@@ -269,7 +389,7 @@ impl DirtyChannel {
             }
             budget -= deletes.len();
         }
-        let mut upserts = HashMap::new();
+        let mut upserts: HashMap<String, Row> = HashMap::new();
         if budget > 0 {
             let take: Vec<String> = s.changed.keys().take(budget).cloned().collect();
             for uid in take {
@@ -343,7 +463,7 @@ fn watcher_config(strategy: ListStrategy) -> watcher::Config {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ResourceDelta {
     Upsert {
-        row: Value,
+        row: RowJson,
     },
     Delete {
         uid: String,
@@ -363,7 +483,7 @@ pub enum ResourceDelta {
 /// one. Drop aborts the task and closes the channel so the forwarder
 /// exits cleanly.
 pub struct ResourceWatcher {
-    snapshot_fn: Box<dyn Fn() -> Vec<Value> + Send + Sync>,
+    snapshot_fn: Box<dyn Fn() -> Vec<RowJson> + Send + Sync>,
     dirty: Arc<DirtyChannel>,
     /// Single-consumer guard for [`Self::take_drainer`]. Production code
     /// only ever takes one drainer (the forwarder spawned in
@@ -400,7 +520,7 @@ impl ResourceWatcher {
         // store would keep full `Arc<S::K>` per object — on a 5000-pod
         // cluster that's 50–200 MB of typed Rust state we never read again
         // (the UI consumes the projected row, not the Pod struct).
-        let cache: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cache: Arc<Mutex<HashMap<String, RowJson>>> = Arc::new(Mutex::new(HashMap::new()));
 
         let cfg = watcher_config(strategy);
         let stream = watcher(api, cfg).default_backoff();
@@ -479,8 +599,18 @@ impl ResourceWatcher {
                         seen.insert(uid.clone());
                     }
                 }
-                let row = with_uid(uid.clone(), S::project(&obj));
-                let row = with_labels(row, Some(obj.labels()));
+                let row = match Row::build(&uid, S::project(&obj), Some(obj.labels())) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            kind = S::meta().id,
+                            uid = %uid,
+                            "watcher: projected row failed to serialise, dropping"
+                        );
+                        continue;
+                    }
+                };
                 // Drop the typed object as soon as projection is done.
                 drop(obj);
                 // No-op suppression: if the projected row is byte-
@@ -490,16 +620,17 @@ impl ResourceWatcher {
                 // unchanged) and the steady-state churn from server-
                 // side fields the projection deliberately drops
                 // (managedFields, resourceVersion, lastTransitionTime
-                // bumps that don't move any column). One Value::eq
-                // walk is orders of magnitude cheaper than the IPC
-                // emit + JSON-decode + React reconciliation we'd
-                // otherwise pay downstream.
+                // bumps that don't move any column). Because rows are
+                // cached pre-serialised this is a `memcmp` (~10 ns),
+                // not a `Value` tree walk (~300 ns) — and either way
+                // orders of magnitude cheaper than the IPC emit +
+                // JSON-decode + React reconciliation downstream.
                 let mut cache = cache_task.lock_recover();
-                let unchanged = cache.get(&uid).is_some_and(|prev| prev == &row);
+                let unchanged = cache.get(&uid).is_some_and(|prev| *prev == row.json);
                 if unchanged {
                     suppressed += 1;
                 } else {
-                    cache.insert(uid.clone(), row.clone());
+                    cache.insert(uid.clone(), row.json.clone());
                     drop(cache);
                     dirty_task.record_upsert(uid, row);
                 }
@@ -530,7 +661,7 @@ impl ResourceWatcher {
             );
         });
 
-        let snapshot_fn: Box<dyn Fn() -> Vec<Value> + Send + Sync> =
+        let snapshot_fn: Box<dyn Fn() -> Vec<RowJson> + Send + Sync> =
             Box::new(move || cache.lock_recover().values().cloned().collect());
 
         Self {
@@ -567,7 +698,7 @@ impl ResourceWatcher {
             Some(ns) => Api::namespaced_with(client, ns, &ar),
             None => Api::all_with(client, &ar),
         };
-        let cache: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cache: Arc<Mutex<HashMap<String, RowJson>>> = Arc::new(Mutex::new(HashMap::new()));
 
         let cfg = watcher_config(strategy);
         let stream = watcher(api, cfg).default_backoff();
@@ -643,18 +774,28 @@ impl ResourceWatcher {
                         seen.insert(uid.clone());
                     }
                 }
-                let row = with_uid(uid.clone(), project_task(&obj));
-                let row = with_labels(row, Some(obj.labels()));
+                let row = match Row::build(&uid, project_task(&obj), Some(obj.labels())) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            kind = %log_id_task,
+                            uid = %uid,
+                            "dynamic watcher: projected row failed to serialise, dropping"
+                        );
+                        continue;
+                    }
+                };
                 // No-op suppression — see typed-watcher branch above
-                // for the rationale. Same behaviour: cheap structural
-                // equality on the projected row; on miss, update the
-                // cache and broadcast; on hit, drop silently.
+                // for the rationale. Same behaviour: byte equality on
+                // the encoded row; on miss, update the cache and
+                // broadcast; on hit, drop silently.
                 let mut cache = cache_task.lock_recover();
-                let unchanged = cache.get(&uid).is_some_and(|prev| prev == &row);
+                let unchanged = cache.get(&uid).is_some_and(|prev| *prev == row.json);
                 if unchanged {
                     suppressed += 1;
                 } else {
-                    cache.insert(uid.clone(), row.clone());
+                    cache.insert(uid.clone(), row.json.clone());
                     drop(cache);
                     dirty_task.record_upsert(uid, row);
                 }
@@ -686,7 +827,7 @@ impl ResourceWatcher {
         });
 
         let cache_snap = cache.clone();
-        let snapshot_fn: Box<dyn Fn() -> Vec<Value> + Send + Sync> = Box::new(move || {
+        let snapshot_fn: Box<dyn Fn() -> Vec<RowJson> + Send + Sync> = Box::new(move || {
             // std::sync::Mutex held only across tiny insert/remove/clone
             // critical sections — blocking briefly here is fine and avoids
             // the lossy try_lock path the previous version used (which
@@ -794,9 +935,12 @@ impl ResourceWatcher {
                             // A non-latest revision was removed, or latest
                             // was removed and we now demote: re-emit so the
                             // table reflects the new live revision.
-                            let uid = synthetic_uid(&key.0, &key.1);
-                            let row = with_uid(uid.clone(), project_row(latest));
-                            dirty_task.record_upsert(uid, row);
+                            record_synth(
+                                &dirty_task,
+                                synthetic_uid(&key.0, &key.1),
+                                project_row(latest),
+                                "helm_releases",
+                            );
                         }
                         continue;
                     }
@@ -831,9 +975,12 @@ impl ResourceWatcher {
                                     dirty_task.record_delete(synthetic_uid(&key.0, &key.1));
                                 } else if let Some(latest) = revs.values().max_by_key(|r| r.version)
                                 {
-                                    let uid = synthetic_uid(&key.0, &key.1);
-                                    let row = with_uid(uid.clone(), project_row(latest));
-                                    dirty_task.record_upsert(uid, row);
+                                    record_synth(
+                                        &dirty_task,
+                                        synthetic_uid(&key.0, &key.1),
+                                        project_row(latest),
+                                        "helm_releases",
+                                    );
                                 }
                             }
                             stale.len()
@@ -884,9 +1031,12 @@ impl ResourceWatcher {
                 let entry = g.entry(key.clone()).or_default();
                 entry.insert(secret_uid, release);
                 if let Some(latest) = entry.values().max_by_key(|r| r.version) {
-                    let uid = synthetic_uid(&ns, &name);
-                    let row = with_uid(uid.clone(), project_row(latest));
-                    dirty_task.record_upsert(uid, row);
+                    record_synth(
+                        &dirty_task,
+                        synthetic_uid(&ns, &name),
+                        project_row(latest),
+                        "helm_releases",
+                    );
                 }
                 applied += 1;
                 if !first_apply_logged {
@@ -908,12 +1058,16 @@ impl ResourceWatcher {
         });
 
         let store_snap = store.clone();
-        let snapshot_fn: Box<dyn Fn() -> Vec<Value> + Send + Sync> = Box::new(move || {
+        let snapshot_fn: Box<dyn Fn() -> Vec<RowJson> + Send + Sync> = Box::new(move || {
             let g = store_snap.lock_recover();
             g.iter()
                 .filter_map(|((ns, name), revs)| {
                     let latest = revs.values().max_by_key(|r| r.version)?;
-                    Some(with_uid(synthetic_uid(ns, name), project_row(latest)))
+                    synth_row(
+                        synthetic_uid(ns, name),
+                        project_row(latest),
+                        "helm_releases",
+                    )
                 })
                 .collect()
         });
@@ -1011,9 +1165,12 @@ impl ResourceWatcher {
                     for rc in &entries {
                         let key: RepoKey = (rc.repo.clone(), rc.name.clone(), rc.version.clone());
                         g.insert(key.clone(), rc.clone());
-                        let uid = synthetic_uid(&rc.repo, &rc.name, &rc.version);
-                        let row = with_uid(uid.clone(), project_repo_row(rc));
-                        dirty.record_upsert(uid, row);
+                        record_synth(
+                            &dirty,
+                            synthetic_uid(&rc.repo, &rc.name, &rc.version),
+                            project_repo_row(rc),
+                            "helm_charts",
+                        );
                     }
                     tracing::info!(
                         kind = "helm_charts",
@@ -1152,12 +1309,12 @@ impl ResourceWatcher {
                         secret_uids: HashSet::new(),
                     });
                     entry.secret_uids.insert(secret_uid.clone());
-                    let uid = synthetic_uid(HELM_CLUSTER_SOURCE, &name, &version);
-                    let row = with_uid(
-                        uid.clone(),
+                    record_synth(
+                        &dirty_task,
+                        synthetic_uid(HELM_CLUSTER_SOURCE, &name, &version),
                         project_cluster_row(&entry.sample, entry.secret_uids.len()),
+                        "helm_charts",
                     );
-                    dirty_task.record_upsert(uid, row);
                 }
                 secret_map_task.lock_recover().insert(secret_uid, new_key);
 
@@ -1168,26 +1325,28 @@ impl ResourceWatcher {
         // Snapshot for late subscribers — covers both sources.
         let cluster_snap = cluster_charts.clone();
         let repo_snap = repo_charts.clone();
-        let snapshot_fn: Box<dyn Fn() -> Vec<Value> + Send + Sync> = Box::new(move || {
+        let snapshot_fn: Box<dyn Fn() -> Vec<RowJson> + Send + Sync> = Box::new(move || {
             use crate::fetch::HELM_CLUSTER_SOURCE;
             let mut out = Vec::new();
             {
                 let g = cluster_snap.lock_recover();
-                for ((name, version), entry) in g.iter() {
-                    out.push(with_uid(
+                out.extend(g.iter().filter_map(|((name, version), entry)| {
+                    synth_row(
                         synthetic_uid(HELM_CLUSTER_SOURCE, name, version),
                         project_cluster_row(&entry.sample, entry.secret_uids.len()),
-                    ));
-                }
+                        "helm_charts",
+                    )
+                }));
             }
             {
                 let g = repo_snap.lock_recover();
-                for ((repo, name, version), rc) in g.iter() {
-                    out.push(with_uid(
+                out.extend(g.iter().filter_map(|((repo, name, version), rc)| {
+                    synth_row(
                         synthetic_uid(repo, name, version),
                         project_repo_row(rc),
-                    ));
-                }
+                        "helm_charts",
+                    )
+                }));
             }
             out
         });
@@ -1217,17 +1376,17 @@ impl ResourceWatcher {
                 g.remove(key);
                 dirty.record_delete(synthetic_uid(HELM_CLUSTER_SOURCE, &key.0, &key.1));
             } else {
-                let uid = synthetic_uid(HELM_CLUSTER_SOURCE, &key.0, &key.1);
-                let row = with_uid(
-                    uid.clone(),
+                record_synth(
+                    dirty,
+                    synthetic_uid(HELM_CLUSTER_SOURCE, &key.0, &key.1),
                     project_cluster_row(&entry.sample, entry.secret_uids.len()),
+                    "helm_charts",
                 );
-                dirty.record_upsert(uid, row);
             }
         }
     }
 
-    pub fn snapshot(&self) -> Vec<Value> {
+    pub fn snapshot(&self) -> Vec<RowJson> {
         (self.snapshot_fn)()
     }
 
@@ -1281,7 +1440,7 @@ impl Drop for ResourceWatcher {
 /// per-chart store and reconcile inline.
 fn reconcile_init_seen(
     init_seen: &mut Option<HashSet<String>>,
-    cache: &Mutex<HashMap<String, Value>>,
+    cache: &Mutex<HashMap<String, RowJson>>,
     dirty: &DirtyChannel,
 ) -> usize {
     let Some(seen) = init_seen.take() else {
@@ -1302,6 +1461,42 @@ fn reconcile_init_seen(
         dirty.record_delete(uid);
     }
     n
+}
+
+/// Finish a *synthetic* row (Helm releases / charts — rows aggregated from
+/// several objects rather than projected from one) into a [`RowJson`].
+///
+/// Returns `None` on the practically-unreachable serialise failure, having
+/// logged it. The Helm projections build plain `Value` objects, so this is
+/// a "can't happen" branch kept honest rather than `expect`ed away.
+fn synth_row(uid: String, projected: Value, what: &'static str) -> Option<RowJson> {
+    match Row::build(&uid, projected, None) {
+        Ok(row) => Some(row.json),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                kind = what,
+                uid = %uid,
+                "watcher: synthetic row failed to serialise, dropping"
+            );
+            None
+        }
+    }
+}
+
+/// [`synth_row`] + record the result as an upsert on `dirty`.
+fn record_synth(dirty: &DirtyChannel, uid: String, projected: Value, what: &'static str) {
+    match Row::build(&uid, projected, None) {
+        Ok(row) => dirty.record_upsert(uid, row),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                kind = what,
+                uid = %uid,
+                "watcher: synthetic row failed to serialise, dropping"
+            );
+        }
+    }
 }
 
 /// Inject `uid` into a projected row. If the projection produced something
@@ -1344,8 +1539,13 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
 
-    fn row(name: &str) -> Value {
-        json!({ "uid": "ignored", "name": name })
+    fn row(name: &str) -> Row {
+        Row::build("ignored", json!({ "name": name }), None).expect("test row serialises")
+    }
+
+    /// `name` off a drained row — the field the coalescing tests assert on.
+    fn name_of(r: &Row) -> &str {
+        r.name.as_deref().unwrap_or("")
     }
 
     #[test]
@@ -1375,6 +1575,86 @@ mod tests {
         assert_eq!(tagged["__labels"]["tier"], json!("frontend"));
     }
 
+    /// The frontend contract. Caching rows pre-serialised must not change a
+    /// single byte of what goes over the bus, so pin `RowJson`'s encoding
+    /// against `serde_json::to_string` of the equivalent `Value` — the exact
+    /// thing the previous `Value`-cached watcher emitted.
+    #[test]
+    fn row_json_encoding_is_byte_identical_to_the_value_path() {
+        let labels: BTreeMap<String, String> = [
+            ("app".to_owned(), "nginx".to_owned()),
+            ("tier".to_owned(), "frontend".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let projected = json!({
+            "namespace": "default",
+            "name": "nginx-abc",
+            "phase": "Running",
+            "restarts": 3,
+            "cpu": Value::Null,
+            "containers": ["app", "sidecar"],
+        });
+
+        // What the old code path produced, verbatim.
+        let legacy = with_labels(with_uid("u-1".to_owned(), projected.clone()), Some(&labels));
+        let expected = serde_json::to_string(&legacy).expect("legacy row serialises");
+
+        let row = Row::build("u-1", projected, Some(&labels)).expect("row builds");
+        assert_eq!(row.json.get(), expected);
+
+        // …and it survives a round trip through a `Serialize` container
+        // without being re-encoded or double-escaped.
+        let wire = serde_json::to_string(&ResourceDelta::Upsert {
+            row: row.json.clone(),
+        })
+        .expect("delta serialises");
+        assert_eq!(wire, format!(r#"{{"kind":"upsert","row":{expected}}}"#));
+    }
+
+    #[test]
+    fn row_build_hoists_namespace_and_name() {
+        let row = Row::build(
+            "u-1",
+            json!({ "namespace": "kube-system", "name": "coredns" }),
+            None,
+        )
+        .expect("row builds");
+        assert_eq!(row.namespace.as_deref(), Some("kube-system"));
+        assert_eq!(row.name.as_deref(), Some("coredns"));
+
+        // Cluster-scoped kinds project no namespace; empty strings are
+        // treated as absent so the search index doesn't store `""`.
+        let row = Row::build("u-2", json!({ "name": "node-1", "namespace": "" }), None)
+            .expect("row builds");
+        assert_eq!(row.namespace, None);
+        assert_eq!(row.name.as_deref(), Some("node-1"));
+
+        // A projection with no name at all — the forwarder skips indexing
+        // these rather than writing an unrenderable hit.
+        let row = Row::build("u-3", json!({ "phase": "Running" }), None).expect("row builds");
+        assert_eq!(row.name, None);
+    }
+
+    #[test]
+    fn row_json_eq_compares_encoded_bytes_not_identity() {
+        let a = Row::build("u-1", json!({ "name": "x" }), None)
+            .unwrap()
+            .json;
+        let b = Row::build("u-1", json!({ "name": "x" }), None)
+            .unwrap()
+            .json;
+        let c = Row::build("u-1", json!({ "name": "y" }), None)
+            .unwrap()
+            .json;
+        // Distinct allocations, same bytes — this is the no-op suppression
+        // hit that keeps a 410-Gone resync off the bus.
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        // Clone shares the allocation and must still compare equal.
+        assert_eq!(a, a.clone());
+    }
+
     #[tokio::test]
     async fn coalesces_repeat_upserts_for_same_uid() {
         // The previous broadcast pipe would emit 100 events. Under the
@@ -1386,7 +1666,7 @@ mod tests {
         }
         let batch = chan.drain();
         assert_eq!(batch.upserts.len(), 1);
-        assert_eq!(batch.upserts["u1"]["name"], "v99");
+        assert_eq!(name_of(&batch.upserts["u1"]), "v99");
         assert!(batch.deletes.is_empty());
     }
 
@@ -1410,7 +1690,7 @@ mod tests {
         let batch = chan.drain();
         assert!(batch.deletes.is_empty(), "upsert must clear pending delete");
         assert_eq!(batch.upserts.len(), 1);
-        assert_eq!(batch.upserts["u1"]["name"], "a");
+        assert_eq!(name_of(&batch.upserts["u1"]), "a");
     }
 
     #[tokio::test]
@@ -1593,7 +1873,7 @@ mod tests {
     fn reconcile_init_seen_none_is_noop() {
         // If Init/InitDone never fired (e.g. an Apply-only stream), the
         // reconcile must not touch the cache and must return 0.
-        let cache = Mutex::new(HashMap::from([("u1".to_owned(), row("a"))]));
+        let cache = Mutex::new(HashMap::from([("u1".to_owned(), row("a").json)]));
         let chan = DirtyChannel::new();
         let mut seen: Option<HashSet<String>> = None;
         let n = reconcile_init_seen(&mut seen, &cache, &chan);
@@ -1609,9 +1889,9 @@ mod tests {
         // what disappeared. `init_seen` carries the uids replayed in this
         // window; anything in the cache that's missing is a ghost.
         let cache = Mutex::new(HashMap::from([
-            ("kept".to_owned(), row("k")),
-            ("gone-1".to_owned(), row("g1")),
-            ("gone-2".to_owned(), row("g2")),
+            ("kept".to_owned(), row("k").json),
+            ("gone-1".to_owned(), row("g1").json),
+            ("gone-2".to_owned(), row("g2").json),
         ]));
         let chan = DirtyChannel::new();
         let mut seen: Option<HashSet<String>> = Some(HashSet::from(["kept".to_owned()]));
@@ -1633,8 +1913,8 @@ mod tests {
         // Steady-state resync (apiserver still has every object we knew
         // about) must emit zero Deletes.
         let cache = Mutex::new(HashMap::from([
-            ("a".to_owned(), row("a")),
-            ("b".to_owned(), row("b")),
+            ("a".to_owned(), row("a").json),
+            ("b".to_owned(), row("b").json),
         ]));
         let chan = DirtyChannel::new();
         let mut seen: Option<HashSet<String>> = Some(HashSet::from([
