@@ -88,13 +88,6 @@ impl KindSpec for PodSpec {
         // status.{init_,}container_statuses for live state.
         let containers = build_containers(pod);
 
-        // Names-only list kept for backwards compat (LogPanel reads it).
-        let container_names: Vec<String> = pod
-            .spec
-            .as_ref()
-            .map(|s| s.containers.iter().map(|c| c.name.clone()).collect())
-            .unwrap_or_default();
-
         json!({
             "namespace": meta.namespace.clone().unwrap_or_default(),
             "name": meta.name.clone().unwrap_or_default(),
@@ -107,7 +100,10 @@ impl KindSpec for PodSpec {
             "mem": Value::Null,
             "node": pod.spec.as_ref().and_then(|s| s.node_name.clone()),
             "creation_timestamp": meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),
-            "containers": container_names,
+            // Single source of truth for this pod's containers: every entry
+            // carries `kind` (init / sidecar / main) so the log + exec
+            // surfaces can pick without a second names-only field riding the
+            // watcher bus on every row update.
             "container_states": containers,
         })
     }

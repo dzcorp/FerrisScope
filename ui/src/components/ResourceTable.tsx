@@ -26,6 +26,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, onResourceDelta } from "../api";
 import { selectClusterDegraded, useAppStore, useResolvedTheme } from "../store";
 import { formatQuantity } from "./detail";
+import { execContainers, rowLogContainers } from "../lib/podContainers";
 import type {
   ColumnDef,
   MetricsSnapshot,
@@ -1054,9 +1055,9 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   const logTargets = useMemo(() => {
     if (!logTarget) return null;
     if (kind.id === "pods") {
-      const containers = Array.isArray(logTarget.containers)
-        ? (logTarget.containers as string[])
-        : [];
+      // Read off `container_states` so init containers and native sidecars are
+      // offered too — the log endpoint serves them like any other container.
+      const containers = rowLogContainers(logTarget);
       return [
         {
           clusterId: logTarget.__clusterId,
@@ -1793,9 +1794,9 @@ function buildRowActionContext(
   const ns = typeof row.namespace === "string" ? row.namespace : null;
   const name = String(row.name ?? "");
   const qualified = ns ? `${ns}/${name}` : name;
-  const containers = Array.isArray(row.containers)
-    ? (row.containers as Array<{ name?: string }>)
-    : [];
+  // Exec can only attach to a running container, so init containers are
+  // filtered out here even though they show up in the log picker.
+  const containers = execContainers(rowLogContainers(row));
 
   const ctx: import("./rowActions").RowActionContext = {
     kind,
@@ -1821,10 +1822,7 @@ function buildRowActionContext(
         toast.bad("Pod has no namespace — can't exec.");
         return;
       }
-      const firstContainer =
-        containers.length > 0 && typeof containers[0]?.name === "string"
-          ? (containers[0]!.name as string)
-          : null;
+      const firstContainer = containers[0]?.name ?? null;
       addDockTab(
         makeTerminalTab(
           {

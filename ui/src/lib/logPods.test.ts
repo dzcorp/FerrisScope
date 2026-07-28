@@ -1,19 +1,24 @@
 import { describe, it, expect } from "vitest";
 import { applyPodDelta, podKey, pruneAfterInit } from "./logPods";
 import type { ObservedPod } from "./logSources";
-import type { LogPodEvent } from "../types";
+import type { LogContainer, LogPodEvent, ResolvedLogPod } from "../types";
 
-const pod = (name: string, containers: string[]): { namespace: string; name: string; containers: string[] } => ({
+/// Container names → `LogContainer[]`. Every fixture here is about pod-set
+/// bookkeeping, not container roles, so `main` is the right default.
+const mains = (names: string[]): LogContainer[] =>
+  names.map((name) => ({ name, kind: "main" }));
+
+const pod = (name: string, containers: string[]): ResolvedLogPod => ({
   namespace: "default",
   name,
-  containers,
+  containers: mains(containers),
 });
 
 const observed = (
   clusterId: string,
   namespace: string,
   name: string,
-): ObservedPod => ({ clusterId, namespace, name, containers: ["app"] });
+): ObservedPod => ({ clusterId, namespace, name, containers: [{ name: "app", kind: "main" as const }] });
 
 describe("applyPodDelta", () => {
   it("adds a pod and reports the map changed", () => {
@@ -27,7 +32,7 @@ describe("applyPodDelta", () => {
       clusterId: "cl1",
       namespace: "default",
       name: "web-0",
-      containers: ["app"],
+      containers: [{ name: "app", kind: "main" as const }],
     });
   });
 
@@ -61,10 +66,9 @@ describe("applyPodDelta", () => {
       pod: pod("web-0", ["app", "sidecar"]),
     });
     expect(map.size).toBe(1);
-    expect(map.get(podKey("cl1", "default", "web-0"))?.containers).toEqual([
-      "app",
-      "sidecar",
-    ]);
+    expect(map.get(podKey("cl1", "default", "web-0"))?.containers).toEqual(
+      mains(["app", "sidecar"]),
+    );
   });
 
   it("treats init_done as a no-op", () => {

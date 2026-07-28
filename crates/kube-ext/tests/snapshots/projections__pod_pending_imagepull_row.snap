@@ -14,9 +14,6 @@ expression: value
       "state": "ImagePullBackOff"
     }
   ],
-  "containers": [
-    "main"
-  ],
   "cpu": null,
   "creation_timestamp": "2026-04-15T10:00:00Z",
   "mem": null,

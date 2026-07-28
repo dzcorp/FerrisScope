@@ -51,14 +51,40 @@ pub struct LogPodTarget {
     pub name: String,
 }
 
+/// What role a container plays in its pod. Drives how the logs surface groups
+/// the picker and which containers stream by default in an aggregated view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogContainerKind {
+    /// `spec.initContainers` without `restartPolicy: Always` — runs to
+    /// completion before the pod starts. Its log is a fixed dump, not a live
+    /// stream, but it's exactly what you need on `Init:CrashLoopBackOff`.
+    Init,
+    /// Native sidecar (K8s 1.29+): declared in `spec.initContainers` with
+    /// `restartPolicy: Always`, so it keeps running alongside the main
+    /// containers. Streams like a main container.
+    Sidecar,
+    /// `spec.containers`. Classic injected sidecars (istio-proxy, linkerd)
+    /// live here too — the apiserver gives us no way to tell them apart.
+    Main,
+}
+
+/// One loggable container on a resolved pod.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LogContainer {
+    pub name: String,
+    pub kind: LogContainerKind,
+}
+
 /// A concrete pod the panel can open a log stream against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedLogPod {
     pub namespace: String,
     pub name: String,
-    /// Main containers (`spec.containers`), in manifest order — matches the
-    /// `containers` field of the streamed pod row projection.
-    pub containers: Vec<String>,
+    /// Every loggable container — init containers and native sidecars first
+    /// (manifest order), then `spec.containers`. Mirrors the ordering of the
+    /// pod row's `container_states` projection so the two surfaces agree.
+    pub containers: Vec<LogContainer>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -231,12 +257,35 @@ fn resolved_from_pod(pod: &Pod) -> ResolvedLogPod {
     ResolvedLogPod {
         namespace: pod.metadata.namespace.clone().unwrap_or_default(),
         name: pod.metadata.name.clone().unwrap_or_default(),
-        containers: pod
-            .spec
-            .as_ref()
-            .map(|s| s.containers.iter().map(|c| c.name.clone()).collect())
-            .unwrap_or_default(),
+        containers: log_containers(pod),
     }
+}
+
+/// Classify every container the kubelet will serve logs for. Init containers
+/// come first (manifest order), then `spec.containers` — matching
+/// `kinds::pods::build_containers` so the row projection and the log picker
+/// never disagree about ordering. Total: a pod with no spec yields an empty
+/// list rather than panicking.
+fn log_containers(pod: &Pod) -> Vec<LogContainer> {
+    let Some(spec) = pod.spec.as_ref() else {
+        return Vec::new();
+    };
+    let inits = spec.init_containers.iter().flatten().map(|c| LogContainer {
+        name: c.name.clone(),
+        // K8s 1.29+ native sidecar: an init container with
+        // `restartPolicy: Always` keeps running alongside the main
+        // containers, so it streams rather than dumping once.
+        kind: if c.restart_policy.as_deref() == Some("Always") {
+            LogContainerKind::Sidecar
+        } else {
+            LogContainerKind::Init
+        },
+    });
+    let mains = spec.containers.iter().map(|c| LogContainer {
+        name: c.name.clone(),
+        kind: LogContainerKind::Main,
+    });
+    inits.chain(mains).collect()
 }
 
 fn kind_label(kind_id: &str) -> &str {
@@ -282,11 +331,16 @@ pub enum LogPodEvent {
 
 type PodKey = (String, String); // (namespace, name)
 
+/// Container set remembered per pod so a status heartbeat doesn't re-emit
+/// `Added`. Compares name *and* kind: an init container promoted to a native
+/// sidecar across a rollout changes how the panel streams it.
+type ContainerSet = Vec<LogContainer>;
+
 /// Record an Apply: emit `Added` only when the pod is new or its container set
 /// changed (an Apply fires on every status heartbeat — emitting unconditionally
 /// would churn the frontend on a busy workload). Pure, for testing.
 fn upsert_pod(
-    seen: &mut BTreeMap<PodKey, Vec<String>>,
+    seen: &mut BTreeMap<PodKey, ContainerSet>,
     pod: ResolvedLogPod,
 ) -> Option<LogPodEvent> {
     let key = (pod.namespace.clone(), pod.name.clone());
@@ -299,7 +353,7 @@ fn upsert_pod(
 
 /// Record a Delete: emit `Removed` only if the pod was in the set. Pure.
 fn remove_pod(
-    seen: &mut BTreeMap<PodKey, Vec<String>>,
+    seen: &mut BTreeMap<PodKey, ContainerSet>,
     namespace: &str,
     name: &str,
 ) -> Option<LogPodEvent> {
@@ -338,7 +392,7 @@ impl LogPodWatch {
             // relist (410 Gone / reconnect) can synthesise `Removed` for pods
             // that vanished while we were disconnected — the exact case where a
             // pod was deleted+recreated during a dead watch.
-            let mut seen: BTreeMap<PodKey, Vec<String>> = BTreeMap::new();
+            let mut seen: BTreeMap<PodKey, ContainerSet> = BTreeMap::new();
             let mut init_keys: Option<BTreeSet<PodKey>> = None;
             while let Some(event) = stream.next().await {
                 match event {
@@ -473,24 +527,56 @@ mod tests {
         );
     }
 
+    /// Terse `LogContainer` builder for fixtures.
+    fn main_c(name: &str) -> LogContainer {
+        LogContainer {
+            name: name.to_owned(),
+            kind: LogContainerKind::Main,
+        }
+    }
+
     #[test]
     fn upsert_pod_emits_on_new_and_on_container_change_only() {
         let mut seen = BTreeMap::new();
-        let pod = |containers: &[&str]| ResolvedLogPod {
+        let pod = |containers: Vec<LogContainer>| ResolvedLogPod {
             namespace: "default".into(),
             name: "web-0".into(),
-            containers: containers.iter().map(|s| (*s).to_owned()).collect(),
+            containers,
         };
         // New pod → Added.
         assert!(matches!(
-            upsert_pod(&mut seen, pod(&["app"])),
+            upsert_pod(&mut seen, pod(vec![main_c("app")])),
             Some(LogPodEvent::Added { .. })
         ));
         // Same container set (status heartbeat) → no event.
-        assert!(upsert_pod(&mut seen, pod(&["app"])).is_none());
+        assert!(upsert_pod(&mut seen, pod(vec![main_c("app")])).is_none());
         // Container set changed (e.g. sidecar injected) → Added again.
         assert!(matches!(
-            upsert_pod(&mut seen, pod(&["app", "istio-proxy"])),
+            upsert_pod(&mut seen, pod(vec![main_c("app"), main_c("istio-proxy")])),
+            Some(LogPodEvent::Added { .. })
+        ));
+    }
+
+    #[test]
+    fn upsert_pod_emits_when_only_the_container_kind_changed() {
+        // A rollout that promotes an init container to a native sidecar keeps
+        // the same names but changes how the panel must stream it, so the
+        // frontend has to be told.
+        let mut seen = BTreeMap::new();
+        let pod = |kind: LogContainerKind| ResolvedLogPod {
+            namespace: "default".into(),
+            name: "web-0".into(),
+            containers: vec![
+                LogContainer {
+                    name: "proxy".into(),
+                    kind,
+                },
+                main_c("app"),
+            ],
+        };
+        assert!(upsert_pod(&mut seen, pod(LogContainerKind::Init)).is_some());
+        assert!(matches!(
+            upsert_pod(&mut seen, pod(LogContainerKind::Sidecar)),
             Some(LogPodEvent::Added { .. })
         ));
     }
@@ -503,7 +589,7 @@ mod tests {
             ResolvedLogPod {
                 namespace: "default".into(),
                 name: "web-0".into(),
-                containers: vec!["app".into()],
+                containers: vec![main_c("app")],
             },
         );
         assert!(matches!(
@@ -529,7 +615,53 @@ mod tests {
         let r = resolved_from_pod(&pod);
         assert_eq!(r.namespace, "default");
         assert_eq!(r.name, "web-0");
-        assert_eq!(r.containers, vec!["app", "istio-proxy"]);
+        // Classic injected sidecars live in `spec.containers` — indistinguishable
+        // from the app container at the API level, so both are `Main`.
+        assert_eq!(r.containers, vec![main_c("app"), main_c("istio-proxy")]);
+    }
+
+    #[test]
+    fn log_containers_classifies_init_sidecar_and_main() {
+        // The case that was previously unloggable: a native sidecar and a
+        // plain init container, both declared under `spec.initContainers`.
+        let pod: Pod = serde_json::from_value(json!({
+            "metadata": { "namespace": "default", "name": "web-0" },
+            "spec": {
+                "initContainers": [
+                    { "name": "migrate" },
+                    { "name": "logship", "restartPolicy": "Always" }
+                ],
+                "containers": [{ "name": "app" }]
+            }
+        }))
+        .expect("pod fixture");
+        assert_eq!(
+            log_containers(&pod),
+            vec![
+                LogContainer {
+                    name: "migrate".into(),
+                    kind: LogContainerKind::Init,
+                },
+                LogContainer {
+                    name: "logship".into(),
+                    kind: LogContainerKind::Sidecar,
+                },
+                main_c("app"),
+            ]
+        );
+    }
+
+    #[test]
+    fn log_containers_serializes_kind_in_snake_case() {
+        // The frontend discriminates on these exact strings.
+        let c = LogContainer {
+            name: "logship".into(),
+            kind: LogContainerKind::Sidecar,
+        };
+        assert_eq!(
+            serde_json::to_value(&c).expect("serialize"),
+            json!({ "name": "logship", "kind": "sidecar" })
+        );
     }
 
     #[test]

@@ -32,10 +32,6 @@ expression: value
       "state": "Running"
     }
   ],
-  "containers": [
-    "web",
-    "envoy"
-  ],
   "cpu": null,
   "creation_timestamp": "2026-04-15T10:00:00Z",
   "mem": null,

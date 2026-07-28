@@ -1,8 +1,11 @@
 import { describe, it, expect } from "vitest";
+import type { LogContainer } from "../types";
 import {
   aggregateLogStatus,
   buildLogSources,
   containerUniverse,
+  initOnlyContainerNames,
+  podKey,
   DEFAULT_TAIL_LINES,
   formatLogExport,
   isFullSourceSwap,
@@ -66,14 +69,134 @@ const names: Record<string, string> = {
 };
 const nameFor = (cid: string) => names[cid] ?? cid;
 
+/// Container names → all-`main` `LogContainer[]`. Tests that care about init /
+/// sidecar roles build their container lists explicitly.
+function mains(names: string[]): LogContainer[] {
+  return names.map((name) => ({ name, kind: "main" }));
+}
+
 function pod(
   clusterId: string,
   namespace: string,
   name: string,
-  containers: string[],
+  containers: string[] | LogContainer[],
 ): ObservedPod {
-  return { clusterId, namespace, name, containers };
+  return {
+    clusterId,
+    namespace,
+    name,
+    containers: containers.every((c) => typeof c === "string")
+      ? mains(containers as string[])
+      : (containers as LogContainer[]),
+  };
 }
+
+const init = (name: string): LogContainer => ({ name, kind: "init" });
+const sidecar = (name: string): LogContainer => ({ name, kind: "sidecar" });
+const main = (name: string): LogContainer => ({ name, kind: "main" });
+
+describe("containerUniverse — container kinds", () => {
+  it("orders main → sidecar → init, alphabetically within each rank", () => {
+    const u = containerUniverse([
+      pod("kc::eu", "default", "web-0", [
+        init("migrate"),
+        sidecar("logship"),
+        main("app"),
+        init("seed"),
+      ]),
+    ]);
+    expect(u).toEqual([
+      main("app"),
+      sidecar("logship"),
+      init("migrate"),
+      init("seed"),
+    ]);
+  });
+
+  it("the liveliest kind wins when a name appears as both across pods", () => {
+    // Mid-rollout: the new ReplicaSet runs `proxy` as a native sidecar while a
+    // stale replica still has it as a plain init container. The mute set is
+    // keyed by name, so one entry has to speak for both — and labelling a
+    // streaming container "init" would be the actively misleading direction.
+    const u = containerUniverse([
+      pod("kc::eu", "default", "old-0", [init("proxy"), main("app")]),
+      pod("kc::eu", "default", "new-0", [sidecar("proxy"), main("app")]),
+    ]);
+    expect(u).toEqual([main("app"), sidecar("proxy")]);
+  });
+});
+
+describe("initOnlyContainerNames", () => {
+  it("names containers that are init containers everywhere they appear", () => {
+    expect(
+      initOnlyContainerNames([
+        pod("kc::eu", "default", "web-0", [
+          init("migrate"),
+          sidecar("logship"),
+          main("app"),
+        ]),
+      ]),
+    ).toEqual(["migrate"]);
+  });
+
+  it("excludes a name that is a live container on any pod", () => {
+    expect(
+      initOnlyContainerNames([
+        pod("kc::eu", "default", "old-0", [init("proxy")]),
+        pod("kc::eu", "default", "new-0", [sidecar("proxy")]),
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("buildLogSources — container kinds and rail selection", () => {
+  it("carries each source's container kind through", () => {
+    const { sources } = buildLogSources(
+      [pod("kc::eu", "default", "web-0", [init("migrate"), main("app")])],
+      () => "eu",
+    );
+    expect(sources.map((s) => [s.container, s.containerKind])).toEqual([
+      ["migrate", "init"],
+      ["app", "main"],
+    ]);
+  });
+
+  it("does not append a container segment for a pod that streams only one", () => {
+    // A one-container pod that merely *declares* an init container must not
+    // start prefixing every line with "/app".
+    const { sources } = buildLogSources(
+      [pod("kc::eu", "default", "web-0", [init("migrate"), main("app")])],
+      () => "eu",
+      { excludedContainers: new Set(["migrate"]) },
+    );
+    expect(sources).toHaveLength(1);
+    expect(sources[0]!.label).toBe("web-0");
+  });
+
+  it("streams only the pods in `includedPods` when one is given", () => {
+    const pods = [
+      pod("kc::eu", "default", "web-0", ["app"]),
+      pod("kc::eu", "default", "web-1", ["app"]),
+      pod("kc::eu", "default", "web-2", ["app"]),
+    ];
+    const { sources, dropped } = buildLogSources(pods, () => "eu", {
+      includedPods: new Set([podKey("kc::eu", "default", "web-1")]),
+    });
+    expect(sources.map((s) => s.pod)).toEqual(["web-1"]);
+    // Unselected pods are a choice, not an overflow — they must not inflate
+    // the "over cap" counter.
+    expect(dropped).toBe(0);
+  });
+
+  it("an empty selection streams nothing", () => {
+    const { sources } = buildLogSources(
+      [pod("kc::eu", "default", "web-0", ["app"])],
+      () => "eu",
+      { includedPods: new Set() },
+    );
+    expect(sources).toEqual([]);
+  });
+});
 
 describe("buildLogSources", () => {
   it("one pod, one container → one unprefixed-feeling source", () => {
@@ -236,7 +359,7 @@ describe("containerUniverse", () => {
       pod("kc::eu", "default", "web-1", ["app", "istio-proxy"]),
       pod("kc::eu", "default", "job-0", ["worker"]),
     ]);
-    expect(u).toEqual(["app", "istio-proxy", "worker"]);
+    expect(u).toEqual(mains(["app", "istio-proxy", "worker"]));
   });
 
   it("is empty for no pods", () => {

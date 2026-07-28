@@ -41,7 +41,7 @@ function labels(ctx: RowActionContext): string[] {
 describe("actionsForRow — View logs availability", () => {
   it("pods: present, disabled without containers", () => {
     const withContainers = ctxFor(kindOf("pods", "Pod"), {
-      containers: ["app"],
+      container_states: [{ name: "app", kind: "main" }],
     });
     const items = actionsForRow(withContainers);
     const logs = items.find(
@@ -89,7 +89,7 @@ describe("actionsForRow — View logs availability", () => {
 describe("actionsForRow — Evict pod", () => {
   it("pods with an evict callback surface a danger 'Evict pod' item", () => {
     const ctx: RowActionContext = {
-      ...ctxFor(kindOf("pods", "Pod"), { containers: ["app"] }),
+      ...ctxFor(kindOf("pods", "Pod"), { container_states: [{ name: "app", kind: "main" }] }),
       evict: vi.fn(),
     };
     const item = actionsForRow(ctx).find(
@@ -113,7 +113,7 @@ describe("actionsForRow — read-only gating", () => {
   // A pod ctx wired with every optional write callback so all mutating items
   // are present in the menu (they're only pushed when their callback exists).
   const podCtx = (): RowActionContext => ({
-    ...ctxFor(kindOf("pods", "Pod"), { containers: ["app"] }),
+    ...ctxFor(kindOf("pods", "Pod"), { container_states: [{ name: "app", kind: "main" }] }),
     openExec: vi.fn(),
     openYamlEdit: vi.fn(),
     openPortForward: vi.fn(),

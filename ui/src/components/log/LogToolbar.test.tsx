@@ -6,8 +6,14 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { tokens } from "../../theme";
 import { LogToolbar } from "./LogToolbar";
+import type { LogContainer } from "../../types";
 
 const t = tokens("dark");
+
+/// Container names → all-`main` `LogContainer[]`. Kind-specific behaviour has
+/// its own cases below.
+const mains = (names: string[]): LogContainer[] =>
+  names.map((name) => ({ name, kind: "main" }));
 
 describe("LogToolbar — aggregated mode", () => {
   it("renders a mute chip per container and toggles on click", () => {
@@ -18,11 +24,14 @@ describe("LogToolbar — aggregated mode", () => {
         mode={{
           kind: "aggregated",
           podCount: 3,
+          selectedPodCount: 3,
           streamCount: 6,
           dropped: 0,
-          universe: ["app", "istio-proxy"],
+          universe: mains(["app", "istio-proxy"]),
           excluded: new Set(),
           onToggleContainer: onToggle,
+          railOpen: false,
+          onToggleRail: () => {},
         }}
         tailLines={200}
         onTailLines={() => {}}
@@ -47,11 +56,14 @@ describe("LogToolbar — aggregated mode", () => {
         mode={{
           kind: "aggregated",
           podCount: 1,
+          selectedPodCount: 3,
           streamCount: 1,
           dropped: 0,
-          universe: ["app", "istio-proxy"],
+          universe: mains(["app", "istio-proxy"]),
           excluded: new Set(["istio-proxy"]),
           onToggleContainer: () => {},
+          railOpen: false,
+          onToggleRail: () => {},
         }}
         tailLines={200}
         onTailLines={() => {}}
@@ -71,11 +83,14 @@ describe("LogToolbar — aggregated mode", () => {
         mode={{
           kind: "aggregated",
           podCount: 40,
+          selectedPodCount: 3,
           streamCount: 24,
           dropped: 16,
-          universe: ["app"],
+          universe: mains(["app"]),
           excluded: new Set(),
           onToggleContainer: () => {},
+          railOpen: false,
+          onToggleRail: () => {},
         }}
         tailLines={200}
         onTailLines={() => {}}
@@ -103,11 +118,14 @@ describe("LogToolbar — theme adaptivity", () => {
         mode={{
           kind: "aggregated",
           podCount: 1,
+          selectedPodCount: 3,
           streamCount: 2,
           dropped: 0,
-          universe: ["app", "sidecar"],
+          universe: mains(["app", "sidecar"]),
           excluded: new Set(),
           onToggleContainer: () => {},
+          railOpen: false,
+          onToggleRail: () => {},
         }}
         tailLines={200}
         onTailLines={() => {}}
@@ -143,7 +161,7 @@ describe("LogToolbar — single mode", () => {
         t={t}
         mode={{
           kind: "single",
-          containers: ["app"],
+          containers: [{ name: "app", kind: "main" as const }],
           active: "app",
           onContainer: () => {},
           previous: false,
@@ -169,7 +187,7 @@ describe("LogToolbar — status", () => {
         t={t}
         mode={{
           kind: "single",
-          containers: ["app"],
+          containers: [{ name: "app", kind: "main" as const }],
           active: "app",
           onContainer: () => {},
           previous: false,

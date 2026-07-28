@@ -35,8 +35,16 @@ import {
   type ObservedPod,
 } from "../lib/logSources";
 import { applyPodDelta, podKey, pruneAfterInit } from "../lib/logPods";
+import {
+  containerLabel,
+  defaultLogContainer,
+  orderContainers,
+} from "../lib/podContainers";
+import { useContainerMute } from "./log/useContainerMute";
+import { usePodSelection } from "./log/usePodSelection";
+import { SourceRail } from "./log/SourceRail";
 import { logErr } from "../lib/log";
-import type { LogPodTarget } from "../types";
+import type { LogContainer, LogPodTarget } from "../types";
 
 // One requested observation — a pod or a pod-bearing workload on a specific
 // cluster. Workloads expand to their pods via `resolve_log_pods`; pod
@@ -46,7 +54,7 @@ export type ObserveTarget = {
   kindId: string;
   namespace: string;
   name: string;
-  containers?: string[];
+  containers?: LogContainer[];
 };
 
 export type ObserveTab = "logs" | "metrics";
@@ -63,6 +71,34 @@ const KIND_LABELS: Record<string, string> = {
 /// Kinds the logs/metrics panel can observe — pods plus everything
 /// `resolve_log_pods` expands. Shared by the bulk bar and row actions.
 export const OBSERVABLE_KIND_IDS = new Set(Object.keys(KIND_LABELS));
+
+/// Stable empty pod list — keeps `useContainerMute`'s effect from re-running on
+/// every render while the resolve is still in flight.
+const EMPTY_PODS: ObservedPod[] = [];
+
+/// Cap on the live pod-set watches one panel arms. Each is a real apiserver
+/// watch connection held open for as long as the panel is; a 50-workload
+/// selection would open 50 of them to feed a view that can only stream
+/// `MAX_LOG_SOURCES` pods anyway. Workloads past the cap keep the pods the
+/// one-shot resolve found — they just stop tracking scale-up / rollout.
+export const MAX_POD_WATCHES = 12;
+
+/// Drop `pods` targets (they need no watch — a single pod's containers are
+/// already known) and collapse duplicate workload targets. A bulk selection can
+/// name the same workload twice, and two watches over one selector cost two
+/// connections for identical events. Exported for testing.
+export function dedupeWatchTargets(targets: ObserveTarget[]): ObserveTarget[] {
+  const seen = new Set<string>();
+  const out: ObserveTarget[] = [];
+  for (const t of targets) {
+    if (t.kindId === "pods") continue;
+    const k = [t.clusterId, t.kindId, t.namespace, t.name].join("\u0000");
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out;
+}
 
 /// Cap on the targets one panel resolves. A 100+-row bulk selection would
 /// otherwise turn into 100+ backend lookups before a single line streams —
@@ -196,45 +232,66 @@ export function useObservedPods(targets: ObserveTarget[]): {
       // initial set (idempotent — `applyPodDelta` keys by pod) and then keeps it
       // current. A watch that can't arm (no selector / RBAC) is non-fatal: the
       // one-shot seed already stands, so we just log and carry on.
-      for (const t of reqs) {
-        if (cancelled) break;
-        if (t.kindId === "pods") continue;
-        try {
-          const handle = await api.watchLogPods(
-            t.clusterId,
-            { kind_id: t.kindId, namespace: t.namespace, name: t.name },
-            (evt) => {
-              if (cancelled) return;
-              if (evt.kind === "init_done") {
-                // Watch's initial list is complete — drop any one-shot-seeded
-                // pod it didn't confirm (deleted in the resolve→watch window).
-                if (
-                  pruneAfterInit(podMap, t.clusterId, t.namespace, watchConfirmed)
-                )
-                  flushReady();
-                return;
-              }
-              if (evt.kind === "added")
-                watchConfirmed.add(
-                  podKey(t.clusterId, evt.pod.namespace, evt.pod.name),
-                );
-              else
-                watchConfirmed.delete(
-                  podKey(t.clusterId, evt.namespace, evt.name),
-                );
-              if (applyPodDelta(podMap, t.clusterId, evt)) flushReady();
-            },
-          );
-          if (cancelled) {
-            handle.close();
-            void api.unwatchLogPods(handle.watchId);
-            break;
-          }
-          handles.push(handle);
-        } catch (e) {
-          logErr("logs")(e);
-        }
+      //
+      // Deduplicated and capped: each watch is a live apiserver connection, and
+      // a bulk selection can repeat the same workload (e.g. a Deployment picked
+      // alongside its ReplicaSet rows). Started concurrently, because a
+      // sequential `await` per target meant a 10-workload selection paid ten
+      // round-trips before the last pod set could arrive.
+      const watchTargets = dedupeWatchTargets(reqs);
+      if (watchTargets.length > MAX_POD_WATCHES) {
+        warnings.push(
+          `watching pod sets for the first ${MAX_POD_WATCHES} of ${watchTargets.length} workloads — the rest show the pods they had when the panel opened`,
+        );
+        flushReady();
       }
+      await Promise.all(
+        watchTargets.slice(0, MAX_POD_WATCHES).map(async (t) => {
+          if (cancelled) return;
+          try {
+            const handle = await api.watchLogPods(
+              t.clusterId,
+              { kind_id: t.kindId, namespace: t.namespace, name: t.name },
+              (evt) => {
+                if (cancelled) return;
+                if (evt.kind === "init_done") {
+                  // Watch's initial list is complete — drop any one-shot-seeded
+                  // pod it didn't confirm (deleted in the resolve→watch window).
+                  if (
+                    pruneAfterInit(
+                      podMap,
+                      t.clusterId,
+                      t.namespace,
+                      watchConfirmed,
+                    )
+                  )
+                    flushReady();
+                  return;
+                }
+                if (evt.kind === "added")
+                  watchConfirmed.add(
+                    podKey(t.clusterId, evt.pod.namespace, evt.pod.name),
+                  );
+                else
+                  watchConfirmed.delete(
+                    podKey(t.clusterId, evt.namespace, evt.name),
+                  );
+                if (applyPodDelta(podMap, t.clusterId, evt)) flushReady();
+              },
+            );
+            // Unmounted while this open was in flight — tear it straight back
+            // down rather than leaking it past the cleanup that already ran.
+            if (cancelled) {
+              handle.close();
+              void api.unwatchLogPods(handle.watchId);
+              return;
+            }
+            handles.push(handle);
+          } catch (e) {
+            logErr("logs")(e);
+          }
+        }),
+      );
     })();
     return () => {
       cancelled = true;
@@ -288,17 +345,15 @@ export function LogPanel({
   // First-open fetch tail (200 by default; up to whole history). Folded into
   // the stream key so changing it restarts cleanly.
   const [tailLines, setTailLines] = useState<number | null>(DEFAULT_TAIL_LINES);
-  // Containers muted across an aggregated view (noisy sidecars). Excluded from
-  // every pod's merged stream; ignored in single-pod mode.
-  const [excluded, setExcluded] = useState<ReadonlySet<string>>(() => new Set());
-  const toggleContainer = useCallback((c: string) => {
-    setExcluded((prev) => {
-      const next = new Set(prev);
-      if (next.has(c)) next.delete(c);
-      else next.add(c);
-      return next;
-    });
-  }, []);
+  // Containers muted across an aggregated view (noisy sidecars, and init
+  // containers by default). Excluded from every pod's merged stream; ignored in
+  // single-pod mode, which uses the container Select instead.
+  const readyPods = state.kind === "ready" ? state.pods : EMPTY_PODS;
+  const { excluded, toggle: toggleContainer } = useContainerMute(readyPods);
+  // Which pods stream, when more than the budget resolves. Seeded with the
+  // greedy default so the panel works without touching the rail.
+  const selection = usePodSelection(readyPods, excluded);
+  const [railOpen, setRailOpen] = useState(false);
   const [view, setView] = useState<LogViewState>({
     status: { kind: "starting" },
     paused: false,
@@ -324,10 +379,16 @@ export function LogPanel({
 
   const singlePod =
     state.kind === "ready" && state.pods.length === 1 ? state.pods[0]! : null;
+  // Picker order (main → sidecar → init), so a pod that declares an init
+  // container still opens on its app container rather than on a terminated one.
+  const singleContainers = useMemo(
+    () => (singlePod ? orderContainers(singlePod.containers) : []),
+    [singlePod],
+  );
   const activeContainer = singlePod
-    ? container && singlePod.containers.includes(container)
+    ? singleContainers.some((c) => c.name === container)
       ? container
-      : singlePod.containers[0] ?? null
+      : defaultLogContainer(singleContainers)
     : null;
 
   const built = useMemo((): { sources: LogViewSource[]; dropped: number } => {
@@ -349,6 +410,9 @@ export function LogPanel({
             namespace: singlePod.namespace,
             pod: singlePod.name,
             container: activeContainer,
+            containerKind:
+              singleContainers.find((c) => c.name === activeContainer)?.kind ??
+              "main",
             previous,
             tailLines,
             label: "",
@@ -361,14 +425,25 @@ export function LogPanel({
     return buildLogSources(state.pods, clusterNameFor, {
       tailLines,
       excludedContainers: excluded,
+      includedPods: selection.selected,
     });
-  }, [state, singlePod, activeContainer, previous, tailLines, excluded, clusterNameFor]);
+  }, [
+    state,
+    singlePod,
+    singleContainers,
+    activeContainer,
+    previous,
+    tailLines,
+    excluded,
+    selection.selected,
+    clusterNameFor,
+  ]);
 
   // Distinct container names across the aggregated pod set (single-pod uses
   // the container Select instead). Drives the toolbar's mute chips.
   const universe = useMemo(
-    () => (singlePod ? [] : containerUniverse(state.kind === "ready" ? state.pods : [])),
-    [singlePod, state],
+    () => (singlePod ? [] : containerUniverse(readyPods)),
+    [singlePod, readyPods],
   );
 
   if (targets.length === 0) return null;
@@ -484,7 +559,7 @@ export function LogPanel({
                       singlePod
                         ? {
                             kind: "single",
-                            containers: singlePod.containers,
+                            containers: singleContainers,
                             active: activeContainer,
                             onContainer: setContainer,
                             previous,
@@ -493,11 +568,14 @@ export function LogPanel({
                         : {
                             kind: "aggregated",
                             podCount: state.pods.length,
+                            selectedPodCount: selection.selected.size,
                             streamCount: built.sources.length,
                             dropped: built.dropped,
                             universe,
                             excluded,
                             onToggleContainer: toggleContainer,
+                            railOpen,
+                            onToggleRail: () => setRailOpen((o) => !o),
                           }
                     }
                     tailLines={tailLines}
@@ -516,15 +594,15 @@ export function LogPanel({
                 )
               ) : /* Metrics tab: only the source picker/summary is relevant —
                    previous/tail/status are log-specific. */
-              singlePod && singlePod.containers.length > 1 ? (
+              singlePod && singleContainers.length > 1 ? (
                 <Select
                   t={t}
                   fullWidth={false}
                   value={activeContainer ?? ""}
                   onChange={(v) => setContainer(v)}
-                  options={singlePod.containers.map((c) => ({
-                    value: c,
-                    label: c,
+                  options={singleContainers.map((c) => ({
+                    value: c.name,
+                    label: containerLabel(c),
                   }))}
                   style={{
                     fontFamily: FF_MONO,
@@ -577,6 +655,20 @@ export function LogPanel({
               </div>
             ))}
             {warnings.length > 4 && <div>+{warnings.length - 4} more</div>}
+          </div>
+        )}
+
+        {/* Source rail — aggregated logs only. Rendered below the toolbar
+            rather than inside it because it needs the panel's full width. */}
+        {tab === "logs" && railOpen && !singlePod && state.kind === "ready" && (
+          <div style={{ margin: "8px 22px 0", flexShrink: 0 }}>
+            <SourceRail
+              t={t}
+              pods={selection.rows}
+              selected={selection.selected}
+              onChange={selection.setSelected}
+              onClose={() => setRailOpen(false)}
+            />
           </div>
         )}
 
@@ -645,6 +737,24 @@ export function LogPanel({
                 warnings.length > 0
                   ? "Nothing in the selection resolved to a pod — see the notes above."
                   : "Nothing in the selection resolved to a pod."
+              }
+            />
+          ) : tab === "logs" && !singlePod && built.sources.length === 0 ? (
+            // Pods resolved, but nothing is streaming — either the rail has an
+            // empty selection or every container is muted. Say which, rather
+            // than handing LogView an empty source set and showing a blank
+            // console with a "starting" pill that never resolves.
+            <EmptyState
+              t={t}
+              title={
+                selection.selected.size === 0
+                  ? "No pods selected"
+                  : "All containers muted"
+              }
+              hint={
+                selection.selected.size === 0
+                  ? "Pick pods to stream from the pod picker in the toolbar."
+                  : "Re-enable a container in the toolbar to stream its logs."
               }
             />
           ) : tab === "logs" ? (
