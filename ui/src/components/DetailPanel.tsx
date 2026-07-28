@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, onResourceDelta } from "../api";
 import { parseYaml, stripYaml, type Json } from "../lib/yamlEdit";
 import { selectClusterDegraded, useAppStore, useResolvedTheme } from "../store";
+import { execContainers, rowLogContainers } from "../lib/podContainers";
 import type {
   ContainerDetail,
   ContainerLastState,
   ContainerProbe,
   ContainerSecurity,
+  LogContainer,
   PodDetail,
   PodScheduling,
   PodSecurity,
@@ -435,12 +437,18 @@ export function DetailPanel({
   const nodeCordoned =
     isNode && row != null && row.phase === "SchedulingDisabled";
 
-  const podContainers: string[] =
-    isPod && row && Array.isArray(row.containers)
-      ? (row.containers as unknown[]).filter(
-          (c): c is string => typeof c === "string",
-        )
-      : [];
+  // Every loggable container on this pod, read off the row's `container_states`
+  // projection: init containers and native sidecars included, each tagged with
+  // its kind. The Logs tab needs them — a pod stuck in `Init:CrashLoopBackOff`
+  // is exactly when the failing init container's log matters.
+  const podContainers: LogContainer[] =
+    isPod && row ? rowLogContainers(row) : [];
+  // Exec can't attach to a terminated init container, so the shell affordances
+  // run off a narrower list than the Logs tab does. Names only — that's what
+  // the exec command takes.
+  const podShellContainers: string[] = execContainers(podContainers).map(
+    (c) => c.name,
+  );
 
   const openActionMenu = (
     kind: "shell" | "delete",
@@ -907,18 +915,20 @@ export function DetailPanel({
                 t={t}
                 size="lg"
                 title={
-                  podContainers.length === 0
-                    ? "No containers"
-                    : podContainers.length === 1
-                      ? `Open shell (${podContainers[0]})`
+                  podShellContainers.length === 0
+                    ? "No runnable containers"
+                    : podShellContainers.length === 1
+                      ? `Open shell (${podShellContainers[0]})`
                       : "Open shell…"
                 }
-                disabled={podContainers.length === 0 || !onOpenExec || degraded}
+                disabled={
+                  podShellContainers.length === 0 || !onOpenExec || degraded
+                }
                 active={actionMenu?.kind === "shell"}
                 onClick={() => {
                   if (!onOpenExec) return;
-                  if (podContainers.length <= 1) {
-                    onOpenExec(podContainers[0] ?? null);
+                  if (podShellContainers.length <= 1) {
+                    onOpenExec(podShellContainers[0] ?? null);
                   } else {
                     openActionMenu("shell", shellBtnRef.current);
                   }
@@ -1118,7 +1128,7 @@ export function DetailPanel({
               kind.kind,
               kind.id,
               target.name,
-              podContainers,
+              podShellContainers,
               onOpenExec,
               runDelete,
             )}

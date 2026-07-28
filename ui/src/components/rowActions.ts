@@ -1,4 +1,5 @@
 import { logErr } from "../lib/log";
+import { execContainers, rowLogContainers } from "../lib/podContainers";
 import type { ResourceKind, ResourceRow } from "../types";
 import type { MenuItem } from "./ContextMenu";
 
@@ -45,9 +46,11 @@ export function actionsForRow(
   const name = String(row.name ?? "");
   const ns = typeof row.namespace === "string" ? row.namespace : null;
   const qualified = ns ? `${ns}/${name}` : name;
-  const containers = Array.isArray(row.containers)
-    ? (row.containers as unknown[])
-    : [];
+  // Two different sets: the log endpoint serves init containers, `exec` can't
+  // attach to one. A pod that has only ever run init containers therefore gets
+  // "View logs" enabled and "Exec shell" disabled.
+  const logContainers = rowLogContainers(row);
+  const shellContainers = execContainers(logContainers);
 
   const items: MenuItem[] = [];
 
@@ -58,14 +61,14 @@ export function actionsForRow(
       kind: "item",
       label: "View logs",
       onClick: openLogs,
-      disabled: containers.length === 0,
+      disabled: logContainers.length === 0,
     });
     if (openExec)
       items.push({
         kind: "item",
         label: "Exec shell",
         onClick: openExec,
-        disabled: containers.length === 0 || readOnly,
+        disabled: shellContainers.length === 0 || readOnly,
       });
     if (openYamlEdit)
       items.push({

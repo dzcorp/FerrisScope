@@ -4,10 +4,12 @@
 // Metrics tab (per-pod metrics-server rows + totals).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { ResolvedLogPod } from "../types";
 import { render, act, cleanup, fireEvent } from "@testing-library/react";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
 import { useAppStore } from "../store";
 import {
+  dedupeWatchTargets,
   LogPanel,
   MAX_OBSERVE_TARGETS,
   type ObserveTarget,
@@ -59,7 +61,7 @@ function mockBackend(opts: {
   resolve?: (
     clusterId: string,
   ) =>
-    | { pods: { namespace: string; name: string; containers: string[] }[]; warnings: string[] }
+    | { pods: ResolvedLogPod[]; warnings: string[] }
     | Error;
 }) {
   const calls: Call[] = [];
@@ -89,7 +91,13 @@ function podTarget(
   containers: string[] | undefined,
   clusterId = ctxEu.id,
 ): ObserveTarget {
-  return { clusterId, kindId: "pods", namespace: "default", name, containers };
+  return {
+    clusterId,
+    kindId: "pods",
+    namespace: "default",
+    name,
+    containers: containers?.map((n) => ({ name: n, kind: "main" as const })),
+  };
 }
 
 beforeEach(() => {
@@ -109,6 +117,42 @@ afterEach(() => {
   vi.unstubAllGlobals();
   act(() => {
     useAppStore.setState({ contexts: [], metricsByCluster: {} });
+  });
+});
+
+describe("dedupeWatchTargets", () => {
+  const t = (kindId: string, name: string, clusterId = "cl1"): ObserveTarget => ({
+    clusterId,
+    kindId,
+    namespace: "default",
+    name,
+  });
+
+  it("drops pod targets — a single pod needs no pod-set watch", () => {
+    expect(dedupeWatchTargets([t("pods", "web-0"), t("deployments", "web")]))
+      .toEqual([t("deployments", "web")]);
+  });
+
+  it("collapses repeats of the same workload", () => {
+    // A bulk selection can name the same workload twice; two watches over one
+    // selector is two connections for identical events.
+    expect(
+      dedupeWatchTargets([
+        t("deployments", "web"),
+        t("deployments", "web"),
+        t("deployments", "api"),
+      ]),
+    ).toEqual([t("deployments", "web"), t("deployments", "api")]);
+  });
+
+  it("keeps same-named workloads apart across clusters and kinds", () => {
+    expect(
+      dedupeWatchTargets([
+        t("deployments", "web", "cl1"),
+        t("deployments", "web", "cl2"),
+        t("statefulsets", "web", "cl1"),
+      ]),
+    ).toHaveLength(3);
   });
 });
 
@@ -171,8 +215,8 @@ describe("LogPanel target resolution", () => {
     const m = mockBackend({
       resolve: () => ({
         pods: [
-          { namespace: "default", name: "api-7f-a1", containers: ["app"] },
-          { namespace: "default", name: "api-7f-b2", containers: ["app"] },
+          { namespace: "default", name: "api-7f-a1", containers: [{ name: "app", kind: "main" as const }] },
+          { namespace: "default", name: "api-7f-b2", containers: [{ name: "app", kind: "main" as const }] },
         ],
         warnings: [],
       }),
@@ -209,7 +253,7 @@ describe("LogPanel target resolution", () => {
   it("surfaces per-target resolution warnings without blanking the view", async () => {
     mockBackend({
       resolve: () => ({
-        pods: [{ namespace: "default", name: "api-0", containers: ["app"] }],
+        pods: [{ namespace: "default", name: "api-0", containers: [{ name: "app", kind: "main" as const }] }],
         warnings: ["Deployment default/dead: no pods matched its selector"],
       }),
     });
@@ -243,7 +287,7 @@ describe("LogPanel target resolution", () => {
           ? new Error("connection refused")
           : {
               pods: [
-                { namespace: "default", name: "api-0", containers: ["app"] },
+                { namespace: "default", name: "api-0", containers: [{ name: "app", kind: "main" as const }] },
               ],
               warnings: [],
             },
@@ -300,15 +344,214 @@ describe("LogPanel target resolution", () => {
     // …and the stream fan-out stops at the source cap, not at 120.
     const streams = m.calls.filter((c) => c.cmd === "start_log_stream");
     expect(streams).toHaveLength(MAX_LOG_SOURCES);
+    // The source rail's default selection is what bounds the fan-out now, so
+    // the toolbar reports a selection ("24/50 pods") rather than an overflow —
+    // the remaining pods are unselected and pickable, not silently dropped.
     expect(
       utils.getByText(
         new RegExp(
-          `${MAX_OBSERVE_TARGETS} pods · ${MAX_LOG_SOURCES} streams \\(\\+${
-            MAX_OBSERVE_TARGETS - MAX_LOG_SOURCES
-          } over cap\\)`,
+          `${MAX_LOG_SOURCES}/${MAX_OBSERVE_TARGETS} pods · ${MAX_LOG_SOURCES} streams`,
         ),
       ),
     ).toBeInTheDocument();
+    expect(utils.queryByText(/over cap/)).toBeNull();
+  });
+
+  it("the source rail lets the operator swap which pods stream", async () => {
+    const m = mockBackend({});
+    const targets = Array.from({ length: 30 }, (_, i) =>
+      podTarget(`p${String(i).padStart(2, "0")}`, ["app"]),
+    );
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <LogPanel mode="dark" targets={targets} onClose={() => {}} />,
+      );
+    });
+    const started = () =>
+      m.calls
+        .filter((c) => c.cmd === "start_log_stream")
+        .map((c) => String(c.args!.pod));
+    // Default selection is the first `MAX_LOG_SOURCES` pods in order, so the
+    // tail of the set is unselected.
+    expect(started()).toHaveLength(MAX_LOG_SOURCES);
+    expect(started()).not.toContain("p29");
+
+    await act(async () => {
+      fireEvent.click(utils.getByTitle("Choose which pods stream"));
+    });
+    // Deselect a streaming pod to free a slot, then select one that was over
+    // the cap — it should start immediately.
+    await act(async () => {
+      fireEvent.click(utils.getByTitle("default/p00"));
+    });
+    await act(async () => {
+      fireEvent.click(utils.getByTitle("default/p29"));
+    });
+    expect(started()).toContain("p29");
+    // And the freed pod's stream was torn down rather than left running.
+    expect(m.calls.filter((c) => c.cmd === "stop_log_stream").length).toBeGreaterThan(0);
+  });
+
+  it("single pod: offers init + sidecar containers but opens on main", async () => {
+    // The gap this change closes — a pod stuck in Init:CrashLoopBackOff needs
+    // its init container's log, and previously it wasn't offered at all.
+    const m = mockBackend({});
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <LogPanel
+          mode="dark"
+          targets={[
+            {
+              clusterId: ctxEu.id,
+              kindId: "pods",
+              namespace: "default",
+              name: "web-0",
+              containers: [
+                { name: "migrate", kind: "init" },
+                { name: "logship", kind: "sidecar" },
+                { name: "app", kind: "main" },
+              ],
+            },
+          ]}
+          onClose={() => {}}
+        />,
+      );
+    });
+    // Opens on the app container, not on the terminated init container that
+    // happens to come first in manifest order.
+    const started = m.calls.filter((c) => c.cmd === "start_log_stream");
+    expect(started).toHaveLength(1);
+    expect(started[0]!.args!.container).toBe("app");
+    // …and all three are pickable, with the non-main ones badged.
+    // jsdom has no layout, so the Select's scroll-into-view is a no-op here.
+    Element.prototype.scrollIntoView ??= () => {};
+    fireEvent.click(utils.getByText("app"));
+    expect(utils.getByText("migrate (init)")).toBeInTheDocument();
+    expect(utils.getByText("logship (sidecar)")).toBeInTheDocument();
+  });
+
+  it("aggregated: sidecars stream, init containers start muted", async () => {
+    // Init containers have terminated — letting them compete for the stream
+    // budget would push live containers out of a rollout's view.
+    const m = mockBackend({
+      resolve: () => ({
+        pods: [
+          {
+            namespace: "default",
+            name: "web-0",
+            containers: [
+              { name: "migrate", kind: "init" },
+              { name: "logship", kind: "sidecar" },
+              { name: "app", kind: "main" },
+            ],
+          },
+          {
+            namespace: "default",
+            name: "web-1",
+            containers: [
+              { name: "migrate", kind: "init" },
+              { name: "logship", kind: "sidecar" },
+              { name: "app", kind: "main" },
+            ],
+          },
+        ],
+        warnings: [],
+      }),
+    });
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <LogPanel
+          mode="dark"
+          targets={[
+            {
+              clusterId: ctxEu.id,
+              kindId: "deployments",
+              namespace: "default",
+              name: "web",
+            },
+          ]}
+          onClose={() => {}}
+        />,
+      );
+    });
+    const containersStreamed = m.calls
+      .filter((c) => c.cmd === "start_log_stream")
+      .map((c) => String(c.args!.container))
+      .sort();
+    expect(containersStreamed).toEqual(["app", "app", "logship", "logship"]);
+
+    // The init container is still there to un-mute — muted, not hidden.
+    const muted = utils.getByLabelText(
+      "migrate (init) muted — click to include",
+    );
+    await act(async () => {
+      fireEvent.click(muted);
+    });
+    expect(
+      m.calls
+        .filter((c) => c.cmd === "start_log_stream")
+        .some((c) => c.args!.container === "migrate"),
+    ).toBe(true);
+  });
+
+  it("muting a sidecar does not resurrect pods the operator deselected", async () => {
+    // Muting frees stream budget. Reconciling by "select anything that fits"
+    // would silently re-select every pod that had just been turned off.
+    const m = mockBackend({
+      resolve: () => ({
+        pods: Array.from({ length: 4 }, (_, i) => ({
+          namespace: "default",
+          name: `web-${i}`,
+          containers: [
+            { name: "app", kind: "main" as const },
+            { name: "istio-proxy", kind: "main" as const },
+          ],
+        })),
+        warnings: [],
+      }),
+    });
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <LogPanel
+          mode="dark"
+          targets={[
+            {
+              clusterId: ctxEu.id,
+              kindId: "deployments",
+              namespace: "default",
+              name: "web",
+            },
+          ]}
+          onClose={() => {}}
+        />,
+      );
+    });
+    await act(async () => {
+      fireEvent.click(utils.getByTitle("Choose which pods stream"));
+    });
+    await act(async () => {
+      fireEvent.click(utils.getByTitle("default/web-3"));
+    });
+    expect(utils.getByText(/3\/4 pods/)).toBeInTheDocument();
+    const before = m.calls.length;
+
+    await act(async () => {
+      fireEvent.click(utils.getByLabelText("Mute istio-proxy across all pods"));
+    });
+    // Still three: the freed budget must not drag web-3 back in, and no new
+    // stream may open against it. (It streamed before being deselected, so the
+    // assertion has to be scoped to calls made after the mute.)
+    expect(utils.getByText(/3\/4 pods/)).toBeInTheDocument();
+    expect(
+      m.calls
+        .slice(before)
+        .filter((c) => c.cmd === "start_log_stream")
+        .map((c) => String(c.args!.pod)),
+    ).not.toContain("web-3");
   });
 
   it("renders the empty state when nothing resolves to a pod", async () => {

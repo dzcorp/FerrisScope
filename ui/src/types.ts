@@ -477,10 +477,25 @@ export type LogPodTarget = {
   name: string;
 };
 
+// What role a container plays in its pod. `init` runs to completion before the
+// pod starts (its log is a fixed dump); `sidecar` is the K8s 1.29+ native form
+// — declared under `spec.initContainers` with `restartPolicy: Always`, so it
+// keeps running and streams like a main container. Classic injected sidecars
+// (istio-proxy, linkerd) sit in `spec.containers` and read as `main`; the API
+// gives us no way to tell them apart.
+export type LogContainerKind = "init" | "sidecar" | "main";
+
+export type LogContainer = {
+  name: string;
+  kind: LogContainerKind;
+};
+
 export type ResolvedLogPod = {
   namespace: string;
   name: string;
-  containers: string[];
+  // Init containers and native sidecars first (manifest order), then
+  // `spec.containers` — mirrors the pod row's `container_states` ordering.
+  containers: LogContainer[];
 };
 
 export type ResolvedLogPods = {

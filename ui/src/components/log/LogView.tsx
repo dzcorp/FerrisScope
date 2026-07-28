@@ -11,6 +11,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
+import { LogRing } from "../../lib/logRing";
 import {
   clusterAccent,
   FF_MONO,
@@ -80,43 +81,6 @@ type LineEntry = {
   src: string;
 };
 
-// Ring buffer over a fixed-capacity array. Append is O(1) (overwrites the
-// oldest slot when full); `toArray` materialises the visible slice once
-// per render. Replaces the prior `[...prev, entry]` + slice pattern that
-// allocated a 5000-entry array on every received line.
-class LineRing {
-  private buf: (LineEntry | undefined)[];
-  private start = 0;
-  private len = 0;
-  constructor(private cap: number) {
-    this.buf = new Array(cap);
-  }
-  push(entry: LineEntry) {
-    if (this.len < this.cap) {
-      this.buf[(this.start + this.len) % this.cap] = entry;
-      this.len += 1;
-    } else {
-      this.buf[this.start] = entry;
-      this.start = (this.start + 1) % this.cap;
-    }
-  }
-  size() {
-    return this.len;
-  }
-  toArray(): LineEntry[] {
-    const out: LineEntry[] = new Array(this.len);
-    for (let i = 0; i < this.len; i++) {
-      out[i] = this.buf[(this.start + i) % this.cap]!;
-    }
-    return out;
-  }
-  clear() {
-    this.buf = new Array(this.cap);
-    this.start = 0;
-    this.len = 0;
-  }
-}
-
 type Props = {
   // Console tokens for the scrollable log BODY — the terminal surface, which
   // stays dark when `darkConsole` is on regardless of the app's light/dark mode.
@@ -147,7 +111,9 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
   const [downloading, setDownloading] = useState(false);
   const lineSeq = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const ringRef = useRef<LineRing>(new LineRing(DEFAULT_MAX_LINES));
+  const ringRef = useRef<LogRing<LineEntry>>(
+    new LogRing<LineEntry>(DEFAULT_MAX_LINES),
+  );
   const capRef = useRef<number>(DEFAULT_MAX_LINES);
   const pausedRef = useRef(false);
   // Per-source stream statuses, keyed by source key. The aggregate is what
@@ -408,6 +374,10 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
     const desired = new Map(sourcesRef.current.map((s) => [s.key, s]));
     wantedRef.current = new Set(desired.keys());
     const multi = desired.size > 1;
+    // Redistribute the scrollback quota before any stream starts, so a pod
+    // joining a busy view doesn't briefly get the whole buffer and then have it
+    // clawed back. Idempotent when the count is unchanged.
+    ringRef.current.setSourceCount(desired.size);
     const running = runningRef.current;
     const { toStart, toStop } = reconcileStreams(running.keys(), desired.keys());
     // Wholesale swap to a different target (no key carried over): clear the ring
@@ -504,17 +474,14 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
     });
   }, []);
 
-  // Swap the ring for one of the new capacity, preserving the newest lines.
-  // Shrinking drops the oldest overflow — same semantics as normal rollover.
+  // Re-cap the buffer, preserving each source's newest lines. Shrinking drops
+  // the oldest overflow — same semantics as normal rollover.
   const changeLineCap = useCallback((next: number) => {
     if (next === capRef.current) return;
-    const old = ringRef.current.toArray();
-    const ring = new LineRing(next);
-    for (const e of old.slice(-next)) ring.push(e);
-    ringRef.current = ring;
+    ringRef.current.setTotalCap(next);
     capRef.current = next;
     setLineCap(next);
-    setLines(ring.toArray());
+    setLines(ringRef.current.toArray());
   }, []);
 
   // Export the buffered lines (all of them, paused or not) to a user-chosen

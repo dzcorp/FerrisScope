@@ -17,7 +17,17 @@ import {
   DEFAULT_TAIL_LINES,
   sourceKey,
   type LogViewSource,
+  type ObservedPod,
 } from "../../lib/logSources";
+import {
+  containerLabel,
+  defaultLogContainer,
+  orderContainers,
+} from "../../lib/podContainers";
+import { useContainerMute } from "../log/useContainerMute";
+import { usePodSelection } from "../log/usePodSelection";
+import { SourceRail } from "../log/SourceRail";
+import type { LogContainer } from "../../types";
 
 // Inline Pod-logs surface for the detail-panel "Logs" tab. The actual
 // streaming + virtualization + footer toggles live in the shared
@@ -50,17 +60,21 @@ export function InlineLogTab({
   clusterId: string;
   namespace: string;
   name: string;
-  containers: string[];
+  // Every loggable container, including init containers and native sidecars.
+  containers: LogContainer[];
   defaultContainer?: string | null;
 }) {
   const t = useResolvedTheme().tokens;
   // The log body + footer render as a console (dark by default); the tab
   // chrome above stays in the active theme. See `useConsoleTokens`.
   const consoleT = useConsoleTokens();
+  // Picker order (main → sidecar → init) so a pod with an init container still
+  // opens on its app container rather than on something already terminated.
+  const ordered = useMemo(() => orderContainers(containers), [containers]);
   const initialContainer =
-    (defaultContainer && containers.includes(defaultContainer)
+    (defaultContainer && ordered.some((c) => c.name === defaultContainer)
       ? defaultContainer
-      : containers[0]) ?? null;
+      : defaultLogContainer(ordered)) ?? null;
   const [container, setContainer] = useState<string | null>(initialContainer);
   // Show the previously-terminated container instance instead of the live one
   // (crash diagnosis — issue #63). Single-pod only.
@@ -81,15 +95,17 @@ export function InlineLogTab({
   // siblings to "cinder-c…" until the operator picks one to read its
   // full label.
   const popoverMinWidth = useMemo(() => {
-    if (containers.length <= 1) return undefined;
+    if (ordered.length <= 1) return undefined;
     const font = "12.5px system-ui, -apple-system, Segoe UI, sans-serif";
     let widest = 0;
-    for (const c of containers) {
-      const w = measureLabel(c, font);
+    // Measure the rendered label, suffix included — "(sidecar)" is wider than
+    // some container names on its own.
+    for (const c of ordered) {
+      const w = measureLabel(containerLabel(c), font);
       if (w > widest) widest = w;
     }
     return Math.min(480, Math.ceil(widest) + POPOVER_CHROME);
-  }, [containers]);
+  }, [ordered]);
 
   const onStateChange = useCallback((s: LogViewState) => setView(s), []);
 
@@ -113,6 +129,8 @@ export function InlineLogTab({
               namespace,
               pod: name,
               container,
+              containerKind:
+                ordered.find((c) => c.name === container)?.kind ?? "main",
               previous,
               tailLines,
               label: "",
@@ -120,7 +138,7 @@ export function InlineLogTab({
             },
           ]
         : [],
-    [clusterId, namespace, name, container, previous, tailLines],
+    [clusterId, namespace, name, container, ordered, previous, tailLines],
   );
 
   // Terse label — the full reason behind `ended` / `error` / `waiting`
@@ -147,7 +165,7 @@ export function InlineLogTab({
         t={t}
         mode={{
           kind: "single",
-          containers,
+          containers: ordered,
           active: container,
           onContainer: setContainer,
           popoverMinWidth,
@@ -177,6 +195,10 @@ export function InlineLogTab({
   );
 }
 
+/// Stable empty list so `useContainerMute`'s effect doesn't re-run on every
+/// render while the workload's pods are still resolving.
+const EMPTY_PODS: ObservedPod[] = [];
+
 // Inline aggregated-logs surface for workload detail tabs (Deployment /
 // StatefulSet / DaemonSet / ReplicaSet / Job). Resolves the workload's pods
 // via its label selector, then streams every container interleaved — same
@@ -201,11 +223,6 @@ export function InlineWorkloadLogTab({
   );
   const { state, retry } = useObservedPods(targets);
   const [tailLines, setTailLines] = useState<number | null>(DEFAULT_TAIL_LINES);
-  // Containers muted across the whole workload (noisy sidecars — istio-proxy,
-  // linkerd, etc.). Excluded from every pod's merged stream.
-  const [excluded, setExcluded] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
   const [view, setView] = useState<LogViewState>({
     status: { kind: "starting" },
     paused: false,
@@ -214,17 +231,16 @@ export function InlineWorkloadLogTab({
   });
   const onStateChange = useCallback((s: LogViewState) => setView(s), []);
 
-  const toggleContainer = useCallback((c: string) => {
-    setExcluded((prev) => {
-      const next = new Set(prev);
-      if (next.has(c)) next.delete(c);
-      else next.add(c);
-      return next;
-    });
-  }, []);
-
-  const pods = state.kind === "ready" ? state.pods : [];
+  const pods = state.kind === "ready" ? state.pods : EMPTY_PODS;
+  // Containers muted across the whole workload (noisy sidecars — istio-proxy,
+  // linkerd — plus init containers, which start muted). Excluded from every
+  // pod's merged stream.
+  const { excluded, toggle: toggleContainer } = useContainerMute(pods);
   const universe = useMemo(() => containerUniverse(pods), [pods]);
+  // Which pods stream, when the workload has more replicas than the stream
+  // budget. Seeded with the greedy default so the tab works untouched.
+  const selection = usePodSelection(pods, excluded);
+  const [railOpen, setRailOpen] = useState(false);
   // One cluster only, so the cluster-prefix branch of the label builder
   // never engages — the name lookup can be a stub.
   const built = useMemo(
@@ -233,9 +249,10 @@ export function InlineWorkloadLogTab({
         ? buildLogSources(state.pods, () => "", {
             tailLines,
             excludedContainers: excluded,
+            includedPods: selection.selected,
           })
         : { sources: [] as LogViewSource[], dropped: 0 },
-    [state, tailLines, excluded],
+    [state, tailLines, excluded, selection.selected],
   );
 
   if (state.kind === "loading") {
@@ -303,11 +320,14 @@ export function InlineWorkloadLogTab({
         mode={{
           kind: "aggregated",
           podCount: state.pods.length,
+          selectedPodCount: selection.selected.size,
           streamCount: built.sources.length,
           dropped: built.dropped,
           universe,
           excluded,
           onToggleContainer: toggleContainer,
+          railOpen,
+          onToggleRail: () => setRailOpen((o) => !o),
         }}
         tailLines={tailLines}
         onTailLines={setTailLines}
@@ -332,11 +352,34 @@ export function InlineWorkloadLogTab({
           flexShrink: 0,
         }}
       />
+      {railOpen && (
+        <div
+          style={{
+            padding: "8px 14px",
+            borderBottom: `1px solid ${t.borderSoft}`,
+            flexShrink: 0,
+          }}
+        >
+          <SourceRail
+            t={t}
+            pods={selection.rows}
+            selected={selection.selected}
+            onChange={selection.setSelected}
+            onClose={() => setRailOpen(false)}
+          />
+        </div>
+      )}
       {allMuted ? (
         <EmptyState
           t={t}
-          title="All containers muted"
-          hint="Re-enable a container chip above to stream its logs."
+          title={
+            selection.selected.size === 0 ? "No pods selected" : "All containers muted"
+          }
+          hint={
+            selection.selected.size === 0
+              ? "Pick pods to stream from the pod picker above."
+              : "Re-enable a container above to stream its logs."
+          }
         />
       ) : (
         <LogView

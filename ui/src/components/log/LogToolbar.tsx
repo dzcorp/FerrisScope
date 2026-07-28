@@ -1,9 +1,12 @@
 import type { CSSProperties, ReactNode } from "react";
 import type { Tokens } from "../../theme";
-import { FF_MONO, FS_SM, FS_XS } from "../../theme";
+import { FF_MONO, FS_SM } from "../../theme";
 import { Select } from "../ui";
 import { PreviousLogsToggle } from "./PreviousControls";
 import { TAIL_OPTIONS } from "../../lib/logSources";
+import { containerLabel } from "../../lib/podContainers";
+import { ContainerMuteMenu } from "./ContainerMuteMenu";
+import type { LogContainer } from "../../types";
 
 // Shared control strip for all three log surfaces — the slide-in overlay
 // (`LogPanel`), the single-pod detail tab (`InlineLogTab`) and the workload
@@ -13,7 +16,6 @@ import { TAIL_OPTIONS } from "../../lib/logSources";
 // of state (container, previous, tail, muted set) is owned by the caller.
 
 const CONTROL_H = 26;
-const RADIUS = "var(--fs-radius-sm, 4px)";
 // Popover min width for the tail picker — fits the longest label ("all
 // history") without clipping. See the `popoverMinWidth` note below.
 const TAIL_POPOVER_MIN_W = 150;
@@ -31,9 +33,10 @@ function decodeTail(v: string): number | null {
 export type LogToolbarMode =
   | {
       kind: "single";
-      // Every container on the pod. A lone container renders as static text
-      // (nothing to pick); 2+ get the Select.
-      containers: string[];
+      // Every loggable container on the pod — init containers and native
+      // sidecars included, in picker order (see `orderContainers`). A lone
+      // container renders as static text (nothing to pick); 2+ get the Select.
+      containers: LogContainer[];
       active: string | null;
       onContainer: (c: string) => void;
       // Pre-measured so the popover fits the longest container name (see
@@ -45,15 +48,22 @@ export type LogToolbarMode =
   | {
       kind: "aggregated";
       podCount: number;
+      // Pods the source rail currently has selected — usually fewer than
+      // `podCount` once a selection exceeds the stream budget.
+      selectedPodCount: number;
       streamCount: number;
       // Streams dropped by the MAX_LOG_SOURCES cap (0 when none).
       dropped: number;
-      // Distinct container names across the resolved pods (see
-      // `containerUniverse`). Rendered as mute toggles — muting one drops it
-      // from every pod's merged stream.
-      universe: string[];
+      // Distinct containers across the resolved pods (see `containerUniverse`).
+      // Rendered as mute toggles — muting one drops it from every pod's merged
+      // stream.
+      universe: LogContainer[];
       excluded: ReadonlySet<string>;
       onToggleContainer: (c: string) => void;
+      // Source-rail disclosure. The rail itself renders below the toolbar (it
+      // needs the full panel width), so the toolbar only owns the trigger.
+      railOpen: boolean;
+      onToggleRail: () => void;
     };
 
 export function LogToolbar({
@@ -159,7 +169,12 @@ function SingleControls({
           fullWidth={false}
           value={mode.active ?? ""}
           onChange={(v) => mode.onContainer(v)}
-          options={mode.containers.map((c) => ({ value: c, label: c }))}
+          // Value stays the bare container name (that's what the kubelet takes);
+          // only the label carries the "(init)" / "(sidecar)" suffix.
+          options={mode.containers.map((c) => ({
+            value: c.name,
+            label: containerLabel(c),
+          }))}
           popoverMinWidth={mode.popoverMinWidth}
           style={{
             fontFamily: FF_MONO,
@@ -170,7 +185,7 @@ function SingleControls({
         />
       ) : (
         <span style={{ fontSize: FS_SM, color: t.textMuted, fontFamily: FF_MONO }}>
-          container: {mode.active ?? "—"}
+          container: {mode.containers[0] ? containerLabel(mode.containers[0]) : "—"}
         </span>
       )}
       <PreviousLogsToggle t={t} active={mode.previous} onToggle={mode.onPrevious} />
@@ -187,47 +202,38 @@ function AggregatedControls({
 }) {
   return (
     <>
-      <span style={{ fontSize: FS_SM, color: t.textMuted, fontFamily: FF_MONO }}>
-        {mode.podCount} pods · {mode.streamCount} streams
-        {mode.dropped > 0 ? ` (+${mode.dropped} over cap)` : ""}
-      </span>
-      {mode.universe.length > 1 && (
-        <div
-          style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}
-        >
-          <span style={{ fontSize: FS_XS, color: t.textMuted }}>containers:</span>
-          {mode.universe.map((c) => {
-            const muted = mode.excluded.has(c);
-            const hint = muted
-              ? `${c} muted — click to include`
-              : `Mute ${c} across all pods`;
-            return (
-              <button
-                key={c}
-                type="button"
-                onClick={() => mode.onToggleContainer(c)}
-                title={hint}
-                aria-label={hint}
-                aria-pressed={!muted}
-                style={{
-                  fontFamily: FF_MONO,
-                  fontSize: FS_XS,
-                  height: 22,
-                  padding: "0 8px",
-                  borderRadius: RADIUS,
-                  border: `1px solid ${muted ? t.borderSoft : t.border}`,
-                  background: muted ? "transparent" : t.chip,
-                  color: muted ? t.textMuted : t.textDim,
-                  textDecoration: muted ? "line-through" : "none",
-                  cursor: "pointer",
-                }}
-              >
-                {c}
-              </button>
-            );
-          })}
-        </div>
-      )}
+      <button
+        type="button"
+        onClick={mode.onToggleRail}
+        aria-expanded={mode.railOpen}
+        title="Choose which pods stream"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          height: 22,
+          padding: "0 8px",
+          borderRadius: "var(--fs-radius-sm, 4px)",
+          border: `1px solid ${mode.dropped > 0 ? t.warn : t.border}`,
+          background: t.chip,
+          color: t.textDim,
+          fontFamily: FF_MONO,
+          fontSize: FS_SM,
+          cursor: "pointer",
+        }}
+      >
+        {mode.selectedPodCount}/{mode.podCount} pods · {mode.streamCount} streams
+        {/* `dropped` means the selection still exceeds the budget — the rail is
+            where that gets resolved, so point at it rather than just reporting
+            the overflow. */}
+        {mode.dropped > 0 ? ` · +${mode.dropped} over cap` : ""}
+      </button>
+      <ContainerMuteMenu
+        t={t}
+        universe={mode.universe}
+        excluded={mode.excluded}
+        onToggle={mode.onToggleContainer}
+      />
     </>
   );
 }

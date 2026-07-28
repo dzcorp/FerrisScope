@@ -34,7 +34,7 @@ function renderTab(containers: string[]) {
       clusterId="kc::prod-eu"
       namespace="default"
       name="api-0"
-      containers={containers}
+      containers={containers.map((name) => ({ name, kind: "main" as const }))}
     />,
   );
 }

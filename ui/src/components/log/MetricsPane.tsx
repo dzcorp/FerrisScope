@@ -1,6 +1,8 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppStore, useResolvedTheme } from "../../store";
 import { FF_MONO, FS_SM, FS_XS, clusterAccent } from "../../theme";
+import type { Tokens } from "../../theme";
 import { BarGauge, EmptyState, LoadingLine } from "../ui";
 import { useMetricsSubscriptions } from "../../lib/useMetricsSubscription";
 import {
@@ -178,89 +180,14 @@ export function MetricsPane({
               text={t.text}
             />
           </div>
-          <div role="table" aria-label="Per-pod metrics">
-            {sorted.map((r) => {
-              const meta = clusterMeta[r.clusterId];
-              return (
-                <div
-                  key={`${r.clusterId} ${r.namespace}/${r.name}`}
-                  role="row"
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: multiCluster
-                      ? "minmax(0, 1fr) 110px 150px 150px"
-                      : "minmax(0, 1fr) 150px 150px",
-                    gap: 12,
-                    alignItems: "center",
-                    padding: "5px 0",
-                    borderBottom: `1px solid ${t.borderSoft}`,
-                    fontFamily: FF_MONO,
-                    fontSize: FS_SM,
-                  }}
-                >
-                  <span
-                    title={`${r.namespace}/${r.name}`}
-                    style={{
-                      color: t.text,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {r.name}
-                  </span>
-                  {multiCluster && (
-                    <span
-                      title={meta?.name}
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 6,
-                        color: t.textDim,
-                        fontSize: FS_XS,
-                        overflow: "hidden",
-                      }}
-                    >
-                      <span
-                        style={{
-                          width: 6,
-                          height: 6,
-                          borderRadius: "50%",
-                          background: meta?.color ?? t.textMuted,
-                          flexShrink: 0,
-                        }}
-                      />
-                      <span
-                        style={{
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {meta?.short ?? r.clusterId}
-                      </span>
-                    </span>
-                  )}
-                  <MetricCell
-                    value={r.metric ? formatCpuMilli(r.metric.cpu_milli) : null}
-                    ratio={r.metric ? r.metric.cpu_milli / maxCpu : 0}
-                    accent={t.accent}
-                    track={t.borderSoft}
-                    dim={t.textMuted}
-                    text={t.textDim}
-                  />
-                  <MetricCell
-                    value={r.metric ? formatMemMib(r.metric.mem_mib) : null}
-                    ratio={r.metric ? r.metric.mem_mib / maxMem : 0}
-                    accent={t.accent}
-                    track={t.borderSoft}
-                    dim={t.textMuted}
-                    text={t.textDim}
-                  />
-                </div>
-              );
-            })}
-          </div>
+          <PodMetricRows
+            rows={sorted}
+            t={t}
+            clusterMeta={clusterMeta}
+            multiCluster={multiCluster}
+            maxCpu={maxCpu}
+            maxMem={maxMem}
+          />
           <div
             style={{
               marginTop: 10,
@@ -274,6 +201,206 @@ export function MetricsPane({
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+type ClusterMeta = { name: string; short: string; color: string };
+
+/// Row height used to seed the virtualizer. Rows are single-line by
+/// construction — every cell ellipsises rather than wrapping — so the estimate
+/// is exact and no per-row `measureElement` pass is needed.
+const ROW_H = 27;
+
+/// Below this many pods the list renders flat. A virtualizer needs its own
+/// scroll container, and nesting one inside the panel is a worse experience
+/// than a few dozen extra DOM nodes; past it, the node count is the bigger
+/// problem — a 500-pod DaemonSet is ~4,000 nodes re-rendered on every
+/// metrics-server snapshot.
+const VIRTUALIZE_AT = 60;
+
+/// Max height of the virtualized scroller. Tall enough to be a real list,
+/// short enough to leave the totals row and footnote visible.
+const VIRTUAL_MAX_H = 420;
+
+function PodMetricRows({
+  rows,
+  t,
+  clusterMeta,
+  multiCluster,
+  maxCpu,
+  maxMem,
+}: {
+  rows: PodMetricRow[];
+  t: Tokens;
+  clusterMeta: Record<string, ClusterMeta | undefined>;
+  multiCluster: boolean;
+  maxCpu: number;
+  maxMem: number;
+}) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const virtual = rows.length > VIRTUALIZE_AT;
+  const virtualizer = useVirtualizer({
+    count: virtual ? rows.length : 0,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_H,
+    overscan: 12,
+  });
+
+  if (!virtual) {
+    return (
+      <div role="table" aria-label="Per-pod metrics">
+        {rows.map((r) => (
+          <PodMetricRowView
+            key={`${r.clusterId}/${r.namespace}/${r.name}`}
+            r={r}
+            t={t}
+            meta={clusterMeta[r.clusterId]}
+            multiCluster={multiCluster}
+            maxCpu={maxCpu}
+            maxMem={maxMem}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  const items = virtualizer.getVirtualItems();
+  return (
+    <div
+      ref={scrollRef}
+      role="table"
+      aria-label="Per-pod metrics"
+      aria-rowcount={rows.length}
+      style={{ maxHeight: VIRTUAL_MAX_H, overflowY: "auto" }}
+    >
+      <div
+        style={{
+          height: virtualizer.getTotalSize(),
+          position: "relative",
+          width: "100%",
+        }}
+      >
+        {items.map((item) => {
+          const r = rows[item.index];
+          if (!r) return null;
+          return (
+            <div
+              key={item.key}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                transform: `translateY(${item.start}px)`,
+              }}
+            >
+              <PodMetricRowView
+                r={r}
+                t={t}
+                meta={clusterMeta[r.clusterId]}
+                multiCluster={multiCluster}
+                maxCpu={maxCpu}
+                maxMem={maxMem}
+              />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PodMetricRowView({
+  r,
+  t,
+  meta,
+  multiCluster,
+  maxCpu,
+  maxMem,
+}: {
+  r: PodMetricRow;
+  t: Tokens;
+  meta: ClusterMeta | undefined;
+  multiCluster: boolean;
+  maxCpu: number;
+  maxMem: number;
+}) {
+  return (
+    <div
+      role="row"
+      style={{
+        display: "grid",
+        gridTemplateColumns: multiCluster
+          ? "minmax(0, 1fr) 110px 150px 150px"
+          : "minmax(0, 1fr) 150px 150px",
+        gap: 12,
+        alignItems: "center",
+        padding: "5px 0",
+        borderBottom: `1px solid ${t.borderSoft}`,
+        fontFamily: FF_MONO,
+        fontSize: FS_SM,
+      }}
+    >
+      <span
+        title={`${r.namespace}/${r.name}`}
+        style={{
+          color: t.text,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {r.name}
+      </span>
+      {multiCluster && (
+        <span
+          title={meta?.name}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            color: t.textDim,
+            fontSize: FS_XS,
+            overflow: "hidden",
+          }}
+        >
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: meta?.color ?? t.textMuted,
+              flexShrink: 0,
+            }}
+          />
+          <span
+            style={{
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {meta?.short ?? r.clusterId}
+          </span>
+        </span>
+      )}
+      <MetricCell
+        value={r.metric ? formatCpuMilli(r.metric.cpu_milli) : null}
+        ratio={r.metric ? r.metric.cpu_milli / maxCpu : 0}
+        accent={t.accent}
+        track={t.borderSoft}
+        dim={t.textMuted}
+        text={t.textDim}
+      />
+      <MetricCell
+        value={r.metric ? formatMemMib(r.metric.mem_mib) : null}
+        ratio={r.metric ? r.metric.mem_mib / maxMem : 0}
+        accent={t.accent}
+        track={t.borderSoft}
+        dim={t.textMuted}
+        text={t.textDim}
+      />
     </div>
   );
 }

@@ -38,8 +38,8 @@ pub use fetch::{
     FIELD_MANAGER, HELM_CLUSTER_SOURCE,
 };
 pub use log_pods::{
-    resolve_log_pods, start_log_pod_watch, LogPodEvent, LogPodTarget, LogPodWatch, ResolvedLogPod,
-    ResolvedLogPods,
+    resolve_log_pods, start_log_pod_watch, LogContainer, LogContainerKind, LogPodEvent,
+    LogPodTarget, LogPodWatch, ResolvedLogPod, ResolvedLogPods,
 };
 pub use portforward::{
     new_status_channel, snapshot as forward_snapshot, start as start_forward, ForwardEntry,
