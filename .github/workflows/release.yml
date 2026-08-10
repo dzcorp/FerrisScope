@@ -78,7 +78,7 @@ jobs:
           prefix-key: v2-release-rust${{ env.RUST_TOOLCHAIN }}-${{ matrix.os }}
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -489,7 +489,7 @@ jobs:
           cat PKGBUILD
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: ferrisscope-bin
           pkgbuild: ./PKGBUILD
