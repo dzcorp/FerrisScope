@@ -137,7 +137,7 @@ export function Chip({
     tone === "accent"
       ? { bg: t.accentSoft, fg: t.accent }
       : tone === "warn"
-        ? { bg: "rgba(245,158,11,0.14)", fg: t.warn }
+        ? { bg: t.warnSoft, fg: t.warn }
         : { bg: t.chip, fg: t.textDim };
   return (
     <span

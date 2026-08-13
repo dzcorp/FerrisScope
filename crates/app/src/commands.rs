@@ -440,6 +440,110 @@ pub(crate) async fn diagnose_connection_cmd(
     .map_err(|e| e.to_string())
 }
 
+/// Explain a *failed* connect when the cause looks like the "wrong Google
+/// account" trap: a context whose `gke-gcloud-auth-plugin` entry carries no
+/// `--account`, on a machine with several gcloud accounts, hitting an RBAC 403.
+///
+/// Returns `None` for every other failure — the caller renders nothing. Runs
+/// only after a connect has already failed, so the kubeconfig + gcloud config
+/// reads never touch the happy path.
+///
+/// SSH-sourced contexts are skipped: their kubeconfig lives on the remote host,
+/// so a local exec entry (and a local gcloud install) says nothing about them.
+#[tauri::command]
+pub(crate) async fn connect_hint_cmd(
+    name: String,
+    error: String,
+    state: State<'_, AppState>,
+) -> Result<Option<ferrisscope_core::cloud_identity::ConnectHint>, String> {
+    let context_name = kubeconfig::context_name_from_id(&name).to_owned();
+    let (is_ssh, source_path) = {
+        let s = state.sources.lock().await;
+        (
+            kubeconfig::ssh_for(&name, &s).is_some(),
+            kubeconfig::resolve_path_for(&name, &s),
+        )
+    };
+    if is_ssh {
+        return Ok(None);
+    }
+    // `resolve_path_for` is `None` only when the id names no source we know —
+    // a stale panel for a source the operator has since removed, or an SSH
+    // source with a null `ssh` block. Reading the *default* kubeconfig in that
+    // case would classify whatever context happens to share the name and
+    // produce a confident note about the wrong cluster, so render nothing.
+    //
+    // Resolving to a concrete file (rather than passing `None` and letting
+    // kube-rs merge every `KUBECONFIG` entry) also keeps this in step with the
+    // pin, which can only ever write one file: if the failing context lives in
+    // the second entry of a multi-file `KUBECONFIG`, the lookup misses here and
+    // no note is offered, instead of offering a pin that always fails.
+    let Some(source_path) = source_path else {
+        return Ok(None);
+    };
+    // Reads the kubeconfig + gcloud config dir from disk → keep off the async
+    // worker, same as `diagnose_connection_cmd`.
+    tokio::task::spawn_blocking(move || {
+        ferrisscope_core::cloud_identity::hint_for_context(
+            &context_name,
+            Some(source_path.as_path()),
+            &error,
+        )
+    })
+    .await
+    .map_err(|e| format!("connect hint task failed: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+/// Pin a context's exec entry to an explicit cloud identity — a gcloud
+/// `--account` or an AWS `AWS_PROFILE`, whichever the exec command calls for.
+///
+/// The kubeconfig is backed up before the first edit. For gcloud (and only
+/// gcloud) the pin also drops `~/.kube/gke_gcloud_auth_plugin_cache`, which can
+/// still be holding a token minted under the previous identity; see
+/// `cloud_identity::pin_identity`. Azure is refused there — kubelogin has no
+/// per-context account flag.
+///
+/// Refuses SSH-sourced contexts — the kubeconfig being described lives on
+/// another host and isn't ours to rewrite.
+#[tauri::command]
+pub(crate) async fn pin_cloud_identity_cmd(
+    name: String,
+    identity: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let context_name = kubeconfig::context_name_from_id(&name).to_owned();
+    let (is_ssh, source_path) = {
+        let s = state.sources.lock().await;
+        (
+            kubeconfig::ssh_for(&name, &s).is_some(),
+            kubeconfig::resolve_path_for(&name, &s),
+        )
+    };
+    if is_ssh {
+        return Err(
+            "this context comes from a remote kubeconfig over SSH — pin the identity on that host"
+                .to_owned(),
+        );
+    }
+    // `resolve_path_for` applies the default-kubeconfig fallback *only* for
+    // ids from the implicit default source. Falling back on a bare
+    // `source_path_for` miss would be wrong three ways out of four: an unknown
+    // source id, a removed source, and an SSH source whose `ssh` block is null
+    // (representable — the field is `#[serde(default)] Option`, so the
+    // `is_ssh` check above misses it) would each rewrite the operator's *local*
+    // kubeconfig for a context that does not live there.
+    let path = source_path.ok_or_else(|| {
+        format!("could not locate the kubeconfig file backing {name} — nothing was written")
+    })?;
+    tokio::task::spawn_blocking(move || {
+        ferrisscope_core::cloud_identity::pin_identity(&path, &context_name, &identity)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("pin identity task failed: {e}"))?
+}
+
 /// Wall-clock budget for `connect_context`. Long enough for slow auth plugins
 /// (gke/aws/oidc shell out and can be sluggish on a cold cache) but short
 /// enough that a wedged apiserver doesn't pin the panel forever. The frontend

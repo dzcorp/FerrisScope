@@ -383,20 +383,37 @@ pub fn source_path_for(id: &str, file: &SourcesFile) -> Option<PathBuf> {
     if source_id == DEFAULT_SOURCE_ID {
         return None;
     }
-    // Folder sources get child ids "<src_id>/<filename>"; strip the suffix to
-    // find the real source, then re-derive the file path.
-    if let Some((parent_id, child_name)) = source_id.split_once('/') {
-        let src = file.sources.iter().find(|s| s.id == parent_id)?;
-        return Some(src.path.join(child_name));
-    }
+    // Folder sources get child ids "<src_id>/<filename>"; split the suffix off
+    // so the *parent* is what gets looked up, then re-derive the file path.
+    let (source_id, child_name) = match source_id.split_once('/') {
+        Some((parent_id, child)) => (parent_id, Some(child)),
+        None => (source_id, None),
+    };
     let src = file.sources.iter().find(|s| s.id == source_id)?;
     // SSH sources have a synthetic "label path" (`user@host:port`) that's not
     // a real filesystem path; refuse to hand it to file-watching / kubeconfig
-    // edit code.
+    // edit code. Checked *before* the child branch: a folder-child id under an
+    // SSH source would otherwise skip this and yield a bogus local path.
     if src.kind == SourceKind::Ssh {
         return None;
     }
-    Some(src.path.clone())
+    let Some(child) = child_name else {
+        return Some(src.path.clone());
+    };
+    // `child` is a bare `file_name()` by construction (see `scan_folder`), so
+    // requiring exactly one normal component can never reject a real entry.
+    // Validating it matters because the result is a *write* target for the
+    // kubeconfig-editing commands, and `Path::join` silently honours an
+    // absolute component by discarding the base entirely
+    // (`join("/etc/kubernetes/admin.conf")` escapes the folder) as well as
+    // `..` traversal.
+    let mut components = Path::new(child).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return None;
+    }
+    Some(src.path.join(child))
 }
 
 /// Look up the SSH source backing an `id`, if any. Returns `(source_id,

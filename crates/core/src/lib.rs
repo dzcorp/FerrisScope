@@ -7,6 +7,7 @@
 //! later back a TUI or headless CLI.
 
 pub mod atomic_write;
+pub mod cloud_identity;
 pub mod cluster;
 pub mod error;
 pub mod fleet;

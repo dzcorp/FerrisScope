@@ -901,9 +901,20 @@ pub struct ConnectionDiagnostics {
     pub env_presence: Vec<EnvPresence>,
 }
 
-/// Extract a context's exec command + args (the args matter for diagnostics:
-/// e.g. `gke-gcloud-auth-plugin` vs `gcloud config config-helper`).
-fn exec_for_context(kc: &Kubeconfig, context_name: &str) -> Option<(String, Vec<String>)> {
+/// A context's exec-credential plugin as declared in the kubeconfig.
+pub struct ExecSpec {
+    pub command: String,
+    pub args: Vec<String>,
+    /// The exec `env` block, flattened to `(name, value)` pairs. These are
+    /// applied to the plugin process, so a `CLOUDSDK_CORE_ACCOUNT` here pins the
+    /// gcloud identity exactly as an `--account` flag would —
+    /// [`crate::cloud_identity::classify`] needs both to classify a context.
+    pub env: Vec<(String, String)>,
+}
+
+/// Extract a context's exec command + args + env (the args matter for
+/// diagnostics: e.g. `gke-gcloud-auth-plugin` vs `gcloud config config-helper`).
+fn exec_for_context(kc: &Kubeconfig, context_name: &str) -> Option<ExecSpec> {
     let user = kc
         .contexts
         .iter()
@@ -918,7 +929,20 @@ fn exec_for_context(kc: &Kubeconfig, context_name: &str) -> Option<(String, Vec<
         .and_then(|ai| ai.exec.as_ref())?;
     let command = exec.command.clone()?;
     let args = exec.args.clone().unwrap_or_default();
-    Some((command, args))
+    // kube models the exec env as a list of free-form maps rather than a typed
+    // pair, mirroring the `{name, value}` shape the k8s exec spec uses. Entries
+    // missing either key are meaningless to the plugin, so drop them.
+    let env = exec
+        .env
+        .as_ref()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|e| Some((e.get("name")?.clone(), e.get("value")?.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ExecSpec { command, args, env })
 }
 
 /// Expand one candidate into the forms a spawn would actually try. On Windows a
@@ -962,6 +986,24 @@ fn resolve_in_path(command: &str) -> Option<PathBuf> {
         .find(|cand| cand.is_file())
 }
 
+/// The exec-credential plugin declared for a context, read fresh off disk.
+/// `Ok(None)` when the context authenticates without one (token, client cert,
+/// in-cluster). Backs [`crate::cloud_identity::hint_for_context`].
+///
+/// # Errors
+///
+/// Propagates kubeconfig read/parse failures.
+pub fn exec_spec_for_context(
+    context_name: &str,
+    source_path: Option<&Path>,
+) -> Result<Option<ExecSpec>> {
+    let kubeconfig = match source_path {
+        Some(p) => Kubeconfig::read_from(p)?,
+        None => Kubeconfig::read()?,
+    };
+    Ok(exec_for_context(&kubeconfig, context_name))
+}
+
 /// Build a read-only [`ConnectionDiagnostics`] for a context. Reads the
 /// kubeconfig and inspects the process env/PATH; never executes the plugin.
 pub fn diagnose_context(
@@ -972,13 +1014,13 @@ pub fn diagnose_context(
         Some(p) => Kubeconfig::read_from(p)?,
         None => Kubeconfig::read()?,
     };
-    let exec = exec_for_context(&kubeconfig, context_name).map(|(command, args)| {
-        let resolved = resolve_in_path(&command);
+    let exec = exec_for_context(&kubeconfig, context_name).map(|spec| {
+        let resolved = resolve_in_path(&spec.command);
         ExecProbe {
             found: resolved.is_some(),
             resolved_path: resolved.map(|p| p.display().to_string()),
-            command,
-            args,
+            command: spec.command,
+            args: spec.args,
         }
     });
     let resolved_path = std::env::var_os("PATH")
@@ -1193,7 +1235,7 @@ users:
     }
 
     #[test]
-    fn exec_for_context_extracts_command_and_args() {
+    fn exec_for_context_extracts_command_args_and_env() {
         let yaml = r#"
 apiVersion: v1
 kind: Config
@@ -1203,6 +1245,8 @@ clusters:
 contexts:
 - name: aws
   context: { cluster: c, user: aws-user }
+- name: gke
+  context: { cluster: c, user: gke-user }
 users:
 - name: aws-user
   user:
@@ -1210,11 +1254,37 @@ users:
       apiVersion: client.authentication.k8s.io/v1beta1
       command: aws
       args: ["eks", "get-token", "--cluster-name", "prod"]
+- name: gke-user
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: gke-gcloud-auth-plugin
+      env:
+      - name: CLOUDSDK_CORE_ACCOUNT
+        value: a@example.com
+      - name: BROKEN
 "#;
         let kc = Kubeconfig::from_yaml(yaml).expect("parse kubeconfig");
-        let (cmd, args) = exec_for_context(&kc, "aws").expect("exec present");
-        assert_eq!(cmd, "aws");
-        assert_eq!(args, vec!["eks", "get-token", "--cluster-name", "prod"]);
+        let spec = exec_for_context(&kc, "aws").expect("exec present");
+        assert_eq!(spec.command, "aws");
+        assert_eq!(
+            spec.args,
+            vec!["eks", "get-token", "--cluster-name", "prod"]
+        );
+        assert!(spec.env.is_empty());
+
+        let spec = exec_for_context(&kc, "gke").expect("exec present");
+        // The `{name}`-only entry carries no value, so it's dropped rather than
+        // surfaced as an empty-valued pin.
+        assert_eq!(
+            spec.env,
+            vec![(
+                "CLOUDSDK_CORE_ACCOUNT".to_owned(),
+                "a@example.com".to_owned()
+            )]
+        );
+        assert!(spec.args.is_empty());
+
         assert!(exec_for_context(&kc, "missing").is_none());
     }
 

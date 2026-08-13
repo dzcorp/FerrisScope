@@ -115,6 +115,9 @@ export type Tokens = {
   // may re-tone them to match its character.
   good: string;
   warn: string;
+  /// Low-opacity wash of `warn`, for the background of warning surfaces
+  /// (inline notes, warn chips). Mirrors the `accentSoft` convention.
+  warnSoft: string;
   bad: string;
   info: string;
   unknown: string;
@@ -260,6 +263,7 @@ const DEFAULT_LIGHT: ColorTokens = {
   bulkBg: "#11161d",
   good: "#10b981",
   warn: "#f59e0b",
+  warnSoft: "rgba(245,158,11,0.12)",
   bad: "#f43f5e",
   info: "#3b82f6",
   unknown: "#94a3b8",
@@ -291,6 +295,7 @@ const DEFAULT_DARK: ColorTokens = {
   bulkBg: "#161a20",
   good: "#10b981",
   warn: "#f59e0b",
+  warnSoft: "rgba(245,158,11,0.14)",
   bad: "#f43f5e",
   info: "#3b82f6",
   unknown: "#64748b",
@@ -427,6 +432,7 @@ const LENS_LIGHT: ColorTokens = {
   bulkBg: "#0f172a",
   good: "#16a34a",
   warn: "#f59e0b",
+  warnSoft: "rgba(245,158,11,0.12)",
   bad: "#dc2626",
   info: "#2563eb",
   unknown: "#94a3b8",
@@ -458,6 +464,7 @@ const LENS_DARK: ColorTokens = {
   bulkBg: "#262a30",
   good: "#22c55e",
   warn: "#f59e0b",
+  warnSoft: "rgba(245,158,11,0.14)",
   bad: "#ef4444",
   info: "#3b82f6",
   unknown: "#64748b",
@@ -573,6 +580,7 @@ const VSCODE_DARK_PLUS: ColorTokens = {
   bulkBg: "#252526",
   good: "#89d185",
   warn: "#cca700",
+  warnSoft: "rgba(204,167,0,0.16)",
   bad: "#f48771",
   info: "#75beff",
   unknown: "#858585",
@@ -608,6 +616,7 @@ const VSCODE_LIGHT_PLUS: ColorTokens = {
   bulkBg: "#1e1e1e",
   good: "#388a34",
   warn: "#bf8803",
+  warnSoft: "rgba(191,136,3,0.14)",
   bad: "#a1260d",
   info: "#0078d4",
   unknown: "#616161",
@@ -718,6 +727,7 @@ const READABLE_LIGHT: ColorTokens = {
   bulkBg: "#1c1a17",
   good: "#15803d",
   warn: "#b45309",
+  warnSoft: "rgba(180,83,9,0.12)",
   bad: "#b91c1c",
   info: "#1d4ed8",
   unknown: "#78716c",
@@ -749,6 +759,7 @@ const READABLE_DARK: ColorTokens = {
   bulkBg: "#22201c",
   good: "#4ade80",
   warn: "#fbbf24",
+  warnSoft: "rgba(251,191,36,0.16)",
   bad: "#fb7185",
   info: "#60a5fa",
   unknown: "#a8a29e",

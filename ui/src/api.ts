@@ -23,6 +23,7 @@ import type {
   ChatEvent,
   ClusterHealthEvent,
   ClusterInfo,
+  ConnectHint,
   ConnectionDiagnostics,
   ClusterProbe,
   ClusterRoleBindingDetail,
@@ -141,6 +142,16 @@ export const api = {
   /// Never executes the plugin.
   diagnoseConnection: (name: string) =>
     invoke<ConnectionDiagnostics>("diagnose_connection_cmd", { name }),
+  /// Explain a failed connect when it looks like the unpinned-gcloud-account
+  /// trap. Resolves to null for every other failure. Called only after a
+  /// connect has already failed.
+  connectHint: (name: string, error: string) =>
+    invoke<ConnectHint | null>("connect_hint_cmd", { name, error }),
+  /// Pin the context's exec entry to an explicit cloud identity (backing the
+  /// kubeconfig up first). Which field gets written — and whether a token cache
+  /// is cleared alongside — is the backend's call, per provider.
+  pinCloudIdentity: (name: string, identity: string) =>
+    invoke<void>("pin_cloud_identity_cmd", { name, identity }),
 
   listResourceKinds: () => invoke<ResourceKind[]>("list_resource_kinds"),
   // CRD-derived dynamic kinds. Per-cluster (CRDs are cluster-local), so

@@ -101,6 +101,28 @@ describe("contexts + connect", () => {
     expect(cap.calls[0]?.cmd).toBe("diagnose_connection_cmd");
     expect(cap.calls[0]?.args).toEqual({ name: "default::ctx-a" });
   });
+
+  it("connectHint → 'connect_hint_cmd' with name + verbatim error", async () => {
+    const cap = captureNext(null);
+    // The backend parses the authenticated identity out of this string, so it
+    // must reach the command uncleaned.
+    await api.connectHint("default::ctx-a", 'User "a@b.io" ... Forbidden');
+    expect(cap.calls[0]?.cmd).toBe("connect_hint_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      name: "default::ctx-a",
+      error: 'User "a@b.io" ... Forbidden',
+    });
+  });
+
+  it("pinCloudIdentity → 'pin_cloud_identity_cmd' with name + identity", async () => {
+    const cap = captureNext(undefined);
+    await api.pinCloudIdentity("default::ctx-a", "a@b.io");
+    expect(cap.calls[0]?.cmd).toBe("pin_cloud_identity_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      name: "default::ctx-a",
+      identity: "a@b.io",
+    });
+  });
 });
 
 describe("subscribeResource", () => {
