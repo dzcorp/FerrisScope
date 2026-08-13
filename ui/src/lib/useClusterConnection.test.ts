@@ -229,3 +229,115 @@ describe("useClusterConnection auto-reconnect", () => {
     expect(useAppStore.getState().clusterReconnecting[CTX.id]).toBeUndefined();
   });
 });
+
+// --- Permanent-failure gating ------------------------------------------
+//
+// Regression: an RBAC 403 used to start a full silent retry session — MAX
+// attempts with exponential backoff, minutes long — even though the same
+// credentials produce the same 403 every time. While that session ran the panel
+// showed the busy "Reconnecting…" banner, which carries neither the Diagnose
+// button nor the cloud-identity note. The one screen explaining "this context
+// is authenticating as the wrong account" was hidden by a loop that could never
+// succeed, and an operator reading it lost it mid-read.
+describe("useClusterConnection permanent-failure gating", () => {
+  const FORBIDDEN: ClusterHealthEvent = {
+    status: "unavailable",
+    reason:
+      'ApiError: namespaces is forbidden: User "ops@example.net" cannot list ' +
+      'resource "namespaces": Forbidden (Status { code: 403 })',
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    healthHandler = null;
+    connectContext.mockReset().mockResolvedValue({ server_version: "v1" });
+    cancelConnect.mockClear();
+    reconnectCluster.mockClear().mockResolvedValue(undefined);
+    useAppStore.setState({
+      ...initial,
+      clusterHealth: {},
+      clusterHealthReason: {},
+      clusterReconnecting: {},
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("starts no retry session when the cluster goes unavailable with a 403", async () => {
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+
+    fireHealth(FORBIDDEN);
+    await flush(backoff(0) * 4);
+
+    // No busy banner and no rebuilt client, so the terminal banner (Diagnose +
+    // cloud-identity note) stays put for as long as the operator needs it.
+    expect(result.current.autoReconnect).toBeNull();
+    expect(reconnectCluster).not.toHaveBeenCalled();
+    // The health flag still reflects reality — only the *retrying* flag is off,
+    // which is what routes the UI to the terminal banner.
+    expect(useAppStore.getState().clusterHealth[CTX.id]).toBe("unavailable");
+    expect(useAppStore.getState().clusterReconnecting[CTX.id]).toBeUndefined();
+  });
+
+  it("still retries a transient unavailable (the gate must stay narrow)", async () => {
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+
+    fireHealth(UNAVAIL);
+    // Armed immediately, exactly as before the gate existed.
+    expect(result.current.autoReconnect).toEqual({ attempt: 1, max: MAX });
+    expect(useAppStore.getState().clusterReconnecting[CTX.id]).toBe(true);
+
+    await flush(backoff(0));
+    expect(reconnectCluster).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends an in-flight retry session as soon as an attempt comes back 403", async () => {
+    // Happens in the field: the cluster is hard-down so a session is running,
+    // then the operator switches cloud account and every attempt starts being
+    // denied. The remaining attempts are pointless and must be abandoned.
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+
+    connectContext.mockRejectedValue(new Error("connection refused"));
+    fireHealth(UNAVAIL);
+    await flush(backoff(0));
+    expect(reconnectCluster).toHaveBeenCalledTimes(1);
+    expect(result.current.autoReconnect).not.toBeNull();
+
+    // Identity drifts: every subsequent connect is denied.
+    connectContext.mockRejectedValue(new Error(FORBIDDEN.reason ?? ""));
+    await flush(backoff(1));
+
+    expect(reconnectCluster).toHaveBeenCalledTimes(2);
+    expect(result.current.autoReconnect).toBeNull();
+    expect(useAppStore.getState().clusterReconnecting[CTX.id]).toBeUndefined();
+
+    // And it stays abandoned — no further attempts trickle in.
+    await flush(backoff(2) + backoff(3) + 30_000);
+    expect(reconnectCluster).toHaveBeenCalledTimes(2);
+  });
+
+  it("a failed first connect arms no retry session at all", async () => {
+    // Not a test of the permanent-failure gate, despite the 403: a first
+    // connect has no session, so `onConnectResolved` returns at the
+    // `!sessionActiveRef` guard before the gate is ever consulted, and this
+    // passes with the gate deleted. Kept because the *behaviour* is worth
+    // pinning — retries are armed by the health probe, never by the initial
+    // connect — but named so it can't be mistaken for gate coverage. The gate
+    // itself is covered by the two tests above.
+    connectContext.mockRejectedValue(
+      new Error("namespaces is forbidden: Forbidden (code: 403)"),
+    );
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+
+    expect(result.current.state.status).toBe("error");
+    await flush(backoff(0) * 4);
+    expect(result.current.autoReconnect).toBeNull();
+    expect(reconnectCluster).not.toHaveBeenCalled();
+  });
+});

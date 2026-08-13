@@ -9,6 +9,7 @@ import {
 import { ClusterBar } from "./ClusterBar";
 import { ResourceTable } from "./ResourceTable";
 import { ConnectionDiagnosticsModal } from "./ConnectionDiagnosticsModal";
+import { CloudIdentityNote } from "./CloudIdentityNote";
 import { Btn, EmptyState, ErrorBlock, LoadingLine } from "./ui";
 
 type Props = {
@@ -61,6 +62,7 @@ export function ClusterPanel({ mode, context }: Props) {
             reason={healthReason}
             onReconnect={reconnect}
             autoReconnect={autoReconnect}
+            diagnoseContext={context}
           >
             {selectedKind ? (
               <ResourceTable
@@ -170,6 +172,7 @@ function ConnectingLabel({
 export function ReconnectBanner({
   title,
   reason,
+  hintReason,
   onReconnect,
   diagnoseContext,
   busy = false,
@@ -178,6 +181,13 @@ export function ReconnectBanner({
   mode: ThemeMode;
   title: string;
   reason: string | null;
+  /// The connect error *verbatim*, for `CloudIdentityNote` to parse. Kept
+  /// separate from `reason` because callers substitute app-authored prose
+  /// there when the backend gave them nothing ("No response from the apiserver
+  /// for 30s…"), and the backend extracts the authenticated identity out of
+  /// this string — feeding it our own sentence would be a lie it has to parse.
+  /// Defaults to `reason` where the two genuinely are the same value.
+  hintReason?: string | null;
   onReconnect: () => void;
   /// When set, renders a "Diagnose" button that opens passive connection
   /// diagnostics for this context. Omitted where diagnosis makes no sense
@@ -238,6 +248,18 @@ export function ReconnectBanner({
             />
           </div>
         )}
+        {/* Gated on the same prop as the Diagnose button, so the note only
+            appears on the terminal "could not connect" banner — not mid
+            auto-reconnect, and not on a cancelled connect. Renders nothing
+            unless the backend recognises cloud identity drift. */}
+        {diagnoseContext && (hintReason ?? reason) && (
+          <CloudIdentityNote
+            t={t}
+            contextId={diagnoseContext.id}
+            reason={(hintReason ?? reason) as string}
+            onReconnect={onReconnect}
+          />
+        )}
       </div>
       {diagnoseContext && (
         <Btn
@@ -278,6 +300,7 @@ export function UnavailableOverlay({
   reason,
   onReconnect,
   autoReconnect,
+  diagnoseContext,
   children,
 }: {
   mode: ThemeMode;
@@ -287,6 +310,12 @@ export function UnavailableOverlay({
   /// Non-null while a silent auto-reconnect session is retrying — swaps the
   /// terminal "Cluster unavailable" banner for the busy progress variant.
   autoReconnect: { attempt: number; max: number } | null;
+  /// Enables Diagnose + the cloud-identity note on the *terminal* banner. A
+  /// cluster can go unavailable because the operator's cloud identity drifted
+  /// mid-session (the heartbeat starts getting 403s), which is the same problem
+  /// the connect-failure banner explains — so it gets the same affordances.
+  /// Omitted while retrying: nothing to act on until the session gives up.
+  diagnoseContext?: ContextInfo;
   children: ReactNode;
 }) {
   // Show the overlay through the whole session: a wedged cluster's retry may
@@ -323,7 +352,9 @@ export function UnavailableOverlay({
             reason ??
             "No response from the apiserver for 30s. Watchers and metrics have been torn down."
           }
+          hintReason={reason}
           onReconnect={onReconnect}
+          diagnoseContext={diagnoseContext}
         />
       )}
       <div

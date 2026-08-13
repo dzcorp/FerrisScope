@@ -1,4 +1,5 @@
 import { logErr } from "./log";
+import { isPermanentConnectFailure } from "./connectFailure";
 import { useEffect, useRef, useState } from "react";
 import { api, onClusterHealth, onClusterInfoChanged } from "../api";
 import { useAppStore } from "../store";
@@ -106,8 +107,8 @@ export function useClusterConnection(context: ContextInfo): {
   // setters above (React state setters and zustand actions are referentially
   // stable), and reads the *current* context id through cidRef.
   const ctlRef = useRef<{
-    onUnavailable: () => void;
-    onConnectResolved: (result: "ok" | "error") => void;
+    onUnavailable: (reason: string | null) => void;
+    onConnectResolved: (result: "ok" | "error", message?: string) => void;
     reset: (resetCounter: boolean) => void;
   } | null>(null);
   if (ctlRef.current === null) {
@@ -168,18 +169,32 @@ export function useClusterConnection(context: ContextInfo): {
     };
 
     ctlRef.current = {
-      onUnavailable() {
+      onUnavailable(reason) {
         // A wedged cluster re-flagging cancels any pending recovery dwell.
         if (dwellTimerRef.current != null) {
           window.clearTimeout(dwellTimerRef.current);
           dwellTimerRef.current = null;
         }
+        // An RBAC 403 won't heal by reconnecting — the probe is being denied,
+        // not dropped. Retrying would spend the whole backoff budget and hide
+        // the terminal banner (Diagnose + cloud-identity note) behind the busy
+        // one for minutes. Hand straight to the manual banner instead.
+        if (reason != null && isPermanentConnectFailure(reason)) {
+          endSession(true);
+          return;
+        }
         scheduleNext(); // starts the session on the first unavailable; advances it after
       },
-      onConnectResolved(result) {
+      onConnectResolved(result, message) {
         attemptInFlightRef.current = false;
         if (!sessionActiveRef.current) return; // no active session → normal behaviour
         if (result === "error") {
+          // Same reasoning as onUnavailable: a deterministic authorization
+          // failure ends the session rather than consuming another attempt.
+          if (message != null && isPermanentConnectFailure(message)) {
+            endSession(true);
+            return;
+          }
           // Hard-down: the connect itself failed, so drive the next attempt now
           // (no unavailable event will arrive — there's no live probe).
           scheduleNext();
@@ -273,7 +288,7 @@ export function useClusterConnection(context: ContextInfo): {
     onClusterHealth(context.id, (evt) => {
       if (cancelled) return;
       applyClusterHealth(context.id, evt.status, evt.reason);
-      if (evt.status === "unavailable") ctlRef.current?.onUnavailable();
+      if (evt.status === "unavailable") ctlRef.current?.onUnavailable(evt.reason);
     }).then((fn) => {
       if (cancelled) fn();
       else unlistenHealth = fn;
@@ -309,7 +324,7 @@ export function useClusterConnection(context: ContextInfo): {
           setState({ status: "cancelled" });
         } else {
           setState({ status: "error", message });
-          ctlRef.current?.onConnectResolved("error");
+          ctlRef.current?.onConnectResolved("error", message);
         }
       });
     // Effect cleanup runs on context change *and* unmount. Either way the

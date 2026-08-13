@@ -153,6 +153,40 @@ export type ConnectionDiagnostics = {
   env_presence: EnvPresence[];
 };
 
+/// Which cloud CLI's identity model a context is on.
+/// Mirrors `ferrisscope_core::cloud_identity::Provider`.
+export type CloudProvider = "gcloud" | "aws" | "azure";
+
+/// What a pin will write, when the provider supports one at all.
+/// Mirrors `ferrisscope_core::cloud_identity::PinOffer`.
+export type PinOffer = {
+  /// What the identity is called for this provider — "account", "profile".
+  /// Drives the button label so the UI carries no per-provider wording.
+  noun: string;
+  /// Everything the pin will do, one complete phrase per effect, rendered
+  /// verbatim in the confirm step.
+  effects: string[];
+};
+
+/// Actionable note attached to a failed connect when the cause looks like cloud
+/// identity drift — a context whose exec entry pins no account/profile, so it
+/// inherits whichever one the cloud CLI last selected.
+/// Mirrors `ferrisscope_core::cloud_identity::ConnectHint`.
+export type ConnectHint = {
+  provider: CloudProvider;
+  title: string;
+  detail: string;
+  /// Identity the apiserver reported in the 403, when it carried one.
+  authenticated_as: string | null;
+  /// Identities configured on this machine — the choices offered by the pin.
+  identities: string[];
+  /// The identity an unpinned context currently authenticates as.
+  active_identity: string | null;
+  /// null when the provider has no per-context pin at all (Azure): the note
+  /// then explains the CLI command to run instead.
+  pin: PinOffer | null;
+};
+
 export type KubeconfigSourceKind = "file" | "folder" | "ssh";
 
 export type SshAuthInput =
