@@ -17,7 +17,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "../../api";
-import { useAppStore } from "../../store";
+import { useAppStore, useClusterLabels } from "../../store";
 import type { Tokens } from "../../theme";
 import { FS_SM, FS_XS } from "../../theme";
 import type { ServicePick } from "../../types";
@@ -100,6 +100,7 @@ function ManualToggle({
 
 export function NewForwardForm({ t, onDone }: { t: Tokens; onDone: () => void }) {
   const contexts = useAppStore((s) => s.contexts);
+  const clusterLabels = useClusterLabels();
   const selectedContext = useAppStore((s) => s.selectedContext);
   const upsertForward = useAppStore((s) => s.upsertForward);
   const upsertGlobalForward = useAppStore((s) => s.upsertGlobalForward);
@@ -294,7 +295,16 @@ export function NewForwardForm({ t, onDone }: { t: Tokens; onDone: () => void })
     }
   };
 
-  const clusterOptions = contexts.map((c) => ({ value: c.id, label: c.name }));
+  // Short name + the coordinate it was stripped of. Without the coordinate
+  // every GKE context in one project truncates to the same
+  // `gke_development-d83ab4a8…` in this narrow select.
+  const clusterOptions = contexts.map((c) => {
+    const l = clusterLabels[c.id];
+    return {
+      value: c.id,
+      label: l?.qualifier ? `${l.short} · ${l.qualifier}` : l?.short ?? c.name,
+    };
+  });
 
   // --- Dynamic-field derivations ---
   const wantsServicePicker =

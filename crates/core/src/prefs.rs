@@ -157,6 +157,13 @@ fn default_dark_console() -> bool {
     true
 }
 
+/// Shared `#[serde(default)]` source for the boolean prefs that ship enabled.
+/// Used by `shorten_cluster_names` / `group_fleet_by_project` so prefs.json
+/// files written before those fields existed opt in on next launch.
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub refresh_sec: u32,
@@ -177,6 +184,18 @@ pub struct Settings {
     /// What scope the app opens with after a restart. Settings → General.
     #[serde(default)]
     pub startup_scope: StartupScope,
+    /// Render machine-generated kubeconfig context names (GKE's
+    /// `gke_<project>_<location>_<cluster>`, EKS cluster ARNs, eksctl's
+    /// `<identity>@<cluster>.<region>.eksctl.io`, OpenShift's
+    /// `<ns>/<host>/<user>`) as just the cluster segment. Names the app
+    /// doesn't recognise are left untouched. Settings → Appearance.
+    #[serde(default = "default_true")]
+    pub shorten_cluster_names: bool,
+    /// Bucket the fleet landing's cards by the project / account / region the
+    /// shortened names were stripped of, so the shared qualifier appears once
+    /// on a sub-header instead of on every row. Settings → Appearance.
+    #[serde(default = "default_true")]
+    pub group_fleet_by_project: bool,
 }
 
 /// Restore-on-launch behaviour. `LatestView` reopens exactly what was on
@@ -206,6 +225,8 @@ impl Default for Settings {
             fleet_view: FleetView::default(),
             dark_console: default_dark_console(),
             startup_scope: StartupScope::default(),
+            shorten_cluster_names: default_true(),
+            group_fleet_by_project: default_true(),
         }
     }
 }
@@ -427,6 +448,48 @@ mod tests {
             prefs.update.auto_check_enabled,
             "auto_check_enabled must default to true so legacy installs opt in"
         );
+    }
+
+    #[test]
+    fn legacy_prefs_without_cluster_name_settings_default_on() {
+        // A prefs.json written before the cluster-name-shortening settings
+        // existed must deserialise cleanly with both flags on, so existing
+        // installs get the shorter names (and the project grouping) without
+        // having to visit Settings.
+        let legacy = r#"{
+            "theme": "dark",
+            "settings": {
+                "refresh_sec": 15,
+                "confirm_destructive": true,
+                "show_system_ns": false,
+                "density": "comfortable",
+                "mono_tables": true,
+                "refresh_on_launch": true
+            },
+            "ui": {}
+        }"#;
+        let prefs = parse(legacy);
+        assert!(
+            prefs.settings.shorten_cluster_names,
+            "shorten_cluster_names must default to true for legacy prefs"
+        );
+        assert!(
+            prefs.settings.group_fleet_by_project,
+            "group_fleet_by_project must default to true for legacy prefs"
+        );
+    }
+
+    #[test]
+    fn cluster_name_settings_round_trip_when_disabled() {
+        // Opting out must survive a save/load cycle — a `false` written to
+        // disk must not be re-defaulted back to `true` by serde.
+        let mut prefs = Prefs::default();
+        prefs.settings.shorten_cluster_names = false;
+        prefs.settings.group_fleet_by_project = false;
+        let json = serde_json::to_string(&prefs).expect("serialize");
+        let back = parse(&json);
+        assert!(!back.settings.shorten_cluster_names);
+        assert!(!back.settings.group_fleet_by_project);
     }
 
     #[test]

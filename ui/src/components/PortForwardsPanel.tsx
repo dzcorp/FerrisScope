@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { useAppStore, useResolvedTheme } from "../store";
+import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
 import { FF_MONO, FONT_SANS, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS } from "../theme";
 import type {
   ForwardEntry,
@@ -33,6 +33,7 @@ export function PortForwardsPanel({ mode }: Props) {
   const removeForward = useAppStore((s) => s.removeForward);
   const upsertForward = useAppStore((s) => s.upsertForward);
   const contexts = useAppStore((s) => s.contexts);
+  const clusterLabels = useClusterLabels();
   const globalForwards = useAppStore((s) => s.globalForwards);
   const helperStatus = useAppStore((s) => s.helperStatus);
   const hydrateGlobalForwards = useAppStore((s) => s.hydrateGlobalForwards);
@@ -83,6 +84,14 @@ export function PortForwardsPanel({ mode }: Props) {
   // handled by backend cleanup, but we still want to show the in-memory
   // entry until the status event arrives).
   const clusterLabel = useMemo(() => {
+    const map = new Map(
+      contexts.map((c) => [c.id, clusterLabels[c.id]?.short ?? c.name]),
+    );
+    return (id: string) => map.get(id) ?? id;
+  }, [contexts, clusterLabels]);
+  // Full context name for the row tooltip, so the short label above is
+  // always recoverable.
+  const clusterFullName = useMemo(() => {
     const map = new Map(contexts.map((c) => [c.id, c.name]));
     return (id: string) => map.get(id) ?? id;
   }, [contexts]);
@@ -284,6 +293,7 @@ export function PortForwardsPanel({ mode }: Props) {
                   key={clusterId}
                   t={t}
                   title={clusterLabel(clusterId)}
+                  fullTitle={clusterFullName(clusterId)}
                   entries={items}
                   onStop={onStop}
                   onPinToggle={onPinToggle}
@@ -313,6 +323,7 @@ export function PortForwardsPanel({ mode }: Props) {
 function ClusterGroup({
   t,
   title,
+  fullTitle,
   entries,
   onStop,
   onPinToggle,
@@ -320,7 +331,11 @@ function ClusterGroup({
   onOpen,
 }: {
   t: Tokens;
+  /// Short cluster name — the group heading.
   title: string;
+  /// Full context name, kept on the heading's `title` attribute so the
+  /// shortened heading is always recoverable.
+  fullTitle?: string;
   entries: ForwardEntry[];
   onStop: (id: string) => void;
   onPinToggle: (e: ForwardEntry) => void;
@@ -330,6 +345,7 @@ function ClusterGroup({
   return (
     <div>
       <div
+        title={fullTitle}
         style={{
           padding: "10px 18px 6px",
           background: t.surfaceAlt,

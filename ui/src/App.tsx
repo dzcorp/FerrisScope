@@ -17,6 +17,7 @@ import {
   selectClusterDegraded,
   useActiveClusterIds,
   useAppStore,
+  useClusterLabels,
   useResolvedTheme,
   type ClusterTab,
   type SelectionMeta,
@@ -127,6 +128,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [activeClusterKey, contexts],
   );
+  // Short display names for every cluster, shared by the Dock's tab titles,
+  // the header crumb's multi-cluster summary and the bulk-failure prefixes.
+  const clusterLabels = useClusterLabels();
   // Primary (first) cluster of a tab's scope — feeds the Dock's "new terminal"
   // default and chat target. Only meaningful for the visible (active) tab;
   // inactive Dock pairs are hidden, so a best-effort fallback is fine.
@@ -141,9 +145,12 @@ export default function App() {
       });
       const first = ids[0] ?? "";
       const c = contexts.find((cc) => cc.id === first);
-      return { id: first, name: c?.name ?? first };
+      return {
+        id: first,
+        name: clusterLabels[first]?.short ?? c?.name ?? first,
+      };
     },
-    [contexts, allVirtualContexts],
+    [contexts, allVirtualContexts, clusterLabels],
   );
   const multiClusterActive =
     activeVirtualContext !== null || activeClusterIds.length > 1;
@@ -155,7 +162,10 @@ export default function App() {
     if (activeContexts.length < 2) return undefined;
     const tags = namespaceClusterTags(
       nsClusters,
-      activeContexts.map((c) => ({ id: c.id, name: c.name })),
+      activeContexts.map((c) => ({
+        id: c.id,
+        name: clusterLabels[c.id]?.short ?? c.name,
+      })),
     );
     const colorIdx = clusterColorIndexMap(activeContexts.map((c) => c.id));
     const out: Record<string, { label: string; color: string }[]> = {};
@@ -213,7 +223,9 @@ export default function App() {
   // Display name for a cluster id in bulk-failure prefixes. Imperative read —
   // resolved inside click handlers, so no store subscription is needed.
   const clusterLabelFor = (cid: string) =>
-    useAppStore.getState().contexts.find((c) => c.id === cid)?.name ?? cid;
+    clusterLabels[cid]?.short ??
+    useAppStore.getState().contexts.find((c) => c.id === cid)?.name ??
+    cid;
 
   // YAML compare drawer — armed from the bulk bar when exactly two rows of
   // one kind are selected (any kind; the killer use is the same object on
@@ -822,7 +834,7 @@ export default function App() {
                 ...activeContexts[0]!,
                 name:
                   activeVirtualContext?.name ??
-                  `${activeContexts[0]!.name} +${activeContexts.length - 1}`,
+                  `${clusterLabels[activeContexts[0]!.id]?.short ?? activeContexts[0]!.name} +${activeContexts.length - 1}`,
                 namespace: null,
               }
             : null)
@@ -867,7 +879,7 @@ export default function App() {
                 title={
                   activeVirtualContext
                     ? activeVirtualContext.name
-                    : `${selectedContext?.name ?? "Ad-hoc"} +${activeContexts.length - 1}`
+                    : `${(selectedContext && clusterLabels[selectedContext.id]?.short) ?? selectedContext?.name ?? "Ad-hoc"} +${activeContexts.length - 1}`
                 }
                 viewScopeId={
                   activeVirtualContext

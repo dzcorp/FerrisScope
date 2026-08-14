@@ -2,7 +2,14 @@
 // per-member failure banners with their own Reconnect.
 
 import { describe, it, expect, afterEach } from "vitest";
-import { render, cleanup, act, screen, fireEvent } from "@testing-library/react";
+import {
+  render,
+  cleanup,
+  act,
+  screen,
+  fireEvent,
+  within,
+} from "@testing-library/react";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
 import { resetEventMock, emitMock } from "../test/tauri-event-mock";
 import { useAppStore } from "../store";
@@ -496,5 +503,175 @@ describe("VirtualClusterBar save mode with an active virtual context", () => {
     // single-cluster menu (subtitles present).
     expect(screen.getByText("Talk to the cluster-aware assistant")).toBeTruthy();
     expect(screen.getByText("Merge another cluster into this view")).toBeTruthy();
+  });
+});
+
+describe("VirtualClusterPanel short member names", () => {
+  const GKE_6 = "gke_production-4f83b34d_us-central1_prod-6";
+  const GKE_7 = "gke_production-4f83b34d_us-central1_prod-7";
+  const GKE_MEMBERS = [
+    ctx(`default::${GKE_6}`, GKE_6),
+    ctx(`default::${GKE_7}`, GKE_7),
+  ];
+
+  const renderGke = async () => {
+    setMockInvoke((cmd) => {
+      switch (cmd) {
+        case "connect_context":
+          return { server_version: "1.30", node_count: 1 };
+        case "subscribe_resource":
+          return { rows: [], init_done: true };
+        default:
+          return undefined;
+      }
+    });
+    // Labels resolve against the STORE's fleet (the uniqueness pass is
+    // list-aware), not against the panel's member prop — seed both.
+    act(() => {
+      useAppStore.setState({ contexts: GKE_MEMBERS });
+    });
+    await act(async () => {
+      render(
+        <VirtualClusterPanel
+          mode="dark"
+          title="prod pair"
+          viewScopeId="vctx:t2"
+          contexts={GKE_MEMBERS}
+        />,
+      );
+    });
+    await act(async () => {});
+  };
+
+  it("renders member chips with the short name", async () => {
+    await renderGke();
+    expect(screen.getByText("prod-6")).toBeTruthy();
+    expect(screen.getByText("prod-7")).toBeTruthy();
+    expect(screen.queryByText(GKE_6)).toBeNull();
+  });
+
+  it("falls back to full names when shortening is off", async () => {
+    act(() => {
+      useAppStore.getState().patchSettings({ shortenClusterNames: false });
+    });
+    await renderGke();
+    expect(screen.getByText(GKE_6)).toBeTruthy();
+    expect(screen.queryByText("prod-6")).toBeNull();
+    act(() => {
+      useAppStore.getState().patchSettings({ shortenClusterNames: true });
+    });
+  });
+});
+
+describe("VirtualClusterPanel member strip", () => {
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      ctx(`default::c${i}`, `cluster-${String(i).padStart(2, "0")}`),
+    );
+
+  const renderMembers = async (members: ContextInfo[]) => {
+    setMockInvoke((cmd) => {
+      switch (cmd) {
+        case "connect_context":
+          return { server_version: "1.30", node_count: 1 };
+        case "subscribe_resource":
+          return { rows: [], init_done: true };
+        default:
+          return undefined;
+      }
+    });
+    act(() => {
+      useAppStore.setState({ contexts: members, focusedClusterId: null });
+    });
+    await act(async () => {
+      render(
+        <VirtualClusterPanel
+          mode="dark"
+          title="fleet"
+          viewScopeId="vctx:strip"
+          contexts={members}
+        />,
+      );
+    });
+    await act(async () => {});
+  };
+
+  it("shows every chip and no overflow control for a small view", async () => {
+    await renderMembers(many(2));
+    expect(screen.getByText("cluster-00")).toBeTruthy();
+    expect(screen.getByText("cluster-01")).toBeTruthy();
+    expect(screen.queryByTestId("member-overflow")).toBeNull();
+    // Two healthy clusters need no rollup — the chips already say it.
+    expect(screen.queryByTestId("member-rollup")).toBeNull();
+  });
+
+  it("collapses the tail into a +N control with a rollup at scale", async () => {
+    await renderMembers(many(24));
+    const overflow = screen.getByTestId("member-overflow");
+    expect(overflow.textContent).toMatch(/^\+\d+$/);
+    expect(overflow.getAttribute("aria-label")).toContain("24 clusters");
+    expect(screen.getByTestId("member-rollup")).toBeTruthy();
+  });
+
+  it("opens a searchable list of every member from +N", async () => {
+    await renderMembers(many(24));
+    fireEvent.click(screen.getByTestId("member-overflow"));
+    const dialog = screen.getByRole("dialog", {
+      name: "All clusters in this view",
+    });
+    expect(dialog).toBeTruthy();
+    // The list carries every member, not only the hidden ones, so the
+    // popover is a complete answer to "what is in this view".
+    expect(screen.getByLabelText("Search clusters in this view")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Search clusters in this view"), {
+      target: { value: "cluster-17" },
+    });
+    // Scope the assertions to the popover: the search filters the list, not
+    // the chips still rendered in the strip behind it.
+    const list = within(dialog);
+    expect(list.getAllByText("cluster-17").length).toBeGreaterThan(0);
+    expect(list.queryByText("cluster-03")).toBeNull();
+  });
+
+  it("reports an empty search honestly", async () => {
+    await renderMembers(many(24));
+    fireEvent.click(screen.getByTestId("member-overflow"));
+    fireEvent.change(screen.getByLabelText("Search clusters in this view"), {
+      target: { value: "nope" },
+    });
+    expect(screen.getByText(/No cluster matches/)).toBeTruthy();
+  });
+
+  it("clicking a chip focuses that cluster and clicking again clears it", async () => {
+    await renderMembers(many(3));
+    fireEvent.click(screen.getByText("cluster-01"));
+    expect(useAppStore.getState().focusedClusterId).toBe("default::c1");
+    fireEvent.click(screen.getByText("cluster-01"));
+    expect(useAppStore.getState().focusedClusterId).toBeNull();
+  });
+
+  it("keeps the focused member visible even when it would overflow", async () => {
+    // A focus you cannot see is a trap — the chip that clears it must stay
+    // on screen.
+    await renderMembers(many(24));
+    act(() => {
+      useAppStore.getState().toggleFocusedCluster("default::c23");
+    });
+    expect(screen.getByText("cluster-23")).toBeTruthy();
+    act(() => {
+      useAppStore.getState().clearFocusedCluster();
+    });
+  });
+
+  it("marks the focused chip pressed for assistive tech", async () => {
+    await renderMembers(many(3));
+    fireEvent.click(screen.getByText("cluster-02"));
+    const chip = screen
+      .getAllByRole("button")
+      .find((b) => b.getAttribute("aria-label")?.startsWith("cluster-02"));
+    expect(chip?.getAttribute("aria-pressed")).toBe("true");
+    act(() => {
+      useAppStore.getState().clearFocusedCluster();
+    });
   });
 });

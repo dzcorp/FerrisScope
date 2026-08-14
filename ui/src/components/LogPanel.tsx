@@ -6,7 +6,12 @@ import {
   useRef,
   useState,
 } from "react";
-import { useAppStore, useConsoleTokens, useResolvedTheme } from "../store";
+import {
+  useAppStore,
+  useClusterLabels,
+  useConsoleTokens,
+  useResolvedTheme,
+} from "../store";
 import { tokens, FF_MONO, type ThemeMode, FS_LG, FS_SM, FS_XS } from "../theme";
 import {
   EmptyState,
@@ -126,8 +131,13 @@ export function useObservedPods(targets: ObserveTarget[]): {
     .map((t) => [t.clusterId, t.kindId, t.namespace, t.name].join("\u0000"))
     .join("\u0001");
   const targetsRef = useRef(targets);
+  const clusterLabels = useClusterLabels();
+  // Read through a ref, like `targets`: a display-name change must not
+  // restart every resolve (and every log stream hanging off it).
+  const clusterLabelsRef = useRef(clusterLabels);
   useLayoutEffect(() => {
     targetsRef.current = targets;
+    clusterLabelsRef.current = clusterLabels;
   });
   useEffect(() => {
     const all = targetsRef.current;
@@ -207,7 +217,9 @@ export function useObservedPods(targets: ObserveTarget[]): {
       );
       if (cancelled) return;
       const clusterName = (cid: string) =>
-        useAppStore.getState().contexts.find((c) => c.id === cid)?.name ?? cid;
+        clusterLabelsRef.current[cid]?.short ??
+        useAppStore.getState().contexts.find((c) => c.id === cid)?.name ??
+        cid;
       results.forEach((res, i) => {
         const cid = entries[i]![0];
         if (res.status === "fulfilled") {
@@ -334,6 +346,7 @@ export function LogPanel({
   // + footer render as a console (dark by default).
   const consoleT = useConsoleTokens();
   const contexts = useAppStore((s) => s.contexts);
+  const clusterLabels = useClusterLabels();
   const [tab, setTab] = useState<ObserveTab>(initialTab ?? "logs");
   const { state, retry } = useObservedPods(targets);
   const [container, setContainer] = useState<string | null>(
@@ -373,8 +386,11 @@ export function LogPanel({
   }, [onClose]);
 
   const clusterNameFor = useCallback(
-    (cid: string) => contexts.find((c) => c.id === cid)?.name ?? cid,
-    [contexts],
+    (cid: string) =>
+      clusterLabels[cid]?.short ??
+      contexts.find((c) => c.id === cid)?.name ??
+      cid,
+    [contexts, clusterLabels],
   );
 
   const singlePod =

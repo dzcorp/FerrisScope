@@ -183,3 +183,52 @@ describe("CommandPalette search", () => {
     expect(onClose).toHaveBeenCalled();
   });
 });
+
+describe("CommandPalette short cluster names", () => {
+  const GKE = "gke_production-4f83b34d_us-central1_prod-6";
+  const gkeCtx: ContextInfo = {
+    ...ctxEu,
+    id: `kc::${GKE}`,
+    name: GKE,
+    cluster: GKE,
+    group: "Default",
+  };
+
+  const withGkeFleet = () =>
+    act(() => {
+      useAppStore.setState({
+        contexts: [gkeCtx],
+        selectedContext: null,
+        scopeExtras: [],
+      });
+    });
+
+  it("lists the switch-context row under its short name", async () => {
+    withGkeFleet();
+    setMockInvoke(() => undefined);
+    const utils = render(<CommandPalette mode="dark" onClose={() => {}} />);
+    await typeQuery(utils.getByPlaceholderText(/Search/), "prod-6");
+    expect(utils.getByText("prod-6")).toBeInTheDocument();
+    expect(utils.queryByText(GKE)).toBeNull();
+  });
+
+  it("still matches when the operator types the full context name", async () => {
+    withGkeFleet();
+    setMockInvoke(() => undefined);
+    const utils = render(<CommandPalette mode="dark" onClose={() => {}} />);
+    // Muscle memory: the full name is still in the keyword index even though
+    // the row renders short.
+    await typeQuery(utils.getByPlaceholderText(/Search/), "gke_production-4f8");
+    expect(utils.getByText("prod-6")).toBeInTheDocument();
+  });
+
+  it("shows the stripped coordinate on the row's sub line", async () => {
+    withGkeFleet();
+    setMockInvoke(() => undefined);
+    const utils = render(<CommandPalette mode="dark" onClose={() => {}} />);
+    await typeQuery(utils.getByPlaceholderText(/Search/), "prod-6");
+    expect(
+      utils.getByText(/Default · production-4f83b34d · us-central1/),
+    ).toBeInTheDocument();
+  });
+});

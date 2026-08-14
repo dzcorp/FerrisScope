@@ -200,3 +200,48 @@ describe("NewForwardForm — global (DNS) mode", () => {
     });
   });
 });
+
+describe("NewForwardForm cluster picker labels", () => {
+  const GKE_A = "gke_development-d83ab4a8_europe-west4_truenv-03";
+  const GKE_B = "gke_development-d83ab4a8_europe-west4_autotest-01";
+  const gke = (name: string): ContextInfo => ({
+    ...ctx,
+    id: `default::${name}`,
+    name,
+    cluster: name,
+  });
+
+  it("labels each cluster with its short name plus the stripped coordinate", async () => {
+    // Without the coordinate, every context in one GKE project truncates to
+    // the same `gke_development-d83ab4a8…` in this narrow select.
+    useAppStore.setState({
+      contexts: [gke(GKE_A), gke(GKE_B)],
+      selectedContext: `default::${GKE_A}`,
+    });
+    mockForm([]);
+    render(<NewForwardForm t={t} onDone={() => {}} />);
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByText(
+          "truenv-03 · development-d83ab4a8 · europe-west4",
+        ).length,
+      ).toBeGreaterThan(0),
+    );
+    expect(screen.queryByText(GKE_A)).toBeNull();
+  });
+
+  it("falls back to the full name when shortening is off", async () => {
+    useAppStore.getState().patchSettings({ shortenClusterNames: false });
+    useAppStore.setState({
+      contexts: [gke(GKE_A)],
+      selectedContext: `default::${GKE_A}`,
+    });
+    mockForm([]);
+    render(<NewForwardForm t={t} onDone={() => {}} />);
+    await waitFor(() =>
+      expect(screen.getAllByText(GKE_A).length).toBeGreaterThan(0),
+    );
+    useAppStore.getState().patchSettings({ shortenClusterNames: true });
+  });
+});

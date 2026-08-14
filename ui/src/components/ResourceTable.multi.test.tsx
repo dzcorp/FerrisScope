@@ -325,3 +325,94 @@ describe("ResourceTable — pendingDetail resolution", () => {
     }
   });
 });
+
+describe("cluster focus", () => {
+  const mockThree = () =>
+    mockSubscribe({
+      [CID_A]: [{ uid: "u1", name: "cm-a", namespace: "default" }],
+      [CID_B]: [
+        { uid: "u2", name: "cm-b", namespace: "default" },
+        { uid: "u3", name: "cm-c", namespace: "default" },
+      ],
+    });
+
+  const renderMulti = async (clusters = TWO) => {
+    await act(async () => {
+      render(
+        <ResourceTable
+          mode="dark"
+          clusters={clusters}
+          viewScopeId="vctx:focus"
+          kind={configMapsKind}
+        />,
+      );
+    });
+    await act(async () => {});
+  };
+
+  it("narrows the merged rows to the focused member", async () => {
+    mockThree();
+    await renderMulti();
+    expect(useAppStore.getState().tableCount).toEqual({
+      filtered: 3,
+      total: 3,
+    });
+
+    await act(async () => {
+      useAppStore.getState().toggleFocusedCluster(CID_B);
+    });
+    expect(useAppStore.getState().tableCount).toEqual({
+      filtered: 2,
+      total: 3,
+    });
+  });
+
+  it("restores every row when the focus is cleared", async () => {
+    mockThree();
+    await renderMulti();
+    await act(async () => {
+      useAppStore.getState().toggleFocusedCluster(CID_A);
+    });
+    expect(useAppStore.getState().tableCount?.filtered).toBe(1);
+    await act(async () => {
+      useAppStore.getState().clearFocusedCluster();
+    });
+    expect(useAppStore.getState().tableCount?.filtered).toBe(3);
+  });
+
+  it("ignores a focus on a cluster that is not in the current scope", async () => {
+    // A stale id from a previous scope must not blank the table.
+    mockThree();
+    await renderMulti();
+    await act(async () => {
+      useAppStore.getState().toggleFocusedCluster("default::gone");
+    });
+    expect(useAppStore.getState().tableCount?.filtered).toBe(3);
+  });
+
+  it("ignores a focus in a single-cluster view", async () => {
+    mockSubscribe({
+      [CID_A]: [{ uid: "u1", name: "cm-a", namespace: "default" }],
+    });
+    await renderMulti(ONE);
+    await act(async () => {
+      useAppStore.getState().toggleFocusedCluster(CID_A);
+    });
+    expect(useAppStore.getState().tableCount?.filtered).toBe(1);
+  });
+
+  it("names the focused cluster in the empty state when nothing matches", async () => {
+    mockSubscribe({
+      [CID_A]: [{ uid: "u1", name: "cm-a", namespace: "default" }],
+      [CID_B]: [],
+    });
+    await renderMulti();
+    await act(async () => {
+      useAppStore.getState().toggleFocusedCluster(CID_B);
+    });
+    expect(
+      screen.getByText("No configmaps match the current filters"),
+    ).toBeTruthy();
+    expect(screen.getByText(/cluster prod-us/)).toBeTruthy();
+  });
+});

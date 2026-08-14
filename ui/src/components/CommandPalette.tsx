@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useActiveClusterIds, useAppStore, useResolvedTheme } from "../store";
+import {
+  useActiveClusterIds,
+  useAppStore,
+  useClusterLabels,
+  useResolvedTheme,
+} from "../store";
 import { FF_MONO, type ThemeMode, R_LG, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
 import { Icons, Kbd, resolveKindIcon } from "./ui";
 import { MOD_KEY } from "../lib/keyboard";
@@ -42,6 +47,9 @@ export function CommandPalette({ mode, onClose }: Props) {
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
 
   const contexts = useAppStore((s) => s.contexts);
+  // Rows show the short name; `keywords` below still carries the full
+  // context name, so typing `gke_production-…` keeps matching.
+  const clusterLabels = useClusterLabels();
   const kinds = useAppStore((s) => s.kinds);
   const selectedContext = useAppStore((s) => s.selectedContext);
   const selectContext = useAppStore((s) => s.selectContext);
@@ -152,8 +160,8 @@ export function CommandPalette({ mode, onClose }: Props) {
             }}
           />
         ),
-        label: c.name,
-        sub: `${c.group} · ${c.cluster}${c.namespace ? ` · ns:${c.namespace}` : ""}`,
+        label: clusterLabels[c.id]?.short ?? c.name,
+        sub: `${c.group} · ${clusterLabels[c.id]?.qualifier ?? c.cluster}${c.namespace ? ` · ns:${c.namespace}` : ""}`,
         keywords: `${c.name} ${c.group} ${c.cluster} ${c.namespace ?? ""} ${c.user ?? ""}`.toLowerCase(),
         mono: true,
         action: () => selectContext(c.id),
@@ -274,6 +282,7 @@ export function CommandPalette({ mode, onClose }: Props) {
     return list;
   }, [
     contexts,
+    clusterLabels,
     virtualContexts,
     kinds,
     scopeActive,
@@ -295,7 +304,9 @@ export function CommandPalette({ mode, onClose }: Props) {
     const kindByIdAttempt = new Map(kinds.map((k) => [k.id, k]));
     const multi = activeClusterIds.length > 1;
     const clusterName = (cid: string) =>
-      contexts.find((c) => c.id === cid)?.name ?? cid;
+      clusterLabels[cid]?.short ??
+      contexts.find((c) => c.id === cid)?.name ??
+      cid;
     // Index rows can outlive their kind id — e.g. a CRD upgraded to a new
     // version leaves `crd:`/`wkcrd:` ids no rail entry matches until GC
     // sweeps them. Navigating to a dead kind id is a guaranteed no-op, so
@@ -338,7 +349,15 @@ export function CommandPalette({ mode, onClose }: Props) {
           navigateToDetail(h.kind_id, h.namespace, h.name, clusterId),
       };
     });
-  }, [hits, kinds, t, navigateToDetail, activeClusterIds, contexts]);
+  }, [
+    hits,
+    kinds,
+    t,
+    navigateToDetail,
+    activeClusterIds,
+    contexts,
+    clusterLabels,
+  ]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -576,7 +595,12 @@ export function CommandPalette({ mode, onClose }: Props) {
             >
               search unavailable on{" "}
               {searchFailures
-                .map((cid) => contexts.find((c) => c.id === cid)?.name ?? cid)
+                .map(
+                  (cid) =>
+                    clusterLabels[cid]?.short ??
+                    contexts.find((c) => c.id === cid)?.name ??
+                    cid,
+                )
                 .join(", ")}
             </div>
           )}

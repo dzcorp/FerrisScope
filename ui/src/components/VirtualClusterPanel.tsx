@@ -1,7 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useAppStore, useResolvedTheme } from "../store";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
 import type { ContextInfo } from "../types";
-import { clusterAccent, type ThemeMode, FF_MONO, FS_MD, FS_XS, R_LG, R_MD } from "../theme";
+import {
+  clusterAccent,
+  type ThemeMode,
+  FF_MONO,
+  FS_MD,
+  FS_XS,
+  R_LG,
+  R_MD,
+  R_SM,
+} from "../theme";
 import {
   useClusterConnection,
   type ConnectState,
@@ -10,6 +26,15 @@ import {
   clusterColorIndexMap,
   defaultVirtualContextName,
 } from "../lib/multiCluster";
+import {
+  fitStrip,
+  healthCounts,
+  populatedBuckets,
+  rollupSummary,
+  shouldShowRollup,
+  type MemberHealth,
+  type StripMember,
+} from "../lib/clusterStrip";
 import { ReconnectBanner } from "./ClusterPanel";
 import { AddMenuItem, AddMenuTrigger, NamespaceButton } from "./ClusterBar";
 import { ResourceTable, type TableCluster } from "./ResourceTable";
@@ -93,6 +118,9 @@ export function VirtualClusterPanel({ mode, title, viewScopeId, contexts }: Prop
   // Stable color assignment by sorted member id, independent of order and
   // of which members happen to be reachable.
   const colorIdx = useMemo(() => clusterColorIndexMap(memberIds), [memberIds]);
+  const clusterLabels = useClusterLabels();
+  const shortName = (c: { id: string; name: string }) =>
+    clusterLabels[c.id]?.short ?? c.name;
 
   // The merged table only spans members whose connect landed — connecting
   // members join the fan as they arrive (backend watcher linger makes the
@@ -157,7 +185,7 @@ export function VirtualClusterPanel({ mode, title, viewScopeId, contexts }: Prop
         <ReconnectBanner
           key={c.id}
           mode={mode}
-          title={`${c.name}: reconnecting…`}
+          title={`${shortName(c)}: reconnecting…`}
           reason={
             clusterHealthReason[c.id] ??
             (conns[c.id]?.state.status === "error"
@@ -180,8 +208,8 @@ export function VirtualClusterPanel({ mode, title, viewScopeId, contexts }: Prop
             mode={mode}
             title={
               st?.status === "cancelled"
-                ? `${c.name}: connection cancelled`
-                : `${c.name}: could not connect`
+                ? `${shortName(c)}: connection cancelled`
+                : `${shortName(c)}: could not connect`
             }
             reason={st?.status === "error" ? st.message : null}
             onReconnect={() => conns[c.id]?.reconnect()}
@@ -192,7 +220,7 @@ export function VirtualClusterPanel({ mode, title, viewScopeId, contexts }: Prop
         <ReconnectBanner
           key={c.id}
           mode={mode}
-          title={`${c.name}: cluster unavailable`}
+          title={`${shortName(c)}: cluster unavailable`}
           reason={
             clusterHealthReason[c.id] ??
             "No response from the apiserver for 30s. Watchers and metrics have been torn down."
@@ -254,9 +282,7 @@ function VirtualClusterBar({
   colorIdx: Record<string, number>;
 }) {
   const t = useResolvedTheme().tokens;
-  const clusterHealth = useAppStore((s) => s.clusterHealth);
   const scopeExtras = useAppStore((s) => s.scopeExtras);
-  const removeScopeExtra = useAppStore((s) => s.removeScopeExtra);
   const addScopeExtra = useAppStore((s) => s.addScopeExtra);
   const allContexts = useAppStore((s) => s.contexts);
   const addDockTab = useAppStore((s) => s.addDockTab);
@@ -275,6 +301,9 @@ function VirtualClusterBar({
 
   const memberIds = contexts.map((c) => c.id);
   const addable = allContexts.filter((c) => !memberIds.includes(c.id));
+  const clusterLabels = useClusterLabels();
+  const shortName = (c: { id: string; name: string }) =>
+    clusterLabels[c.id]?.short ?? c.name;
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuMode, setMenuMode] = useState<AddMenuMode>("root");
@@ -339,23 +368,6 @@ function VirtualClusterBar({
     selectVirtualContext(id);
   };
 
-  const stateDot = (c: ContextInfo): { color: string; label: string } => {
-    // Auto-reconnecting wins over the underlying error/unavailable state so the
-    // dot matches the single "reconnecting…" strip the operator sees.
-    if (conns[c.id]?.autoReconnect != null) {
-      return { color: t.warn, label: "reconnecting" };
-    }
-    const st = conns[c.id]?.state.status;
-    if (st === "ok") {
-      return clusterHealth[c.id] === "unavailable"
-        ? { color: t.bad, label: "unavailable" }
-        : { color: t.good, label: "connected" };
-    }
-    if (st === "error" || st === "cancelled") {
-      return { color: t.bad, label: st };
-    }
-    return { color: t.unknown, label: "connecting" };
-  };
 
   return (
     <div
@@ -387,93 +399,13 @@ function VirtualClusterBar({
         aria-hidden
         style={{ width: 1, height: 16, background: t.border, flexShrink: 0 }}
       />
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          flex: 1,
-          minWidth: 0,
-          overflow: "hidden",
-        }}
-      >
-        {contexts.map((c) => {
-          const dot = stateDot(c);
-          const isExtra = scopeExtras.includes(c.id);
-          return (
-            <Tooltip
-              key={c.id}
-              label={`${c.name} — ${dot.label}${isExtra ? " (ad-hoc)" : ""}`}
-            >
-              <span
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "3px 8px",
-                  borderRadius: R_MD,
-                  background: t.chip,
-                  border: `1px ${isExtra ? "dashed" : "solid"} ${t.borderSoft}`,
-                  fontSize: FS_XS,
-                  fontFamily: FF_MONO,
-                  color: t.textDim,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  maxWidth: 220,
-                }}
-              >
-                <span
-                  aria-hidden
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    background: clusterAccent(colorIdx[c.id] ?? 0),
-                    flexShrink: 0,
-                  }}
-                />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {c.name}
-                </span>
-                <span
-                  aria-hidden
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: "50%",
-                    background: dot.color,
-                    flexShrink: 0,
-                  }}
-                />
-                {isExtra && (
-                  <button
-                    type="button"
-                    aria-label={`Remove ${c.name} from this view`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeScopeExtra(c.id);
-                    }}
-                    style={{
-                      border: "none",
-                      background: "transparent",
-                      color: t.textMuted,
-                      cursor: "pointer",
-                      padding: 0,
-                      display: "inline-flex",
-                      alignItems: "center",
-                      lineHeight: 1,
-                      fontSize: FS_XS,
-                    }}
-                  >
-                    ×
-                  </button>
-                )}
-              </span>
-            </Tooltip>
-          );
-        })}
-      </div>
+      <MemberStrip
+        contexts={contexts}
+        conns={conns}
+        colorIdx={colorIdx}
+        shortName={shortName}
+        qualifierFor={(c) => clusterLabels[c.id]?.qualifier ?? null}
+      />
 
       {/* Temporary (ad-hoc) views get a standing Save affordance — the
           same save flow the "+" menu offers, surfaced so the operator
@@ -591,7 +523,7 @@ function VirtualClusterBar({
               contexts.map((c) => (
                 <MenuRow
                   key={c.id}
-                  label={c.name}
+                  label={shortName(c)}
                   hint=""
                   dotColor={clusterAccent(colorIdx[c.id] ?? 0)}
                   onClick={() => {
@@ -599,7 +531,7 @@ function VirtualClusterBar({
                       addDockTab(
                         makeTerminalTab(
                           { mode: "shell", clusterId: c.id, namespace: null },
-                          c.name,
+                          shortName(c),
                         ),
                       );
                     } else {
@@ -628,8 +560,8 @@ function VirtualClusterBar({
                     key={c.id}
                     t={t}
                     icon={Icons.cluster}
-                    title={c.name}
-                    subtitle={c.cluster}
+                    title={shortName(c)}
+                    subtitle={clusterLabels[c.id]?.qualifier ?? c.cluster}
                     onClick={() => {
                       addScopeExtra(c.id);
                       setMenuOpen(false);
@@ -706,6 +638,468 @@ function VirtualClusterBar({
 // Minimal dropdown row for the VirtualClusterBar "+" menu. Kept local —
 // ClusterBar's AddMenuItem carries icon+subtitle chrome this compact menu
 // doesn't need.
+// The bar's member list. Scales from two clusters to a few dozen without a
+// magic cutoff: chips render while they fit the measured width, then a health
+// rollup summarises what's left and a "+N" pill opens the full list.
+//
+// The old strip was a plain flex row with `overflow: hidden`, so past a
+// handful of members the extras were clipped SILENTLY — no count, no way to
+// reach them, and an unreachable member could be invisible.
+function MemberStrip({
+  contexts,
+  conns,
+  colorIdx,
+  shortName,
+  qualifierFor,
+}: {
+  contexts: ContextInfo[];
+  conns: Record<string, MemberConn>;
+  colorIdx: Record<string, number>;
+  shortName: (c: { id: string; name: string }) => string;
+  qualifierFor: (c: ContextInfo) => string | null;
+}) {
+  const t = useResolvedTheme().tokens;
+  const clusterHealth = useAppStore((s) => s.clusterHealth);
+  const scopeExtras = useAppStore((s) => s.scopeExtras);
+  const removeScopeExtra = useAppStore((s) => s.removeScopeExtra);
+  const focusedClusterId = useAppStore((s) => s.focusedClusterId);
+  const toggleFocusedCluster = useAppStore((s) => s.toggleFocusedCluster);
+
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const overflowRef = useRef<HTMLDivElement | null>(null);
+
+  // Measured width of the strip. Seeded optimistically so the first paint
+  // shows chips rather than a "+N" that immediately expands.
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState(640);
+  useLayoutEffect(() => {
+    const el = stripRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width;
+      if (typeof w === "number") setWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const health = (c: ContextInfo): { bucket: MemberHealth; label: string } => {
+    // Auto-reconnecting wins over the underlying error/unavailable state so
+    // the chip matches the single "reconnecting…" strip the operator sees.
+    if (conns[c.id]?.autoReconnect != null) {
+      return { bucket: "connecting", label: "reconnecting" };
+    }
+    const st = conns[c.id]?.state.status;
+    if (st === "ok") {
+      return clusterHealth[c.id] === "unavailable"
+        ? { bucket: "bad", label: "unavailable" }
+        : { bucket: "ok", label: "connected" };
+    }
+    if (st === "error" || st === "cancelled") {
+      return { bucket: "bad", label: st };
+    }
+    return { bucket: "connecting", label: "connecting" };
+  };
+  const bucketColor = (b: MemberHealth) =>
+    b === "ok" ? t.good : b === "bad" ? t.bad : t.warn;
+
+  const byId = new Map(contexts.map((c) => [c.id, c]));
+  const members: StripMember[] = contexts.map((c) => ({
+    id: c.id,
+    label: shortName(c),
+    health: health(c).bucket,
+    removable: scopeExtras.includes(c.id),
+  }));
+
+  const counts = healthCounts(members);
+  // Chicken-and-egg: the rollup's width depends on whether anything is
+  // hidden, which depends on the space the rollup takes. Reserve for it
+  // whenever it *could* show (anything unhealthy), then decide for real.
+  const mayRollup = counts.connecting > 0 || counts.bad > 0;
+  const fit = fitStrip(members, width, {
+    pinnedId: focusedClusterId,
+    rollupBuckets: mayRollup ? populatedBuckets(counts) : 0,
+  });
+  const showRollup = shouldShowRollup(counts, fit.hidden.length);
+
+  useEffect(() => {
+    if (!overflowOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (overflowRef.current && !overflowRef.current.contains(e.target as Node))
+        setOverflowOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOverflowOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [overflowOpen]);
+  useEffect(() => {
+    if (!overflowOpen) setQuery("");
+  }, [overflowOpen]);
+
+  const chip = (m: StripMember) => {
+    const c = byId.get(m.id);
+    if (!c) return null;
+    const h = health(c);
+    const focused = focusedClusterId === m.id;
+    return (
+      <Tooltip
+        key={m.id}
+        label={`${c.name} — ${h.label}${m.removable ? " (ad-hoc)" : ""}${
+          focused ? " · showing only this cluster" : " · click to show only this cluster"
+        }`}
+      >
+        <span
+          role="button"
+          tabIndex={0}
+          aria-pressed={focused}
+          aria-label={`${c.name}, ${h.label}`}
+          onClick={() => toggleFocusedCluster(m.id)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              toggleFocusedCluster(m.id);
+            }
+          }}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "3px 8px",
+            borderRadius: R_MD,
+            background: focused ? t.accentSoft : t.chip,
+            border: `1px ${m.removable ? "dashed" : "solid"} ${
+              focused ? t.accent : t.borderSoft
+            }`,
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
+            color: focused ? t.text : t.textDim,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            maxWidth: 220,
+            cursor: "pointer",
+            flexShrink: 0,
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: clusterAccent(colorIdx[m.id] ?? 0),
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+            {m.label}
+          </span>
+          <span
+            aria-hidden
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: bucketColor(m.health),
+              flexShrink: 0,
+            }}
+          />
+          {m.removable && (
+            <button
+              type="button"
+              aria-label={`Remove ${c.name} from this view`}
+              onClick={(e) => {
+                e.stopPropagation();
+                removeScopeExtra(m.id);
+              }}
+              style={{
+                border: "none",
+                background: "transparent",
+                color: t.textMuted,
+                cursor: "pointer",
+                padding: 0,
+                display: "inline-flex",
+                alignItems: "center",
+                lineHeight: 1,
+                fontSize: FS_XS,
+              }}
+            >
+              ×
+            </button>
+          )}
+        </span>
+      </Tooltip>
+    );
+  };
+
+  const hiddenMatching = query.trim()
+    ? members.filter((m) => {
+        const c = byId.get(m.id);
+        const needle = query.trim().toLowerCase();
+        return (
+          m.label.toLowerCase().includes(needle) ||
+          (c?.name ?? "").toLowerCase().includes(needle)
+        );
+      })
+    : members;
+
+  return (
+    <div
+      ref={stripRef}
+      data-testid="member-strip"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        flex: 1,
+        minWidth: 0,
+        overflow: "hidden",
+      }}
+    >
+      {fit.visible.map(chip)}
+
+      {showRollup && (
+        <Tooltip label={rollupSummary(counts)}>
+          <span
+            data-testid="member-rollup"
+            aria-label={rollupSummary(counts)}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              flexShrink: 0,
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
+              color: t.textMuted,
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {(["ok", "connecting", "bad"] as const)
+              .filter((b) => counts[b] > 0)
+              .map((b) => (
+                <span
+                  key={b}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 3 }}
+                >
+                  <span
+                    aria-hidden
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: "50%",
+                      background: bucketColor(b),
+                    }}
+                  />
+                  {counts[b]}
+                </span>
+              ))}
+          </span>
+        </Tooltip>
+      )}
+
+      {fit.hidden.length > 0 && (
+        <div ref={overflowRef} style={{ position: "relative", flexShrink: 0 }}>
+          <button
+            type="button"
+            data-testid="member-overflow"
+            aria-haspopup="dialog"
+            aria-expanded={overflowOpen}
+            aria-label={`Show all ${members.length} clusters (${fit.hidden.length} not shown)`}
+            onClick={() => setOverflowOpen((v) => !v)}
+            style={{
+              border: `1px solid ${t.borderSoft}`,
+              background: overflowOpen ? t.accentSoft : t.chip,
+              color: overflowOpen ? t.accent : t.textDim,
+              borderRadius: R_MD,
+              padding: "3px 8px",
+              fontSize: FS_XS,
+              fontFamily: FF_MONO,
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            +{fit.hidden.length}
+          </button>
+          {overflowOpen && (
+            <div
+              role="dialog"
+              aria-label="All clusters in this view"
+              style={{
+                position: "absolute",
+                top: "calc(100% + 6px)",
+                left: 0,
+                zIndex: 30,
+                minWidth: 280,
+                maxWidth: 380,
+                maxHeight: 340,
+                overflowY: "auto",
+                background: t.surface,
+                border: `1px solid ${t.border}`,
+                borderRadius: R_MD,
+                boxShadow: "0 8px 28px rgba(0,0,0,0.28)",
+                padding: 4,
+              }}
+            >
+              {members.length > 8 && (
+                <input
+                  autoFocus
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search clusters…"
+                  aria-label="Search clusters in this view"
+                  style={{
+                    width: "100%",
+                    boxSizing: "border-box",
+                    margin: "2px 0 6px",
+                    padding: "5px 8px",
+                    border: `1px solid ${t.borderSoft}`,
+                    borderRadius: R_SM,
+                    background: t.chip,
+                    color: t.text,
+                    fontSize: FS_XS,
+                    fontFamily: FF_MONO,
+                    outline: "none",
+                  }}
+                />
+              )}
+              {hiddenMatching.length === 0 && (
+                <div
+                  style={{
+                    padding: "8px 8px 10px",
+                    fontSize: FS_XS,
+                    color: t.textMuted,
+                    fontFamily: FF_MONO,
+                  }}
+                >
+                  No cluster matches “{query.trim()}”.
+                </div>
+              )}
+              {hiddenMatching.map((m) => {
+                const c = byId.get(m.id);
+                if (!c) return null;
+                const h = health(c);
+                const focused = focusedClusterId === m.id;
+                const qualifier = qualifierFor(c);
+                return (
+                  <div
+                    key={m.id}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={focused}
+                    title={c.name}
+                    onClick={() => {
+                      toggleFocusedCluster(m.id);
+                      setOverflowOpen(false);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        toggleFocusedCluster(m.id);
+                        setOverflowOpen(false);
+                      }
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "6px 8px",
+                      borderRadius: R_SM,
+                      cursor: "pointer",
+                      background: focused ? t.accentSoft : "transparent",
+                      color: focused ? t.text : t.textDim,
+                    }}
+                  >
+                    <span
+                      aria-hidden
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: "50%",
+                        background: clusterAccent(colorIdx[m.id] ?? 0),
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: FS_XS,
+                          fontFamily: FF_MONO,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {m.label}
+                      </span>
+                      {qualifier && (
+                        <span
+                          style={{
+                            display: "block",
+                            fontSize: FS_XS,
+                            fontFamily: FF_MONO,
+                            color: t.textMuted,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {qualifier}
+                        </span>
+                      )}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: FS_XS,
+                        fontFamily: FF_MONO,
+                        color: bucketColor(m.health),
+                        flexShrink: 0,
+                      }}
+                    >
+                      {h.label}
+                    </span>
+                    {m.removable && (
+                      <button
+                        type="button"
+                        aria-label={`Remove ${c.name} from this view`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeScopeExtra(m.id);
+                        }}
+                        style={{
+                          border: "none",
+                          background: "transparent",
+                          color: t.textMuted,
+                          cursor: "pointer",
+                          padding: 0,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          lineHeight: 1,
+                          fontSize: FS_XS,
+                          flexShrink: 0,
+                        }}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MenuRow({
   label,
   hint,

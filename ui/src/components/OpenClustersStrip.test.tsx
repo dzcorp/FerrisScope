@@ -65,3 +65,54 @@ describe("OpenClustersStrip", () => {
     ).toBe(false);
   });
 });
+
+describe("OpenClustersStrip short cluster names", () => {
+  const GKE_A = "gke_production-4f83b34d_us-central1_prod-6";
+  const GKE_B = "gke_development-d83ab4a8_europe-west4_truenv-03";
+
+  const openGkePair = () => {
+    act(() => {
+      useAppStore.setState({
+        contexts: [
+          { id: `default::${GKE_A}`, name: GKE_A, user: null } as never,
+          { id: `default::${GKE_B}`, name: GKE_B, user: null } as never,
+        ],
+      });
+      useAppStore
+        .getState()
+        .openTab({ kind: "context", contextId: `default::${GKE_A}` });
+      useAppStore
+        .getState()
+        .openTab({ kind: "context", contextId: `default::${GKE_B}` });
+    });
+  };
+
+  it("renders the short name but keeps the full one in the tooltip", () => {
+    openGkePair();
+    render(<OpenClustersStrip t={t} open />);
+    const row = screen.getByText("prod-6");
+    expect(row).toBeTruthy();
+    // The rail is narrow: no qualifier inline, full name on hover instead.
+    expect(row.getAttribute("title")).toBe(GKE_A);
+    expect(screen.queryByText(GKE_A)).toBeNull();
+  });
+
+  it("labels the close button with the full context name", () => {
+    openGkePair();
+    render(<OpenClustersStrip t={t} open />);
+    expect(screen.getByLabelText(`Close ${GKE_A}`)).toBeTruthy();
+  });
+
+  it("falls back to full names when shortening is off", () => {
+    act(() => {
+      useAppStore.getState().patchSettings({ shortenClusterNames: false });
+    });
+    openGkePair();
+    render(<OpenClustersStrip t={t} open />);
+    expect(screen.getByText(GKE_A)).toBeTruthy();
+    expect(screen.queryByText("prod-6")).toBeNull();
+    act(() => {
+      useAppStore.getState().patchSettings({ shortenClusterNames: true });
+    });
+  });
+});

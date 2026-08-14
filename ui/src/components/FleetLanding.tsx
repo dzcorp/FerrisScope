@@ -1,7 +1,7 @@
 import { logErr } from "../lib/log";
 import { useEffect, useMemo, useState } from "react";
 import { api, onFleetProbe, onKubeconfigChanged } from "../api";
-import { useAppStore, useResolvedTheme } from "../store";
+import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
 import type { ClusterProbe, ContextInfo, VirtualContext } from "../types";
 import {
   FF_MONO,
@@ -18,6 +18,7 @@ import {
   FS_XS,
 } from "../theme";
 import { MOD_KEY } from "../lib/keyboard";
+import { labelFor, type ClusterLabel } from "../lib/clusterName";
 import {
   aggregateVirtualContext,
   clusterColorIndexMap,
@@ -65,6 +66,12 @@ export function FleetLanding({ mode, onSelect }: Props) {
   const setContexts = useAppStore((s) => s.setContexts);
   const setContextsLoading = useAppStore((s) => s.setContextsLoading);
   const setContextsError = useAppStore((s) => s.setContextsError);
+
+  // Display labels for the whole fleet, resolved once here and threaded down
+  // rather than re-subscribed per card. The uniqueness pass inside is
+  // list-aware, so it must see every context — never a bucket.
+  const labels = useClusterLabels();
+  const groupByProject = useAppStore((s) => s.settings.groupFleetByProject);
 
   const [probes, setProbes] = useState<Record<string, ClusterProbe>>({});
   const [menu, setMenu] = useState<{ pos: MenuPosition; ctx: ContextInfo } | null>(null);
@@ -124,6 +131,15 @@ export function FleetLanding({ mode, onSelect }: Props) {
   // Empty input is fine — we fall back to a pregenerated "a + b" / "a +N"
   // name (already deduped against existing virtual contexts), shown as the
   // input placeholder so the operator sees exactly what Save will use.
+  //
+  // Deliberately the FULL context names, not the shortened display labels.
+  // This name is persisted as the virtual context's identity, and
+  // `defaultVirtualContextName` runs its own sibling-elision pass over
+  // whatever it's given. Fed the short names it double-compresses: two
+  // clusters from different projects that both shorten to `prod-1` come out
+  // as "prod-1 + prod-1", and `prod-1` + `prod-2` come out as "1 + 2" with
+  // the project gone. Fed the full names it produces "alpha + beta" — the
+  // segment that actually distinguishes them.
   const generatedName = useMemo(() => {
     const pickedNames = Array.from(picked).map(
       (id) => contexts.find((c) => c.id === id)?.name ?? id,
@@ -348,6 +364,8 @@ export function FleetLanding({ mode, onSelect }: Props) {
           mode={mode}
           label={g}
           list={groups.get(g) ?? []}
+          labels={labels}
+          groupByProject={groupByProject}
           probes={probes}
           view={fleetView}
           picked={picked}
@@ -362,7 +380,7 @@ export function FleetLanding({ mode, onSelect }: Props) {
           mode={mode}
           position={menu.pos}
           onClose={() => setMenu(null)}
-          rowName={primaryLabel(menu.ctx)}
+          rowName={primaryLabel(menu.ctx, labels)}
           items={fleetMenuItems(menu.ctx, onSelect, togglePick)}
         />
       )}
@@ -698,6 +716,10 @@ function vctxDotColor(t: Tokens, agg: VirtualContextAggregate): string {
 
 // One colored dot + name per member; missing members render struck-through
 // in the bad color. `dotsOnly` drops the names for the Mini layout.
+//
+// Names go through the fleet's shortening pass — a virtual context over four
+// GKE clusters is exactly where 50-character chips hurt most. The full
+// context name stays in the chip's `title`.
 function VctxMemberChips({
   resolved,
   colorIdx,
@@ -708,6 +730,7 @@ function VctxMemberChips({
   dotsOnly?: boolean;
 }) {
   const t = useResolvedTheme().tokens;
+  const labels = useClusterLabels();
   return (
     <span
       style={{
@@ -744,7 +767,7 @@ function VctxMemberChips({
               outline: m.ctx ? undefined : `1px solid ${t.bad}`,
             }}
           />
-          {!dotsOnly && (m.ctx?.name ?? m.id)}
+          {!dotsOnly && labelFor(labels, m.id, m.ctx?.name ?? m.id).short}
         </span>
       ))}
     </span>
@@ -1065,10 +1088,64 @@ function VirtualContextRow({
   );
 }
 
+// One bucket of a kubeconfig group, split out by the cloud coordinate the
+// short names were stripped of (GKE project + location, EKS account +
+// region, AKS resource group, DO region). `key === null` is the remainder:
+// contexts with no coordinate to group by, plus buckets of one — a header
+// over a single row is noise, not structure.
+type ProjectBucket = {
+  key: string | null;
+  label: string | null;
+  list: ContextInfo[];
+};
+
+// Pure: bucket a kubeconfig group's contexts by `ClusterLabel.groupKey`.
+// Preserves the incoming order inside each bucket, puts the ungrouped
+// remainder first, then buckets alphabetically by header so the layout
+// doesn't reshuffle when a probe lands.
+export function bucketByProject(
+  list: ContextInfo[],
+  labels: Record<string, ClusterLabel>,
+  enabled: boolean,
+): ProjectBucket[] {
+  if (!enabled) return [{ key: null, label: null, list }];
+
+  const counts = new Map<string, number>();
+  for (const c of list) {
+    const key = labels[c.id]?.groupKey;
+    if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+
+  const loose: ContextInfo[] = [];
+  const buckets = new Map<string, { label: string; list: ContextInfo[] }>();
+  for (const c of list) {
+    const l = labels[c.id];
+    const key = l?.groupKey;
+    if (!key || !l?.groupLabel || (counts.get(key) ?? 0) < 2) {
+      loose.push(c);
+      continue;
+    }
+    const bucket = buckets.get(key) ?? { label: l.groupLabel, list: [] };
+    bucket.list.push(c);
+    buckets.set(key, bucket);
+  }
+
+  const out: ProjectBucket[] = [];
+  if (loose.length > 0) out.push({ key: null, label: null, list: loose });
+  for (const [key, bucket] of [...buckets].sort((a, b) =>
+    a[1].label.localeCompare(b[1].label),
+  )) {
+    out.push({ key, label: bucket.label, list: bucket.list });
+  }
+  return out;
+}
+
 function FleetGroup({
   mode,
   label,
   list,
+  labels,
+  groupByProject,
   probes,
   view,
   picked,
@@ -1079,6 +1156,8 @@ function FleetGroup({
   mode: ThemeMode;
   label: string;
   list: ContextInfo[];
+  labels: Record<string, ClusterLabel>;
+  groupByProject: boolean;
   probes: Record<string, ClusterProbe>;
   view: FleetView;
   picked: Set<string>;
@@ -1117,6 +1196,59 @@ function FleetGroup({
     </div>
   );
 
+  const buckets = bucketByProject(list, labels, groupByProject);
+  // A bucket's header already carries the coordinate, so repeating it on
+  // every row inside would be pure noise.
+  const showQualifier = (b: ProjectBucket) => b.label === null;
+
+  // Sub-header for one project bucket. `inset` is the Rows variant, which
+  // lives inside the bordered container and so needs its own padding and a
+  // separating rule rather than card-grid margins.
+  const subHeader = (b: ProjectBucket, inset: boolean) =>
+    b.label && (
+      <div
+        data-testid="fleet-project-header"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: inset ? "6px 14px" : undefined,
+          marginBottom: inset ? undefined : 8,
+          marginTop: inset ? undefined : 4,
+          background: inset ? t.chip : undefined,
+          borderBottom: inset ? `1px solid ${t.border}` : undefined,
+        }}
+      >
+        <span
+          style={{
+            fontSize: FS_XS,
+            fontFamily: FF_MONO,
+            fontWeight: 600,
+            color: t.textMuted,
+            letterSpacing: 0.2,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+          }}
+        >
+          {b.label}
+        </span>
+        <div style={{ flex: 1, height: 1, background: t.borderSoft }} />
+        <span
+          style={{
+            fontSize: FS_XS,
+            color: t.textMuted,
+            fontVariantNumeric: "tabular-nums",
+            fontFamily: FF_MONO,
+            flexShrink: 0,
+          }}
+        >
+          {b.list.length}
+        </span>
+      </div>
+    );
+
   if (view === "rows") {
     return (
       <div style={{ marginBottom: 28 }}>
@@ -1129,19 +1261,28 @@ function FleetGroup({
             overflow: "hidden",
           }}
         >
-          {list.map((c, i) => (
-            <FleetRow
-              key={c.id}
-              mode={mode}
-              context={c}
-              probe={probes[c.id] ?? null}
-              isLast={i === list.length - 1}
-              picked={picked.has(c.id)}
-              showPick={anyPicked}
-              onTogglePick={() => onTogglePick(c.id)}
-              onSelect={cardClick(c)}
-              onMenu={(pos) => onMenu(pos, c)}
-            />
+          {buckets.map((b, bi) => (
+            <div key={b.key ?? "__ungrouped"}>
+              {subHeader(b, true)}
+              {b.list.map((c, i) => (
+                <FleetRow
+                  key={c.id}
+                  mode={mode}
+                  context={c}
+                  labels={labels}
+                  showQualifier={showQualifier(b)}
+                  probe={probes[c.id] ?? null}
+                  isLast={
+                    bi === buckets.length - 1 && i === b.list.length - 1
+                  }
+                  picked={picked.has(c.id)}
+                  showPick={anyPicked}
+                  onTogglePick={() => onTogglePick(c.id)}
+                  onSelect={cardClick(c)}
+                  onMenu={(pos) => onMenu(pos, c)}
+                />
+              ))}
+            </div>
           ))}
         </div>
       </div>
@@ -1155,55 +1296,65 @@ function FleetGroup({
   return (
     <div style={{ marginBottom: 28 }}>
       {header}
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: view === "mini" ? 8 : 12,
-          alignItems: "stretch",
-        }}
-      >
-        {list.map((c) => {
-          const title = primaryLabel(c);
-          const sub = secondaryLabel(c);
-          const visibleLen = title.length + (sub ? sub.length + 3 : 0);
-          return (
-            <div
-              key={c.id}
-              style={{
-                flex: `1 0 ${basisFn(title, sub)}px`,
-                minWidth: 0,
-                maxWidth: "100%",
-              }}
-            >
-              {view === "mini" ? (
-                <MiniCard
-                  mode={mode}
-                  context={c}
-                  probe={probes[c.id] ?? null}
-                  picked={picked.has(c.id)}
-                  showPick={anyPicked}
-                  onTogglePick={() => onTogglePick(c.id)}
-                  onSelect={cardClick(c)}
-                  onMenu={(pos) => onMenu(pos, c)}
-                />
-              ) : (
-                <FleetCard
-                  mode={mode}
-                  context={c}
-                  probe={probes[c.id] ?? null}
-                  wide={visibleLen > 36}
-                  picked={picked.has(c.id)}
-                  showPick={anyPicked}
-                  onTogglePick={() => onTogglePick(c.id)}
-                  onSelect={cardClick(c)}
-                  onMenu={(pos) => onMenu(pos, c)}
-                />
-              )}
-            </div>
-          );
-        })}
-      </div>
+      {buckets.map((b) => (
+        <div key={b.key ?? "__ungrouped"}>
+          {subHeader(b, false)}
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: view === "mini" ? 8 : 12,
+              alignItems: "stretch",
+              marginBottom: b.label ? 14 : 0,
+            }}
+          >
+            {b.list.map((c) => {
+              const title = primaryLabel(c, labels);
+              const sub = showQualifier(b) ? secondaryLabel(c, labels) : null;
+              const visibleLen = title.length + (sub ? sub.length + 3 : 0);
+              return (
+                <div
+                  key={c.id}
+                  style={{
+                    flex: `1 0 ${basisFn(title, sub)}px`,
+                    minWidth: 0,
+                    maxWidth: "100%",
+                  }}
+                >
+                  {view === "mini" ? (
+                    <MiniCard
+                      mode={mode}
+                      context={c}
+                      labels={labels}
+                      showQualifier={showQualifier(b)}
+                      probe={probes[c.id] ?? null}
+                      picked={picked.has(c.id)}
+                      showPick={anyPicked}
+                      onTogglePick={() => onTogglePick(c.id)}
+                      onSelect={cardClick(c)}
+                      onMenu={(pos) => onMenu(pos, c)}
+                    />
+                  ) : (
+                    <FleetCard
+                      mode={mode}
+                      context={c}
+                      labels={labels}
+                      showQualifier={showQualifier(b)}
+                      probe={probes[c.id] ?? null}
+                      wide={visibleLen > 36}
+                      picked={picked.has(c.id)}
+                      showPick={anyPicked}
+                      onTogglePick={() => onTogglePick(c.id)}
+                      onSelect={cardClick(c)}
+                      onMenu={(pos) => onMenu(pos, c)}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1211,6 +1362,8 @@ function FleetGroup({
 function FleetCard({
   mode,
   context,
+  labels,
+  showQualifier,
   probe,
   wide,
   picked,
@@ -1221,6 +1374,10 @@ function FleetCard({
 }: {
   mode: ThemeMode;
   context: ContextInfo;
+  labels: Record<string, ClusterLabel>;
+  /// False when the card sits under a project sub-header that already shows
+  /// the coordinate; repeating it on the card would be noise.
+  showQualifier: boolean;
   probe: ClusterProbe | null;
   wide: boolean;
   picked: boolean;
@@ -1230,6 +1387,7 @@ function FleetCard({
   onMenu: (pos: MenuPosition) => void;
 }) {
   const t = useResolvedTheme().tokens;
+  const sub = showQualifier ? secondaryLabel(context, labels) : null;
   const density = useAppStore((s) => s.settings.density);
   const cardPad =
     density === "compact" ? 9 : density === "spacious" ? 18 : 14;
@@ -1343,8 +1501,8 @@ function FleetCard({
               maxWidth: "100%",
             }}
           >
-            {primaryLabel(context)}
-            {secondaryLabel(context) && (
+            {primaryLabel(context, labels)}
+            {sub && (
               <span
                 style={{
                   marginLeft: 6,
@@ -1355,7 +1513,7 @@ function FleetCard({
                   letterSpacing: 0,
                 }}
               >
-                · {secondaryLabel(context)}
+                · {sub}
               </span>
             )}
           </div>
@@ -1425,7 +1583,7 @@ function FleetCard({
             whiteSpace: "nowrap",
           }}
         >
-          {summaryLine(probe, context)}
+          {summaryLine(probe, context, labels)}
         </div>
       </div>
     </button>
@@ -1469,19 +1627,31 @@ function miniBasisPx(primary: string, secondary: string | null): number {
 }
 
 // Title for the card. We prefer the context name (k8s convention — what
-// `kubectl use-context` switches between, unique within a kubeconfig). If
-// the cluster name carries extra information (different from the context
-// name), `secondaryLabel` surfaces it next to the title.
-function primaryLabel(c: ContextInfo): string {
-  return c.name || c.cluster;
+// `kubectl use-context` switches between, unique within a kubeconfig),
+// shortened to the cluster segment when the name is one of the
+// machine-generated shapes `lib/clusterName` recognises.
+function primaryLabel(
+  c: ContextInfo,
+  labels: Record<string, ClusterLabel>,
+): string {
+  return labelFor(labels, c.id, c.name || c.cluster).short;
 }
 
-// Returns the cluster name when it adds information beyond the context
-// name. We only dedup on a literal case-insensitive match — the `user@`
-// prefix variant (`admin@prod-cluster` vs `prod-cluster`) still surfaces
-// the cluster, since the operator wants both the identity and the
-// underlying cluster visible on the card.
-function secondaryLabel(c: ContextInfo): string | null {
+// The dim text next to the title. When shortening stripped a cloud
+// coordinate (GKE project + location, EKS account + region, …) that's what
+// we surface, so the card still says which project a `prod-6` lives in.
+//
+// Otherwise we fall back to the kubeconfig cluster name when it adds
+// information beyond the context name. We only dedup on a literal
+// case-insensitive match — the `user@` prefix variant (`admin@prod-cluster`
+// vs `prod-cluster`) still surfaces the cluster, since the operator wants
+// both the identity and the underlying cluster visible on the card.
+function secondaryLabel(
+  c: ContextInfo,
+  labels: Record<string, ClusterLabel>,
+): string | null {
+  const qualifier = labels[c.id]?.qualifier;
+  if (qualifier) return qualifier;
   const cluster = c.cluster?.trim();
   if (!cluster) return null;
   const ctx = c.name.trim();
@@ -1492,9 +1662,10 @@ function secondaryLabel(c: ContextInfo): string | null {
 function summaryLine(
   probe: ClusterProbe | null,
   context: ContextInfo,
+  labels: Record<string, ClusterLabel>,
 ): string {
   if (!probe) {
-    return secondaryLabel(context) ? "" : context.cluster;
+    return secondaryLabel(context, labels) ? "" : context.cluster;
   }
   const bits: string[] = [];
   if (probe.nodes != null) bits.push(`${probe.nodes} nodes`);
@@ -1581,6 +1752,8 @@ function GaugeWithLabel({
 function MiniCard({
 
   context,
+  labels,
+  showQualifier,
   probe,
   picked,
   showPick,
@@ -1590,6 +1763,8 @@ function MiniCard({
 }: {
   mode: ThemeMode;
   context: ContextInfo;
+  labels: Record<string, ClusterLabel>;
+  showQualifier: boolean;
   probe: ClusterProbe | null;
   picked: boolean;
   showPick: boolean;
@@ -1604,7 +1779,7 @@ function MiniCard({
       : probe?.healthy === false
         ? t.bad
         : t.unknown;
-  const sub = secondaryLabel(context);
+  const sub = showQualifier ? secondaryLabel(context, labels) : null;
 
   const card = (
     <button
@@ -1684,7 +1859,7 @@ function MiniCard({
           whiteSpace: "nowrap",
         }}
       >
-        {primaryLabel(context)}
+        {primaryLabel(context, labels)}
         {sub && (
           <span
             style={{
@@ -1745,6 +1920,8 @@ function MiniCard({
 function FleetRow({
 
   context,
+  labels,
+  showQualifier,
   probe,
   isLast,
   picked,
@@ -1755,6 +1932,8 @@ function FleetRow({
 }: {
   mode: ThemeMode;
   context: ContextInfo;
+  labels: Record<string, ClusterLabel>;
+  showQualifier: boolean;
   probe: ClusterProbe | null;
   isLast: boolean;
   picked: boolean;
@@ -1770,7 +1949,7 @@ function FleetRow({
       : probe?.healthy === false
         ? t.bad
         : t.unknown;
-  const sub = secondaryLabel(context);
+  const sub = showQualifier ? secondaryLabel(context, labels) : null;
 
   const stats: string[] = [];
   if (probe?.nodes != null) stats.push(`${probe.nodes} nodes`);
@@ -1862,7 +2041,7 @@ function FleetRow({
             flexShrink: 1,
           }}
         >
-          {primaryLabel(context)}
+          {primaryLabel(context, labels)}
         </span>
         {sub && (
           <span

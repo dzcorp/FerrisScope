@@ -111,6 +111,120 @@ describe("darkConsole setting", () => {
   });
 });
 
+describe("cluster-name settings", () => {
+  it("both default to on", () => {
+    const s = useAppStore.getState().settings;
+    expect(s.shortenClusterNames).toBe(true);
+    expect(s.groupFleetByProject).toBe(true);
+  });
+
+  it("patchSettings toggles them independently", () => {
+    useAppStore.getState().patchSettings({ shortenClusterNames: false });
+    expect(useAppStore.getState().settings.shortenClusterNames).toBe(false);
+    expect(useAppStore.getState().settings.groupFleetByProject).toBe(true);
+    useAppStore.getState().patchSettings({ shortenClusterNames: true });
+    expect(useAppStore.getState().settings.shortenClusterNames).toBe(true);
+  });
+
+  it("survives a persist / hydrate round-trip when disabled", () => {
+    useAppStore.getState().patchSettings({
+      shortenClusterNames: false,
+      groupFleetByProject: false,
+    });
+    const prefs = buildPrefsPayload({ ...useAppStore.getState() });
+    expect(prefs.settings.shorten_cluster_names).toBe(false);
+    expect(prefs.settings.group_fleet_by_project).toBe(false);
+    useAppStore.getState().patchSettings({
+      shortenClusterNames: true,
+      groupFleetByProject: true,
+    });
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState().settings;
+    expect(s.shortenClusterNames).toBe(false);
+    expect(s.groupFleetByProject).toBe(false);
+  });
+
+  it("defaults both on when hydrating prefs that predate them", () => {
+    // Restore the flags first so the assertion can't pass by accident.
+    useAppStore.getState().patchSettings({
+      shortenClusterNames: false,
+      groupFleetByProject: false,
+    });
+    const prefs = buildPrefsPayload({ ...useAppStore.getState() });
+    delete (prefs.settings as Record<string, unknown>).shorten_cluster_names;
+    delete (prefs.settings as Record<string, unknown>).group_fleet_by_project;
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState().settings;
+    expect(s.shortenClusterNames).toBe(true);
+    expect(s.groupFleetByProject).toBe(true);
+  });
+});
+
+describe("focusedClusterId", () => {
+  it("defaults to null", () => {
+    expect(useAppStore.getState().focusedClusterId).toBeNull();
+  });
+
+  it("toggleFocusedCluster sets, then clears on a second call", () => {
+    useAppStore.getState().toggleFocusedCluster("default::a");
+    expect(useAppStore.getState().focusedClusterId).toBe("default::a");
+    useAppStore.getState().toggleFocusedCluster("default::a");
+    expect(useAppStore.getState().focusedClusterId).toBeNull();
+  });
+
+  it("switches focus straight to another cluster", () => {
+    useAppStore.getState().toggleFocusedCluster("default::a");
+    useAppStore.getState().toggleFocusedCluster("default::b");
+    expect(useAppStore.getState().focusedClusterId).toBe("default::b");
+    useAppStore.getState().clearFocusedCluster();
+    expect(useAppStore.getState().focusedClusterId).toBeNull();
+  });
+
+  it("clears when the focused member is dropped from the scope", () => {
+    // Otherwise the table stays filtered to a cluster that is no longer in
+    // view — an empty table with nothing on screen explaining why.
+    useAppStore.setState({ scopeExtras: ["default::b"] });
+    useAppStore.getState().toggleFocusedCluster("default::b");
+    useAppStore.getState().removeScopeExtra("default::b");
+    expect(useAppStore.getState().focusedClusterId).toBeNull();
+  });
+
+  it("leaves the focus alone when a different extra is dropped", () => {
+    useAppStore.setState({ scopeExtras: ["default::b", "default::c"] });
+    useAppStore.getState().toggleFocusedCluster("default::b");
+    useAppStore.getState().removeScopeExtra("default::c");
+    expect(useAppStore.getState().focusedClusterId).toBe("default::b");
+    useAppStore.getState().clearFocusedCluster();
+    useAppStore.setState({ scopeExtras: [] });
+  });
+
+  it("is per-tab: switching tabs restores that tab's focus", () => {
+    useAppStore.setState({
+      contexts: [
+        { id: "default::a", name: "a" } as never,
+        { id: "default::b", name: "b" } as never,
+      ],
+      openTabs: [],
+      activeTabId: null,
+      scopeExtras: [],
+    });
+    const s = useAppStore.getState();
+    s.openTab({ kind: "context", contextId: "default::a" });
+    const tabA = useAppStore.getState().activeTabId!;
+    useAppStore.getState().toggleFocusedCluster("default::a");
+
+    useAppStore.getState().openTab({ kind: "context", contextId: "default::b" });
+    // Fresh tab starts unfocused rather than inheriting the previous tab's.
+    expect(useAppStore.getState().focusedClusterId).toBeNull();
+
+    useAppStore.getState().switchTab(tabA);
+    expect(useAppStore.getState().focusedClusterId).toBe("default::a");
+
+    useAppStore.getState().clearFocusedCluster();
+    useAppStore.setState({ openTabs: [], activeTabId: null, contexts: [] });
+  });
+});
+
 describe("setPalette", () => {
   it("swaps palette inside the current theme", () => {
     useAppStore.getState().setTheme("default");

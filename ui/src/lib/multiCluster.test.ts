@@ -12,9 +12,11 @@ import {
   mergeSearchHits,
   shortClusterNames,
   defaultVirtualContextName,
+  clusterDisplayMeta,
   namespaceClusterTags,
   type ScopedRow,
 } from "./multiCluster";
+import { clusterLabels } from "./clusterName";
 import { CLUSTER_ACCENTS, clusterAccent } from "../theme";
 import type { ClusterProbe } from "../types";
 
@@ -274,6 +276,65 @@ describe("defaultVirtualContextName", () => {
         ["eu + us", "eu + us (2)"],
       ),
     ).toBe("eu + us (3)");
+  });
+});
+
+describe("clusterDisplayMeta", () => {
+  const GKE_6 = "gke_production-4f83b34d_us-central1_prod-6";
+  const GKE_7 = "gke_production-4f83b34d_us-central1_prod-7";
+  const cluster = (name: string, colorIdx: number) => ({
+    id: `default::${name}`,
+    name,
+    colorIdx,
+  });
+
+  it("keeps the full context name for the tooltip", () => {
+    const clusters = [cluster(GKE_6, 0), cluster(GKE_7, 1)];
+    const meta = clusterDisplayMeta(
+      clusters,
+      clusterLabels(clusters.map((c) => ({ ...c, user: null })), true),
+    );
+    expect(meta[`default::${GKE_6}`]!.name).toBe(GKE_6);
+  });
+
+  it("composes provider shortening with sibling elision", () => {
+    const clusters = [cluster(GKE_6, 0), cluster(GKE_7, 1)];
+    const meta = clusterDisplayMeta(
+      clusters,
+      clusterLabels(clusters.map((c) => ({ ...c, user: null })), true),
+    );
+    // `prod-6` / `prod-7` after provider shortening, then the shared `prod`
+    // token elided across the visible members.
+    expect(meta[`default::${GKE_6}`]!.short).toBe("6");
+    expect(meta[`default::${GKE_7}`]!.short).toBe("7");
+  });
+
+  it("never collapses two members to the same short", () => {
+    // Same cluster segment in two projects: provider shortening keeps both
+    // as `prod-1`, so the elision pass must leave them distinguishable
+    // rather than produce a duplicate.
+    const a = cluster("gke_alpha_us-central1_prod-1", 0);
+    const b = cluster("gke_beta_us-central1_prod-1", 1);
+    const meta = clusterDisplayMeta(
+      [a, b],
+      clusterLabels([a, b].map((c) => ({ ...c, user: null })), true),
+    );
+    expect(meta[a.id]!.short).not.toBe(meta[b.id]!.short);
+  });
+
+  it("falls back to the raw name for a cluster with no label", () => {
+    const c = cluster("kind-e2e", 0);
+    const meta = clusterDisplayMeta([c], {});
+    expect(meta[c.id]).toEqual({ name: "kind-e2e", short: "kind-e2e", colorIdx: 0 });
+  });
+
+  it("leaves a single member untouched", () => {
+    const c = cluster(GKE_6, 0);
+    const meta = clusterDisplayMeta(
+      [c],
+      clusterLabels([{ ...c, user: null }], true),
+    );
+    expect(meta[c.id]!.short).toBe("prod-6");
   });
 });
 

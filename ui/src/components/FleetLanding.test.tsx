@@ -11,7 +11,8 @@ import { render, cleanup, act } from "@testing-library/react";
 import { Profiler, type ProfilerOnRenderCallback } from "react";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
 import { useAppStore } from "../store";
-import { FleetLanding } from "./FleetLanding";
+import { FleetLanding, bucketByProject } from "./FleetLanding";
+import { clusterLabels } from "../lib/clusterName";
 
 afterEach(() => {
   cleanup();
@@ -410,5 +411,280 @@ describe("FleetLanding generated names + temporary open", () => {
     expect(s.virtualContexts).toHaveLength(0);
     expect(s.selectedVirtualContextId).toBeNull();
     expect(screen.queryByText("Open")).toBeNull();
+  });
+});
+
+// ─── Short cluster names + project grouping ─────────────────────────────────
+
+const gkeCtx = (cluster: string, project: string, location = "us-central1") => {
+  const name = `gke_${project}_${location}_${cluster}`;
+  return { ...fleetCtx(`default::${name}`, name), cluster: name };
+};
+
+const namedFleet = (contexts: ReturnType<typeof fleetCtx>[]) =>
+  setMockInvoke((cmd) => {
+    switch (cmd) {
+      case "list_contexts":
+        return contexts;
+      case "get_fleet_cache":
+        return {};
+      case "refresh_fleet":
+        return undefined;
+      default:
+        return undefined;
+    }
+  });
+
+const renderFleet = async (view: "tiles" | "rows" | "mini" = "rows") => {
+  act(() => {
+    useAppStore.setState((s) => ({
+      settings: { ...s.settings, fleetView: view },
+    }));
+  });
+  await act(async () => {
+    render(<FleetLanding mode="dark" onSelect={() => {}} />);
+  });
+  await act(async () => {});
+};
+
+const setNameSettings = (
+  shortenClusterNames: boolean,
+  groupFleetByProject: boolean,
+) =>
+  act(() => {
+    useAppStore
+      .getState()
+      .patchSettings({ shortenClusterNames, groupFleetByProject });
+  });
+
+describe("FleetLanding short cluster names", () => {
+  afterEach(() => setNameSettings(true, true));
+
+  it("renders GKE contexts as their cluster segment", async () => {
+    resetVctxState();
+    setNameSettings(true, false);
+    namedFleet([
+      gkeCtx("prod-6", "production-4f83b34d"),
+      gkeCtx("truenv-03", "development-d83ab4a8", "europe-west4"),
+    ]);
+    await renderFleet();
+
+    expect(screen.getAllByText("prod-6").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("truenv-03").length).toBeGreaterThan(0);
+    expect(
+      screen.queryByText("gke_production-4f83b34d_us-central1_prod-6"),
+    ).toBeNull();
+  });
+
+  it("shows the stripped project as a dim qualifier when ungrouped", async () => {
+    resetVctxState();
+    setNameSettings(true, false);
+    namedFleet([gkeCtx("prod-6", "production-4f83b34d")]);
+    await renderFleet();
+
+    expect(
+      screen.getAllByText("· production-4f83b34d · us-central1").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("leaves unrecognised context names untouched", async () => {
+    resetVctxState();
+    setNameSettings(true, true);
+    namedFleet([fleetCtx("default::kind-ruw-e2e", "kind-ruw-e2e")]);
+    await renderFleet();
+
+    expect(screen.getAllByText("kind-ruw-e2e").length).toBeGreaterThan(0);
+    expect(screen.queryByTestId("fleet-project-header")).toBeNull();
+  });
+
+  it("restores full names when the setting is off", async () => {
+    resetVctxState();
+    setNameSettings(false, false);
+    namedFleet([gkeCtx("prod-6", "production-4f83b34d")]);
+    await renderFleet();
+
+    expect(
+      screen.getAllByText("gke_production-4f83b34d_us-central1_prod-6").length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText("prod-6")).toBeNull();
+  });
+});
+
+describe("FleetLanding project grouping", () => {
+  afterEach(() => setNameSettings(true, true));
+
+  const twoProjects = () => [
+    gkeCtx("prod-6", "production-4f83b34d"),
+    gkeCtx("prod-7", "production-4f83b34d"),
+    gkeCtx("truenv-03", "development-d83ab4a8", "europe-west4"),
+  ];
+
+  it.each(["rows", "tiles", "mini"] as const)(
+    "renders a project sub-header in the %s view",
+    async (view) => {
+      resetVctxState();
+      setNameSettings(true, true);
+      namedFleet(twoProjects());
+      await renderFleet(view);
+
+      const headers = screen.getAllByTestId("fleet-project-header");
+      expect(headers).toHaveLength(1);
+      expect(headers[0]!.textContent).toContain(
+        "production-4f83b34d · us-central1",
+      );
+    },
+  );
+
+  it("suppresses the per-row qualifier inside a bucket", async () => {
+    resetVctxState();
+    setNameSettings(true, true);
+    namedFleet(twoProjects());
+    await renderFleet();
+
+    // The coordinate appears once, on the header — not beside each row.
+    expect(
+      screen.queryByText("· production-4f83b34d · us-central1"),
+    ).toBeNull();
+    expect(screen.getAllByText("prod-6").length).toBeGreaterThan(0);
+  });
+
+  it("does not give a lone cluster its own header", async () => {
+    resetVctxState();
+    setNameSettings(true, true);
+    namedFleet(twoProjects());
+    await renderFleet();
+
+    // development-d83ab4a8 has a single member, so it stays in the
+    // ungrouped remainder and keeps its inline qualifier instead.
+    const headers = screen.getAllByTestId("fleet-project-header");
+    expect(headers.map((h) => h.textContent).join("")).not.toContain(
+      "development-d83ab4a8",
+    );
+    expect(
+      screen.getAllByText("· development-d83ab4a8 · europe-west4").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("groups by project even when shortening is off", async () => {
+    // The two settings are independent — grouping is derived from the parsed
+    // coordinate, not from the display decision.
+    resetVctxState();
+    setNameSettings(false, true);
+    namedFleet(twoProjects());
+    await renderFleet();
+
+    const headers = screen.getAllByTestId("fleet-project-header");
+    expect(headers).toHaveLength(1);
+    expect(headers[0]!.textContent).toContain(
+      "production-4f83b34d · us-central1",
+    );
+    // Rows still show their full names.
+    expect(
+      screen.getAllByText("gke_production-4f83b34d_us-central1_prod-6").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("renders one flat list when grouping is off", async () => {
+    resetVctxState();
+    setNameSettings(true, false);
+    namedFleet(twoProjects());
+    await renderFleet();
+
+    expect(screen.queryByTestId("fleet-project-header")).toBeNull();
+    expect(
+      screen.getAllByText("· production-4f83b34d · us-central1").length,
+    ).toBe(2);
+  });
+});
+
+describe("bucketByProject", () => {
+  const c = (name: string) => ({
+    ...fleetCtx(`default::${name}`, name),
+    cluster: name,
+  });
+  const gke = (cluster: string, project: string, loc = "us-central1") =>
+    c(`gke_${project}_${loc}_${cluster}`);
+
+  const bucket = (list: ReturnType<typeof c>[], enabled = true) =>
+    bucketByProject(list, clusterLabels(list, true), enabled);
+
+  it("returns one unlabelled bucket when grouping is off", () => {
+    const list = [gke("prod-6", "p1"), gke("prod-7", "p1")];
+    const out = bucket(list, false);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.label).toBeNull();
+    expect(out[0]!.list).toEqual(list);
+  });
+
+  it("groups contexts that share a coordinate", () => {
+    const list = [gke("prod-6", "p1"), gke("prod-7", "p1")];
+    const out = bucket(list);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.label).toBe("p1 · us-central1");
+    expect(out[0]!.list.map((x) => x.name)).toEqual(list.map((x) => x.name));
+  });
+
+  it("folds singletons into the ungrouped remainder instead of giving them a header", () => {
+    const list = [gke("prod-6", "p1"), gke("prod-7", "p1"), gke("solo", "p2")];
+    const out = bucket(list);
+    expect(out).toHaveLength(2);
+    expect(out[0]!.label).toBeNull();
+    expect(out[0]!.list.map((x) => x.name)).toEqual([list[2]!.name]);
+    expect(out[1]!.label).toBe("p1 · us-central1");
+  });
+
+  it("keeps unrecognised names ungrouped", () => {
+    const list = [c("kind-a"), c("minikube")];
+    const out = bucket(list);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.label).toBeNull();
+    expect(out[0]!.list).toHaveLength(2);
+  });
+
+  it("puts the remainder first, then buckets alphabetically by header", () => {
+    const list = [
+      gke("z1", "zeta"),
+      gke("z2", "zeta"),
+      c("kind-a"),
+      gke("a1", "alpha"),
+      gke("a2", "alpha"),
+    ];
+    const out = bucket(list);
+    expect(out.map((b) => b.label)).toEqual([
+      null,
+      "alpha · us-central1",
+      "zeta · us-central1",
+    ]);
+  });
+
+  it("preserves the incoming order inside each bucket", () => {
+    const list = [gke("b", "p1"), gke("a", "p1"), gke("c", "p1")];
+    const out = bucket(list);
+    expect(out[0]!.list.map((x) => x.name.split("_")[3])).toEqual([
+      "b",
+      "a",
+      "c",
+    ]);
+  });
+});
+
+describe("FleetLanding virtual-context member chips", () => {
+  it("shortens member names and keeps the full one in the chip title", async () => {
+    resetVctxState();
+    setNameSettings(true, true);
+    const a = gkeCtx("prod-6", "production-4f83b34d");
+    const b = gkeCtx("prod-7", "production-4f83b34d");
+    namedFleet([a, b]);
+    act(() => {
+      useAppStore.setState({
+        virtualContexts: [
+          { id: "v0", name: "prod pair", members: [a.id, b.id] },
+        ],
+      });
+    });
+    await renderFleet("tiles");
+
+    const chip = screen.getAllByTitle(a.name).at(-1)!;
+    expect(chip.textContent).toBe("prod-6");
   });
 });
