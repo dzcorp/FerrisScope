@@ -639,6 +639,30 @@ function AppearanceSection({}: { mode: ThemeMode }) {
       </Field>
       <Field
         t={t}
+        label="Short cluster names"
+        hint="Show GKE / EKS / eksctl / OpenShift contexts as just the cluster name, with the project or account beside it. Names we don't recognise are left as-is; the full name stays in the tooltip and in search."
+      >
+        <Toggle
+          t={t}
+          checked={settings.shortenClusterNames}
+          onChange={(v) => patchSettings({ shortenClusterNames: v })}
+          label={settings.shortenClusterNames ? "On" : "Off"}
+        />
+      </Field>
+      <Field
+        t={t}
+        label="Group fleet by project"
+        hint="On the fleet landing, bucket clusters under the project, account or region they share."
+      >
+        <Toggle
+          t={t}
+          checked={settings.groupFleetByProject}
+          onChange={(v) => patchSettings({ groupFleetByProject: v })}
+          label={settings.groupFleetByProject ? "On" : "Off"}
+        />
+      </Field>
+      <Field
+        t={t}
         label="Interface scale"
         hint={`Zoom the whole UI. ${MOD_KEY}+− / ${MOD_KEY}+= to nudge, ${MOD_KEY}+0 to reset.`}
       >

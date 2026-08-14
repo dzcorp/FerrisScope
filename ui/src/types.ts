@@ -297,6 +297,13 @@ export type PrefsSettings = {
   dark_console: boolean;
   /// Optional for payloads from transitional builds; absent ⇒ "latest_view".
   startup_scope?: PrefsStartupScope;
+  /// Render machine-generated context names (GKE / EKS ARN / eksctl /
+  /// OpenShift) as just the cluster segment. Optional for payloads from
+  /// transitional builds; absent ⇒ true.
+  shorten_cluster_names?: boolean;
+  /// Bucket the fleet landing by the project / account / region that
+  /// shortening stripped. Absent ⇒ true.
+  group_fleet_by_project?: boolean;
 };
 export type PrefsUiState = {
   selected_context: string | null;

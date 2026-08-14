@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { useAppStore } from "../store";
+import { useAppStore, useClusterLabels } from "../store";
 import { clusterAccent, FS_SM, FS_XS, R_SM, type Tokens } from "../theme";
 import { clusterColorIndexMap } from "../lib/multiCluster";
 import { Icons, Tooltip } from "./ui";
 import {
   closeClusterTab,
+  clusterTabFullLabel,
   clusterTabLabel,
   clusterTabPrimaryId,
 } from "../lib/clusterTabs";
@@ -26,6 +27,7 @@ export function OpenClustersStrip({ t, open }: Props) {
   const switchTab = useAppStore((s) => s.switchTab);
   const contexts = useAppStore((s) => s.contexts);
   const virtualContexts = useAppStore((s) => s.virtualContexts);
+  const labels = useClusterLabels();
   const [hoverId, setHoverId] = useState<string | null>(null);
 
   if (openTabs.length < 2) return null;
@@ -64,7 +66,10 @@ export function OpenClustersStrip({ t, open }: Props) {
       )}
       {openTabs.map((tab) => {
         const isActive = tab.id === activeTabId;
-        const label = clusterTabLabel(tab, contexts, virtualContexts);
+        const label = clusterTabLabel(tab, contexts, virtualContexts, labels);
+        // The rail is narrow, so the row shows only the short name; the full
+        // context name stays reachable via the tooltip / aria-label.
+        const fullLabel = clusterTabFullLabel(tab, contexts, virtualContexts);
         const primaryId = clusterTabPrimaryId(tab, contexts, virtualContexts);
         const dot = clusterAccent(colorIdx[primaryId] ?? 0);
         const row = (
@@ -101,6 +106,7 @@ export function OpenClustersStrip({ t, open }: Props) {
             {open && (
               <>
                 <span
+                  title={fullLabel}
                   style={{
                     flex: 1,
                     minWidth: 0,
@@ -115,7 +121,7 @@ export function OpenClustersStrip({ t, open }: Props) {
                 </span>
                 <button
                   type="button"
-                  aria-label={`Close ${label}`}
+                  aria-label={`Close ${fullLabel}`}
                   title="Close cluster tab"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -141,7 +147,7 @@ export function OpenClustersStrip({ t, open }: Props) {
           </div>
         );
         // Collapsed rail: dots only, name in a tooltip.
-        return open ? row : <Tooltip key={tab.id} label={label}>{row}</Tooltip>;
+        return open ? row : <Tooltip key={tab.id} label={fullLabel}>{row}</Tooltip>;
       })}
     </div>
   );

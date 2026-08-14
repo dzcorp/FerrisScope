@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import { Mono } from "./detail";
 import type { ContextInfo, ClusterInfo } from "../types";
 import { tokens, FF_MONO, type ThemeMode, R_LG, R_MD, FS_MD, FS_XS } from "../theme";
-import { useAppStore, useResolvedTheme } from "../store";
+import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
 import { Stat, StatusPill, Gauge, Icons, Kbd, Tooltip } from "./ui";
 import { makeChatTab, makeTerminalTab, makeYamlTab } from "./Dock";
 import { MOD_KEY, SHIFT_KEY } from "../lib/keyboard";
@@ -25,6 +25,15 @@ type Props = {
 // Hosts the namespace filter button and the "+" menu (terminal / YAML).
 export function ClusterBar({ mode, context, state, style }: Props) {
   const t = useResolvedTheme().tokens;
+  // Short names for the "Add cluster…" list and for dock-tab titles — a
+  // terminal tab labelled with a 50-character GKE context is unreadable.
+  const clusterLabels = useClusterLabels();
+  const shortName = (c: ContextInfo) => clusterLabels[c.id]?.short ?? c.name;
+  // The Cluster stat renders the kubeconfig cluster entry, which for every
+  // managed provider is the same machine-generated string as the context
+  // name. Split it the same way the rest of the app does.
+  const clusterShort = clusterLabels[context.id]?.short ?? context.cluster;
+  const clusterQualifier = clusterLabels[context.id]?.qualifier ?? null;
 
   const addMenuOpen = useAppStore((s) => s.addMenuOpen);
   const setAddMenuOpen = useAppStore((s) => s.setAddMenuOpen);
@@ -133,9 +142,30 @@ export function ClusterBar({ mode, context, state, style }: Props) {
         t={t}
         label="Cluster"
         value={
-          <Mono>
-            {context.cluster}
-          </Mono>
+          // Two lines instead of one 50-character string that wraps
+          // mid-token: the cluster segment on top, the coordinate it was
+          // stripped of (project · region) dim underneath. Falls back to the
+          // single kubeconfig cluster name when nothing was shortened.
+          clusterQualifier ? (
+            <span
+              title={context.cluster}
+              style={{ display: "flex", flexDirection: "column", lineHeight: 1.25 }}
+            >
+              <Mono>{clusterShort}</Mono>
+              <span
+                style={{
+                  fontFamily: FF_MONO,
+                  fontSize: FS_XS,
+                  fontWeight: 500,
+                  color: t.textMuted,
+                }}
+              >
+                {clusterQualifier}
+              </span>
+            </span>
+          ) : (
+            <Mono>{context.cluster}</Mono>
+          )
         }
       />
       {showUser && context.user && (
@@ -215,8 +245,8 @@ export function ClusterBar({ mode, context, state, style }: Props) {
                     key={c.id}
                     t={t}
                     icon={Icons.cluster}
-                    title={c.name}
-                    subtitle={c.cluster}
+                    title={shortName(c)}
+                    subtitle={clusterLabels[c.id]?.qualifier ?? c.cluster}
                     onClick={() => {
                       addScopeExtra(c.id);
                       setAddMenuOpen(false);
@@ -240,7 +270,7 @@ export function ClusterBar({ mode, context, state, style }: Props) {
                       clusterId: context.id,
                       namespace: null,
                     },
-                    context.name,
+                    shortName(context),
                   ),
                 );
               }}
@@ -275,7 +305,7 @@ export function ClusterBar({ mode, context, state, style }: Props) {
                   s.setDockActiveId(existing.id);
                   s.setDockMin("right", false);
                 } else {
-                  addDockTab(makeChatTab(context.id, context.name));
+                  addDockTab(makeChatTab(context.id, shortName(context)));
                 }
               }}
             />

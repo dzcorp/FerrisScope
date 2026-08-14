@@ -24,7 +24,12 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, onResourceDelta } from "../api";
-import { selectClusterDegraded, useAppStore, useResolvedTheme } from "../store";
+import {
+  selectClusterDegraded,
+  useAppStore,
+  useClusterLabels,
+  useResolvedTheme,
+} from "../store";
 import { formatQuantity } from "./detail";
 import { execContainers, rowLogContainers } from "../lib/podContainers";
 import type {
@@ -66,7 +71,7 @@ import {
   applyScopedDelta,
   mergeScopedSnapshots,
   scopedUid,
-  shortClusterNames,
+  clusterDisplayMeta,
   type ScopedRow,
 } from "../lib/multiCluster";
 import {
@@ -266,6 +271,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // Lifted to the store so the AppHeader can render the active-filter chip
   // and so the palette in filter mode can edit it live without prop drilling.
   const tableFilter = useAppStore((s) => s.tableFilter);
+  const focusedClusterId = useAppStore((s) => s.focusedClusterId);
   const setTableCount = useAppStore((s) => s.setTableCount);
   const [logTarget, setLogTarget] = useState<ScopedRow | null>(null);
   const [logDefaultContainer, setLogDefaultContainer] = useState<string | null>(
@@ -332,6 +338,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         : clusters,
     [clusters, kindClusterIds],
   );
+  const clusterLabels = useClusterLabels();
   const clusterIds = useMemo(
     () => effectiveClusters.map((c) => c.id),
     [effectiveClusters],
@@ -343,20 +350,10 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // `short` is the compressed sibling-distinguishing name (common prefix /
   // suffix tokens stripped across the member set) the cell displays; the
   // full name stays in the tooltip and the failure strips.
-  const clusterMeta = useMemo(() => {
-    const shorts = shortClusterNames(clusters.map((c) => c.name));
-    const out: Record<
-      string,
-      { name: string; short: string; colorIdx: number }
-    > = {};
-    for (const c of clusters)
-      out[c.id] = {
-        name: c.name,
-        short: shorts[c.name] ?? c.name,
-        colorIdx: c.colorIdx,
-      };
-    return out;
-  }, [clusters]);
+  const clusterMeta = useMemo(
+    () => clusterDisplayMeta(clusters, clusterLabels),
+    [clusters, clusterLabels],
+  );
   const clusterMetaRef = useRef(clusterMeta);
   clusterMetaRef.current = clusterMeta;
 
@@ -615,10 +612,19 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     return () => window.clearTimeout(handle);
   }, [pendingDetail, kind.id, load.kind, consumePendingDetail]);
 
+  // A cluster focus set from the multi-cluster bar only applies while the
+  // view actually spans several members — a single-cluster tab can't be
+  // focused, and a stale id from a previous scope must not blank the table.
+  const focusActive =
+    clusters.length > 1 &&
+    focusedClusterId !== null &&
+    clusters.some((c) => c.id === focusedClusterId);
+
   const filtered = useMemo(() => {
     const parsed = parseTableFilter(tableFilter);
     const nsFilterActive = kind.namespaced && selectedNamespaces.size > 0;
     return rows
+      .filter((r) => !focusActive || r.__clusterId === focusedClusterId)
       .filter((r) => {
         if (!nsFilterActive) return true;
         const ns = r.namespace;
@@ -630,7 +636,14 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         // `r.__labels` (watcher-injected).
         return parsed.test(r);
       });
-  }, [rows, selectedNamespaces, tableFilter, kind.namespaced]);
+  }, [
+    rows,
+    selectedNamespaces,
+    tableFilter,
+    kind.namespaced,
+    focusActive,
+    focusedClusterId,
+  ]);
 
   // Push the row count to the store so the header breadcrumb can render it
   // (`Pods · 232` / `Pods · 12/232`). Reset to null on unmount so a stale
@@ -1466,9 +1479,22 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
               const nsFilterApplied =
                 kind.namespaced && selectedNamespaces.size > 0;
               const filtersApplied =
-                tableFilter.trim().length > 0 || nsFilterApplied;
+                tableFilter.trim().length > 0 || nsFilterApplied || focusActive;
               if (filtersApplied) {
                 const bits: string[] = [];
+                if (focusActive) {
+                  // The provider-short name, NOT `clusterMeta.short` — that
+                  // one is further compressed against its siblings for the
+                  // narrow Cluster column ("us"), which reads as nonsense in
+                  // a sentence.
+                  bits.push(
+                    `cluster ${
+                      clusterLabels[focusedClusterId!]?.short ??
+                      clusterMeta[focusedClusterId!]?.name ??
+                      focusedClusterId
+                    }`,
+                  );
+                }
                 if (nsFilterApplied) {
                   bits.push(
                     selectedNamespaces.size === 1

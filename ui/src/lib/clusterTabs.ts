@@ -4,6 +4,7 @@
 // other open tab still uses.
 
 import { confirm } from "./dialog";
+import type { ClusterLabel } from "./clusterName";
 import { selectActiveClusterIds, useAppStore, type ClusterTab } from "../store";
 
 /// Live terminal/chat dock sessions a tab is holding. For the active tab these
@@ -70,10 +71,16 @@ export async function goToFleet(): Promise<void> {
 
 /// Human label for a tab: the context name for a single cluster, the virtual
 /// context's name for a merged view, falling back to the raw id.
+///
+/// `labels` is the fleet's resolved display map (`useClusterLabels()`), which
+/// shortens machine-generated context names. Callers in tight chrome (the
+/// rail strip, the header's tab menu) pass it and keep the full name in the
+/// tooltip; omitting it yields the raw context name.
 export function clusterTabLabel(
   tab: ClusterTab,
   contexts: { id: string; name: string }[],
   virtualContexts: { id: string; name: string }[],
+  labels?: Record<string, ClusterLabel>,
 ): string {
   if (tab.selectedVirtualContextId) {
     const v = virtualContexts.find((vc) => vc.id === tab.selectedVirtualContextId);
@@ -81,10 +88,21 @@ export function clusterTabLabel(
   }
   if (tab.selectedContext) {
     const c = contexts.find((cc) => cc.id === tab.selectedContext);
-    if (c) return c.name;
+    if (c) return labels?.[c.id]?.short ?? c.name;
     return tab.selectedContext;
   }
   return tab.selectedVirtualContextId ?? "cluster";
+}
+
+/// The full, unshortened context name behind a tab — for tooltips and
+/// `aria-label`s, so the operator can always recover what `clusterTabLabel`
+/// trimmed. Same fallbacks as `clusterTabLabel`.
+export function clusterTabFullLabel(
+  tab: ClusterTab,
+  contexts: { id: string; name: string }[],
+  virtualContexts: { id: string; name: string }[],
+): string {
+  return clusterTabLabel(tab, contexts, virtualContexts);
 }
 
 /// Primary (first) physical cluster id of a tab's scope — used to colour its

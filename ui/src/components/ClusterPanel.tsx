@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useAppStore, useResolvedTheme } from "../store";
+import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
 import type { ClusterInfo, ContextInfo } from "../types";
 import { type ThemeMode, FS_MD } from "../theme";
 import {
@@ -151,14 +151,15 @@ function ConnectingLabel({
   startedAt: number;
 }) {
   const [now, setNow] = useState(Date.now());
+  const shortName = useClusterLabels()[context.id]?.short ?? context.name;
   useEffect(() => {
     const i = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(i);
   }, []);
   const secs = Math.max(0, Math.floor((now - startedAt) / 1000));
   return (
-    <span>
-      Connecting to {context.name}… <span style={{ opacity: 0.6 }}>({secs}s)</span>
+    <span title={context.name}>
+      Connecting to {shortName}… <span style={{ opacity: 0.6 }}>({secs}s)</span>
     </span>
   );
 }

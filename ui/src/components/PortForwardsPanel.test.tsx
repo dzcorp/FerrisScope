@@ -127,3 +127,70 @@ describe("PortForwardsPanel — global section", () => {
     expect(screen.getByTestId("new-forward-form")).toBeTruthy();
   });
 });
+
+// The panel hydrates the helper lifecycle on mount; an undefined response
+// would be stored verbatim and crash the header.
+const mockPfIdle = (cmd: string) => {
+  if (cmd === "gf_list") return [];
+  if (cmd === "gf_helper_status") return { state: "not_started" };
+  return undefined;
+};
+
+describe("PortForwardsPanel short cluster names", () => {
+  const GKE = "gke_development-d83ab4a8_europe-west4_truenv-03";
+  const CID = `default::${GKE}`;
+  const entry = {
+    spec: {
+      id: `${CID}::Service/default/api:80`,
+      cluster_id: CID,
+      target: { kind: "Service", namespace: "default", name: "api" },
+      remote_port: 80,
+      requested_local_port: null,
+      autostart: false,
+      mode: "simple",
+    },
+    actual_local_port: 8080,
+    status: { kind: "listening" },
+  } as never;
+
+  const seed = () =>
+    useAppStore.setState({
+      forwards: { [`${CID}::Service/default/api:80`]: entry },
+      forwardsOpen: true,
+      globalForwards: {},
+      helperStatus: { state: "not_started" },
+      contexts: [
+        {
+          id: CID,
+          name: GKE,
+          cluster: GKE,
+          user: null,
+          namespace: null,
+          is_current: false,
+          group: "Default",
+          source_id: "default",
+          source_path: null,
+        },
+      ],
+    });
+
+  it("heads each group with the short name, full name on hover", () => {
+    seed();
+    setMockInvoke(mockPfIdle);
+    render(<PortForwardsPanel mode="dark" />);
+    const heading = screen.getByText("truenv-03");
+    expect(heading).toBeTruthy();
+    expect(heading.getAttribute("title")).toBe(GKE);
+    expect(screen.queryByText(GKE)).toBeNull();
+  });
+
+  it("falls back to the full name when shortening is off", () => {
+    useAppStore.getState().patchSettings({ shortenClusterNames: false });
+    seed();
+    setMockInvoke(mockPfIdle);
+    render(<PortForwardsPanel mode="dark" />);
+    expect(screen.getByText(GKE)).toBeTruthy();
+    expect(screen.queryByText("truenv-03")).toBeNull();
+    useAppStore.getState().patchSettings({ shortenClusterNames: true });
+  });
+});

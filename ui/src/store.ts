@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { create } from "zustand";
+import { clusterLabels, type ClusterLabel } from "./lib/clusterName";
 import type {
   ClusterHealthStatus,
   ContextInfo,
@@ -213,6 +214,8 @@ export type ScopeSlice = {
   pendingDetail: DetailEntry | null;
   tableFilter: string;
   filterEditing: boolean;
+
+  focusedClusterId: string | null;
   kindClusters: Record<string, string[]>;
   dockTabs: DockTab[];
   dockActiveId: string | null;
@@ -340,6 +343,13 @@ type AppState = {
   // this flag lets the keyboard handler in `App.tsx` open it and the
   // input itself close it on Esc / Enter / blur.
   filterEditing: boolean;
+  // In a multi-cluster (virtual context / ad-hoc) view, restrict the merged
+  // table to one member. `null` = show every member. Set by clicking a chip
+  // in the multi-cluster bar; purely a view filter — it never touches the
+  // subscription fan-out, so every member keeps streaming and clearing the
+  // focus is instant with no refetch. Per-tab (lives in `ScopeSlice`), so
+  // two tabs can focus different members.
+  focusedClusterId: string | null;
 
   // Confirm-modal queue. Multiple opens stack; the topmost renders. Each
   // entry carries its `resolve` so the imperative `confirm()` helper can
@@ -439,6 +449,14 @@ type AppState = {
     // virtual context / unsaved ad-hoc set), only the last single cluster,
     // or always the fleet landing. Settings → General.
     startupScope: PrefsStartupScope;
+    // Render machine-generated context names (GKE, EKS ARNs, eksctl,
+    // OpenShift) as just the cluster segment, with what was stripped shown
+    // as a dim qualifier. Names we don't recognise are left untouched.
+    // Default on; toggled in Settings → Appearance.
+    shortenClusterNames: boolean;
+    // Bucket the fleet landing's cards by the project / account / region the
+    // shortened names were stripped of. Default on; Settings → Appearance.
+    groupFleetByProject: boolean;
   };
 
   setContexts: (cs: ContextInfo[]) => void;
@@ -483,6 +501,13 @@ type AppState = {
   /// Drop an ad-hoc scope addition. Clears row selection — selected rows may
   /// belong to the removed cluster.
   removeScopeExtra: (contextId: string) => void;
+
+  /// Toggle the merged table's focus onto one member cluster. Passing the id
+  /// that is already focused clears it, so a second click on the same chip is
+  /// "show everything again".
+  toggleFocusedCluster: (clusterId: string) => void;
+  /// Clear the focus outright (the "showing 1 of N" chip's ×).
+  clearFocusedCluster: () => void;
 
   setKinds: (ks: ResourceKind[]) => void;
   setKindsError: (err: string) => void;
@@ -621,6 +646,7 @@ function emptyScopeSlice(): ScopeSlice {
     pendingDetail: null,
     tableFilter: "",
     filterEditing: false,
+    focusedClusterId: null,
     // Dynamic-kind availability is per-scope — the rail republishes after
     // re-discovering CRDs on the new scope's members.
     kindClusters: {},
@@ -642,6 +668,7 @@ function captureScopeSlice(s: AppState): ScopeSlice {
     pendingDetail: s.pendingDetail,
     tableFilter: s.tableFilter,
     filterEditing: s.filterEditing,
+    focusedClusterId: s.focusedClusterId,
     kindClusters: s.kindClusters,
     dockTabs: s.dockTabs,
     dockActiveId: s.dockActiveId,
@@ -844,6 +871,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   tableCount: null,
   tableFilter: "",
   filterEditing: false,
+  focusedClusterId: null,
 
   modals: [],
   toasts: [],
@@ -879,6 +907,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     fleetView: "tiles",
     darkConsole: true,
     startupScope: "latest_view",
+    shortenClusterNames: true,
+    groupFleetByProject: true,
   },
 
   appVersion: null,
@@ -1062,7 +1092,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({
       scopeExtras: s.scopeExtras.filter((id) => id !== contextId),
       selection: new Map<string, SelectionMeta>(),
+      // Dropping the focused member would otherwise leave the table filtered
+      // to a cluster that is no longer in scope — an empty table with no
+      // visible cause.
+      focusedClusterId:
+        s.focusedClusterId === contextId ? null : s.focusedClusterId,
     })),
+
+  toggleFocusedCluster: (clusterId) =>
+    set((s) => ({
+      focusedClusterId: s.focusedClusterId === clusterId ? null : clusterId,
+    })),
+  clearFocusedCluster: () => set({ focusedClusterId: null }),
 
   setKindsLoading: () => set({ kindsStatus: "loading", kindsError: null }),
   setKinds: (ks) =>
@@ -1587,6 +1628,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         // gets the console treatment without re-opting.
         darkConsole: prefs.settings.dark_console ?? true,
         startupScope,
+        // Older prefs predate both flags; default on so existing installs
+        // pick up the shorter names without visiting Settings.
+        shortenClusterNames: prefs.settings.shorten_cluster_names ?? true,
+        groupFleetByProject: prefs.settings.group_fleet_by_project ?? true,
       },
       // `prefs.update` lands populated by `#[serde(default)]` on the Rust side
       // for prefs.json files written before this block existed.
@@ -1802,6 +1847,8 @@ export function buildPrefsPayload(s: {
       fleet_view: s.settings.fleetView,
       dark_console: s.settings.darkConsole,
       startup_scope: s.settings.startupScope,
+      shorten_cluster_names: s.settings.shortenClusterNames,
+      group_fleet_by_project: s.settings.groupFleetByProject,
     },
     ui: {
       selected_context: s.selectedContext,
@@ -1914,6 +1961,23 @@ export function useActiveClusterEpoch(): number {
     for (const id of selectActiveClusterIds(s)) sum += s.clusterEpoch[id] ?? 0;
     return sum;
   });
+}
+
+/// Display labels for every context in the fleet, keyed by `ContextInfo.id`.
+///
+/// The shortening pass is list-aware (it guarantees the rendered
+/// `short + qualifier` pair identifies exactly one cluster), so this hook
+/// deliberately reads the WHOLE `contexts` array rather than a filtered or
+/// grouped subset — otherwise a label could change as a search box is typed
+/// into. `clusterLabels` memoises on the array reference, so the ~15 call
+/// sites share one computation per store update.
+///
+/// Subscribing here is also what makes the Settings toggle live: a component
+/// that renders `c.name` directly won't repaint when the flag flips.
+export function useClusterLabels(): Record<string, ClusterLabel> {
+  const contexts = useAppStore((s) => s.contexts);
+  const enabled = useAppStore((s) => s.settings.shortenClusterNames);
+  return useMemo(() => clusterLabels(contexts, enabled), [contexts, enabled]);
 }
 
 /// Resolve the active theme into a ready-to-use bag of tokens, typography,

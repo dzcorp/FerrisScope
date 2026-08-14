@@ -26,7 +26,12 @@ import { MOD_KEY, IS_MAC } from "../lib/keyboard";
 import { headerPaddingLeft, dragRegionProps } from "../lib/macChrome";
 import { HeaderToast } from "./HeaderToast";
 import { parseTableFilter } from "../lib/tableFilter";
-import { useAppStore, useResolvedTheme, type ClusterTab } from "../store";
+import {
+  useAppStore,
+  useClusterLabels,
+  useResolvedTheme,
+  type ClusterTab,
+} from "../store";
 import { api } from "../api";
 import {
   closeClusterTab,
@@ -72,6 +77,12 @@ export function AppHeader({
   onOpenForwards,
 }: Props) {
   const t = useResolvedTheme().tokens;
+  // Breadcrumb shows the short cluster name; `title` on the surrounding
+  // button keeps the full context name one hover away.
+  const clusterLabels = useClusterLabels();
+  const contextLabel = context
+    ? clusterLabels[context.id]?.short ?? context.name
+    : "";
   // Open cluster tabs for the breadcrumb switcher dropdown.
   const openTabs = useAppStore((s) => s.openTabs);
   const activeTabId = useAppStore((s) => s.activeTabId);
@@ -189,7 +200,11 @@ export function AppHeader({
               onClick={() => setClusterMenuOpen((v) => !v)}
               aria-haspopup="menu"
               aria-expanded={clusterMenuOpen}
-              title="Switch or open a cluster"
+              title={
+                context && contextLabel !== context.name
+                  ? `${context.name} — switch or open a cluster`
+                  : "Switch or open a cluster"
+              }
               style={{
                 display: "inline-flex",
                 alignItems: "center",
@@ -205,7 +220,7 @@ export function AppHeader({
                 font: "inherit",
               }}
             >
-              {context.name}
+              {contextLabel}
               <span
                 aria-hidden
                 style={{
@@ -825,6 +840,7 @@ function ClusterSwitcherMenu({
   onOpenVirtual: (id: string) => void;
   onClose: () => void;
 }) {
+  const labels = useClusterLabels();
   // Anchor the menu to the trigger's viewport rect. It is portaled to <body>
   // (below) so it escapes the header's stacking context (zIndex 5) — otherwise
   // it would paint behind the dock (zIndex 25) and detail panel. Fixed
@@ -902,7 +918,7 @@ function ClusterSwitcherMenu({
         <MenuCaption t={t}>Open</MenuCaption>
         {openTabs.map((tab) => {
           const isActive = tab.id === activeTabId;
-          const label = clusterTabLabel(tab, contexts, virtualContexts);
+          const label = clusterTabLabel(tab, contexts, virtualContexts, labels);
           const primaryId = clusterTabPrimaryId(tab, contexts, virtualContexts);
           return (
             <div
@@ -979,7 +995,9 @@ function ClusterSwitcherMenu({
               <MenuOpenRow
                 key={`c:${c.id}`}
                 t={t}
-                label={c.name}
+                label={labels[c.id]?.short ?? c.name}
+                sub={labels[c.id]?.qualifier ?? null}
+                title={c.name}
                 onClick={() => onOpenContext(c.id)}
               />
             ))}
@@ -1011,15 +1029,22 @@ function MenuCaption({ t, children }: { t: Tokens; children: ReactNode }) {
 function MenuOpenRow({
   t,
   label,
+  sub,
+  title,
   onClick,
 }: {
   t: Tokens;
   label: string;
+  /// Dim coordinate rendered after the label — what shortening stripped.
+  sub?: string | null;
+  /// Full context name, for the hover tooltip.
+  title?: string;
   onClick: () => void;
 }) {
   return (
     <div
       role="menuitem"
+      title={title}
       onClick={onClick}
       style={{
         display: "flex",
@@ -1049,6 +1074,18 @@ function MenuOpenRow({
         }}
       >
         {label}
+        {sub && (
+          <span
+            style={{
+              marginLeft: 6,
+              color: t.textMuted,
+              fontFamily: FF_MONO,
+              fontSize: FS_XS,
+            }}
+          >
+            {sub}
+          </span>
+        )}
       </span>
     </div>
   );

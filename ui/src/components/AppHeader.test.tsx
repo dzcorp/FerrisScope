@@ -205,3 +205,86 @@ describe("AppHeader cluster switcher", () => {
     expect(useAppStore.getState().selectedContext).toBe("default::beta");
   });
 });
+
+describe("AppHeader short cluster names", () => {
+  const GKE_OPEN = "gke_development-d83ab4a8_europe-west4_truenv-03";
+  const GKE_OTHER = "gke_production-4f83b34d_us-central1_prod-6";
+  const mkCtx = (name: string) => ({
+    id: `default::${name}`,
+    name,
+    cluster: name,
+    user: null,
+    namespace: null,
+    is_current: false,
+    group: "Default",
+    source_id: "default",
+    source_path: null,
+  });
+  const open = mkCtx(GKE_OPEN);
+  const other = mkCtx(GKE_OTHER);
+
+  const renderWithFleet = () => {
+    act(() => {
+      useAppStore.setState({
+        contexts: [open, other],
+        virtualContexts: [],
+        openTabs: [],
+        activeTabId: null,
+      });
+      useAppStore
+        .getState()
+        .openTab({ kind: "context", contextId: open.id });
+    });
+    return render(
+      <AppHeader
+        mode="dark"
+        context={open}
+        selectedKindLabel="Pod"
+        unreadNotifications={0}
+        activeForwards={0}
+        onHome={noop}
+        onPalette={noop}
+        onToggleTheme={noop}
+        onOpenNotifications={noop}
+        onOpenSettings={noop}
+        onOpenForwards={noop}
+      />,
+    );
+  };
+
+  it("renders the breadcrumb as the short name with the full one on hover", () => {
+    const utils = renderWithFleet();
+    expect(utils.getByText("truenv-03")).toBeTruthy();
+    expect(utils.queryByText(GKE_OPEN)).toBeNull();
+    expect(
+      utils.getByTitle(`${GKE_OPEN} — switch or open a cluster`),
+    ).toBeTruthy();
+  });
+
+  it("shortens the 'Open another' list and keeps the coordinate beside it", () => {
+    const utils = renderWithFleet();
+    fireEvent.click(utils.getByText("truenv-03"));
+    // The unopened context is listed short, not as a 42-character string.
+    expect(utils.getByText("prod-6")).toBeTruthy();
+    expect(utils.queryByText(GKE_OTHER)).toBeNull();
+    // …with the stripped coordinate dim next to it, so two clusters from
+    // different projects stay distinguishable.
+    expect(
+      utils.getByText("production-4f83b34d · us-central1"),
+    ).toBeTruthy();
+    // Full name still recoverable on hover.
+    expect(utils.getByTitle(GKE_OTHER)).toBeTruthy();
+  });
+
+  it("falls back to full names when shortening is off", () => {
+    act(() => {
+      useAppStore.getState().patchSettings({ shortenClusterNames: false });
+    });
+    const utils = renderWithFleet();
+    expect(utils.getByText(GKE_OPEN)).toBeTruthy();
+    expect(utils.queryByText("truenv-03")).toBeNull();
+    act(() => {
+      useAppStore.getState().patchSettings({ shortenClusterNames: true });
+    });
+  });
+});

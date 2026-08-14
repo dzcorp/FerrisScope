@@ -256,6 +256,50 @@ export function shortClusterNames(names: string[]): Record<string, string> {
   return out;
 }
 
+/// Display metadata for the table's synthetic Cluster column.
+///
+/// Composes the two shorteners. `labels` (from `lib/clusterName`) strips the
+/// provider coordinate — GKE project + location, an EKS ARN's account +
+/// region — giving the same base name the rail and the fleet show.
+/// `shortClusterNames` then elides whatever token run the visible members
+/// still share, because the Cluster column is the narrowest surface in the
+/// app and its rows are already badged by accent colour.
+///
+/// Order matters: run on raw context names, the prefix pass would eat the
+/// project segment, and its uniqueness guard would then revert BOTH siblings
+/// to their full 50-character names — the worst possible outcome for that
+/// column. `name` stays the full context name; it's what the tooltip and the
+/// partial-data strips show.
+///
+/// The one case where the raw names are the better input: when two members
+/// shorten to the SAME base (same cluster segment in two projects, where
+/// `ClusterLabel` disambiguates with a qualifier this column has no room
+/// for). Feeding the shortened names there would print two identical cells;
+/// the raw names let the elision pass keep the differing segment — the
+/// projects — which is exactly the distinguishing part.
+export function clusterDisplayMeta(
+  clusters: readonly { id: string; name: string; colorIdx: number }[],
+  labels: Record<string, { short: string }>,
+): Record<string, { name: string; short: string; colorIdx: number }> {
+  const shortened = clusters.map((c) => labels[c.id]?.short ?? c.name);
+  const distinct = new Set(shortened).size === shortened.length;
+  const base = new Map(
+    clusters.map((c, i) => [c.id, distinct ? shortened[i]! : c.name]),
+  );
+  const shorts = shortClusterNames([...base.values()]);
+  const out: Record<string, { name: string; short: string; colorIdx: number }> =
+    {};
+  for (const c of clusters) {
+    const short = base.get(c.id) ?? c.name;
+    out[c.id] = {
+      name: c.name,
+      short: shorts[short] ?? short,
+      colorIdx: c.colorIdx,
+    };
+  }
+  return out;
+}
+
 /// Per-namespace origin labels for the namespace modal in multi-cluster
 /// views. A namespace present on EVERY reporting member needs no label —
 /// only the ones that exist on a subset get tagged with the (compressed)
