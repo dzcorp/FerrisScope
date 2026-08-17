@@ -77,6 +77,22 @@ pub struct PinOffer {
     pub effects: Vec<String>,
 }
 
+/// What an operator has to run to renew a lapsed cloud session.
+///
+/// Separate from [`PinOffer`] because there is nothing for the app to write: the
+/// provider wants an identity challenge (usually a browser round trip), and a
+/// GUI process spawning the plugin has no terminal to host one. The remedy is a
+/// command the operator runs, after which the app's next connect succeeds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReauthOffer {
+    /// Verbatim command to run, complete with the account flag when the context
+    /// pins one.
+    pub command: String,
+    /// Account whose session lapsed. `None` when the context is unpinned, in
+    /// which case whichever account the CLI has active is the one to renew.
+    pub account: Option<String>,
+}
+
 /// An actionable note to render alongside a failed connect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConnectHint {
@@ -94,6 +110,10 @@ pub struct ConnectHint {
     /// `None` when the provider has no per-context pin at all (Azure): the note
     /// then explains the CLI command to run instead.
     pub pin: Option<PinOffer>,
+    /// Set instead of [`Self::pin`] when the failure was a lapsed cloud session
+    /// rather than identity drift. Pinning cannot fix that — only an interactive
+    /// login can — so the two are mutually exclusive in practice.
+    pub reauth: Option<ReauthOffer>,
 }
 
 /// Pull the identity out of an apiserver RBAC denial (`User "x" cannot …`).
@@ -138,6 +158,20 @@ pub fn forbidden_user(message: &str) -> Option<String> {
         rest = &rest[idx + marker.len()..];
     }
     None
+}
+
+/// Does this error look like a cloud session that needs an interactive renewal?
+///
+/// Matches both ends of the same failure: the plugin's own stderr (which
+/// [`crate::exec_auth`] captures and puts in the error) and our rendering of
+/// [`crate::Error::ExecReauthRequired`], so the note survives whichever layer
+/// formatted the string that reaches the frontend.
+#[must_use]
+pub fn looks_like_reauth(message: &str) -> bool {
+    gcloud::classify_exec_failure(message) == gcloud::ExecFailure::ReauthRequired
+        || message
+            .to_ascii_lowercase()
+            .contains("cloud session expired")
 }
 
 /// Does this error string look like a genuine RBAC 403?
@@ -301,9 +335,13 @@ fn hint_for_context_with(
     error: &str,
     probe: &dyn Fn(Provider) -> Identities,
 ) -> Result<Option<ConnectHint>> {
-    // Cheapest gate first: most connect failures aren't 403s at all, and
-    // bailing here avoids reading the kubeconfig a second time.
-    if !is_forbidden(error) {
+    // Two different failures reach here. A 403 means the connect *authenticated*
+    // and was refused, which is where identity drift shows up. A lapsed cloud
+    // session never gets that far — the exec plugin refuses to produce a token
+    // at all — so it needs its own gate, and it must come first: the reauth
+    // message is not a 403 and would otherwise be dropped by the check below.
+    let reauth = looks_like_reauth(error);
+    if !reauth && !is_forbidden(error) {
         return Ok(None);
     }
     let Some(spec) = crate::cluster::exec_spec_for_context(context_name, source_path)? else {
@@ -312,6 +350,23 @@ fn hint_for_context_with(
     let Some((provider, binding)) = classify(&spec.command, &spec.args, &spec.env) else {
         return Ok(None);
     };
+    if reauth {
+        // Only gcloud is claimed here. AWS mints per call (no session to lapse),
+        // and kubelogin's device/interactive modes fail differently — inventing
+        // matching prose for either would be guessing.
+        if provider != Provider::Gcloud {
+            return Ok(None);
+        }
+        let account = match &binding {
+            Binding::Pinned { identity } => Some(identity.clone()),
+            Binding::FollowsActive => None,
+        };
+        let identities = probe(provider);
+        return Ok(Some(gcloud::compose_reauth_hint(
+            account.as_deref(),
+            &identities,
+        )));
+    }
     // A pinned context can't be suffering identity drift, whatever the
     // provider — the 403 is a plain RBAC gap.
     if binding != Binding::FollowsActive {
@@ -349,6 +404,7 @@ pub fn pin_identity(kubeconfig: &Path, context: &str, identity: &str) -> Result<
         context,
         identity,
         gcloud::plugin_cache_path().as_deref(),
+        crate::exec_auth::slots_root().as_deref(),
     )
 }
 
@@ -381,7 +437,8 @@ fn validate_identity(identity: &str) -> Result<()> {
     Ok(())
 }
 
-/// [`pin_identity`] with the gcloud token cache location injected.
+/// [`pin_identity`] with both token cache locations injected: the plugin's
+/// default file and the root of the slots we hand it ourselves.
 ///
 /// Exists so tests can exercise the real code path — including the
 /// gcloud-only cache clear — without reaching into the developer's `$HOME` and
@@ -391,6 +448,7 @@ fn pin_identity_at(
     context: &str,
     identity: &str,
     gcloud_cache: Option<&Path>,
+    slots_root: Option<&Path>,
 ) -> Result<()> {
     let identity = identity.trim();
     validate_identity(identity)?;
@@ -430,6 +488,17 @@ fn pin_identity_at(
             gcloud::clear_plugin_cache_at(cache).map_err(|e| {
                 Error::Invalid(format!(
                     "account pinned, but clearing the gcloud auth plugin token cache failed: {e}"
+                ))
+            })?;
+        }
+        // The default slot above isn't the only one: every slot
+        // `crate::exec_auth` hands the plugin can hold a token minted under the
+        // pre-pin identity too, and the newly pinned account reads a *different*
+        // slot, so a stale one would sit there until it expired.
+        if let Some(root) = slots_root {
+            crate::exec_auth::clear_cache_slots_at(root).map_err(|e| {
+                Error::Invalid(format!(
+                    "account pinned, but clearing the app's auth token cache failed: {e}"
                 ))
             })?;
         }
@@ -846,6 +915,96 @@ mod tests {
         assert_eq!(hint("nope", FORBIDDEN_403, &no_probe).expect("hint"), None);
     }
 
+    /// Verbatim from `Error::ExecReauthRequired`'s rendering of a real plugin
+    /// failure — the string the frontend actually hands back to `connect_hint`.
+    const REAUTH_ERROR: &str = "cloud session expired for a@example.com — run \
+         `gcloud auth login --account=a@example.com` in a terminal (ERROR: \
+         (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: \
+         Reauthentication failed. cannot prompt during non-interactive execution.)";
+
+    #[test]
+    fn a_lapsed_session_gets_a_reauth_note_not_a_pin() {
+        // This failure never reaches the apiserver, so it carries no 403 and
+        // the drift gates would drop it. It also must not offer a pin: the
+        // account is fine, its session isn't, and pinning would edit the
+        // operator's kubeconfig for nothing.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pinned = KUBECONFIG_YAML.replace(
+            "      command: gke-gcloud-auth-plugin",
+            "      command: gke-gcloud-auth-plugin\n      args: [\"--account=a@example.com\"]",
+        );
+        let path = kubeconfig_fixture(tmp.path(), &pinned);
+        let hint = hint_for_context_with("gke", Some(&path), REAUTH_ERROR, &two_accounts)
+            .expect("hint")
+            .expect("a reauth note");
+
+        assert_eq!(hint.provider, Provider::Gcloud);
+        assert_eq!(hint.pin, None);
+        let offer = hint.reauth.expect("reauth offer");
+        assert_eq!(offer.account.as_deref(), Some("a@example.com"));
+        assert_eq!(offer.command, "gcloud auth login --account=a@example.com");
+        assert!(hint.detail.contains("terminal"));
+    }
+
+    #[test]
+    fn a_lapsed_session_on_an_unpinned_context_renews_the_active_account() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
+        let hint = hint_for_context_with(
+            "gke",
+            Some(&path),
+            "Reauthentication failed. cannot prompt during non-interactive execution.",
+            &two_accounts,
+        )
+        .expect("hint")
+        .expect("a reauth note");
+
+        let offer = hint.reauth.expect("reauth offer");
+        assert_eq!(
+            offer.account, None,
+            "an unpinned context has no account of its own to name"
+        );
+        assert_eq!(
+            offer.command, "gcloud auth login",
+            "so the command must not invent one either"
+        );
+        // The note still says which account gcloud would renew.
+        assert!(hint.detail.contains("b@example.com"));
+    }
+
+    #[test]
+    fn the_reauth_gate_stays_inside_gcloud() {
+        // AWS mints a token per call, so there is no session to lapse; kubelogin
+        // fails differently. Matching prose for either would be invention.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
+        for ctx in ["eks", "aks"] {
+            assert_eq!(
+                hint_for_context_with(ctx, Some(&path), REAUTH_ERROR, &two_accounts).expect("hint"),
+                None,
+                "{ctx} must not be handed gcloud's reauth wording"
+            );
+        }
+        // Nor does a context with no exec plugin at all.
+        assert_eq!(
+            hint_for_context_with("plain", Some(&path), REAUTH_ERROR, &no_probe).expect("hint"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_ordinary_403_is_still_drift_not_reauth() {
+        // The two gates must not bleed: a plain RBAC denial keeps offering the
+        // pin, with no reauth offer attached.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
+        let hint = hint_for_context_with("gke", Some(&path), FORBIDDEN_403, &two_accounts)
+            .expect("hint")
+            .expect("a drift note");
+        assert!(hint.pin.is_some());
+        assert_eq!(hint.reauth, None);
+    }
+
     #[test]
     fn hint_refuses_a_context_that_already_names_an_identity() {
         // The gate that stops the note firing on a correctly-pinned context.
@@ -1130,7 +1289,13 @@ users:
     /// the gcloud-only cache clear runs for real without touching the
     /// developer's `~/.kube`.
     pub(super) fn pin(path: &Path, ctx: &str, identity: &str) -> Result<()> {
-        pin_identity_at(path, ctx, identity, Some(&path.with_extension("cache")))
+        pin_identity_at(
+            path,
+            ctx,
+            identity,
+            Some(&path.with_extension("cache")),
+            Some(&path.with_extension("slots")),
+        )
     }
 
     #[test]

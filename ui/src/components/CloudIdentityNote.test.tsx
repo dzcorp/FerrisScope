@@ -23,6 +23,7 @@ const GCLOUD: ConnectHint = {
       "delete ~/.kube/gke_gcloud_auth_plugin_cache",
     ],
   },
+  reauth: null,
 };
 
 const AWS: ConnectHint = {
@@ -39,6 +40,7 @@ const AWS: ConnectHint = {
       "keep a .ferrisscope-backup copy of the kubeconfig",
     ],
   },
+  reauth: null,
 };
 
 const AZURE: ConnectHint = {
@@ -51,6 +53,24 @@ const AZURE: ConnectHint = {
   active_identity: "ops@example.net",
   // The whole point of the Azure case: nothing to write, so no button.
   pin: null,
+  reauth: null,
+};
+
+// A lapsed Google session: the plugin never produced a token, so there is no
+// apiserver identity to report and nothing a pin could fix.
+const REAUTH: ConnectHint = {
+  provider: "gcloud",
+  title: "Google session expired",
+  detail:
+    "The Google session for ops@example.net has expired, so gke-gcloud-auth-plugin could not mint a token. Run the command below in a terminal, then reconnect.",
+  authenticated_as: null,
+  identities: ["dev@example.com", "ops@example.net"],
+  active_identity: "dev@example.com",
+  pin: null,
+  reauth: {
+    command: "gcloud auth login --account=ops@example.net",
+    account: "ops@example.net",
+  },
 };
 
 const REASON =
@@ -410,5 +430,51 @@ describe("CloudIdentityNote", () => {
       expect(screen.getByText(/kubeconfig is read-only/)).toBeInTheDocument();
     });
     expect(screen.getByText(/Unpinned Google account/)).toBeInTheDocument();
+  });
+  it("offers the login command and a retry when the session lapsed", async () => {
+    setMockInvoke((cmd) => {
+      expect(cmd).toBe("connect_hint_cmd");
+      return REAUTH;
+    });
+    const onReconnect = vi.fn();
+
+    renderNote(onReconnect);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Google session expired/)).toBeInTheDocument();
+    });
+    const note = screen.getByRole("note");
+    // The exact command, including the account flag — an operator with several
+    // accounts renewing the wrong one is back where they started.
+    expect(note).toHaveTextContent("gcloud auth login --account=ops@example.net");
+    // No pin offered: the account is fine, its session isn't, and pinning would
+    // edit the kubeconfig for nothing.
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^pin/i }),
+    ).not.toBeInTheDocument();
+    // And no "apiserver saw" row: the plugin failed before any apiserver call.
+    expect(note).not.toHaveTextContent("apiserver saw");
+
+    fireEvent.click(screen.getByRole("button", { name: /retry connect/i }));
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("copies the login command on click", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    setMockInvoke(() => REAUTH);
+
+    renderNote();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Google session expired/)).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByText("gcloud auth login --account=ops@example.net"),
+    );
+    expect(writeText).toHaveBeenCalledWith(
+      "gcloud auth login --account=ops@example.net",
+    );
   });
 });

@@ -28,6 +28,20 @@ pub enum Error {
         stderr: String,
     },
 
+    /// The plugin ran and refused because the cloud session lapsed: the
+    /// credentials are intact, but the provider wants an identity challenge that
+    /// needs a terminal (and usually a browser) the app cannot offer. Separate
+    /// from [`Error::ExecPluginFailed`] because the only remedy is an
+    /// interactive login, not a plugin or PATH fix.
+    #[error("cloud session expired for {} — run `gcloud auth login{}` in a terminal ({message})",
+        account.as_deref().unwrap_or("the active account"),
+        account.as_ref().map(|a| format!(" --account={a}")).unwrap_or_default())]
+    ExecReauthRequired {
+        command: String,
+        account: Option<String>,
+        message: String,
+    },
+
     #[error("context not found: {0}")]
     ContextNotFound(String),
 

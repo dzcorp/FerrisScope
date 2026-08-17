@@ -4,7 +4,7 @@ import type { ConnectHint } from "../types";
 import type { Tokens } from "../theme";
 import { FS_SM } from "../theme";
 import { Btn, Chip, Select } from "./ui";
-import { Mono } from "./detail/primitives";
+import { Copyable, Mono } from "./detail/primitives";
 
 // Small amber note under a failed connect, shown only when the backend
 // recognises cloud identity drift: a context whose exec entry pins no
@@ -152,6 +152,27 @@ export function CloudIdentityNote({
               </Chip>
             </>
           )}
+        </div>
+      )}
+
+      {/* A lapsed cloud session, not identity drift: there is nothing to write,
+          so the note hands over the command and a way back. The command is
+          copyable rather than a button that runs it — gcloud needs a real
+          terminal (and usually a browser) for the challenge, and the app has no
+          terminal surface before a cluster is connected. */}
+      {hint.reauth && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <Copyable text={hint.reauth.command}>
+            <Mono>{hint.reauth.command}</Mono>
+          </Copyable>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <Btn t={t} variant="primary" size="sm" onClick={onReconnect}>
+              Retry connect
+            </Btn>
+            <span style={{ color: t.textDim }}>
+              after the login completes in your terminal
+            </span>
+          </div>
         </div>
       )}
 

@@ -51,10 +51,15 @@ const CONFIGURATIONS_DIR: &str = "configurations";
 /// Configuration gcloud falls back to when [`ACTIVE_CONFIG_FILE`] is absent.
 const DEFAULT_CONFIG_NAME: &str = "default";
 
-/// The `gke-gcloud-auth-plugin` global token cache. Shared by every tool on the
-/// machine (kubectl included) and regenerated on the next plugin run, which is
-/// what makes deleting it a safe recovery step.
-const PLUGIN_CACHE_FILE: &str = "gke_gcloud_auth_plugin_cache";
+/// The `gke-gcloud-auth-plugin` token cache. Regenerated on the next plugin
+/// run, which is what makes deleting it a safe recovery step.
+///
+/// The plugin writes it beside the kubeconfig it resolves — `filepath.Dir` of
+/// client-go's `GetDefaultFilename()`, i.e. the first existing `KUBECONFIG`
+/// entry, else `~/.kube/config`. So this name appears both in the default
+/// location ([`plugin_cache_path`], shared with kubectl) and in each slot
+/// [`crate::exec_auth`] hands the plugin.
+pub(crate) const PLUGIN_CACHE_FILE: &str = "gke_gcloud_auth_plugin_cache";
 
 /// gcloud's config directory: `CLOUDSDK_CONFIG` when set, else the per-platform
 /// default. `None` when neither the override nor a home directory is resolvable.
@@ -220,7 +225,96 @@ pub fn compose_hint(error: &str, accounts: &Identities) -> Option<ConnectHint> {
                     .to_owned(),
             ],
         }),
+        reauth: None,
     })
+}
+
+/// Build the "your Google session expired" note.
+///
+/// Unlike [`compose_hint`] this has no gates to pass: the plugin's own stderr
+/// already told us exactly what happened, so there is nothing to infer and no
+/// risk of a confident guess about the wrong problem. `account` is the pinned
+/// account when the context has one; an unpinned context renews whichever
+/// account gcloud has active.
+///
+/// Offers no pin. Pinning writes an `--account` flag, and the account was never
+/// the problem here — its session lapsed. Pinning would leave the operator with
+/// the same failure and an edited kubeconfig.
+#[must_use]
+pub fn compose_reauth_hint(account: Option<&str>, accounts: &Identities) -> ConnectHint {
+    let whose = account
+        .map(|a| format!("The Google session for {a}"))
+        .unwrap_or_else(|| {
+            accounts.active.as_ref().map_or_else(
+                || "Your active Google session".to_owned(),
+                |a| format!("The Google session for {a} (this context's active account)"),
+            )
+        });
+    let command = account.map_or_else(
+        || "gcloud auth login".to_owned(),
+        |a| format!("gcloud auth login --account={a}"),
+    );
+    ConnectHint {
+        provider: Provider::Gcloud,
+        title: "Google session expired".to_owned(),
+        detail: format!(
+            "{whose} has expired, so gke-gcloud-auth-plugin could not mint a token. Renewing it \
+             needs an identity challenge — usually a browser — which the app cannot show you: it \
+             runs the plugin without a terminal, and gcloud refuses to prompt there \
+             (\"cannot prompt during non-interactive execution\"). Run the command below in a \
+             terminal, then reconnect. Your credentials are intact; only the session lapsed, and \
+             an org session-length policy will lapse it again on its own schedule."
+        ),
+        authenticated_as: None,
+        identities: accounts.identities.clone(),
+        active_identity: accounts.active.clone(),
+        pin: None,
+        reauth: Some(super::ReauthOffer {
+            command,
+            account: account.map(str::to_owned),
+        }),
+    }
+}
+
+/// Why a gcloud-family exec plugin exited non-zero, to the extent its stderr
+/// says. Drives which remedy we offer, and the remedies have nothing in common.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecFailure {
+    /// The refresh token is intact but the org's session policy wants a fresh
+    /// identity challenge, which needs a terminal (usually a browser) the app
+    /// cannot offer. Cured only by an interactive `gcloud auth login`.
+    ReauthRequired,
+    /// No usable credentials for that account at all — never logged in, or the
+    /// grant was revoked.
+    CredentialsInvalid,
+    /// Anything else: a broken plugin, a bad `--account`, gcloud not installed.
+    Other,
+}
+
+/// Classify a plugin's stderr.
+///
+/// Reauth is tested first and wins: gcloud prints the same "Please run: $ gcloud
+/// auth login" footer for a lapsed session as for absent credentials, so the
+/// footer distinguishes nothing while the reauth sentence does.
+#[must_use]
+pub fn classify_exec_failure(stderr: &str) -> ExecFailure {
+    let m = stderr.to_ascii_lowercase();
+    if m.contains("reauthentication failed")
+        || m.contains("reauthentication required")
+        || m.contains("reauth")
+        || (m.contains("cannot prompt") && m.contains("non-interactive"))
+    {
+        return ExecFailure::ReauthRequired;
+    }
+    if m.contains("invalid_grant")
+        || m.contains("does not have valid credentials")
+        || m.contains("do not have valid credentials")
+        || m.contains("no credentialed accounts")
+        || m.contains("was not found in credentialed accounts")
+    {
+        return ExecFailure::CredentialsInvalid;
+    }
+    ExecFailure::Other
 }
 
 /// Write `--account=<identity>` into an exec mapping, replacing any prior form.
@@ -289,9 +383,14 @@ pub fn clear_plugin_cache_at(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// `~/.kube/gke_gcloud_auth_plugin_cache`. Deliberately *not* derived from
-/// `KUBECONFIG` — the plugin always writes it next to the default kube home,
-/// regardless of which kubeconfig is in play.
+/// `~/.kube/gke_gcloud_auth_plugin_cache` — the slot the plugin uses when no
+/// `KUBECONFIG` steers it elsewhere, and therefore the one it shares with the
+/// operator's kubectl.
+///
+/// Not the only slot: the path is `filepath.Dir` of client-go's
+/// `GetDefaultFilename()`, so a set `KUBECONFIG` moves the cache next to its
+/// first existing entry. [`crate::exec_auth::clear_cache_slots`] covers the
+/// ones we create.
 #[must_use]
 pub fn plugin_cache_path() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".kube").join(PLUGIN_CACHE_FILE))
@@ -304,6 +403,76 @@ mod tests {
         kubeconfig_fixture, read_args, FORBIDDEN_403, KUBECONFIG_YAML,
     };
     use crate::cloud_identity::{backup_path, tests::pin};
+
+    /// Verbatim stderr from `gke-gcloud-auth-plugin` when the org's Cloud
+    /// session length has lapsed. Captured from a real GKE context, account
+    /// name replaced — the exact wording is what the classifier keys on, so a
+    /// paraphrase here would test nothing.
+    const REAUTH_STDERR: &str = "print credential failed with error: Failed to retrieve access \
+         token:: failure while executing gcloud, with args [config config-helper --format=json \
+         --account=a@example.com]: exit status 1 (err: ERROR: \
+         (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: \
+         Reauthentication failed. cannot prompt during non-interactive execution.\nPlease run:\n\n \
+         $ gcloud auth login\n\nto obtain new credentials.\n)";
+
+    #[test]
+    fn a_lapsed_session_is_classified_as_reauth() {
+        assert_eq!(
+            classify_exec_failure(REAUTH_STDERR),
+            ExecFailure::ReauthRequired
+        );
+        // The bare sentence, without the plugin's wrapper.
+        assert_eq!(
+            classify_exec_failure(
+                "Reauthentication failed. cannot prompt during non-interactive execution."
+            ),
+            ExecFailure::ReauthRequired
+        );
+        // Older gcloud phrasing.
+        assert_eq!(
+            classify_exec_failure("ERROR: (gcloud.auth) reauth required"),
+            ExecFailure::ReauthRequired
+        );
+    }
+
+    #[test]
+    fn absent_credentials_are_not_a_reauth() {
+        // Both shapes end with the same "Please run: $ gcloud auth login"
+        // footer as a lapsed session, so the footer must not be what decides.
+        assert_eq!(
+            classify_exec_failure(
+                "ERROR: (gcloud.config.config-helper) There was a problem refreshing your current \
+                 auth tokens: ('invalid_grant: Bad Request', ...)\nPlease run:\n\n  $ gcloud auth \
+                 login\n"
+            ),
+            ExecFailure::CredentialsInvalid
+        );
+        assert_eq!(
+            classify_exec_failure(
+                "ERROR: (gcloud.config.config-helper) You do not currently have an active account \
+                 selected.\nERROR: no credentialed accounts."
+            ),
+            ExecFailure::CredentialsInvalid
+        );
+    }
+
+    #[test]
+    fn unrelated_plugin_failures_stay_other() {
+        assert_eq!(
+            classify_exec_failure("exec: \"gcloud\": executable file not found in $PATH"),
+            ExecFailure::Other
+        );
+        assert_eq!(
+            classify_exec_failure("cannot construct google default token source"),
+            ExecFailure::Other
+        );
+        assert_eq!(classify_exec_failure(""), ExecFailure::Other);
+        // "credentials" on its own is not a verdict either way.
+        assert_eq!(
+            classify_exec_failure("invalid credentials for project foo"),
+            ExecFailure::Other
+        );
+    }
 
     fn write(path: &Path, body: &str) {
         if let Some(parent) = path.parent() {

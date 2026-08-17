@@ -32,6 +32,7 @@ use tower_http::{
     decompression::DecompressionLayer, set_header::SetRequestHeaderLayer, ServiceExt as _,
 };
 
+use crate::exec_auth::{self, redact_and_truncate};
 use crate::sources::SshSourceConfig;
 use crate::ssh::{SshSession, TunnelHandle};
 use crate::{Error, Result};
@@ -273,77 +274,6 @@ fn auth_exec_run_in_chain(
     None
 }
 
-/// Make a plugin's raw stderr safe and compact for display: drop lines that
-/// look like they carry a credential (token JSON, JWT/base64 runs, Bearer
-/// headers), strip blank lines, and cap total length. Conservative on what it
-/// flags as secret so genuine error text ("reauth required", "invalid
-/// credentials") survives.
-fn redact_and_truncate(s: &str) -> String {
-    const MAX: usize = 1500;
-    let mut lines: Vec<&str> = Vec::new();
-    let mut redacted_any = false;
-    for line in s.lines() {
-        let t = line.trim_end();
-        if t.is_empty() {
-            continue;
-        }
-        if looks_secretish(t) {
-            redacted_any = true;
-            continue;
-        }
-        lines.push(t);
-    }
-    let mut out = lines.join("\n");
-    if redacted_any {
-        out.push_str("\n[credential material redacted]");
-    }
-    let out = out.trim().to_string();
-    let mut out = if out.len() > MAX {
-        let mut end = MAX;
-        while !out.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut truncated = out[..end].to_string();
-        truncated.push_str(" … (truncated)");
-        truncated
-    } else {
-        out
-    };
-    if out.is_empty() {
-        out = "(plugin produced no output)".to_string();
-    }
-    out
-}
-
-/// Heuristic: does this line likely contain a secret value (not merely the word
-/// "credentials")? Catches token JSON fields, `Bearer` headers, and long
-/// base64url/JWT runs. Excludes `/` and `.` from the run alphabet so file paths
-/// and dotted hostnames don't trip it.
-fn looks_secretish(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    if lower.contains("\"token\"")
-        || lower.contains("token=")
-        || lower.contains("bearer ")
-        || lower.contains("id_token")
-        || lower.contains("access_token")
-        || lower.contains("\"password\"")
-        || lower.contains("client-secret")
-    {
-        return true;
-    }
-    let mut run = 0usize;
-    let mut max_run = 0usize;
-    for c in line.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '+' | '_' | '-' | '=') {
-            run += 1;
-            max_run = max_run.max(run);
-        } else {
-            run = 0;
-        }
-    }
-    max_run >= 40
-}
-
 /// Walk the [`std::error::Error`] source chain looking for an `io::Error` of
 /// kind `NotFound`. Depends only on the std error trait + an `io::Error`
 /// downcast, so it's robust to kube-rs's internal error-enum shape changing
@@ -447,7 +377,7 @@ impl Cluster {
     /// `source_path = None` reads the default kubeconfig (env / ~/.kube/config);
     /// `Some(path)` loads from that specific file (used for user-added sources).
     pub async fn connect(context_name: &str, source_path: Option<&Path>) -> Result<Self> {
-        let kubeconfig = match source_path {
+        let mut kubeconfig = match source_path {
             Some(p) => Kubeconfig::read_from(p)?,
             None => Kubeconfig::read()?,
         };
@@ -455,6 +385,33 @@ impl Cluster {
         // consumed, so a later ENOENT from that plugin can be turned into an
         // actionable error instead of a raw "No such file or directory".
         let exec_command = exec_plugin_for_context(&kubeconfig, context_name);
+        // Run the gcloud auth plugin once ourselves, before kube-rs spawns it
+        // per `Client`. Two payoffs: its stderr is ours to read (kube-rs
+        // inherits it, so `AuthExecRun` arrives empty), and a success warms the
+        // token-cache slot the later spawns read instead of each shelling out to
+        // gcloud. See `crate::exec_auth`.
+        if let Some(prepared) = exec_auth::prepare(&mut kubeconfig, context_name) {
+            match exec_auth::preflight(&prepared, None).await {
+                exec_auth::PreflightOutcome::Failed { code, stderr } => {
+                    return Err(exec_auth::failure_error(&prepared, code, stderr));
+                }
+                exec_auth::PreflightOutcome::Missing => {
+                    return Err(Error::ExecPluginNotFound {
+                        hint: exec_install_hint(&prepared.command),
+                        command: prepared.command,
+                    });
+                }
+                // No information — a spawn that failed for an unrelated reason,
+                // or one slower than the preflight budget. Connecting anyway
+                // keeps a working cluster reachable; kube-rs gets its own try.
+                exec_auth::PreflightOutcome::Inconclusive(why) => tracing::debug!(
+                    target: "ferrisscope::auth",
+                    context = context_name,
+                    "exec preflight inconclusive ({why})"
+                ),
+                exec_auth::PreflightOutcome::Warmed => {}
+            }
+        }
         let options = KubeConfigOptions {
             context: Some(context_name.to_owned()),
             ..Default::default()
@@ -1333,50 +1290,6 @@ users:
         // Env presence covers the full diagnostic key set, values never leaked.
         assert_eq!(diag.env_presence.len(), DIAG_ENV_KEYS.len());
         assert!(diag.env_presence.iter().any(|e| e.key == "HOME"));
-    }
-
-    #[test]
-    fn redact_and_truncate_keeps_error_text_drops_secrets() {
-        let raw = "ERROR: (gcloud.auth) reauth required\n\
-                   invalid credentials for project foo\n\
-                   token=eyJhbGciOiJSUzI1NiIsImtpZCI6IjEyMzQ1Njc4OTABCDEFGH\n";
-        let out = redact_and_truncate(raw);
-        // Human-readable diagnostics survive…
-        assert!(out.contains("reauth required"));
-        // …including a line that merely mentions "credentials" (no secret value).
-        assert!(out.contains("invalid credentials for project foo"));
-        // …but the token line is gone, replaced by a marker.
-        assert!(!out.contains("eyJhbGci"));
-        assert!(!out.contains("token="));
-        assert!(out.contains("[credential material redacted]"));
-    }
-
-    #[test]
-    fn redact_and_truncate_caps_length_and_handles_empty() {
-        // Long but non-secret text (spaces break the base64-run heuristic).
-        let long = "err line ".repeat(1000);
-        let out = redact_and_truncate(&long);
-        assert!(out.len() <= 1500 + 32);
-        assert!(out.ends_with("… (truncated)"));
-        assert_eq!(
-            redact_and_truncate("   \n  \n"),
-            "(plugin produced no output)"
-        );
-    }
-
-    #[test]
-    fn looks_secretish_flags_tokens_not_paths() {
-        assert!(looks_secretish("\"token\": \"abc\""));
-        assert!(looks_secretish("Authorization: Bearer abc123"));
-        assert!(looks_secretish(&format!("blob {}", "A".repeat(45))));
-        // File paths and dotted hostnames must NOT be flagged.
-        assert!(!looks_secretish(
-            "/Users/me/.config/gcloud/application_default_credentials.json"
-        ));
-        assert!(!looks_secretish(
-            "could not reach oauth2.googleapis.com:443"
-        ));
-        assert!(!looks_secretish("invalid credentials"));
     }
 
     // kube-rs surfaces a non-zero plugin exit as `AuthError::AuthExecRun`, which
