@@ -255,6 +255,7 @@ fn main() {
             commands::get_prefs,
             commands::set_prefs,
             commands::terminal_open_shell,
+            commands::cloud_login_open,
             commands::terminal_open_exec,
             commands::terminal_open_kubectl,
             commands::terminal_write,

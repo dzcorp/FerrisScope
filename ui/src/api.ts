@@ -986,6 +986,33 @@ export const api = {
     };
   },
 
+  // Open a PTY running `gcloud auth login` to renew a lapsed cloud session.
+  // Same event plumbing as the other terminal sessions, but no cluster and no
+  // kubeconfig: this runs *because* the connect failed. `account` is the one the
+  // failing context pins, or null to renew whichever account gcloud has active.
+  cloudLoginOpen: async (
+    clusterId: string,
+    account: string | null,
+    onData: (b64: string) => void,
+    onExit: (code: number) => void,
+  ): Promise<{ sessionId: string; close: () => void }> => {
+    const channel = new Channel<TerminalEvent>();
+    channel.onmessage = (evt) => {
+      if (evt.kind === "data") onData(evt.b64);
+      else onExit(evt.code);
+    };
+    const sessionId = await invoke<string>("cloud_login_open", {
+      clusterId,
+      account,
+      onEvent: channel,
+    });
+    return {
+      sessionId,
+      close: () => {
+        channel.onmessage = () => {};
+      },
+    };
+  },
   terminalWrite: (sessionId: string, b64: string) =>
     invoke<void>("terminal_write", { sessionId, b64 }),
   terminalResize: (sessionId: string, cols: number, rows: number) =>

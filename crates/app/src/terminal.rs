@@ -60,6 +60,19 @@ pub(crate) enum SpawnSpec {
         /// own its lifecycle and tear it down with the terminal tab.
         cleanup: Option<PodCleanup>,
     },
+    /// Run `gcloud auth login` to renew a lapsed cloud session.
+    ///
+    /// The only spec that touches no cluster and writes no scratch kubeconfig:
+    /// it exists precisely because the *connect* failed, so there is nothing to
+    /// point a kubeconfig at. It runs in a PTY for the same reason the operator
+    /// has to run it in a terminal by hand — gcloud refuses to perform an
+    /// identity challenge without one.
+    CloudLogin {
+        /// Account to renew. `None` renews whichever one gcloud has active,
+        /// matching an unpinned context's behaviour. Validated at the command
+        /// boundary before it reaches this argv.
+        account: Option<String>,
+    },
 }
 
 /// Resource the terminal session owns and must delete when it closes. Today
@@ -248,7 +261,12 @@ impl TerminalRegistry {
     }
 
     pub(crate) async fn close(&self, id: &str) -> Option<PodCleanup> {
-        let removed = self.sessions.lock().await.remove(id);
+        let (removed, remaining) = {
+            let mut map = self.sessions.lock().await;
+            let removed = map.remove(id);
+            (removed, map.len())
+        };
+        clear_plugin_slot_if_idle(remaining, &plugin_cache_slot());
         removed.and_then(|s| s.cleanup.lock().ok().and_then(|mut g| g.take()))
     }
 
@@ -264,10 +282,12 @@ impl TerminalRegistry {
         &self,
         cluster_id: &str,
     ) -> (usize, Vec<PodCleanup>) {
-        let removed = {
+        let (removed, remaining) = {
             let mut map = self.sessions.lock().await;
-            drain_cluster_sessions(&mut map, cluster_id, |s| s.cluster_id.as_str())
+            let removed = drain_cluster_sessions(&mut map, cluster_id, |s| s.cluster_id.as_str());
+            (removed, map.len())
         };
+        clear_plugin_slot_if_idle(remaining, &plugin_cache_slot());
         let closed = removed.len();
         let mut cleanups = Vec::new();
         for session in removed {
@@ -524,6 +544,28 @@ fn build_command(id: &str, spec: &SpawnSpec) -> Result<(CommandBuilder, Vec<Path
             apply_common_env(&mut cmd, &merged_env, context_name);
             Ok((cmd, scratch_files))
         }
+        SpawnSpec::CloudLogin { account } => {
+            let mut cmd = CommandBuilder::new("gcloud");
+            cmd.arg("auth");
+            cmd.arg("login");
+            // `--quiet` answers gcloud's own yes/no questions with their
+            // defaults. The one that matters: when the account already has
+            // credentials — always true here, since its session merely lapsed —
+            // gcloud asks "You are already authenticated … continue (Y/n)?".
+            // The browser challenge is not a prompt and still runs; without
+            // this flag the session would sit on that question instead.
+            cmd.arg("--quiet");
+            if let Some(account) = account {
+                // One argv element, so a leading `-` inside the value cannot
+                // become a separate flag. Validated at the command boundary too.
+                cmd.arg(format!("--account={account}"));
+            }
+            apply_login_env(&mut cmd);
+            if let Some(home) = directories::UserDirs::new().map(|u| u.home_dir().to_path_buf()) {
+                cmd.cwd(home);
+            }
+            Ok((cmd, Vec::new()))
+        }
     }
 }
 
@@ -547,12 +589,16 @@ fn apply_common_env(cmd: &mut CommandBuilder, kubeconfig_env: &str, context_name
             cmd.env(key, v);
         }
     }
-    // PATH: prepend our managed-bin dir so a managed kubectl (installed via
-    // settings → Tools) is preferred over anything the parent shell exposes.
-    // We always set PATH explicitly so child processes see a deterministic
-    // search order regardless of how the operator launched FerrisScope.
+    cmd.env("PATH", resolved_path());
+}
+
+/// PATH for every PTY child: our managed-bin dir first so a managed kubectl
+/// (installed via Settings → Tools) wins over anything the parent shell
+/// exposes, then the inherited entries. Always set explicitly so children see a
+/// deterministic search order regardless of how the operator launched the app.
+fn resolved_path() -> String {
     let inherited = std::env::var("PATH").unwrap_or_default();
-    let combined = match crate::kubectl_install::managed_bin_dir() {
+    match crate::kubectl_install::managed_bin_dir() {
         Some(dir) if dir.is_dir() => {
             let mut entries = vec![dir];
             entries.extend(std::env::split_paths(&inherited));
@@ -561,8 +607,52 @@ fn apply_common_env(cmd: &mut CommandBuilder, kubeconfig_env: &str, context_name
                 .unwrap_or(inherited)
         }
         _ => inherited,
-    };
-    cmd.env("PATH", combined);
+    }
+}
+
+/// Environment for `gcloud auth login`. Deliberately wider than
+/// [`apply_common_env`] in one respect: the whole point of the session is that
+/// gcloud opens a **browser**, and `xdg-open` needs the desktop-session
+/// variables to find one. Proxy and `CLOUDSDK_*` variables come along because
+/// gcloud needs them to reach the token endpoint and to resolve which config
+/// directory it is renewing credentials in.
+fn apply_login_env(cmd: &mut CommandBuilder) {
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    for key in [
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SHELL",
+        // Browser launch.
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_TYPE",
+        "XDG_CURRENT_DESKTOP",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "BROWSER",
+        // gcloud's own configuration and network reach.
+        "CLOUDSDK_CONFIG",
+        "CLOUDSDK_PYTHON",
+        "CLOUDSDK_ACTIVE_CONFIG_NAME",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_FILE",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            cmd.env(key, v);
+        }
+    }
+    cmd.env("PATH", resolved_path());
 }
 
 /// Write a tiny override kubeconfig that pins `current-context` (and
@@ -579,14 +669,70 @@ fn apply_common_env(cmd: &mut CommandBuilder, kubeconfig_env: &str, context_name
 /// source's cluster/user with empty strings, which makes kubectl fall back
 /// to `localhost:8080` ("connection refused"). Copying cluster/user from the
 /// source keeps the merged context complete.
+/// Where a session's scratch kubeconfig is written.
+///
+/// Also decides where any credential plugin the session runs caches its token:
+/// `gke-gcloud-auth-plugin` writes beside the kubeconfig it resolves, and the
+/// scratch file is first in the session's `KUBECONFIG`. Hence
+/// [`plugin_cache_slot`] — the slot is a consequence of this directory, not a
+/// separate choice.
+fn scratch_dir() -> PathBuf {
+    directories::ProjectDirs::from("dev", "ferrisscope", "ferrisscope")
+        .map_or_else(std::env::temp_dir, |d| d.cache_dir().to_path_buf())
+}
+
+/// The gcloud plugin token cache a terminal session's `kubectl` writes.
+///
+/// Distinct from both `~/.kube/gke_gcloud_auth_plugin_cache` (the operator's own
+/// shell) and the per-identity slots in `ferrisscope_core::exec_auth` (the app's
+/// kube clients). Three independent slots, which is what keeps them from
+/// evicting each other's tokens — but it also means a cache invalidation has to
+/// name each one.
+pub(crate) fn plugin_cache_slot() -> PathBuf {
+    scratch_dir().join("gke_gcloud_auth_plugin_cache")
+}
+
+/// Delete the token cache a terminal session left behind, but only once no
+/// session can still be using it.
+///
+/// A live access token has no business outliving the sessions that minted it,
+/// and nothing prunes this directory. Sessions share the slot deliberately — a
+/// new tab reuses the warm token instead of paying a fresh `gcloud` round trip —
+/// so the delete waits for the last one to close.
+pub(crate) fn clear_plugin_slot_if_idle(remaining: usize, path: &Path) {
+    if remaining > 0 {
+        return;
+    }
+    clear_plugin_slot(path);
+}
+
+/// Delete the slot now, whatever is open.
+///
+/// For invalidation rather than hygiene: an identity pin must not leave a token
+/// minted as the previous identity readable, and an open terminal simply re-mints
+/// on its next `kubectl`.
+pub(crate) fn clear_plugin_slot(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        // Already gone is the normal case (no plugin ran, or a parallel close
+        // beat us). Anything else is worth a line but never worth failing a
+        // close over.
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "terminal token cache cleanup failed"
+            );
+        }
+    }
+}
+
 fn write_scratch_kubeconfig(
     id: &str,
     source: &Path,
     context_name: &str,
     default_namespace: Option<&str>,
 ) -> Result<(PathBuf, String), String> {
-    let dir = directories::ProjectDirs::from("dev", "ferrisscope", "ferrisscope")
-        .map_or_else(std::env::temp_dir, |d| d.cache_dir().to_path_buf());
+    let dir = scratch_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir cache: {e}"))?;
     let path = dir.join(format!("term-{id}-{}.yaml", std::process::id()));
 
@@ -688,7 +834,112 @@ fn source_context_cluster_user(
 
 #[cfg(test)]
 mod tests {
+    use super::{build_command, SpawnSpec};
     use std::collections::HashMap;
+
+    fn argv(spec: &SpawnSpec) -> Vec<String> {
+        let (cmd, scratch) = build_command("t0", spec).expect("build");
+        assert!(
+            scratch.is_empty(),
+            "a login session owns no scratch files to clean up"
+        );
+        cmd.get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_token_slot_sits_beside_the_scratch_kubeconfig() {
+        // Not an arbitrary path: the gcloud plugin caches beside whichever
+        // kubeconfig it resolves, and the scratch file is first in the session's
+        // KUBECONFIG. If these two ever diverge, cleanup silently stops finding
+        // the file it is supposed to remove.
+        let slot = super::plugin_cache_slot();
+        assert_eq!(slot.parent(), Some(super::scratch_dir().as_path()));
+        assert_eq!(
+            slot.file_name().and_then(|n| n.to_str()),
+            Some("gke_gcloud_auth_plugin_cache")
+        );
+    }
+
+    #[test]
+    fn the_token_slot_survives_a_close_while_other_sessions_hold_it() {
+        // Sessions share the slot on purpose — a second tab reuses the warm
+        // token instead of paying another gcloud round trip.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let slot = dir.path().join("gke_gcloud_auth_plugin_cache");
+        std::fs::write(&slot, "{}").expect("write");
+
+        super::clear_plugin_slot_if_idle(1, &slot);
+        assert!(slot.exists(), "a live session still needs this token");
+
+        super::clear_plugin_slot_if_idle(0, &slot);
+        assert!(
+            !slot.exists(),
+            "an access token must not outlive the last session that could use it"
+        );
+    }
+
+    #[test]
+    fn clearing_an_absent_slot_is_not_an_error() {
+        // The common case: no plugin ever ran, or a parallel close won the race.
+        let dir = tempfile::tempdir().expect("tempdir");
+        super::clear_plugin_slot_if_idle(0, &dir.path().join("never-written"));
+        super::clear_plugin_slot(&dir.path().join("never-written"));
+    }
+
+    #[test]
+    fn an_identity_pin_clears_the_slot_even_with_terminals_open() {
+        // Invalidation, not hygiene: after a pin, a token minted as the previous
+        // identity must stop being served. An open terminal just re-mints.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let slot = dir.path().join("gke_gcloud_auth_plugin_cache");
+        std::fs::write(&slot, "{}").expect("write");
+        super::clear_plugin_slot(&slot);
+        assert!(!slot.exists());
+    }
+
+    #[test]
+    fn cloud_login_runs_gcloud_non_interactively_for_one_account() {
+        let args = argv(&SpawnSpec::CloudLogin {
+            account: Some("a@example.com".to_owned()),
+        });
+        assert_eq!(
+            args,
+            vec![
+                "gcloud",
+                "auth",
+                "login",
+                // Without this, gcloud stops on "you are already authenticated,
+                // continue (Y/n)?" — always the case here, since the account's
+                // session merely lapsed — and the PTY would hang.
+                "--quiet",
+                "--account=a@example.com",
+            ]
+        );
+    }
+
+    #[test]
+    fn cloud_login_without_an_account_renews_the_active_one() {
+        let args = argv(&SpawnSpec::CloudLogin { account: None });
+        assert_eq!(args, vec!["gcloud", "auth", "login", "--quiet"]);
+        assert!(
+            !args.iter().any(|a| a.starts_with("--account")),
+            "an unpinned context must not have an account invented for it"
+        );
+    }
+
+    #[test]
+    fn an_account_cannot_smuggle_a_second_flag_into_the_argv() {
+        // The command boundary validates this value, but the argv shape is the
+        // structural guarantee: one element, so `-` inside it is data.
+        let args = argv(&SpawnSpec::CloudLogin {
+            account: Some("--update-adc x".to_owned()),
+        });
+        assert_eq!(args.len(), 5);
+        assert_eq!(args[4], "--account=--update-adc x");
+    }
 
     #[test]
     fn drain_cluster_sessions_removes_only_named_cluster() {

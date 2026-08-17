@@ -419,7 +419,11 @@ pub fn pin_identity(kubeconfig: &Path, context: &str, identity: &str) -> Result<
 /// A newline in an env value or a control character in an argv element is never
 /// legitimate here, and the length cap stops a pathological value from bloating
 /// the file we're about to rewrite.
-fn validate_identity(identity: &str) -> Result<()> {
+/// # Errors
+///
+/// [`Error::Invalid`] when the value is empty, over [`MAX_LEN`], or carries
+/// control characters.
+pub fn validate_identity(identity: &str) -> Result<()> {
     if identity.is_empty() {
         return Err(Error::Invalid("identity must not be empty".to_owned()));
     }

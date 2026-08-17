@@ -538,7 +538,15 @@ pub(crate) async fn pin_cloud_identity_cmd(
     })?;
     tokio::task::spawn_blocking(move || {
         ferrisscope_core::cloud_identity::pin_identity(&path, &context_name, &identity)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // `pin_identity` clears the caches core knows about: the plugin's
+        // default slot and the app's per-identity ones. It cannot know about
+        // this third slot — the one a Dock terminal's `kubectl` writes beside
+        // its scratch kubeconfig — and a token minted under the pre-pin
+        // identity would keep being served there for up to an hour, which is
+        // precisely the staleness the pin exists to end.
+        crate::terminal::clear_plugin_slot(&crate::terminal::plugin_cache_slot());
+        Ok(())
     })
     .await
     .map_err(|e| format!("pin identity task failed: {e}"))?
@@ -3612,6 +3620,39 @@ pub(crate) async fn terminal_open_shell(
                 default_namespace: namespace,
             },
             extras,
+        )
+        .await
+}
+
+/// Open a PTY running `gcloud auth login` to renew a lapsed cloud session.
+///
+/// The remedy for `Error::ExecReauthRequired`, and the one terminal session that
+/// deliberately does **not** resolve a kubeconfig: it exists because the connect
+/// failed, so there is no cluster to point one at. `cluster_id` is carried only
+/// as the ownership label every session gets, so a later disconnect closes this
+/// one too.
+///
+/// `account` is what the failing context pins, or `None` for an unpinned context
+/// (gcloud then renews whichever account is active — the same one that context
+/// would have used). It lands in an argv element, so it is validated here rather
+/// than trusted for having come from our own hint.
+#[tauri::command]
+pub(crate) async fn cloud_login_open(
+    cluster_id: String,
+    account: Option<String>,
+    on_event: tauri::ipc::Channel<crate::terminal::TerminalEvent>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if let Some(account) = &account {
+        ferrisscope_core::cloud_identity::validate_identity(account).map_err(|e| e.to_string())?;
+    }
+    state
+        .terminals
+        .spawn_with_extras(
+            cluster_id,
+            on_event,
+            SpawnSpec::CloudLogin { account },
+            Vec::new(),
         )
         .await
 }
