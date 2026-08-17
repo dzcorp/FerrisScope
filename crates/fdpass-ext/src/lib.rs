@@ -250,8 +250,23 @@ mod tests {
                 // It should accept connections.
                 let _conn = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
                 got.set_nonblocking(true).unwrap();
-                let accepted = got.accept();
-                assert!(accepted.is_ok(), "accept on passed socket failed");
+                // `connect` returns once the handshake completes, which does not
+                // mean the listener's accept queue has been populated yet —
+                // Linux does it inside `connect`, macOS often does not. A single
+                // non-blocking accept would therefore assert on the scheduler
+                // rather than on the transfer. Retry, as `recv_blocking` does:
+                // the claim is that the passed socket accepts at all.
+                let accepted = (0..1000).find_map(|_| match got.accept() {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        None
+                    }
+                    other => Some(other),
+                });
+                assert!(
+                    matches!(accepted, Some(Ok(_))),
+                    "accept on passed socket failed: {accepted:?}"
+                );
             }
             _ => panic!("expected a listener"),
         }

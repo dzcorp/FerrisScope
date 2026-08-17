@@ -537,8 +537,18 @@ pub(crate) async fn pin_cloud_identity_cmd(
         format!("could not locate the kubeconfig file backing {name} — nothing was written")
     })?;
     tokio::task::spawn_blocking(move || {
-        ferrisscope_core::cloud_identity::pin_identity(&path, &context_name, &identity)
-            .map_err(|e| e.to_string())
+        let pinned =
+            ferrisscope_core::cloud_identity::pin_identity(&path, &context_name, &identity);
+        // Unconditional, and deliberately not behind `?` on the line above.
+        // `pin_identity` rewrites the kubeconfig *before* it clears caches, so a
+        // failure reported there can still mean the new `--account` is already
+        // on disk. Skipping this clear in that case would leave a Dock terminal
+        // serving the pre-pin identity's token for up to an hour — precisely the
+        // staleness the pin exists to end. Core clears the slots it knows about
+        // (the plugin default and the app's per-identity ones); this third slot,
+        // written beside a terminal session's scratch kubeconfig, is ours.
+        crate::terminal::clear_plugin_slot(&crate::terminal::plugin_cache_slot());
+        pinned.map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("pin identity task failed: {e}"))?
@@ -3612,6 +3622,39 @@ pub(crate) async fn terminal_open_shell(
                 default_namespace: namespace,
             },
             extras,
+        )
+        .await
+}
+
+/// Open a PTY running `gcloud auth login` to renew a lapsed cloud session.
+///
+/// The remedy for `Error::ExecReauthRequired`, and the one terminal session that
+/// deliberately does **not** resolve a kubeconfig: it exists because the connect
+/// failed, so there is no cluster to point one at. `cluster_id` is carried only
+/// as the ownership label every session gets, so a later disconnect closes this
+/// one too.
+///
+/// `account` is what the failing context pins, or `None` for an unpinned context
+/// (gcloud then renews whichever account is active — the same one that context
+/// would have used). It lands in an argv element, so it is validated here rather
+/// than trusted for having come from our own hint.
+#[tauri::command]
+pub(crate) async fn cloud_login_open(
+    cluster_id: String,
+    account: Option<String>,
+    on_event: tauri::ipc::Channel<crate::terminal::TerminalEvent>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if let Some(account) = &account {
+        ferrisscope_core::cloud_identity::validate_identity(account).map_err(|e| e.to_string())?;
+    }
+    state
+        .terminals
+        .spawn_with_extras(
+            cluster_id,
+            on_event,
+            SpawnSpec::CloudLogin { account },
+            Vec::new(),
         )
         .await
 }

@@ -62,4 +62,25 @@ describe("isPermanentConnectFailure", () => {
       isPermanentConnectFailure("spec.selector: Forbidden: field is immutable"),
     ).toBe(false);
   });
+  it("treats a lapsed cloud session as permanent", () => {
+    // Retrying cannot renew a session — only an interactive login can — and the
+    // retry banner hides the note that says so.
+    for (const msg of [
+      "cloud session expired for a@example.com — run `gcloud auth login --account=a@example.com` in a terminal",
+      "ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: Reauthentication failed. cannot prompt during non-interactive execution.",
+    ]) {
+      expect(isPermanentConnectFailure(msg), msg).toBe(true);
+    }
+  });
+
+  it("still retries a plain expired token", () => {
+    // A 401 heals on reconnect: `Config` is rebuilt and the credential plugin
+    // re-runs. Only the reauth wording above is terminal.
+    for (const msg of [
+      "Unauthorized (401)",
+      "the server has asked for the client to provide credentials",
+    ]) {
+      expect(isPermanentConnectFailure(msg), msg).toBe(false);
+    }
+  });
 });

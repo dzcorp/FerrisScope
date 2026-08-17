@@ -190,6 +190,7 @@ pub fn compose_hint(error: &str, profiles: &Identities) -> Option<ConnectHint> {
                     .to_owned(),
             ],
         }),
+        reauth: None,
     })
 }
 

@@ -29,6 +29,18 @@
 /// costs four minutes behind a spinner that explains nothing.
 export function isPermanentConnectFailure(message: string): boolean {
   const m = message.toLowerCase();
+  // A lapsed cloud session is as deterministic as a 403, and for the same
+  // reason: nothing about a retry changes it. The credential plugin refuses to
+  // mint a token until the operator completes an identity challenge in a
+  // terminal, so ten attempts produce ten identical failures — while hiding the
+  // one note that names the account and the command to run.
+  if (
+    m.includes("cloud session expired") ||
+    m.includes("reauthentication failed") ||
+    m.includes("cannot prompt during non-interactive")
+  ) {
+    return true;
+  }
   // Kubernetes embeds "Forbidden:" *inside* HTTP 422 validation messages to
   // mean "this field can't be changed". That is not an authorization failure
   // and must be excluded first — the same ordering guard `classifyDetailError`

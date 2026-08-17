@@ -1596,6 +1596,20 @@ function classifyDetailError(
       raw: trimmed,
     };
   }
+  // A lapsed cloud session, which is a *credential* failure rather than a
+  // plugin failure: the binary is installed and ran, the account is fine, and
+  // the provider simply wants an identity challenge the app has no terminal to
+  // host. MUST precede the exec-plugin branch below, whose "check the plugin
+  // runs cleanly from your terminal" advice would send the operator looking at
+  // the wrong thing. `CloudIdentityNote` renders the account and the exact
+  // command underneath this banner.
+  if (/cloud session expired|reauthentication failed|cannot prompt during non-interactive/.test(m)) {
+    return {
+      title: "Cloud session expired",
+      body: "Your cloud CLI session needs renewing — run `gcloud auth login` (with `--account=…` if this context pins one) in a terminal, then reconnect. Credentials are intact; only the session lapsed.",
+      raw: trimmed,
+    };
+  }
   // Auth / exec-credential plugin failures (gke-gcloud-auth-plugin,
   // aws-iam-authenticator, kubelogin, …). MUST come before the generic 404
   // branch: a missing plugin or its stderr often contains "not found" (e.g.

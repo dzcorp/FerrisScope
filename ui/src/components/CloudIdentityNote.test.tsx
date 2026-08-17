@@ -23,6 +23,7 @@ const GCLOUD: ConnectHint = {
       "delete ~/.kube/gke_gcloud_auth_plugin_cache",
     ],
   },
+  reauth: null,
 };
 
 const AWS: ConnectHint = {
@@ -39,6 +40,7 @@ const AWS: ConnectHint = {
       "keep a .ferrisscope-backup copy of the kubeconfig",
     ],
   },
+  reauth: null,
 };
 
 const AZURE: ConnectHint = {
@@ -51,6 +53,24 @@ const AZURE: ConnectHint = {
   active_identity: "ops@example.net",
   // The whole point of the Azure case: nothing to write, so no button.
   pin: null,
+  reauth: null,
+};
+
+// A lapsed Google session: the plugin never produced a token, so there is no
+// apiserver identity to report and nothing a pin could fix.
+const REAUTH: ConnectHint = {
+  provider: "gcloud",
+  title: "Google session expired",
+  detail:
+    "The Google session for ops@example.net has expired, so gke-gcloud-auth-plugin could not mint a token. Run the command below in a terminal, then reconnect.",
+  authenticated_as: null,
+  identities: ["dev@example.com", "ops@example.net"],
+  active_identity: "dev@example.com",
+  pin: null,
+  reauth: {
+    command: "gcloud auth login --account=ops@example.net",
+    account: "ops@example.net",
+  },
 };
 
 const REASON =
@@ -410,5 +430,314 @@ describe("CloudIdentityNote", () => {
       expect(screen.getByText(/kubeconfig is read-only/)).toBeInTheDocument();
     });
     expect(screen.getByText(/Unpinned Google account/)).toBeInTheDocument();
+  });
+  it("offers the login command when the session lapsed", async () => {
+    setMockInvoke((cmd) => {
+      expect(cmd).toBe("connect_hint_cmd");
+      return REAUTH;
+    });
+    const onReconnect = vi.fn();
+
+    renderNote(onReconnect);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Google session expired/)).toBeInTheDocument();
+    });
+    const note = screen.getByRole("note");
+    // The exact command, including the account flag — an operator with several
+    // accounts renewing the wrong one is back where they started.
+    expect(note).toHaveTextContent("gcloud auth login --account=ops@example.net");
+    // No pin offered: the account is fine, its session isn't, and pinning would
+    // edit the kubeconfig for nothing.
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^pin/i }),
+    ).not.toBeInTheDocument();
+    // And no "apiserver saw" row: the plugin failed before any apiserver call.
+    expect(note).not.toHaveTextContent("apiserver saw");
+    // No retry button of its own — the enclosing banner already carries
+    // Reconnect, wired to this same callback.
+    expect(
+      screen.queryByRole("button", { name: /retry connect/i }),
+    ).not.toBeInTheDocument();
+    expect(onReconnect).not.toHaveBeenCalled();
+  });
+
+  it("copies the login command on click", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    setMockInvoke(() => REAUTH);
+
+    renderNote();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Google session expired/)).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByText("gcloud auth login --account=ops@example.net"),
+    );
+    expect(writeText).toHaveBeenCalledWith(
+      "gcloud auth login --account=ops@example.net",
+    );
+  });
+  it("runs the login in a PTY and reconnects when gcloud exits cleanly", async () => {
+    let channel: { onmessage: (m: unknown) => void } | undefined;
+    let loginArgs: Record<string, unknown> | undefined;
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "terminal_close") {
+        closed.push(args);
+        return undefined;
+      }
+      expect(cmd).toBe("cloud_login_open");
+      loginArgs = args;
+      channel = args?.onEvent as { onmessage: (m: unknown) => void };
+      return "t1";
+    });
+    const onReconnect = vi.fn();
+
+    renderNote(onReconnect);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+
+    await waitFor(() => expect(channel).toBeDefined());
+    // The failing context's own account, not the CLI's active one.
+    expect(loginArgs?.clusterId).toBe("default::prod");
+    expect(loginArgs?.account).toBe("ops@example.net");
+    // Button locks while the browser round trip is outstanding, so a second
+    // click can't spawn a second gcloud.
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /waiting for browser/i }),
+      ).toBeDisabled();
+    });
+
+    // gcloud's own output is shown verbatim ("aGk=" is "hi").
+    channel?.onmessage({ kind: "data", b64: "aGk=" });
+    await waitFor(() => {
+      expect(screen.getByRole("note")).toHaveTextContent("hi");
+    });
+
+    channel?.onmessage({ kind: "exit", code: 0 });
+    await waitFor(() => expect(onReconnect).toHaveBeenCalledTimes(1));
+    // The session must be closed, not merely detached: the backend keeps its
+    // registry entry otherwise, which both leaks the gcloud child and stops the
+    // terminal token slot from ever being reclaimed.
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t1" }]));
+  });
+
+  it("keeps the failure visible and does not reconnect when gcloud fails", async () => {
+    let channel: { onmessage: (m: unknown) => void } | undefined;
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "terminal_close") {
+        closed.push(args);
+        return undefined;
+      }
+      channel = args?.onEvent as { onmessage: (m: unknown) => void };
+      return "t2";
+    });
+    const onReconnect = vi.fn();
+
+    renderNote(onReconnect);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+    await waitFor(() => expect(channel).toBeDefined());
+
+    channel?.onmessage({ kind: "exit", code: 1 });
+
+    await waitFor(() => {
+      expect(screen.getByRole("note")).toHaveTextContent(
+        "[gcloud exited with code 1]",
+      );
+    });
+    expect(onReconnect).not.toHaveBeenCalled();
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t2" }]));
+    // Retryable: the button comes back rather than staying stuck on "Waiting".
+    expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    // The copyable command is still there as the manual fallback.
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "gcloud auth login --account=ops@example.net",
+    );
+  });
+
+  it("shows the spawn error when gcloud can't be started at all", async () => {
+    // e.g. the account failed validation, or gcloud isn't on the PATH the app
+    // sees. Without this the button would spin forever on a rejected promise.
+    setMockInvoke((cmd) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      throw new Error("spawn: No such file or directory (os error 2)");
+    });
+
+    renderNote();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("note")).toHaveTextContent("No such file");
+    });
+    expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+  });
+
+  it("offers no login button when the failure is drift, not a lapsed session", async () => {
+    setMockInvoke(() => GCLOUD);
+    renderNote();
+    await waitFor(() => {
+      expect(screen.getByText(/Unpinned Google account/)).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: /^log in$/i }),
+    ).not.toBeInTheDocument();
+  });
+  it("closes the login session when the note unmounts mid-login", async () => {
+    // Cluster switch, or a reconnect that succeeded from another path: the
+    // note is gone but gcloud is still waiting on a browser. Without a close
+    // the registry entry (and the live child) survives until the cluster
+    // disconnects — and while it does, the terminal token slot is never
+    // reclaimed.
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "cloud_login_open") return "t7";
+      expect(cmd).toBe("terminal_close");
+      closed.push(args);
+      return undefined;
+    });
+
+    const view = renderNote();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /waiting for browser/i }),
+      ).toBeDisabled();
+    });
+
+    view.unmount();
+    // Whichever side loses the race — unmount before or after the open ack —
+    // exactly one close must land.
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t7" }]));
+  });
+
+  it("closes the session even when the exit frame outruns the open ack", async () => {
+    // A spawn that dies instantly can deliver its exit frame before the invoke
+    // promise resolves. The session id only exists on that promise, so the
+    // close has to happen when the ack finally lands — otherwise the registry
+    // entry leaks and a later Log in click overwrites the only reference.
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "terminal_close") {
+        closed.push(args);
+        return undefined;
+      }
+      expect(cmd).toBe("cloud_login_open");
+      const channel = args?.onEvent as { onmessage: (m: unknown) => void };
+      channel.onmessage({ kind: "exit", code: 1 });
+      return "t8";
+    });
+
+    renderNote();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t8" }]));
+    // And the surface recovered: failure reported, button back for a retry.
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "[gcloud exited with code 1]",
+    );
+    expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+  });
+
+  it("closes an in-flight login when the failure context changes", async () => {
+    // A new connect error re-runs the hint lookup and resets the note's state.
+    // Forgetting the session id without closing it would orphan the previous
+    // attempt's PTY.
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "cloud_login_open") return "t10";
+      expect(cmd).toBe("terminal_close");
+      closed.push(args);
+      return undefined;
+    });
+
+    const view = render(
+      <CloudIdentityNote
+        t={t}
+        contextId="default::prod"
+        reason={REASON}
+        onReconnect={() => {}}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /waiting for browser/i }),
+      ).toBeDisabled();
+    });
+
+    view.rerender(
+      <CloudIdentityNote
+        t={t}
+        contextId="default::prod"
+        reason={`${REASON} (attempt 2)`}
+        onReconnect={() => {}}
+      />,
+    );
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t10" }]));
+    // The reset also unsticks the button for the fresh failure.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+  });
+
+  it("can abandon a login that is going nowhere", async () => {
+    // gcloud can sit on a question this surface cannot answer, so the operator
+    // needs a way out that doesn't leave a PTY running or the button stuck.
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "cloud_login_open") return "t9";
+      expect(cmd).toBe("terminal_close");
+      closed.push(args);
+      return undefined;
+    });
+
+    renderNote();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+
+    await waitFor(() => {
+      expect(closed).toEqual([{ sessionId: "t9" }]);
+    });
+    // Back to the offer, not stuck on "Waiting for browser…", and the Cancel
+    // that only belongs to an in-flight login is gone.
+    expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: /^cancel$/i }),
+    ).not.toBeInTheDocument();
   });
 });

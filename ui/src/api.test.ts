@@ -3,7 +3,7 @@
 // break here is exactly the kind of regression that's hard to spot in a
 // running app because the backend silently no-ops on unknown commands.
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setMockInvoke, resetMockInvoke } from "./test/tauri-mock";
 import { api } from "./api";
 
@@ -112,6 +112,52 @@ describe("contexts + connect", () => {
       name: "default::ctx-a",
       error: 'User "a@b.io" ... Forbidden',
     });
+  });
+
+  it("cloudLoginOpen → 'cloud_login_open' with cluster + account + channel", async () => {
+    const cap = captureNext("t7");
+    const onData = vi.fn();
+    const onExit = vi.fn();
+    const opened = await api.cloudLoginOpen(
+      "default::ctx-a",
+      "a@b.io",
+      onData,
+      onExit,
+    );
+
+    expect(opened.sessionId).toBe("t7");
+    expect(cap.calls[0]?.cmd).toBe("cloud_login_open");
+    const args = cap.calls[0]?.args as Record<string, unknown>;
+    expect(args.clusterId).toBe("default::ctx-a");
+    // The account reaches the backend as-is; it validates before it lands in an
+    // argv element.
+    expect(args.account).toBe("a@b.io");
+
+    // Frames route to the right callback, and `close` detaches so a late frame
+    // after unmount can't reach a torn-down component.
+    const channel = args.onEvent as { onmessage: (m: unknown) => void };
+    channel.onmessage({ kind: "data", b64: "aGk=" });
+    channel.onmessage({ kind: "exit", code: 0 });
+    expect(onData).toHaveBeenCalledWith("aGk=");
+    expect(onExit).toHaveBeenCalledWith(0);
+    opened.close();
+    channel.onmessage({ kind: "exit", code: 1 });
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  it("cloudLoginOpen passes a null account for an unpinned context", async () => {
+    // gcloud then renews whichever account is active — the same one the unpinned
+    // context would have used. Sending "" instead would be a different request.
+    const cap = captureNext("t8");
+    await api.cloudLoginOpen(
+      "default::ctx-a",
+      null,
+      () => {},
+      () => {},
+    );
+    expect(
+      (cap.calls[0]?.args as Record<string, unknown>).account,
+    ).toBeNull();
   });
 
   it("pinCloudIdentity → 'pin_cloud_identity_cmd' with name + identity", async () => {

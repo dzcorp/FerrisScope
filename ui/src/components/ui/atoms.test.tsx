@@ -436,6 +436,34 @@ describe("ErrorBlock — classification branches", () => {
     expect(getByText(/the pod/i)).toBeInTheDocument();
   });
 
+  it("lapsed cloud session → 'Cloud session expired', not 'Auth plugin failed'", () => {
+    // Ordering-sensitive: this message names gke-gcloud-auth-plugin, which the
+    // exec-plugin branch below also matches. That branch's advice ("check the
+    // plugin runs cleanly from your terminal") points at the wrong thing — the
+    // plugin ran fine, the org's session policy lapsed.
+    const { getByText, queryByText } = render(
+      <ErrorBlock
+        t={t}
+        message="cloud session expired for a@example.com — run `gcloud auth login --account=a@example.com` in a terminal (ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: Reauthentication failed. cannot prompt during non-interactive execution.)"
+        kindLabel="cluster"
+      />,
+    );
+    expect(getByText("Cloud session expired")).toBeInTheDocument();
+    expect(queryByText("Auth plugin failed")).not.toBeInTheDocument();
+  });
+
+  it("raw plugin reauth stderr also classifies as a lapsed session", () => {
+    // The same failure can reach the UI unwrapped, straight from the plugin.
+    const { getByText } = render(
+      <ErrorBlock
+        t={t}
+        message="exec credential plugin 'gke-gcloud-auth-plugin' failed (exit 1) — Reauthentication failed. cannot prompt during non-interactive execution."
+        kindLabel="cluster"
+      />,
+    );
+    expect(getByText("Cloud session expired")).toBeInTheDocument();
+  });
+
   it("exec-plugin 'not found on PATH' → 'Auth plugin not found', not 'cluster doesn't exist'", () => {
     const { getByText, queryByText } = render(
       <ErrorBlock

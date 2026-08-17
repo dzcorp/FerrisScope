@@ -10,6 +10,7 @@ pub mod atomic_write;
 pub mod cloud_identity;
 pub mod cluster;
 pub mod error;
+pub mod exec_auth;
 pub mod fleet;
 pub mod globalfwd;
 pub mod health;

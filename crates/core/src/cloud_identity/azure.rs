@@ -159,6 +159,7 @@ pub fn compose_hint(error: &str, accounts: &Identities) -> Option<ConnectHint> {
         // mutating global `az` state behind a button that looks like a
         // kubeconfig edit.
         pin: None,
+        reauth: None,
     })
 }
 

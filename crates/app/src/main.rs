@@ -255,6 +255,7 @@ fn main() {
             commands::get_prefs,
             commands::set_prefs,
             commands::terminal_open_shell,
+            commands::cloud_login_open,
             commands::terminal_open_exec,
             commands::terminal_open_kubectl,
             commands::terminal_write,
@@ -469,6 +470,11 @@ fn main() {
                     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), gf.shutdown())
                         .await;
                 });
+                // A terminal session's kubectl leaves a live access token in the
+                // cache dir. Session close reclaims it while the app runs; quitting
+                // with a terminal open would otherwise leave it there indefinitely,
+                // and nothing prunes that directory.
+                terminal::clear_plugin_slot(&terminal::plugin_cache_slot());
             }
         });
 }

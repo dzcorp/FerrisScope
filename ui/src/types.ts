@@ -168,6 +168,21 @@ export type PinOffer = {
   effects: string[];
 };
 
+/// What renews a lapsed cloud session. Mirrors
+/// `ferrisscope_core::cloud_identity::ReauthOffer`.
+///
+/// There is nothing for the app to write here — unlike a pin. The provider wants
+/// an identity challenge (usually a browser), and the app runs the credential
+/// plugin without a terminal, so gcloud refuses to prompt. The operator runs
+/// `command`, then reconnects.
+export type ReauthOffer = {
+  /// Verbatim command to run, with the account flag when the context pins one.
+  command: string;
+  /// Account whose session lapsed; null for an unpinned context, where the CLI's
+  /// active account is the one to renew.
+  account: string | null;
+};
+
 /// Actionable note attached to a failed connect when the cause looks like cloud
 /// identity drift — a context whose exec entry pins no account/profile, so it
 /// inherits whichever one the cloud CLI last selected.
@@ -185,6 +200,9 @@ export type ConnectHint = {
   /// null when the provider has no per-context pin at all (Azure): the note
   /// then explains the CLI command to run instead.
   pin: PinOffer | null;
+  /// Set instead of `pin` when the session lapsed rather than the identity
+  /// drifting. Pinning cannot fix that, so the two never arrive together.
+  reauth: ReauthOffer | null;
 };
 
 export type KubeconfigSourceKind = "file" | "folder" | "ssh";
