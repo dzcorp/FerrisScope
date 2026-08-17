@@ -65,7 +65,7 @@ anyhow.workspace = true
 serde_yaml.workspace = true
 portable-pty = "0.9"
 directories.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 # Re-encode raw RGBA bitmaps read off the system clipboard into PNG for chat
 # image attachments (WebKitGTK doesn't surface clipboard images on the DOM
 # paste event). Already in the tree via tauri's image stack.

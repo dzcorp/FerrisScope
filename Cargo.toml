@@ -120,7 +120,7 @@ russh = { version = "0.62", default-features = false, features = ["flate2", "rin
 keyring = { version = "3", features = ["apple-native", "linux-native", "windows-native"] }
 hex = "0.4"
 sha2 = "0.11"
-base64 = "0.22"
+base64 = "0.23"
 
 # HTTP (agent provider clients)
 # `rustls-no-provider` avoids pulling reqwest's bundled aws-lc-rs. kube-rs's
