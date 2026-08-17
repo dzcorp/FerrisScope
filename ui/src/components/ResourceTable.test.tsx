@@ -4,8 +4,14 @@
 // renderer is the unit where the cross-kind link behaviour lives.
 
 import { describe, it, expect, vi } from "vitest";
-import { render, fireEvent } from "@testing-library/react";
-import { renderCell, selectPodMetrics, sortingFnFor } from "./ResourceTable";
+import { render, fireEvent, renderHook } from "@testing-library/react";
+import { useTable } from "@tanstack/react-table";
+import {
+  renderCell,
+  selectPodMetrics,
+  sortingFnFor,
+  TABLE_FEATURES,
+} from "./ResourceTable";
 import { tokens } from "../theme";
 import type { ColumnDef, MetricsSnapshot, ResourceRow } from "../types";
 
@@ -270,5 +276,41 @@ describe("renderCell — non-link columns stay inert", () => {
     fireEvent.click(getByText("my-pod"));
     expect(nav).not.toHaveBeenCalled();
     expect(setNs).not.toHaveBeenCalled();
+  });
+});
+
+// TanStack Table v9 resolves `sortFn: "auto"` by *name*: it samples the rows,
+// picks "alphanumeric" / "text" / "datetime", then looks that name up in the
+// table's registry. An unregistered name degrades silently to `basic` — plain
+// `<`/`>` — which orders "pod-10" before "pod-2". v8 resolved the same names
+// internally, so nothing about our column defs changed; only the registry did.
+// This exercises the real resolution path rather than the registry's contents.
+describe("auto sorting resolves through the registered sort functions", () => {
+  const rows = [
+    { name: "pod-10" },
+    { name: "pod-2" },
+    { name: "pod-1" },
+  ];
+
+  // Driven through the same hook the table uses, so the test exercises the
+  // real feature set rather than a hand-assembled one.
+  function sortedNames(desc: boolean): string[] {
+    const { result } = renderHook(() =>
+      useTable({
+        features: TABLE_FEATURES,
+        data: rows,
+        columns: [{ id: "name", accessorFn: (r) => r.name, sortFn: "auto" }],
+        state: { sorting: [{ id: "name", desc }] },
+      }),
+    );
+    return result.current.getRowModel().rows.map((r) => r.original.name);
+  }
+
+  it("orders embedded numbers naturally, not lexically", () => {
+    expect(sortedNames(false)).toEqual(["pod-1", "pod-2", "pod-10"]);
+  });
+
+  it("reverses on descending", () => {
+    expect(sortedNames(true)).toEqual(["pod-10", "pod-2", "pod-1"]);
   });
 });

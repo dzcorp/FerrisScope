@@ -13,10 +13,17 @@ import {
   type ReactNode,
 } from "react";
 import {
+  columnResizingFeature,
+  columnSizingFeature,
+  columnVisibilityFeature,
+  createSortedRowModel,
   flexRender,
-  getCoreRowModel,
-  getSortedRowModel,
-  useReactTable,
+  rowSortingFeature,
+  sortFn_alphanumeric,
+  sortFn_datetime,
+  sortFn_text,
+  tableFeatures,
+  useTable,
   type ColumnDef as TanColumnDef,
   type SortingState,
   type ColumnSizingState,
@@ -94,6 +101,39 @@ type LoadState =
 // so a theme can shift the whole curve (e.g. Readable's spacious is taller
 // than Default's). The density preference still picks which row of the
 // curve to use.
+// TanStack Table v9 is feature-composed: nothing is in the bundle (or on the
+// table instance) unless it is named here. Declared once at module scope
+// because the feature set is static — rebuilding it per render would rebuild
+// the table's whole type surface with it.
+//
+// We sort and resize; we do not filter, paginate, group, or expand through
+// TanStack (row filtering happens upstream in `filtered`), so those features
+// stay out. `sortFns` is likewise absent: every column passes a comparator
+// function rather than one of the built-in string ids.
+export const TABLE_FEATURES = tableFeatures({
+  rowSortingFeature,
+  columnSizingFeature,
+  columnResizingFeature,
+  // Not for hiding columns — `visibleColumns` already decides that upstream —
+  // but because `row.getVisibleCells()` lives in this feature, and the row
+  // renderer is built on it.
+  columnVisibilityFeature,
+  sortedRowModel: createSortedRowModel(),
+  // Every column that isn't cpu/mem sorts with `sortFn: "auto"`, and in v9
+  // "auto" is *name* resolution: it samples the rows, decides on
+  // "alphanumeric" / "text" / "datetime", then looks that name up in this
+  // registry. An unregistered name silently degrades to `basic` (plain
+  // `<`/`>`), which would order "pod-10" before "pod-2" — a quiet regression
+  // in the table's most-used interaction. Registered individually rather than
+  // via the whole `sortFns` object so the unused ones still tree-shake.
+  sortFns: {
+    alphanumeric: sortFn_alphanumeric,
+    text: sortFn_text,
+    datetime: sortFn_datetime,
+  },
+});
+export type TableFeats = typeof TABLE_FEATURES;
+
 const SELECT_COL_ID = "__select__";
 const SELECT_COL_WIDTH = 40;
 const RESIZE_HANDLE_WIDTH = 6;
@@ -781,8 +821,8 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     return placeLabelColumns(withCluster, labelCols);
   }, [kind, singleNs, isMultiCluster, labelColumns]);
 
-  const columns = useMemo<TanColumnDef<ScopedRow>[]>(() => {
-    const cols: TanColumnDef<ScopedRow>[] = visibleColumns.map((c) => {
+  const columns = useMemo<TanColumnDef<TableFeats, ScopedRow>[]>(() => {
+    const cols: TanColumnDef<TableFeats, ScopedRow>[] = visibleColumns.map((c) => {
       if (c.id === CLUSTER_COL_ID) {
         return {
           id: c.id,
@@ -808,10 +848,10 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         header: c.header,
         size: defaultWidth(c),
         enableSorting: true,
-        // sortingFn reads from the ref so a metrics tick doesn't force
-        // a columns rebuild; sort comparator is invoked at sort time
-        // and picks up the current podMetrics ref then.
-        sortingFn: sortingFnFor<ScopedRow>(c, podMetricsRef, isPods),
+        // `sortFn` (v8 called it `sortingFn`) reads from the ref so a metrics
+        // tick doesn't force a columns rebuild; the comparator is invoked at
+        // sort time and picks up the current podMetrics ref then.
+        sortFn: sortingFnFor<ScopedRow>(c, podMetricsRef, isPods),
         accessorFn: accessorFor(c),
         cell: (ctx) =>
           renderCell(
@@ -844,7 +884,8 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     // through refs.
   }, [visibleColumns, isPods]);
 
-  const table = useReactTable({
+  const table = useTable({
+    features: TABLE_FEATURES,
     data: filtered,
     columns,
     state: { sorting, columnSizing },
@@ -855,8 +896,8 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       userResizedRef.current = true;
       setColumnSizing(updater);
     },
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
+    // v9 builds the core row model unconditionally and takes the sorted one
+    // from the feature set above, so both `get*RowModel` options are gone.
     enableColumnResizing: true,
     columnResizeMode: "onChange",
     enableMultiSort: false,
@@ -1096,7 +1137,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // keys (Slice 2) share the same code path.
   const onSelectClick = (
     e: React.MouseEvent,
-    row: TanRow<ScopedRow>,
+    row: TanRow<TableFeats, ScopedRow>,
   ) => {
     e.stopPropagation();
     const sid = row.original.__sid;
@@ -2492,7 +2533,7 @@ export function sortingFnFor<RowData extends ResourceRow = ResourceRow>(
   isPods: boolean,
 ) {
   if (c.kind === "phase") {
-    return (a: TanRow<RowData>, b: TanRow<RowData>) => {
+    return (a: TanRow<TableFeats, RowData>, b: TanRow<TableFeats, RowData>) => {
       const av = phaseRank(String(a.original[c.id] ?? ""));
       const bv = phaseRank(String(b.original[c.id] ?? ""));
       return av - bv;
@@ -2502,7 +2543,7 @@ export function sortingFnFor<RowData extends ResourceRow = ResourceRow>(
     // The ref holds clusterId → ("ns/name" → metric); each row joins
     // through its own origin cluster so a merged view sorts correctly.
     const metricFor = (
-      r: TanRow<RowData>,
+      r: TanRow<TableFeats, RowData>,
     ): { cpu_milli: number; mem_mib: number } | null => {
       const byCluster = podMetricsRef.current;
       if (!byCluster) return null;
@@ -2512,7 +2553,7 @@ export function sortingFnFor<RowData extends ResourceRow = ResourceRow>(
       const key = `${r.original.namespace ?? ""}/${r.original.name ?? ""}`;
       return byCluster[cid]?.[key] ?? null;
     };
-    return (a: TanRow<RowData>, b: TanRow<RowData>) => {
+    return (a: TanRow<TableFeats, RowData>, b: TanRow<TableFeats, RowData>) => {
       const av = metricFor(a);
       const bv = metricFor(b);
       const an = av ? (c.id === "cpu" ? av.cpu_milli : av.mem_mib) : -1;
