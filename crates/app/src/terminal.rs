@@ -520,6 +520,13 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Characters `cmd.exe` treats as syntax rather than data.
+///
+/// Only the Windows login path is re-parsed by a shell, but the check runs
+/// everywhere so its test does too — see the `--account` handling in
+/// [`build_command`].
+const CMD_METACHARACTERS: &str = "\"&|^<>%()!";
+
 fn build_command(id: &str, spec: &SpawnSpec) -> Result<(CommandBuilder, Vec<PathBuf>), String> {
     match spec {
         SpawnSpec::Shell {
@@ -630,6 +637,21 @@ fn build_command(id: &str, spec: &SpawnSpec) -> Result<(CommandBuilder, Vec<Path
             if let Some(account) = account {
                 // One argv element, so a leading `-` inside the value cannot
                 // become a separate flag. Validated at the command boundary too.
+                //
+                // That atomicity is an argv property, and on Windows this argv
+                // is re-parsed by `cmd.exe`, which honours neither portable-pty's
+                // MSVCRT quoting nor a backslash-escaped quote — a `"` would end
+                // the quoted run and leave the rest to parse as cmd syntax (the
+                // CVE-2024-24576 class). Rejecting cmd's metacharacters restores
+                // the guarantee on every platform. Cross-platform on purpose: a
+                // value carrying one is not an account on Unix either, and a
+                // rule that holds everywhere is one fewer thing to be wrong
+                // about on the platform we develop on least.
+                if let Some(bad) = account.chars().find(|c| CMD_METACHARACTERS.contains(*c)) {
+                    return Err(format!(
+                        "account contains {bad:?}, which cannot appear in a cloud account name"
+                    ));
+                }
                 cmd.arg(format!("--account={account}"));
             }
             apply_login_env(&mut cmd);
@@ -932,6 +954,26 @@ mod tests {
             .collect()
     }
 
+    /// The launcher `build_command` puts in front of `gcloud` on this platform.
+    #[cfg(windows)]
+    const LOGIN_LAUNCHER: &[&str] = &["cmd.exe", "/c"];
+    #[cfg(not(windows))]
+    const LOGIN_LAUNCHER: &[&str] = &[];
+
+    /// A login argv with the platform launcher stripped, so every claim about
+    /// the *gcloud* argv below is one assertion instead of two cfg-gated ones.
+    /// The prefix itself is pinned by `the_login_argv_names_its_interpreter`.
+    fn login_argv(spec: &SpawnSpec) -> Vec<String> {
+        let args = argv(spec);
+        let prefix: Vec<&str> = args
+            .iter()
+            .take(LOGIN_LAUNCHER.len())
+            .map(String::as_str)
+            .collect();
+        assert_eq!(prefix, LOGIN_LAUNCHER, "unexpected launcher prefix");
+        args[LOGIN_LAUNCHER.len()..].to_vec()
+    }
+
     /// Stand-in for a PTY child: reports "still running" for `pending` polls,
     /// then the given status. Enough to exercise the reaper without a real PTY.
     #[derive(Debug)]
@@ -1064,7 +1106,7 @@ mod tests {
 
     #[test]
     fn cloud_login_runs_gcloud_non_interactively_for_one_account() {
-        let args = argv(&SpawnSpec::CloudLogin {
+        let args = login_argv(&SpawnSpec::CloudLogin {
             account: Some("a@example.com".to_owned()),
         });
         assert_eq!(
@@ -1084,7 +1126,7 @@ mod tests {
 
     #[test]
     fn cloud_login_without_an_account_renews_the_active_one() {
-        let args = argv(&SpawnSpec::CloudLogin { account: None });
+        let args = login_argv(&SpawnSpec::CloudLogin { account: None });
         assert_eq!(args, vec!["gcloud", "auth", "login", "--quiet"]);
         assert!(
             !args.iter().any(|a| a.starts_with("--account")),
@@ -1093,10 +1135,59 @@ mod tests {
     }
 
     #[test]
+    fn the_login_argv_names_its_interpreter() {
+        // The gcloud SDK ships `gcloud.cmd` on Windows and portable-pty spawns
+        // through raw `CreateProcessW`, which cannot execute a batch file, so
+        // the interpreter has to be explicit there. Everywhere else `gcloud` is
+        // a real executable and naming a shell would be wrong.
+        let args = argv(&SpawnSpec::CloudLogin { account: None });
+        if cfg!(windows) {
+            assert_eq!(&args[..3], ["cmd.exe", "/c", "gcloud"]);
+        } else {
+            assert_eq!(args[0], "gcloud");
+        }
+    }
+
+    #[test]
+    fn an_account_cannot_carry_cmd_syntax() {
+        // `cmd.exe` re-parses the Windows login argv and does not honour the
+        // MSVCRT quoting portable-pty emits, so a quote in this value would end
+        // the quoted run and hand the rest to the shell. Rejected on every
+        // platform: no cloud account contains one, and a cfg-gated rule would
+        // only ever be exercised by the CI runner we read the least.
+        for bad in ["a@x.com\" & calc", "a@x.com|x", "a%PATH%@x.com", "a@x.com^"] {
+            assert!(
+                build_command(
+                    "t0",
+                    &SpawnSpec::CloudLogin {
+                        account: Some(bad.to_owned()),
+                    },
+                )
+                .is_err(),
+                "{bad:?} must not reach the argv"
+            );
+        }
+        // A real account, and the one legitimate value with punctuation in it,
+        // must still build — the guard is not allowed to cost the feature.
+        for ok in ["a@example.com", "svc-1@proj.iam.gserviceaccount.com"] {
+            assert!(
+                build_command(
+                    "t0",
+                    &SpawnSpec::CloudLogin {
+                        account: Some(ok.to_owned()),
+                    },
+                )
+                .is_ok(),
+                "{ok:?} must still build"
+            );
+        }
+    }
+
+    #[test]
     fn an_account_cannot_smuggle_a_second_flag_into_the_argv() {
         // The command boundary validates this value, but the argv shape is the
         // structural guarantee: one element, so `-` inside it is data.
-        let args = argv(&SpawnSpec::CloudLogin {
+        let args = login_argv(&SpawnSpec::CloudLogin {
             account: Some("--update-adc x".to_owned()),
         });
         assert_eq!(args.len(), 5);
