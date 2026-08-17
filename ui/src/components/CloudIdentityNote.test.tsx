@@ -597,6 +597,116 @@ describe("CloudIdentityNote", () => {
       screen.queryByRole("button", { name: /^log in$/i }),
     ).not.toBeInTheDocument();
   });
+  it("closes the login session when the note unmounts mid-login", async () => {
+    // Cluster switch, or a reconnect that succeeded from another path: the
+    // note is gone but gcloud is still waiting on a browser. Without a close
+    // the registry entry (and the live child) survives until the cluster
+    // disconnects — and while it does, the terminal token slot is never
+    // reclaimed.
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "cloud_login_open") return "t7";
+      expect(cmd).toBe("terminal_close");
+      closed.push(args);
+      return undefined;
+    });
+
+    const view = renderNote();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /waiting for browser/i }),
+      ).toBeDisabled();
+    });
+
+    view.unmount();
+    // Whichever side loses the race — unmount before or after the open ack —
+    // exactly one close must land.
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t7" }]));
+  });
+
+  it("closes the session even when the exit frame outruns the open ack", async () => {
+    // A spawn that dies instantly can deliver its exit frame before the invoke
+    // promise resolves. The session id only exists on that promise, so the
+    // close has to happen when the ack finally lands — otherwise the registry
+    // entry leaks and a later Log in click overwrites the only reference.
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "terminal_close") {
+        closed.push(args);
+        return undefined;
+      }
+      expect(cmd).toBe("cloud_login_open");
+      const channel = args?.onEvent as { onmessage: (m: unknown) => void };
+      channel.onmessage({ kind: "exit", code: 1 });
+      return "t8";
+    });
+
+    renderNote();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t8" }]));
+    // And the surface recovered: failure reported, button back for a retry.
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "[gcloud exited with code 1]",
+    );
+    expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+  });
+
+  it("closes an in-flight login when the failure context changes", async () => {
+    // A new connect error re-runs the hint lookup and resets the note's state.
+    // Forgetting the session id without closing it would orphan the previous
+    // attempt's PTY.
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "cloud_login_open") return "t10";
+      expect(cmd).toBe("terminal_close");
+      closed.push(args);
+      return undefined;
+    });
+
+    const view = render(
+      <CloudIdentityNote
+        t={t}
+        contextId="default::prod"
+        reason={REASON}
+        onReconnect={() => {}}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^log in$/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /waiting for browser/i }),
+      ).toBeDisabled();
+    });
+
+    view.rerender(
+      <CloudIdentityNote
+        t={t}
+        contextId="default::prod"
+        reason={`${REASON} (attempt 2)`}
+        onReconnect={() => {}}
+      />,
+    );
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t10" }]));
+    // The reset also unsticks the button for the fresh failure.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
+    });
+  });
+
   it("can abandon a login that is going nowhere", async () => {
     // gcloud can sit on a question this surface cannot answer, so the operator
     // needs a way out that doesn't leave a PTY running or the button stuck.

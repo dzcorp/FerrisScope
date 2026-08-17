@@ -16,6 +16,16 @@ function decodeB64(b64: string): string {
   return new TextDecoder().decode(bytes);
 }
 
+/// Release a login PTY in the backend registry. Fire-and-forget by design:
+/// every caller sits on a teardown path where nothing useful can be done with a
+/// failure, and the registry reaps leftovers with the cluster anyway. The close
+/// matters even when the child already exited — the registry entry it leaves
+/// behind keeps the terminal token slot from ever being reclaimed.
+function closeLoginSession(sessionId: string | null): void {
+  if (!sessionId) return;
+  void api.terminalClose(sessionId).catch(() => {});
+}
+
 // Small amber note under a failed connect, shown when the backend recognises the
 // cause as a cloud-credential problem. Two of them today:
 //
@@ -67,6 +77,12 @@ export function CloudIdentityNote({
   // sit on a question this surface has no way to answer, and the note offers no
   // input. Closing kills the PTY child.
   const loginSessionRef = useRef<string | null>(null);
+  // Monotonic id of the current login attempt. Cancel, a context change, and
+  // unmount all invalidate the attempt by bumping it; a handler that finds its
+  // attempt stale limits itself to cleanup. A boolean can't express this — a
+  // new attempt can begin while a previous attempt's open ack is still in
+  // flight, and that ack must not adopt the new attempt's session slot.
+  const loginAttemptRef = useRef(0);
   // The pin outlives the hint effect's own `live` flag: it can still be in
   // flight when the operator switches cluster and unmounts this note. Guard its
   // settle handlers with a mount flag so a resolved (or rejected) pin doesn't
@@ -76,6 +92,13 @@ export function CloudIdentityNote({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // A login can still be in flight when the note unmounts (cluster switch,
+      // or a reconnect that succeeded from another path). The backend registry
+      // entry — and the live gcloud waiting on its browser — outlives this
+      // component unless closed here; nothing else ever would.
+      loginAttemptRef.current += 1;
+      closeLoginSession(loginSessionRef.current);
+      loginSessionRef.current = null;
     };
   }, []);
 
@@ -87,6 +110,10 @@ export function CloudIdentityNote({
     setPinError(null);
     setLoggingIn(false);
     setLoginLog("");
+    // A context/reason change mid-login orphans the old attempt — close its
+    // session rather than just forgetting the id.
+    loginAttemptRef.current += 1;
+    closeLoginSession(loginSessionRef.current);
     loginSessionRef.current = null;
     api
       .connectHint(contextId, reason)
@@ -132,29 +159,33 @@ export function CloudIdentityNote({
     if (!reauth || loggingIn) return;
     setLoggingIn(true);
     setLoginLog("");
+    const attempt = loginAttemptRef.current;
     let opened: { sessionId: string; close: () => void } | null = null;
+    let exited = false;
     api
       .cloudLoginOpen(
         contextId,
         reauth.account,
         (b64) => {
-          if (!mountedRef.current) return;
+          if (loginAttemptRef.current !== attempt) return;
           // Tail only: this is a progress surface, not a terminal, and gcloud's
           // browser-launch line is the part worth seeing.
           setLoginLog((prev) => (prev + decodeB64(b64)).slice(-2000));
         },
         (code) => {
-          if (!mountedRef.current) return;
-          setLoggingIn(false);
-          const sessionId = loginSessionRef.current;
-          loginSessionRef.current = null;
+          exited = true;
           opened?.close();
+          if (loginAttemptRef.current !== attempt) return;
           // Detaching the channel is not enough: the backend keeps the session
           // in its registry until told otherwise, and while any entry remains
           // the terminal token slot is never reclaimed (and this gcloud child is
           // never reaped). The exit frame means the process is gone, so this is
-          // bookkeeping, not a kill.
-          if (sessionId) void api.terminalClose(sessionId).catch(() => {});
+          // bookkeeping, not a kill. Null here when the frame outran the open
+          // ack — the `.then` below closes for us in that case.
+          const sessionId = loginSessionRef.current;
+          loginSessionRef.current = null;
+          closeLoginSession(sessionId);
+          setLoggingIn(false);
           if (code === 0) onReconnect();
           else
             setLoginLog(
@@ -164,18 +195,20 @@ export function CloudIdentityNote({
       )
       .then((session) => {
         opened = session;
-        loginSessionRef.current = session.sessionId;
-        // The note can unmount mid-login (cluster switch, or a reconnect that
-        // succeeded from another path). Close the session rather than only
-        // detaching, so the registry doesn't keep an entry no one can reach.
-        if (!mountedRef.current) {
+        // The ack can arrive too late to matter in two ways: the exit frame
+        // outran it (a spawn that died instantly), or the attempt was
+        // invalidated under it (cancel, context change, unmount). Either way
+        // the handlers that normally own the session have already run without
+        // the id, so close here and never store it.
+        if (exited || loginAttemptRef.current !== attempt) {
           session.close();
-          loginSessionRef.current = null;
-          void api.terminalClose(session.sessionId).catch(() => {});
+          closeLoginSession(session.sessionId);
+          return;
         }
+        loginSessionRef.current = session.sessionId;
       })
       .catch((e: unknown) => {
-        if (!mountedRef.current) return;
+        if (loginAttemptRef.current !== attempt) return;
         setLoggingIn(false);
         loginSessionRef.current = null;
         setLoginLog(String(e));
@@ -183,14 +216,17 @@ export function CloudIdentityNote({
   };
 
   const cancelLogin = () => {
+    // Invalidate first: the exit frame that follows the kill finds a stale
+    // attempt and stays silent instead of reporting a code for a login the
+    // operator already walked away from.
+    loginAttemptRef.current += 1;
     const sessionId = loginSessionRef.current;
     setLoggingIn(false);
     loginSessionRef.current = null;
-    if (!sessionId) return;
-    // Fire and forget: the exit frame that follows is ignored because
-    // `loggingIn` is already false, and a failed close leaves a PTY the backend
-    // reaps with the cluster anyway.
-    void api.terminalClose(sessionId).catch(() => {});
+    // Fire and forget — a failed close leaves a PTY the backend reaps with the
+    // cluster anyway. A null id means the open ack hasn't landed; its `.then`
+    // sees the stale attempt and closes.
+    closeLoginSession(sessionId);
   };
 
   const doPin = () => {
