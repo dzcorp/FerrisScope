@@ -33,6 +33,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use directories::ProjectDirs;
@@ -52,6 +53,26 @@ pub const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
 /// identity is a cache slot per identity.
 const SLOTS_DIR: &str = "authcache";
 
+/// One lock per cache slot, so concurrent connects sharing an identity take
+/// turns at a cold slot instead of each spawning gcloud. Keyed by slot
+/// directory; slotless invocations share one entry, which is the same
+/// serialisation they'd want anyway (they contend on the plugin's default file).
+static SLOT_LOCKS: OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
+
+fn slot_lock(dir: Option<&Path>) -> Arc<tokio::sync::Mutex<()>> {
+    let key = dir.map_or_else(|| PathBuf::from("<default>"), Path::to_path_buf);
+    let table = SLOT_LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = match table.lock() {
+        Ok(g) => g,
+        // A poisoned table would only mean some earlier holder panicked; the
+        // contents are still sound, and refusing to preflight over it would be
+        // worse than serialising slightly wrong.
+        Err(e) => e.into_inner(),
+    };
+    Arc::clone(guard.entry(key).or_default())
+}
+
 /// A context's exec plugin, resolved and ready to run, plus the cache slot we
 /// pointed it at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +85,9 @@ pub struct PreparedExec {
     /// The gcloud account this invocation authenticates as, when the context
     /// pins one. `None` means it follows `gcloud config set account`.
     pub identity: Option<String>,
+    /// The exec entry's `apiVersion`, carried so our `KUBERNETES_EXEC_INFO`
+    /// matches what kube-rs will send rather than a guess.
+    pub api_version: Option<String>,
     /// Directory the plugin will read/write its token cache in. `None` when the
     /// slot could not be prepared — the plugin then falls back to its default
     /// location, which is exactly the pre-existing behaviour.
@@ -123,6 +147,7 @@ pub fn prepare_in(
         return None;
     }
     let args = exec.args.clone().unwrap_or_default();
+    let api_version = exec.api_version.clone();
     let mut env = exec_env_pairs(exec.env.as_ref());
 
     let identity = match gcloud::binding_for(command_basename(&command), &args, &env) {
@@ -156,6 +181,7 @@ pub fn prepare_in(
         args,
         env,
         identity,
+        api_version,
         cache_dir,
     })
 }
@@ -165,21 +191,38 @@ pub fn prepare_in(
 /// Stdin is `null` rather than inherited: a GUI process has nothing useful
 /// there, and an inherited-but-dead stdin is what makes gcloud believe it may
 /// prompt and then fail with a message no one sees.
-pub async fn preflight(prepared: &PreparedExec, api_version: Option<&str>) -> PreflightOutcome {
+pub async fn preflight(prepared: &PreparedExec) -> PreflightOutcome {
+    preflight_with_budget(prepared, PREFLIGHT_TIMEOUT).await
+}
+
+/// [`preflight`] with the wall-clock cap injected, so the timeout arm is
+/// testable without a multi-second test.
+pub async fn preflight_with_budget(prepared: &PreparedExec, budget: Duration) -> PreflightOutcome {
+    // One run per slot at a time. Connecting a fleet (or several tabs) fires
+    // parallel connects, and without this each one misses the same cold slot and
+    // spawns its own `gcloud` — the storm this module exists to remove. The
+    // waiters still run the plugin, but by then the slot is warm, so they hit the
+    // cache instead of gcloud (measured ~3ms vs ~1.2s) and the plugin itself
+    // decides whether the token is still good — no expiry parsing here.
+    let lock = slot_lock(prepared.cache_dir.as_deref());
+    let _guard = lock.lock().await;
+
     let mut cmd = tokio::process::Command::new(&prepared.command);
     cmd.args(&prepared.args)
         .envs(prepared.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .env("KUBERNETES_EXEC_INFO", exec_info(api_version))
+        .env(
+            "KUBERNETES_EXEC_INFO",
+            exec_info(prepared.api_version.as_deref()),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    match tokio::time::timeout(PREFLIGHT_TIMEOUT, cmd.output()).await {
-        Err(_) => PreflightOutcome::Inconclusive(format!(
-            "timed out after {}s",
-            PREFLIGHT_TIMEOUT.as_secs()
-        )),
+    match tokio::time::timeout(budget, cmd.output()).await {
+        Err(_) => {
+            PreflightOutcome::Inconclusive(format!("timed out after {}ms", budget.as_millis()))
+        }
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => PreflightOutcome::Missing,
         Ok(Err(e)) => PreflightOutcome::Inconclusive(e.to_string()),
         Ok(Ok(out)) if out.status.success() => PreflightOutcome::Warmed,
@@ -280,6 +323,11 @@ fn prepare_slot(root: Option<&Path>, identity: Option<&str>) -> std::io::Result<
         )
     })?;
     let dir = root.join(slot_name(identity));
+    // The plugin drops a live access token in here, so the directory is as
+    // sensitive as the file: created 0700 rather than left at whatever the
+    // process umask says.
+    create_private_dir(root)?;
+    create_private_dir(&dir)?;
     let kubeconfig = dir.join("config");
     crate::atomic_write::atomic_write_sync_mode(
         &kubeconfig,
@@ -287,6 +335,18 @@ fn prepare_slot(root: Option<&Path>, identity: Option<&str>) -> std::io::Result<
         Some(0o600),
     )?;
     Ok(Slot { dir, kubeconfig })
+}
+
+/// `mkdir -p` with owner-only permissions on unix. Idempotent, and tightens an
+/// existing directory that was created before this rule.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// Filesystem-safe directory name for an identity. Unpinned contexts share one
@@ -672,6 +732,26 @@ users:
         clear_cache_slots_at(&root.path().join("never-created")).expect("missing root");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn slot_directories_are_owner_only() {
+        // The plugin writes a live access token into this directory, so the
+        // directory is as sensitive as the file inside it.
+        use std::os::unix::fs::PermissionsExt;
+        let root = root();
+        let mut kubeconfig = kc(KUBECONFIG);
+        let dir = prepare_in(&mut kubeconfig, "gke_p_r_c", Some(root.path()))
+            .expect("prepared")
+            .cache_dir
+            .expect("cache dir");
+        for path in [root.path(), dir.as_path()] {
+            let mode = std::fs::metadata(path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{path:?} is group/world accessible");
+        }
+        let file = std::fs::metadata(dir.join("config")).expect("stat");
+        assert_eq!(file.permissions().mode() & 0o777, 0o600);
+    }
+
     #[test]
     fn slot_names_stay_filesystem_safe() {
         assert_eq!(slot_name(None), "active");
@@ -750,6 +830,7 @@ users:
                 args: vec!["-c".to_owned(), body.to_owned()],
                 env: Vec::new(),
                 identity: Some("a@example.com".to_owned()),
+                api_version: Some("client.authentication.k8s.io/v1beta1".to_owned()),
                 cache_dir: None,
             }
         }
@@ -757,7 +838,7 @@ users:
         #[tokio::test]
         async fn success_is_warmed() {
             let p = plugin("echo '{\"kind\":\"ExecCredential\"}'");
-            assert_eq!(preflight(&p, None).await, PreflightOutcome::Warmed);
+            assert_eq!(preflight(&p).await, PreflightOutcome::Warmed);
         }
 
         #[tokio::test]
@@ -767,7 +848,7 @@ users:
                  current auth tokens: Reauthentication failed. cannot prompt during \
                  non-interactive execution.' 1>&2; exit 1",
             );
-            let out = preflight(&p, None).await;
+            let out = preflight(&p).await;
             let PreflightOutcome::Failed { code, stderr } = out else {
                 panic!("expected Failed, got {out:?}");
             };
@@ -786,7 +867,7 @@ users:
         #[tokio::test]
         async fn other_failures_stay_generic() {
             let p = plugin("echo 'boom: bad config' 1>&2; exit 3");
-            let out = preflight(&p, None).await;
+            let out = preflight(&p).await;
             let PreflightOutcome::Failed { code, stderr } = out else {
                 panic!("expected Failed, got {out:?}");
             };
@@ -807,13 +888,13 @@ users:
                 .to_string_lossy()
                 .into_owned();
             p.args.clear();
-            assert_eq!(preflight(&p, None).await, PreflightOutcome::Missing);
+            assert_eq!(preflight(&p).await, PreflightOutcome::Missing);
         }
 
         #[tokio::test]
         async fn stdout_is_used_when_the_plugin_writes_its_error_there() {
             let p = plugin("echo 'failed on stdout'; exit 1");
-            let out = preflight(&p, None).await;
+            let out = preflight(&p).await;
             let PreflightOutcome::Failed { stderr, .. } = out else {
                 panic!("expected Failed, got {out:?}");
             };
@@ -826,7 +907,7 @@ users:
         async fn the_injected_kubeconfig_reaches_the_child() {
             let mut p = plugin("echo \"$KUBECONFIG\" 1>&2; exit 1");
             p.env = vec![("KUBECONFIG".to_owned(), "/slot/config".to_owned())];
-            let out = preflight(&p, None).await;
+            let out = preflight(&p).await;
             let PreflightOutcome::Failed { stderr, .. } = out else {
                 panic!("expected Failed, got {out:?}");
             };
@@ -838,7 +919,7 @@ users:
         #[tokio::test]
         async fn exec_info_is_passed_to_the_child() {
             let p = plugin("echo \"$KUBERNETES_EXEC_INFO\" 1>&2; exit 1");
-            let out = preflight(&p, None).await;
+            let out = preflight(&p).await;
             let PreflightOutcome::Failed { stderr, .. } = out else {
                 panic!("expected Failed, got {out:?}");
             };
@@ -847,21 +928,70 @@ users:
             assert_eq!(v["spec"]["interactive"], false);
         }
 
+        /// The invariant that keeps a working cluster reachable: a plugin
+        /// slower than the budget must report "no information", never a failure
+        /// the connect aborts on.
         #[tokio::test]
         async fn an_overrunning_plugin_is_inconclusive_not_fatal() {
-            // Exercise the real timeout arm with a budget short enough to keep
-            // the suite fast: same primitive, same outcome mapping.
-            let mut cmd = tokio::process::Command::new("/bin/sh");
-            cmd.args(["-c", "sleep 30"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
+            let p = plugin("sleep 30");
+            let out = preflight_with_budget(&p, Duration::from_millis(150)).await;
+            match out {
+                PreflightOutcome::Inconclusive(why) => assert!(
+                    why.contains("timed out"),
+                    "the reason must say what happened: {why}"
+                ),
+                other => panic!("a hung plugin must not abort a connect, got {other:?}"),
+            }
+        }
+
+        /// Concurrent connects sharing an identity (a fleet, or several tabs)
+        /// must take turns at the slot instead of each spawning gcloud.
+        #[tokio::test]
+        async fn concurrent_preflights_on_one_slot_are_serialised() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let log = dir.path().join("overlaps");
+            // Each run claims its own marker, then counts how many exist. Under
+            // the lock the answer is always 1. Counting (rather than testing for
+            // one shared marker) makes the detection deterministic: without the
+            // lock every run holds its marker for the whole sleep, so any
+            // overlapping pair sees at least two.
+            let mut p = plugin(&format!(
+                "d={d}; : > $d/mark.$$; n=$(ls $d/mark.* | wc -l); \
+                 [ \"$n\" -gt 1 ] && echo overlap >> {l}; sleep 0.15; rm -f $d/mark.$$; exit 0",
+                d = dir.path().display(),
+                l = log.display()
+            ));
+            p.cache_dir = Some(dir.path().to_path_buf());
+
+            let runs = futures::future::join_all((0..4).map(|_| preflight(&p))).await;
             assert!(
-                tokio::time::timeout(Duration::from_millis(200), cmd.output())
-                    .await
-                    .is_err(),
-                "a hung plugin must not block a connect forever"
+                runs.iter().all(|r| *r == PreflightOutcome::Warmed),
+                "every run should succeed: {runs:?}"
+            );
+            assert!(
+                !log.exists(),
+                "two plugin runs overlapped on one slot: {:?}",
+                std::fs::read_to_string(&log)
+            );
+        }
+
+        /// Different identities must not serialise against each other — they
+        /// own different slots and can mint in parallel.
+        #[tokio::test]
+        async fn different_slots_do_not_block_each_other() {
+            let a = tempfile::tempdir().expect("tempdir");
+            let b = tempfile::tempdir().expect("tempdir");
+            let mut pa = plugin("sleep 0.3");
+            pa.cache_dir = Some(a.path().to_path_buf());
+            let mut pb = plugin("sleep 0.3");
+            pb.cache_dir = Some(b.path().to_path_buf());
+
+            let started = tokio::time::Instant::now();
+            let _ = tokio::join!(preflight(&pa), preflight(&pb));
+            assert!(
+                started.elapsed() < Duration::from_millis(550),
+                "two identities ran back to back instead of together: {:?}",
+                started.elapsed()
             );
         }
     }

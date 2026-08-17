@@ -537,16 +537,18 @@ pub(crate) async fn pin_cloud_identity_cmd(
         format!("could not locate the kubeconfig file backing {name} — nothing was written")
     })?;
     tokio::task::spawn_blocking(move || {
-        ferrisscope_core::cloud_identity::pin_identity(&path, &context_name, &identity)
-            .map_err(|e| e.to_string())?;
-        // `pin_identity` clears the caches core knows about: the plugin's
-        // default slot and the app's per-identity ones. It cannot know about
-        // this third slot — the one a Dock terminal's `kubectl` writes beside
-        // its scratch kubeconfig — and a token minted under the pre-pin
-        // identity would keep being served there for up to an hour, which is
-        // precisely the staleness the pin exists to end.
+        let pinned =
+            ferrisscope_core::cloud_identity::pin_identity(&path, &context_name, &identity);
+        // Unconditional, and deliberately not behind `?` on the line above.
+        // `pin_identity` rewrites the kubeconfig *before* it clears caches, so a
+        // failure reported there can still mean the new `--account` is already
+        // on disk. Skipping this clear in that case would leave a Dock terminal
+        // serving the pre-pin identity's token for up to an hour — precisely the
+        // staleness the pin exists to end. Core clears the slots it knows about
+        // (the plugin default and the app's per-identity ones); this third slot,
+        // written beside a terminal session's scratch kubeconfig, is ours.
         crate::terminal::clear_plugin_slot(&crate::terminal::plugin_cache_slot());
-        Ok(())
+        pinned.map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("pin identity task failed: {e}"))?

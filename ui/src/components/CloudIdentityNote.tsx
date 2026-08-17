@@ -146,8 +146,15 @@ export function CloudIdentityNote({
         (code) => {
           if (!mountedRef.current) return;
           setLoggingIn(false);
+          const sessionId = loginSessionRef.current;
           loginSessionRef.current = null;
           opened?.close();
+          // Detaching the channel is not enough: the backend keeps the session
+          // in its registry until told otherwise, and while any entry remains
+          // the terminal token slot is never reclaimed (and this gcloud child is
+          // never reaped). The exit frame means the process is gone, so this is
+          // bookkeeping, not a kill.
+          if (sessionId) void api.terminalClose(sessionId).catch(() => {});
           if (code === 0) onReconnect();
           else
             setLoginLog(
@@ -158,10 +165,14 @@ export function CloudIdentityNote({
       .then((session) => {
         opened = session;
         loginSessionRef.current = session.sessionId;
-        // The session can outlive this note (cluster switch, successful
-        // reconnect). Detaching the channel is enough — the PTY is owned by the
-        // backend and torn down with the cluster.
-        if (!mountedRef.current) session.close();
+        // The note can unmount mid-login (cluster switch, or a reconnect that
+        // succeeded from another path). Close the session rather than only
+        // detaching, so the registry doesn't keep an entry no one can reach.
+        if (!mountedRef.current) {
+          session.close();
+          loginSessionRef.current = null;
+          void api.terminalClose(session.sessionId).catch(() => {});
+        }
       })
       .catch((e: unknown) => {
         if (!mountedRef.current) return;

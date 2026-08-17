@@ -391,7 +391,7 @@ impl Cluster {
         // token-cache slot the later spawns read instead of each shelling out to
         // gcloud. See `crate::exec_auth`.
         if let Some(prepared) = exec_auth::prepare(&mut kubeconfig, context_name) {
-            match exec_auth::preflight(&prepared, None).await {
+            match exec_auth::preflight(&prepared).await {
                 exec_auth::PreflightOutcome::Failed { code, stderr } => {
                     return Err(exec_auth::failure_error(&prepared, code, stderr));
                 }

@@ -483,8 +483,13 @@ describe("CloudIdentityNote", () => {
   it("runs the login in a PTY and reconnects when gcloud exits cleanly", async () => {
     let channel: { onmessage: (m: unknown) => void } | undefined;
     let loginArgs: Record<string, unknown> | undefined;
+    const closed: unknown[] = [];
     setMockInvoke((cmd, args) => {
       if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "terminal_close") {
+        closed.push(args);
+        return undefined;
+      }
       expect(cmd).toBe("cloud_login_open");
       loginArgs = args;
       channel = args?.onEvent as { onmessage: (m: unknown) => void };
@@ -518,12 +523,21 @@ describe("CloudIdentityNote", () => {
 
     channel?.onmessage({ kind: "exit", code: 0 });
     await waitFor(() => expect(onReconnect).toHaveBeenCalledTimes(1));
+    // The session must be closed, not merely detached: the backend keeps its
+    // registry entry otherwise, which both leaks the gcloud child and stops the
+    // terminal token slot from ever being reclaimed.
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t1" }]));
   });
 
   it("keeps the failure visible and does not reconnect when gcloud fails", async () => {
     let channel: { onmessage: (m: unknown) => void } | undefined;
+    const closed: unknown[] = [];
     setMockInvoke((cmd, args) => {
       if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "terminal_close") {
+        closed.push(args);
+        return undefined;
+      }
       channel = args?.onEvent as { onmessage: (m: unknown) => void };
       return "t2";
     });
@@ -544,6 +558,7 @@ describe("CloudIdentityNote", () => {
       );
     });
     expect(onReconnect).not.toHaveBeenCalled();
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t2" }]));
     // Retryable: the button comes back rather than staying stuck on "Waiting".
     expect(screen.getByRole("button", { name: /^log in$/i })).toBeEnabled();
     // The copyable command is still there as the manual fallback.

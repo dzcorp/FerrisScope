@@ -18,6 +18,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -383,7 +384,66 @@ fn forward_output(
             }
         }
     }
-    let _ = on_event.send(TerminalEvent::Exit { code: 0 });
+    let _ = on_event.send(TerminalEvent::Exit {
+        code: reap_exit_code(&session.child),
+    });
+}
+
+/// How long to keep polling for the child's status after the PTY hit EOF.
+/// EOF normally *follows* the child exiting, so the first poll almost always
+/// answers; the budget only covers the inverse case (a read error while the
+/// child still lives).
+const REAP_BUDGET: Duration = Duration::from_secs(2);
+
+/// Exit code reported when the child's real status could not be established.
+///
+/// Deliberately non-zero. Callers treat 0 as "the command succeeded" — the
+/// reauth login acts on it by reconnecting — so an unknown status must never
+/// masquerade as success.
+const EXIT_CODE_UNKNOWN: i32 = -1;
+
+/// The child's real exit code, polled rather than waited.
+///
+/// `Child::wait` would be simpler but it blocks while holding the session's
+/// child lock, which [`Session::kill_child`] also takes — a cluster disconnect
+/// would then hang on a child that never exits. `try_wait` releases the lock
+/// between polls, so a kill can always get in.
+fn reap_exit_code(child: &StdMutex<Box<dyn portable_pty::Child + Send + Sync>>) -> i32 {
+    reap_exit_code_within(child, REAP_BUDGET)
+}
+
+/// [`reap_exit_code`] with the budget injected, so the give-up arm is testable
+/// without a multi-second test.
+fn reap_exit_code_within(
+    child: &StdMutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    budget: Duration,
+) -> i32 {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.lock() {
+            Ok(mut child) => match child.try_wait() {
+                Ok(Some(status)) => return exit_code_of(&status),
+                // Still running: fall through to the sleep below, having
+                // dropped the lock at the end of this arm.
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(error = %e, "pty child status unavailable");
+                    return EXIT_CODE_UNKNOWN;
+                }
+            },
+            Err(_) => return EXIT_CODE_UNKNOWN,
+        }
+        if Instant::now() >= deadline {
+            return EXIT_CODE_UNKNOWN;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A signalled child reports the signal name and code 1; anything non-zero is a
+/// failure to every caller, so the distinction doesn't need to survive here.
+fn exit_code_of(status: &portable_pty::ExitStatus) -> i32 {
+    i32::try_from(status.exit_code()).unwrap_or(EXIT_CODE_UNKNOWN)
 }
 
 fn extract_debug_pod_name(s: &str) -> Option<String> {
@@ -545,6 +605,18 @@ fn build_command(id: &str, spec: &SpawnSpec) -> Result<(CommandBuilder, Vec<Path
             Ok((cmd, scratch_files))
         }
         SpawnSpec::CloudLogin { account } => {
+            // On Windows the gcloud SDK ships `gcloud.cmd`, and portable-pty
+            // spawns through raw `CreateProcessW`, which cannot execute a batch
+            // file — so the interpreter has to be explicit there. Elsewhere
+            // `gcloud` is a real executable on PATH.
+            #[cfg(windows)]
+            let mut cmd = {
+                let mut c = CommandBuilder::new("cmd.exe");
+                c.arg("/c");
+                c.arg("gcloud");
+                c
+            };
+            #[cfg(not(windows))]
             let mut cmd = CommandBuilder::new("gcloud");
             cmd.arg("auth");
             cmd.arg("login");
@@ -733,7 +805,16 @@ fn write_scratch_kubeconfig(
     default_namespace: Option<&str>,
 ) -> Result<(PathBuf, String), String> {
     let dir = scratch_dir();
+    // The credential plugin caches a live access token in here (see
+    // `plugin_cache_slot`), so the directory is owner-only rather than whatever
+    // the umask allows.
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir cache: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("chmod cache dir: {e}"))?;
+    }
     let path = dir.join(format!("term-{id}-{}.yaml", std::process::id()));
 
     let mut doc = serde_yaml::Mapping::new();
@@ -834,8 +915,10 @@ fn source_context_cluster_user(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_command, SpawnSpec};
+    use super::{build_command, reap_exit_code_within, SpawnSpec, EXIT_CODE_UNKNOWN, REAP_BUDGET};
     use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
 
     fn argv(spec: &SpawnSpec) -> Vec<String> {
         let (cmd, scratch) = build_command("t0", spec).expect("build");
@@ -847,6 +930,85 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// Stand-in for a PTY child: reports "still running" for `pending` polls,
+    /// then the given status. Enough to exercise the reaper without a real PTY.
+    #[derive(Debug)]
+    struct FakeChild {
+        pending: usize,
+        status: Option<portable_pty::ExitStatus>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeKiller;
+
+    impl portable_pty::ChildKiller for FakeKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl portable_pty::ChildKiller for FakeChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(FakeKiller)
+        }
+    }
+
+    impl portable_pty::Child for FakeChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            if self.pending > 0 {
+                self.pending -= 1;
+                return Ok(None);
+            }
+            Ok(self.status.clone())
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            unreachable!("the reaper must poll, never block holding the child lock")
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    fn child(
+        pending: usize,
+        code: Option<u32>,
+    ) -> StdMutex<Box<dyn portable_pty::Child + Send + Sync>> {
+        StdMutex::new(Box::new(FakeChild {
+            pending,
+            status: code.map(portable_pty::ExitStatus::with_exit_code),
+        }))
+    }
+
+    #[test]
+    fn a_failed_command_reports_its_real_exit_code() {
+        // The reason this matters: the reauth login treats 0 as "renewed" and
+        // reconnects. Reporting 0 for a failed `gcloud auth login` would send the
+        // operator into a reconnect that re-fails, with the real reason hidden.
+        assert_eq!(reap_exit_code_within(&child(0, Some(1)), REAP_BUDGET), 1);
+        assert_eq!(reap_exit_code_within(&child(0, Some(0)), REAP_BUDGET), 0);
+        // EOF usually precedes the child's status being reapable by a poll or two.
+        assert_eq!(reap_exit_code_within(&child(3, Some(7)), REAP_BUDGET), 7);
+    }
+
+    #[test]
+    fn an_unreapable_child_never_reports_success() {
+        // A child still running when the budget expires has an unknown status,
+        // and unknown must not read as success.
+        let code = reap_exit_code_within(&child(usize::MAX, None), Duration::from_millis(60));
+        assert_eq!(code, EXIT_CODE_UNKNOWN);
+        assert_ne!(code, 0, "unknown must never masquerade as success");
     }
 
     #[test]
