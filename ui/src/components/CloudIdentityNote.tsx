@@ -395,27 +395,18 @@ export function CloudIdentityNote({
               Open Privacy Settings
             </Btn>
             {/* macOS fixes a process's file-access rights at launch, so a grant
-                made now does not reach this instance — reconnecting refuses
-                identically and the operator concludes the grant did not work.
-                Only a fresh process picks it up, hence "restart" rather than
-                "reconnect", and a button so it is one click. */}
-            <Btn
-              t={t}
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setSettingsError(null);
-                api.restartApp().catch((e: unknown) => {
-                  setSettingsError(String(e));
-                });
-              }}
-            >
-              Restart FerrisScope
-            </Btn>
+                made now never reaches this instance — reconnecting refuses
+                identically and the operator concludes the grant failed. It has
+                to be a full quit-and-reopen: an in-app relaunch spawns the
+                replacement as this process's child, and TCC judges a child by
+                its responsible process, so the stale decision is inherited.
+                Said as text rather than offered as a button, because no button
+                we can implement actually escapes it. */}
             <span style={{ color: t.textDim }}>
-              allow FerrisScope under Files and Folders, then restart — a new
-              grant only reaches a freshly started app, so reconnecting alone
-              keeps failing
+              allow FerrisScope under Files and Folders, then <b>quit
+              FerrisScope completely and open it again</b> — macOS only applies
+              a new grant to a freshly launched app, so reconnecting (or
+              restarting from inside the app) keeps failing
             </span>
           </div>
           {settingsError && (

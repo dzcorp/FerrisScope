@@ -827,15 +827,18 @@ describe("CloudIdentityNote", () => {
       screen.getByRole("button", { name: /open privacy settings/i }),
     ).toBeInTheDocument();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: /restart ferrisscope/i }),
-    );
-    await waitFor(() => {
-      expect(openCalls).toEqual(["restart_app_cmd"]);
-    });
+    // No in-app restart button: a relaunch from inside the app spawns a child,
+    // and TCC judges a child by its responsible process, so it inherits the
+    // stale decision. Only a full quit-and-reopen escapes it, so the note says
+    // exactly that rather than offering a control that cannot deliver.
+    expect(
+      screen.queryByRole("button", { name: /restart ferrisscope/i }),
+    ).not.toBeInTheDocument();
+    expect(note).toHaveTextContent(/quit FerrisScope completely and open it again/i);
+    expect(openCalls).toEqual([]);
   });
 
-  it("offers a restart on the blocked note, because a grant misses this process", async () => {
+  it("tells the operator to quit and reopen on the blocked note, not to reconnect", async () => {
     const openCalls: string[] = [];
     setMockInvoke((cmd) => {
       if (cmd === "connect_hint_cmd") return BLOCKED;
@@ -852,15 +855,11 @@ describe("CloudIdentityNote", () => {
     // the running app. Telling the operator to "reconnect" sends them in a
     // loop that always refuses; the copy has to say restart.
     const note = screen.getByRole("note");
-    expect(note).toHaveTextContent(/restart/i);
+    expect(note).toHaveTextContent(/quit FerrisScope completely and open it again/i);
+    // The old copy said "then reconnect", which is the one thing that cannot
+    // work: the grant never reaches the running process.
     expect(note).not.toHaveTextContent(/then reconnect/i);
-
-    fireEvent.click(
-      screen.getByRole("button", { name: /restart ferrisscope/i }),
-    );
-    await waitFor(() => {
-      expect(openCalls).toEqual(["restart_app_cmd"]);
-    });
+    expect(openCalls).toEqual([]);
   });
 
   it("drops the strip command from the blocked note when no path was parsed", async () => {

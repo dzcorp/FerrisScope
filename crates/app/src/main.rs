@@ -161,7 +161,6 @@ fn main() {
             commands::connect_hint_cmd,
             commands::pin_cloud_identity_cmd,
             commands::open_privacy_settings_cmd,
-            commands::restart_app_cmd,
             commands::cancel_connect,
             commands::list_resource_kinds,
             commands::list_custom_resource_kinds,

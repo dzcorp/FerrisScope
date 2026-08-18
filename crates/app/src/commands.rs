@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ferrisscope_core::cluster::{Cluster, ClusterInfo};
 use ferrisscope_core::fleet::{self, ClusterProbe};
@@ -515,101 +515,6 @@ pub(crate) async fn open_privacy_settings_cmd(app: tauri::AppHandle) -> Result<(
             None::<&str>,
         )
         .map_err(|e| format!("could not open System Settings: {e}"))
-}
-
-/// `<...>/Foo.app` from `<...>/Foo.app/Contents/MacOS/<binary>`, or `None` when
-/// the executable isn't inside a bundle (a `cargo run` / `tauri dev` build).
-/// Split out so the layout check is testable without a bundle on disk.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_bundle_root(exe: &Path) -> Option<PathBuf> {
-    let macos_dir = exe.parent()?;
-    if macos_dir.file_name()? != "MacOS" {
-        return None;
-    }
-    let contents = macos_dir.parent()?;
-    if contents.file_name()? != "Contents" {
-        return None;
-    }
-    let root = contents.parent()?;
-    root.extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("app"))
-        .then(|| root.to_path_buf())
-}
-
-/// Wrap a path for `sh -c`. Paths here come from `current_exe`, but an
-/// apostrophe in a volume or folder name would otherwise break out of the
-/// quoting and run as a command.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn sh_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-/// Relaunch the app so a just-granted TCC folder permission takes effect.
-///
-/// macOS decides a process's file-access rights when it starts: granting
-/// Downloads/Desktop/Documents access while the app is running does *not* reach
-/// the running instance, and every subsequent plugin spawn keeps being refused.
-/// Reconnecting cannot fix that — only a fresh process can — so the blocked and
-/// hidden-helper notes offer this alongside the grant, and the copy says
-/// "restart", not "reconnect".
-///
-/// Not [`tauri::AppHandle::restart`]: on macOS that spawns the replacement as a
-/// *child of this process*, and TCC judges a child by its responsible process —
-/// so the new instance inherits exactly the stale decision we are restarting to
-/// escape. Measured: the button relaunched but the refusal persisted, while
-/// quitting and reopening from the Dock fixed it. Going through LaunchServices
-/// (`open`) makes the new instance its own responsible process, which is the
-/// whole point.
-///
-/// The relaunch is handed to a detached shell that waits for this PID to go
-/// away first: the single-instance plugin would otherwise just focus the
-/// still-live old window and never start a new process.
-#[tauri::command]
-pub(crate) fn restart_app_cmd(app: tauri::AppHandle) {
-    tracing::info!(
-        target: "ferrisscope::auth",
-        "restarting to pick up a newly granted folder permission"
-    );
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(bundle) = std::env::current_exe()
-            .ok()
-            .as_deref()
-            .and_then(macos_bundle_root)
-        {
-            let script = format!(
-                "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open {bundle}",
-                pid = std::process::id(),
-                bundle = sh_single_quote(&bundle.to_string_lossy()),
-            );
-            match std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&script)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                // Exit cleanly rather than `restart()`: Tauri's shutdown still
-                // runs (port-forwards, chats, watchers), and the waiter brings
-                // us back through LaunchServices once we are gone.
-                Ok(_) => app.exit(0),
-                Err(e) => {
-                    // Better a same-responsibility relaunch than none: the
-                    // operator can still quit manually, and the note says so.
-                    tracing::warn!(
-                        target: "ferrisscope::auth",
-                        "could not schedule a LaunchServices relaunch ({e}) — falling back"
-                    );
-                    app.restart();
-                }
-            }
-        } else {
-            app.restart();
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    app.restart();
 }
 
 /// Pin a context's exec entry to an explicit cloud identity — a gcloud
@@ -4687,55 +4592,6 @@ fn emit_prom_changed(app: &AppHandle, cluster_id: &str, entry: Option<&PromCache
 mod tests {
     use super::{health_status_triggers_teardown, resource_event_name, sanitize_event_segment};
     use ferrisscope_core::health::ClusterHealthStatus;
-
-    #[test]
-    fn bundle_root_is_found_only_from_a_real_bundle_layout() {
-        use super::macos_bundle_root;
-        use std::path::{Path, PathBuf};
-
-        assert_eq!(
-            macos_bundle_root(Path::new(
-                "/Applications/FerrisScope.app/Contents/MacOS/ferrisscope"
-            )),
-            Some(PathBuf::from("/Applications/FerrisScope.app"))
-        );
-        // A dev build (`target/release/ferrisscope`) is not in a bundle, so
-        // there is nothing for LaunchServices to open — the caller must fall
-        // back rather than hand `open` a bare binary.
-        assert_eq!(
-            macos_bundle_root(Path::new("/repo/target/release/ferrisscope")),
-            None
-        );
-        // Right depth, wrong layout: must not walk up blindly.
-        assert_eq!(
-            macos_bundle_root(Path::new("/somewhere/Contents/MacOS/x")),
-            None
-        );
-        assert_eq!(
-            macos_bundle_root(Path::new("/x/Foo.app/Resources/MacOS/ferrisscope")),
-            None
-        );
-    }
-
-    #[test]
-    fn bundle_paths_are_quoted_against_shell_injection() {
-        use super::sh_single_quote;
-
-        assert_eq!(
-            sh_single_quote("/Applications/A.app"),
-            "'/Applications/A.app'"
-        );
-        // An apostrophe in a volume or folder name would otherwise close the
-        // quote and let the remainder run as a command.
-        assert_eq!(
-            sh_single_quote("/Volumes/Yurii's Disk/A.app"),
-            r"'/Volumes/Yurii'\''s Disk/A.app'"
-        );
-        assert_eq!(
-            sh_single_quote("/tmp/a'; rm -rf /tmp/x; echo '"),
-            r"'/tmp/a'\''; rm -rf /tmp/x; echo '\'''"
-        );
-    }
 
     #[test]
     fn detail_cmd_invocations_forward_to_same_stem_inner_fn() {

@@ -381,9 +381,9 @@ pub fn compose_hidden_helper_hint() -> ConnectHint {
                  `gcloud` beside it. On macOS a guarded folder (Downloads, Desktop, Documents, \
                  iCloud Drive, a network or removable volume) fails the access check, and that \
                  reads as \"not found\" rather than \"denied\". If you have just granted this app \
-                 access, the grant applies to newly started processes only — restart FerrisScope \
-                 to pick it up, because reconnecting will keep failing. Otherwise grant access \
-                 below, or move the SDK somewhere unguarded."
+                 access: quit FerrisScope completely and open it again — macOS applies a new \
+                 grant only to a freshly launched app, so reconnecting keeps failing. Otherwise \
+                 grant access below, or move the SDK somewhere unguarded."
             .to_owned(),
         authenticated_as: None,
         identities: Vec::new(),
@@ -446,8 +446,10 @@ pub fn compose_blocked_hint(path: Option<&str>) -> ConnectHint {
              (Downloads, Desktop, Documents, iCloud Drive, network or removable volumes) and \
              this app has no grant for it, or the SDK still carries the quarantine flag from \
              being downloaded as an archive. Grant access in System Settings → Privacy & \
-             Security → Files and Folders, or clear the quarantine with the command below — \
-             moving the SDK to an unguarded location fixes it for every app at once."
+             Security → Files and Folders and then quit FerrisScope completely and open it \
+             again — macOS applies a new grant only to a freshly launched app, so reconnecting \
+             keeps failing. Or clear the quarantine with the command below; moving the SDK to \
+             an unguarded location fixes it for every app at once."
         ),
         authenticated_as: None,
         identities: Vec::new(),
@@ -734,9 +736,18 @@ mod tests {
         assert_eq!(unblock.path, None);
         assert_eq!(unblock.command, None);
         assert_eq!(unblock.settings_url, MACOS_PRIVACY_SETTINGS_URL);
+        // The remedy the operator cannot guess, and it has to be a full
+        // quit-and-reopen: macOS applies the grant to a freshly launched app
+        // only, and an in-app relaunch inherits this process's TCC decision.
+        let detail = hint.detail.to_ascii_lowercase();
         assert!(
-            hint.detail.to_ascii_lowercase().contains("restart"),
-            "the note must name the one remedy the operator cannot guess"
+            detail.contains("quit ferrisscope completely and open it again"),
+            "the note must spell out the quit-and-reopen remedy, got: {}",
+            hint.detail
+        );
+        assert!(
+            detail.contains("reconnecting keeps failing"),
+            "and must say why reconnecting is not the remedy"
         );
     }
 
