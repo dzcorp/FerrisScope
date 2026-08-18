@@ -582,6 +582,76 @@ mod tests {
          --account=a@example.com]: exit status 126 (err: /bin/sh: \
          /Users/u/Downloads/google-cloud-sdk/bin/gcloud: Operation not permitted\n)";
 
+    /// Verbatim stderr captured on a macOS box reproducing the client report:
+    /// the whole SDK downloaded into ~/Downloads, TCC denying this app. Differs
+    /// from [`BLOCKED_STDERR`] in two ways that the parser must tolerate — no
+    /// `--account=` (the context pins no identity, so the plugin omits the
+    /// flag) and the lower-cased single-colon "failed to retrieve access
+    /// token:" wording emitted by this plugin build.
+    const BLOCKED_STDERR_NO_ACCOUNT: &str = "print credential failed with error: failed to \
+         retrieve access token: failure while executing gcloud, with args [config config-helper \
+         --format=json]: exit status 126 (err: /bin/sh: \
+         /Users/u/Downloads/google-cloud-sdk/bin/gcloud: Operation not permitted\n)";
+
+    #[test]
+    fn blocked_without_a_pinned_account_still_classifies_and_offers_the_sdk_root() {
+        assert_eq!(
+            classify_exec_failure(BLOCKED_STDERR_NO_ACCOUNT),
+            ExecFailure::ExecBlocked
+        );
+        let path = blocked_path(BLOCKED_STDERR_NO_ACCOUNT);
+        assert_eq!(
+            path.as_deref(),
+            Some("/Users/u/Downloads/google-cloud-sdk/bin/gcloud")
+        );
+        // The remedy must target the SDK root, not the single refused file:
+        // gcloud is a launcher that execs its siblings, each equally guarded.
+        let hint = compose_blocked_hint(path.as_deref());
+        assert_eq!(
+            hint.unblock.and_then(|u| u.command).as_deref(),
+            Some("xattr -r -d com.apple.quarantine '/Users/u/Downloads/google-cloud-sdk'")
+        );
+    }
+
+    /// TCC guards far more than the well-known trio, and its coverage shifts
+    /// per OS release: iCloud mirrors, network shares, removable volumes, and
+    /// (with Full Disk Access withheld) plenty besides. Nothing in the blocked
+    /// path may key on a location allowlist — the OS already decided by the
+    /// time this stderr exists, so every guarded prefix must classify and yield
+    /// its own SDK root.
+    #[test]
+    fn any_guarded_location_classifies_not_just_downloads() {
+        for root in [
+            "/Users/u/Downloads/google-cloud-sdk",
+            "/Users/u/Desktop/google-cloud-sdk",
+            "/Users/u/Documents/google-cloud-sdk",
+            "/Users/u/Library/Mobile Documents/com~apple~CloudDocs/google-cloud-sdk",
+            "/Volumes/Backup SSD/sdks/google-cloud-sdk",
+            "/Users/u/some/entirely/unexpected/place/google-cloud-sdk",
+        ] {
+            let stderr = format!(
+                "print credential failed with error: failed to retrieve access token: failure \
+                 while executing gcloud, with args [config config-helper --format=json]: exit \
+                 status 126 (err: /bin/sh: {root}/bin/gcloud: Operation not permitted\n)"
+            );
+            assert_eq!(
+                classify_exec_failure(&stderr),
+                ExecFailure::ExecBlocked,
+                "should classify under {root}"
+            );
+            let path = blocked_path(&stderr);
+            assert_eq!(path.as_deref(), Some(format!("{root}/bin/gcloud").as_str()));
+            assert_eq!(
+                compose_blocked_hint(path.as_deref())
+                    .unblock
+                    .and_then(|u| u.command)
+                    .as_deref(),
+                Some(format!("xattr -r -d com.apple.quarantine '{root}'").as_str()),
+                "quarantine target should be the SDK root under {root}"
+            );
+        }
+    }
+
     #[test]
     fn an_os_exec_refusal_is_classified_as_blocked() {
         assert_eq!(
