@@ -157,6 +157,11 @@ export const api = {
   /// backend constant, not an argument, so this is not a general URL opener.
   openPrivacySettings: () => invoke<void>("open_privacy_settings_cmd"),
 
+  /// Relaunch the app. A TCC folder grant only reaches a freshly started
+  /// process, so reconnecting after granting keeps failing — see
+  /// `restart_app_cmd`.
+  restartApp: () => invoke<void>("restart_app_cmd"),
+
   listResourceKinds: () => invoke<ResourceKind[]>("list_resource_kinds"),
   // CRD-derived dynamic kinds. Per-cluster (CRDs are cluster-local), so
   // unlike `listResourceKinds` this needs a connected `clusterId`.

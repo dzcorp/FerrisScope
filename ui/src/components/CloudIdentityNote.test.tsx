@@ -797,6 +797,34 @@ describe("CloudIdentityNote", () => {
     });
   });
 
+  it("offers a restart on the blocked note, because a grant misses this process", async () => {
+    const openCalls: string[] = [];
+    setMockInvoke((cmd) => {
+      if (cmd === "connect_hint_cmd") return BLOCKED;
+      openCalls.push(cmd);
+      return undefined;
+    });
+
+    renderNote();
+
+    await waitFor(() => {
+      expect(screen.getByText(/macOS blocked the auth plugin/)).toBeInTheDocument();
+    });
+    // macOS fixes file-access rights at launch, so granting now cannot reach
+    // the running app. Telling the operator to "reconnect" sends them in a
+    // loop that always refuses; the copy has to say restart.
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent(/restart/i);
+    expect(note).not.toHaveTextContent(/then reconnect/i);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /restart ferrisscope/i }),
+    );
+    await waitFor(() => {
+      expect(openCalls).toEqual(["restart_app_cmd"]);
+    });
+  });
+
   it("drops the strip command from the blocked note when no path was parsed", async () => {
     setMockInvoke(() => ({
       ...BLOCKED,

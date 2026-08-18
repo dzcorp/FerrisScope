@@ -517,6 +517,23 @@ pub(crate) async fn open_privacy_settings_cmd(app: tauri::AppHandle) -> Result<(
         .map_err(|e| format!("could not open System Settings: {e}"))
 }
 
+/// Relaunch the app so a just-granted TCC folder permission takes effect.
+///
+/// macOS decides a process's file-access rights when it starts: granting
+/// Downloads/Desktop/Documents access while the app is running does *not* reach
+/// the running instance, and every subsequent plugin spawn keeps being refused.
+/// Reconnecting cannot fix that — only a fresh process can — so the blocked
+/// note offers this alongside the grant, and the copy says "restart", not
+/// "reconnect". Diverges: the process is replaced.
+#[tauri::command]
+pub(crate) fn restart_app_cmd(app: tauri::AppHandle) {
+    tracing::info!(
+        target: "ferrisscope::auth",
+        "restarting to pick up a newly granted folder permission"
+    );
+    app.restart();
+}
+
 /// Pin a context's exec entry to an explicit cloud identity — a gcloud
 /// `--account` or an AWS `AWS_PROFILE`, whichever the exec command calls for.
 ///

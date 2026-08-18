@@ -167,6 +167,13 @@ describe("contexts + connect", () => {
     expect(cap.calls[0]?.args).toBeUndefined();
   });
 
+  it("restartApp → 'restart_app_cmd' with no args", async () => {
+    const cap = captureNext(undefined);
+    await api.restartApp();
+    expect(cap.calls[0]?.cmd).toBe("restart_app_cmd");
+    expect(cap.calls[0]?.args).toBeUndefined();
+  });
+
   it("pinCloudIdentity → 'pin_cloud_identity_cmd' with name + identity", async () => {
     const cap = captureNext(undefined);
     await api.pinCloudIdentity("default::ctx-a", "a@b.io");

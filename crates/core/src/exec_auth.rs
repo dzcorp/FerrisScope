@@ -251,7 +251,7 @@ pub async fn preflight_with_budget(prepared: &PreparedExec, budget: Duration) ->
 /// connect forever — on timeout the spawn proceeds, fails, and the
 /// blocked-plugin note carries the remedies instead.
 #[cfg(target_os = "macos")]
-const CONSENT_PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
+const CONSENT_PROMPT_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Resolve a command the way the spawn will: paths as given, bare names
 /// through `path_var`. Canonicalized, so a symlink into a protected folder is

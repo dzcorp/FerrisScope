@@ -394,8 +394,28 @@ export function CloudIdentityNote({
             >
               Open Privacy Settings
             </Btn>
+            {/* macOS fixes a process's file-access rights at launch, so a grant
+                made now does not reach this instance — reconnecting refuses
+                identically and the operator concludes the grant did not work.
+                Only a fresh process picks it up, hence "restart" rather than
+                "reconnect", and a button so it is one click. */}
+            <Btn
+              t={t}
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setSettingsError(null);
+                api.restartApp().catch((e: unknown) => {
+                  setSettingsError(String(e));
+                });
+              }}
+            >
+              Restart FerrisScope
+            </Btn>
             <span style={{ color: t.textDim }}>
-              allow FerrisScope under Files and Folders, then reconnect
+              allow FerrisScope under Files and Folders, then restart — a new
+              grant only reaches a freshly started app, so reconnecting alone
+              keeps failing
             </span>
           </div>
           {settingsError && (
