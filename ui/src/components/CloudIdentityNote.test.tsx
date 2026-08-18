@@ -24,6 +24,7 @@ const GCLOUD: ConnectHint = {
     ],
   },
   reauth: null,
+  unblock: null,
 };
 
 const AWS: ConnectHint = {
@@ -41,6 +42,7 @@ const AWS: ConnectHint = {
     ],
   },
   reauth: null,
+  unblock: null,
 };
 
 const AZURE: ConnectHint = {
@@ -54,6 +56,7 @@ const AZURE: ConnectHint = {
   // The whole point of the Azure case: nothing to write, so no button.
   pin: null,
   reauth: null,
+  unblock: null,
 };
 
 // A lapsed Google session: the plugin never produced a token, so there is no
@@ -70,6 +73,26 @@ const REAUTH: ConnectHint = {
   reauth: {
     command: "gcloud auth login --account=ops@example.net",
     account: "ops@example.net",
+  },
+  unblock: null,
+};
+
+const BLOCKED: ConnectHint = {
+  provider: "gcloud",
+  title: "macOS blocked the auth plugin",
+  detail:
+    'The OS refused to run `/Users/u/Downloads/google-cloud-sdk/bin/gcloud` ("Operation not permitted"), so no token could be minted.',
+  authenticated_as: null,
+  identities: [],
+  active_identity: null,
+  pin: null,
+  reauth: null,
+  unblock: {
+    path: "/Users/u/Downloads/google-cloud-sdk/bin/gcloud",
+    settings_url:
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
+    command:
+      "xattr -r -d com.apple.quarantine '/Users/u/Downloads/google-cloud-sdk'",
   },
 };
 
@@ -739,5 +762,121 @@ describe("CloudIdentityNote", () => {
     expect(
       screen.queryByRole("button", { name: /^cancel$/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("offers the privacy grant and quarantine strip when the OS blocked the plugin", async () => {
+    const openCalls: string[] = [];
+    setMockInvoke((cmd) => {
+      if (cmd === "connect_hint_cmd") return BLOCKED;
+      openCalls.push(cmd);
+      return undefined;
+    });
+
+    renderNote();
+
+    await waitFor(() => {
+      expect(screen.getByText(/macOS blocked the auth plugin/)).toBeInTheDocument();
+    });
+    const note = screen.getByRole("note");
+    // The exact strip command, targeting the SDK root — copyable verbatim.
+    expect(note).toHaveTextContent(
+      "xattr -r -d com.apple.quarantine '/Users/u/Downloads/google-cloud-sdk'",
+    );
+    // Neither a pin nor a login belongs here: no account choice and no gcloud
+    // command changes an OS exec refusal.
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /log in/i }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /open privacy settings/i }),
+    );
+    await waitFor(() => {
+      expect(openCalls).toEqual(["open_privacy_settings_cmd"]);
+    });
+  });
+
+  it("offers grant + restart, and no invented xattr, when the helper is hidden", async () => {
+    // The plugin ran but could not see its gcloud: no path was named, so a
+    // quarantine strip would have to be guessed. Grant and restart are the
+    // honest remedies.
+    const HIDDEN: ConnectHint = {
+      ...BLOCKED,
+      title: "macOS is hiding the gcloud SDK",
+      detail:
+        "The auth plugin ran, so the SDK is installed — but it could not find the `gcloud` beside it. If you have just granted this app access, restart FerrisScope to pick it up, because reconnecting will keep failing.",
+      unblock: { path: null, settings_url: BLOCKED.unblock!.settings_url, command: null },
+    };
+    const openCalls: string[] = [];
+    setMockInvoke((cmd) => {
+      if (cmd === "connect_hint_cmd") return HIDDEN;
+      openCalls.push(cmd);
+      return undefined;
+    });
+
+    renderNote();
+
+    await waitFor(() => {
+      expect(screen.getByText(/hiding the gcloud SDK/)).toBeInTheDocument();
+    });
+    const note = screen.getByRole("note");
+    expect(note).not.toHaveTextContent("xattr");
+    expect(note).toHaveTextContent(/restart/i);
+    expect(
+      screen.getByRole("button", { name: /open privacy settings/i }),
+    ).toBeInTheDocument();
+
+    // No in-app restart button: a relaunch from inside the app spawns a child,
+    // and TCC judges a child by its responsible process, so it inherits the
+    // stale decision. Only a full quit-and-reopen escapes it, so the note says
+    // exactly that rather than offering a control that cannot deliver.
+    expect(
+      screen.queryByRole("button", { name: /restart ferrisscope/i }),
+    ).not.toBeInTheDocument();
+    expect(note).toHaveTextContent(/quit FerrisScope completely and open it again/i);
+    expect(openCalls).toEqual([]);
+  });
+
+  it("tells the operator to quit and reopen on the blocked note, not to reconnect", async () => {
+    const openCalls: string[] = [];
+    setMockInvoke((cmd) => {
+      if (cmd === "connect_hint_cmd") return BLOCKED;
+      openCalls.push(cmd);
+      return undefined;
+    });
+
+    renderNote();
+
+    await waitFor(() => {
+      expect(screen.getByText(/macOS blocked the auth plugin/)).toBeInTheDocument();
+    });
+    // macOS fixes file-access rights at launch, so granting now cannot reach
+    // the running app. Telling the operator to "reconnect" sends them in a
+    // loop that always refuses; the copy has to say restart.
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent(/quit FerrisScope completely and open it again/i);
+    // The old copy said "then reconnect", which is the one thing that cannot
+    // work: the grant never reaches the running process.
+    expect(note).not.toHaveTextContent(/then reconnect/i);
+    expect(openCalls).toEqual([]);
+  });
+
+  it("drops the strip command from the blocked note when no path was parsed", async () => {
+    setMockInvoke(() => ({
+      ...BLOCKED,
+      unblock: { ...BLOCKED.unblock!, path: null, command: null },
+    }));
+
+    renderNote();
+
+    await waitFor(() => {
+      expect(screen.getByText(/macOS blocked the auth plugin/)).toBeInTheDocument();
+    });
+    expect(screen.getByRole("note")).not.toHaveTextContent("xattr");
+    // The grant remedy stands on its own.
+    expect(
+      screen.getByRole("button", { name: /open privacy settings/i }),
+    ).toBeInTheDocument();
   });
 });

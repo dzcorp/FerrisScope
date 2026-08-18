@@ -183,6 +183,19 @@ export type ReauthOffer = {
   account: string | null;
 };
 
+/// What clears an OS refusal to execute the credential plugin's helper (macOS
+/// TCC or a quarantine xattr). Mirrors
+/// `ferrisscope_core::cloud_identity::UnblockOffer`.
+export type UnblockOffer = {
+  /// The binary the OS refused, when the plugin's stderr named it.
+  path: string | null;
+  /// Deep link to the System Settings pane with the per-app folder grants.
+  settings_url: string;
+  /// Verbatim quarantine-strip command for the SDK root; null when the blocked
+  /// path was unparseable.
+  command: string | null;
+};
+
 /// Actionable note attached to a failed connect when the cause looks like cloud
 /// identity drift — a context whose exec entry pins no account/profile, so it
 /// inherits whichever one the cloud CLI last selected.
@@ -203,6 +216,9 @@ export type ConnectHint = {
   /// Set instead of `pin` when the session lapsed rather than the identity
   /// drifting. Pinning cannot fix that, so the two never arrive together.
   reauth: ReauthOffer | null;
+  /// Set when the OS refused to execute the plugin's helper. Mutually
+  /// exclusive with both `pin` and `reauth`.
+  unblock: UnblockOffer | null;
 };
 
 export type KubeconfigSourceKind = "file" | "folder" | "ssh";

@@ -207,6 +207,9 @@ pub async fn preflight_with_budget(prepared: &PreparedExec, budget: Duration) ->
     let lock = slot_lock(prepared.cache_dir.as_deref());
     let _guard = lock.lock().await;
 
+    #[cfg(target_os = "macos")]
+    nudge_tcc_consent(prepared).await;
+
     let mut cmd = tokio::process::Command::new(&prepared.command);
     cmd.args(&prepared.args)
         .envs(prepared.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -243,6 +246,98 @@ pub async fn preflight_with_budget(prepared: &PreparedExec, budget: Duration) ->
     }
 }
 
+/// How long the consent read may hold up a preflight. The read blocks for as
+/// long as the dialog is on screen, and an unanswered dialog must not hang the
+/// connect forever — on timeout the spawn proceeds, fails, and the
+/// blocked-plugin note carries the remedies instead.
+#[cfg(target_os = "macos")]
+const CONSENT_PROMPT_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Resolve a command the way the spawn will: paths as given, bare names
+/// through `path_var`. Canonicalized, so a symlink into a protected folder is
+/// judged by where it points, not where it sits.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn resolve_command(command: &str, path_var: Option<&str>) -> Option<PathBuf> {
+    let p = Path::new(command);
+    if p.components().count() > 1 {
+        return p.canonicalize().ok();
+    }
+    std::env::split_paths(path_var?)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| {
+            dir.join(command)
+                .canonicalize()
+                .ok()
+                .filter(|c| c.is_file())
+        })
+}
+
+/// Directories a consent-nudging read should touch before this preflight: the
+/// parent of every candidate binary the spawn will involve. Candidates are
+/// the plugin itself and `gcloud`, which the plugin shells out to — either
+/// alone can be the one inside a protected folder.
+///
+/// Deliberately *not* filtered against a list of protected locations: TCC's
+/// coverage is per-OS-release and wider than the well-known trio (Downloads /
+/// Desktop / Documents also come as iCloud mirrors, network shares, removable
+/// volumes). Reading an unprotected directory is a no-op costing microseconds,
+/// so the OS itself gets to be the judge of whether a prompt is due.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn consent_read_targets(prepared: &PreparedExec) -> Vec<PathBuf> {
+    // The spawn sees the exec block's env layered over ours, so a PATH there
+    // wins for resolution too.
+    let path_var = prepared
+        .env
+        .iter()
+        .find(|(k, _)| k == "PATH")
+        .map(|(_, v)| v.clone())
+        .or_else(|| std::env::var("PATH").ok());
+    let mut targets: Vec<PathBuf> = [prepared.command.as_str(), "gcloud"]
+        .iter()
+        .filter_map(|cmd| resolve_command(cmd, path_var.as_deref()))
+        .filter_map(|bin| bin.parent().map(Path::to_path_buf))
+        .collect();
+    targets.dedup();
+    targets
+}
+
+/// Fire the TCC consent prompt for a gated SDK location, bounded by
+/// [`CONSENT_PROMPT_TIMEOUT`]. Executing a binary inside a TCC-protected
+/// folder from a GUI app fails with EPERM *without* showing the prompt, while
+/// a plain directory read from the app process *does* show it — so read the
+/// directories the spawn will involve first. Unprotected paths return
+/// instantly and prompt nothing. Best-effort by design: every failure mode
+/// ends in "the spawn proceeds and its own error is handled".
+#[cfg(target_os = "macos")]
+async fn nudge_tcc_consent(prepared: &PreparedExec) {
+    let targets = consent_read_targets(prepared);
+    if targets.is_empty() {
+        return;
+    }
+    tracing::debug!(
+        target: "ferrisscope::auth",
+        ?targets,
+        "touching the auth plugin's directories so a TCC consent prompt can fire"
+    );
+    let read = tokio::task::spawn_blocking(move || {
+        for dir in targets {
+            // Consume one entry: opening the directory alone may not count as
+            // an access for TCC's purposes.
+            let _ = std::fs::read_dir(&dir).map(|mut it| it.next());
+        }
+    });
+    if tokio::time::timeout(CONSENT_PROMPT_TIMEOUT, read)
+        .await
+        .is_err()
+    {
+        tracing::info!(
+            target: "ferrisscope::auth",
+            "consent prompt unanswered after {}s — continuing without it",
+            CONSENT_PROMPT_TIMEOUT.as_secs()
+        );
+    }
+}
+
 /// Turn a [`PreflightOutcome::Failed`] into the most specific error we can
 /// justify. A lapsed cloud session is its own variant because the remedy
 /// (interactive login) is nothing like the remedy for a broken plugin.
@@ -252,6 +347,11 @@ pub fn failure_error(prepared: &PreparedExec, code: String, stderr: String) -> E
         gcloud::ExecFailure::ReauthRequired => Error::ExecReauthRequired {
             command: prepared.command.clone(),
             account: prepared.identity.clone(),
+            message: stderr,
+        },
+        gcloud::ExecFailure::ExecBlocked => Error::ExecPluginBlocked {
+            command: prepared.command.clone(),
+            path: gcloud::blocked_path(&stderr),
             message: stderr,
         },
         _ => Error::ExecPluginFailed {
@@ -816,6 +916,83 @@ users:
     }
 
     #[cfg(unix)]
+    mod consent {
+        use super::*;
+
+        #[test]
+        fn resolve_follows_path_and_symlinks() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let real = tmp.path().join("home/Downloads/sdk/bin");
+            std::fs::create_dir_all(&real).expect("mkdir");
+            std::fs::write(real.join("gcloud"), "#!/bin/sh\n").expect("write");
+            let elsewhere = tmp.path().join("usr-local-bin");
+            std::fs::create_dir_all(&elsewhere).expect("mkdir");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(real.join("gcloud"), elsewhere.join("gcloud"))
+                .expect("symlink");
+
+            let path_var = elsewhere.to_string_lossy().into_owned();
+            // A bare name resolves through PATH, and the symlink is judged by
+            // where it points — the client's `/usr/local/bin` → Downloads case.
+            #[cfg(unix)]
+            {
+                let resolved = resolve_command("gcloud", Some(&path_var)).expect("resolved");
+                let canon_home = tmp.path().join("home").canonicalize().expect("canon");
+                assert!(resolved.starts_with(canon_home.join("Downloads")));
+            }
+            assert_eq!(resolve_command("gcloud", None), None);
+            assert_eq!(resolve_command("not-there", Some(&path_var)), None);
+        }
+
+        #[test]
+        fn targets_are_the_dirs_of_every_binary_the_spawn_involves() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            // Plugin and gcloud in *different* directories — both matter: the
+            // plugin can sit somewhere sane while the gcloud it shells out to
+            // is the one inside a gated folder (the client's case, inverted).
+            let plugin_bin = tmp.path().join("Downloads/google-cloud-sdk/bin");
+            std::fs::create_dir_all(&plugin_bin).expect("mkdir");
+            std::fs::write(plugin_bin.join("gke-gcloud-auth-plugin"), "").expect("write");
+            let gcloud_bin = tmp.path().join("iCloud/sdk/bin");
+            std::fs::create_dir_all(&gcloud_bin).expect("mkdir");
+            std::fs::write(gcloud_bin.join("gcloud"), "").expect("write");
+
+            let p = PreparedExec {
+                command: plugin_bin
+                    .join("gke-gcloud-auth-plugin")
+                    .to_string_lossy()
+                    .into_owned(),
+                args: Vec::new(),
+                // `gcloud` resolves through the exec env's PATH, which wins
+                // over the process's own.
+                env: vec![("PATH".to_owned(), gcloud_bin.to_string_lossy().into_owned())],
+                identity: None,
+                api_version: None,
+                cache_dir: None,
+            };
+            let targets = consent_read_targets(&p);
+            assert_eq!(
+                targets,
+                vec![
+                    plugin_bin.canonicalize().expect("canon plugin bin"),
+                    gcloud_bin.canonicalize().expect("canon gcloud bin"),
+                ]
+            );
+
+            // Both in one directory → one read, not two. No protected-folder
+            // list is consulted: the OS judges, a plain dir read is free.
+            let p2 = PreparedExec {
+                command: gcloud_bin.join("gcloud").to_string_lossy().into_owned(),
+                ..p
+            };
+            assert_eq!(
+                consent_read_targets(&p2),
+                vec![gcloud_bin.canonicalize().expect("canon gcloud bin")]
+            );
+        }
+    }
+
+    #[cfg(unix)]
     mod spawned {
         use super::*;
 
@@ -861,6 +1038,34 @@ users:
                     assert!(message.contains("Reauthentication failed"));
                 }
                 other => panic!("expected ExecReauthRequired, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_tcc_blocked_helper_maps_to_the_blocked_error() {
+            // The client-reported macOS shape: the plugin runs, its gcloud
+            // helper is refused by the OS, and the plugin wraps the shell's
+            // report. Must not fall into the generic bucket — the note built
+            // from this variant is the one carrying the remedies.
+            let p = plugin(
+                "echo 'print credential failed with error: Failed to retrieve access token:: \
+                 failure while executing gcloud: exit status 126 (err: /bin/sh: \
+                 /Users/u/Downloads/google-cloud-sdk/bin/gcloud: Operation not permitted' 1>&2; \
+                 exit 1",
+            );
+            let out = preflight(&p).await;
+            let PreflightOutcome::Failed { code, stderr } = out else {
+                panic!("expected Failed, got {out:?}");
+            };
+            match failure_error(&p, code, stderr) {
+                Error::ExecPluginBlocked { path, message, .. } => {
+                    assert_eq!(
+                        path.as_deref(),
+                        Some("/Users/u/Downloads/google-cloud-sdk/bin/gcloud")
+                    );
+                    assert!(message.contains("Operation not permitted"));
+                }
+                other => panic!("expected ExecPluginBlocked, got {other:?}"),
             }
         }
 

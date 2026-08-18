@@ -27,7 +27,7 @@ function closeLoginSession(sessionId: string | null): void {
 }
 
 // Small amber note under a failed connect, shown when the backend recognises the
-// cause as a cloud-credential problem. Two of them today:
+// cause as a cloud-credential problem. Three of them today:
 //
 //   * identity drift — a context whose exec entry pins no account/profile, so it
 //     authenticates as whichever identity the cloud CLI last selected, and that
@@ -35,8 +35,11 @@ function closeLoginSession(sessionId: string | null): void {
 //   * a lapsed session — the credential plugin could not mint a token at all
 //     because the provider wants an identity challenge. Remedy: an interactive
 //     login, which `hint.reauth` describes and the Log in button runs.
+//   * a blocked plugin — the OS refused to execute the plugin's helper (macOS
+//     TCC on a Downloads install, or a quarantine xattr). Remedy: a privacy
+//     grant or a quarantine strip, which `hint.unblock` describes.
 //
-// The two are mutually exclusive, and which one arrives is the backend's call.
+// All mutually exclusive, and which one arrives is the backend's call.
 //
 // Provider-neutral by construction. Every string that differs between GKE, EKS
 // and AKS (the noun, the prose, what a pin would write) arrives in the hint;
@@ -73,6 +76,7 @@ export function CloudIdentityNote({
   const [pinError, setPinError] = useState<string | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
   const [loginLog, setLoginLog] = useState("");
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   // Held so the operator can abandon a login that is going nowhere — gcloud can
   // sit on a question this surface has no way to answer, and the note offers no
   // input. Closing kills the PTY child.
@@ -353,6 +357,60 @@ export function CloudIdentityNote({
             >
               {loginLog}
             </pre>
+          )}
+        </div>
+      )}
+
+      {/* The OS refused to execute the plugin's helper (macOS TCC or a
+          quarantine xattr) — nothing for a pin or a login to fix. The button
+          lands on the Files-and-Folders privacy pane; the xattr command stays
+          copyable for the quarantine case, same shape as the reauth command
+          above. */}
+      {hint.unblock && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {hint.unblock.command && (
+            <Copyable text={hint.unblock.command}>
+              <Mono>{hint.unblock.command}</Mono>
+            </Copyable>
+          )}
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <Btn
+              t={t}
+              variant="primary"
+              size="sm"
+              onClick={() => {
+                setSettingsError(null);
+                api.openPrivacySettings().catch((e: unknown) => {
+                  setSettingsError(String(e));
+                });
+              }}
+            >
+              Open Privacy Settings
+            </Btn>
+            {/* macOS fixes a process's file-access rights at launch, so a grant
+                made now never reaches this instance — reconnecting refuses
+                identically and the operator concludes the grant failed. It has
+                to be a full quit-and-reopen: an in-app relaunch spawns the
+                replacement as this process's child, and TCC judges a child by
+                its responsible process, so the stale decision is inherited.
+                Said as text rather than offered as a button, because no button
+                we can implement actually escapes it. */}
+            <span style={{ color: t.textDim }}>
+              allow FerrisScope under Files and Folders, then <b>quit
+              FerrisScope completely and open it again</b> — macOS only applies
+              a new grant to a freshly launched app, so reconnecting (or
+              restarting from inside the app) keeps failing
+            </span>
+          </div>
+          {settingsError && (
+            <div style={{ color: t.bad }}>{settingsError}</div>
           )}
         </div>
       )}

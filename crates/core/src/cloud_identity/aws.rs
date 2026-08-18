@@ -191,6 +191,7 @@ pub fn compose_hint(error: &str, profiles: &Identities) -> Option<ConnectHint> {
             ],
         }),
         reauth: None,
+        unblock: None,
     })
 }
 
