@@ -992,6 +992,7 @@ users:
         }
     }
 
+    #[cfg(unix)]
     mod spawned {
         use super::*;
 
