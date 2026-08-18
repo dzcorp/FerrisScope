@@ -362,6 +362,7 @@ pub fn hint_for_context(
             Provider::Aws => aws::probe(),
             Provider::Azure => azure::probe().unwrap_or_default(),
         },
+        cfg!(target_os = "macos"),
     )
 }
 
@@ -372,11 +373,20 @@ pub fn hint_for_context(
 /// consulted *after* every refusal, which is the property most worth pinning:
 /// a test that had to stub a real config directory to reach those branches
 /// wouldn't be testing them.
+///
+/// `on_macos` is injected for the same reason. The blocked and hidden-helper
+/// notes are macOS diagnoses — their prose names TCC and quarantine, and their
+/// offer opens System Settings — but their stderr shapes are cross-platform:
+/// the same Go plugin says "not found in $PATH" on a Linux box whose gcloud is
+/// off the app's PATH, and an EPERM can come from a noexec mount. On any other
+/// platform those must fall through to the generic banner rather than tell the
+/// operator about an OS they aren't running.
 fn hint_for_context_with(
     context_name: &str,
     source_path: Option<&Path>,
     error: &str,
     probe: &dyn Fn(Provider) -> Identities,
+    on_macos: bool,
 ) -> Result<Option<ConnectHint>> {
     // Three different failures reach here. A 403 means the connect
     // *authenticated* and was refused, which is where identity drift shows up.
@@ -399,8 +409,10 @@ fn hint_for_context_with(
     if blocked {
         // Only gcloud: the classifier that produced `blocked` is gcloud's, and
         // the note's prose names the gcloud SDK layout. Another provider's
-        // EPERM would get confident prose about the wrong SDK.
-        if provider != Provider::Gcloud {
+        // EPERM would get confident prose about the wrong SDK. And only on
+        // macOS: a Linux noexec mount produces the same words, and TCC prose
+        // plus an xattr command would send that operator nowhere.
+        if provider != Provider::Gcloud || !on_macos {
             return Ok(None);
         }
         return Ok(Some(gcloud::compose_blocked_hint(
@@ -408,10 +420,11 @@ fn hint_for_context_with(
         )));
     }
     if helper_hidden {
-        // Same restriction as `blocked`: the classifier and the note's prose are
-        // both gcloud's, so another provider would get confident advice about an
-        // SDK it does not use.
-        if provider != Provider::Gcloud {
+        // Same restrictions as `blocked`: the note's prose is gcloud's and
+        // macOS's. The identical "not found in $PATH" wrapper on Linux or
+        // Windows means gcloud genuinely absent from the app's PATH — a real
+        // problem, but not this note's problem.
+        if provider != Provider::Gcloud || !on_macos {
             return Ok(None);
         }
         return Ok(Some(gcloud::compose_hidden_helper_hint()));
@@ -960,7 +973,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
         let hint = |ctx: &str, err: &str, probe: &dyn Fn(Provider) -> Identities| {
-            hint_for_context_with(ctx, Some(&path), err, probe)
+            hint_for_context_with(ctx, Some(&path), err, probe, true)
         };
 
         // Not a 403 at all — the overwhelmingly common case, and the reason the
@@ -1004,7 +1017,7 @@ mod tests {
             "      command: gke-gcloud-auth-plugin\n      args: [\"--account=a@example.com\"]",
         );
         let path = kubeconfig_fixture(tmp.path(), &pinned);
-        let hint = hint_for_context_with("gke", Some(&path), REAUTH_ERROR, &two_accounts)
+        let hint = hint_for_context_with("gke", Some(&path), REAUTH_ERROR, &two_accounts, true)
             .expect("hint")
             .expect("a reauth note");
 
@@ -1031,7 +1044,7 @@ mod tests {
         // unconsulted: no account list changes the remedy for an OS refusal.
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
-        let hint = hint_for_context_with("gke", Some(&path), BLOCKED_ERROR, &no_probe)
+        let hint = hint_for_context_with("gke", Some(&path), BLOCKED_ERROR, &no_probe, true)
             .expect("hint")
             .expect("an unblock note");
 
@@ -1046,9 +1059,40 @@ mod tests {
         assert_eq!(offer.settings_url, gcloud::MACOS_PRIVACY_SETTINGS_URL);
         // A context with no exec plugin can't have had its plugin blocked.
         assert_eq!(
-            hint_for_context_with("plain", Some(&path), BLOCKED_ERROR, &no_probe).expect("hint"),
+            hint_for_context_with("plain", Some(&path), BLOCKED_ERROR, &no_probe, true)
+                .expect("hint"),
             None
         );
+    }
+
+    #[test]
+    fn the_macos_notes_stay_silent_off_macos() {
+        // The stderr shapes are cross-platform — the same Go plugin says
+        // "not found in $PATH" on a Linux box whose gcloud is off the app's
+        // PATH, and an EPERM can come from a noexec mount — but the notes'
+        // prose names TCC, quarantine, and System Settings. Off macOS both
+        // must fall through to the generic banner rather than describe an OS
+        // the operator isn't running.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
+        const HIDDEN_ERROR: &str = "exec credential plugin 'gke-gcloud-auth-plugin' failed \
+             (exit 1) — print credential failed with error: failure while executing gcloud: \
+             exec: \"gcloud\": executable file not found in $PATH";
+        for err in [BLOCKED_ERROR, HIDDEN_ERROR] {
+            assert_eq!(
+                hint_for_context_with("gke", Some(&path), err, &no_probe, false).expect("hint"),
+                None,
+                "off macOS, no note for: {err}"
+            );
+            // And the same error still produces its note on macOS — the gate
+            // is the platform, not the message.
+            assert!(
+                hint_for_context_with("gke", Some(&path), err, &no_probe, true)
+                    .expect("hint")
+                    .is_some(),
+                "on macOS, a note for: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1060,6 +1104,7 @@ mod tests {
             Some(&path),
             "Reauthentication failed. cannot prompt during non-interactive execution.",
             &two_accounts,
+            true,
         )
         .expect("hint")
         .expect("a reauth note");
@@ -1085,14 +1130,16 @@ mod tests {
         let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
         for ctx in ["eks", "aks"] {
             assert_eq!(
-                hint_for_context_with(ctx, Some(&path), REAUTH_ERROR, &two_accounts).expect("hint"),
+                hint_for_context_with(ctx, Some(&path), REAUTH_ERROR, &two_accounts, true)
+                    .expect("hint"),
                 None,
                 "{ctx} must not be handed gcloud's reauth wording"
             );
         }
         // Nor does a context with no exec plugin at all.
         assert_eq!(
-            hint_for_context_with("plain", Some(&path), REAUTH_ERROR, &no_probe).expect("hint"),
+            hint_for_context_with("plain", Some(&path), REAUTH_ERROR, &no_probe, true)
+                .expect("hint"),
             None
         );
     }
@@ -1103,7 +1150,7 @@ mod tests {
         // pin, with no reauth offer attached.
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
-        let hint = hint_for_context_with("gke", Some(&path), FORBIDDEN_403, &two_accounts)
+        let hint = hint_for_context_with("gke", Some(&path), FORBIDDEN_403, &two_accounts, true)
             .expect("hint")
             .expect("a drift note");
         assert!(hint.pin.is_some());
@@ -1123,7 +1170,8 @@ mod tests {
         );
         let path = kubeconfig_fixture(tmp.path(), &pinned);
         assert_eq!(
-            hint_for_context_with("gke", Some(&path), FORBIDDEN_403, &no_probe).expect("hint"),
+            hint_for_context_with("gke", Some(&path), FORBIDDEN_403, &no_probe, true)
+                .expect("hint"),
             None
         );
     }
@@ -1136,7 +1184,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
         let hint = |ctx: &str| {
-            hint_for_context_with(ctx, Some(&path), FORBIDDEN_403, &two_accounts)
+            hint_for_context_with(ctx, Some(&path), FORBIDDEN_403, &two_accounts, true)
                 .expect("hint")
                 .expect("a hint for an unpinned context")
         };
