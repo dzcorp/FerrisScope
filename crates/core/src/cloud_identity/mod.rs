@@ -207,6 +207,16 @@ pub fn looks_like_exec_blocked(message: &str) -> bool {
     gcloud::classify_exec_failure(message) == gcloud::ExecFailure::ExecBlocked
 }
 
+/// Did the plugin run but fail to find its `gcloud` helper?
+///
+/// A guarded folder fails macOS's access check, and Go's `LookPath` renders
+/// that as "not found" instead of a denial — so this failure carries no EPERM
+/// to classify on, yet its remedy is the permission one (grant, then restart).
+#[must_use]
+pub fn looks_like_helper_hidden(message: &str) -> bool {
+    gcloud::classify_exec_failure(message) == gcloud::ExecFailure::HelperHidden
+}
+
 /// Does this error string look like a genuine RBAC 403?
 ///
 /// Kubernetes also embeds `Forbidden:` *inside* HTTP 422 validation messages to
@@ -376,7 +386,8 @@ fn hint_for_context_with(
     // neither message is a 403 and both would otherwise be dropped below.
     let reauth = looks_like_reauth(error);
     let blocked = looks_like_exec_blocked(error);
-    if !reauth && !blocked && !is_forbidden(error) {
+    let helper_hidden = looks_like_helper_hidden(error);
+    if !reauth && !blocked && !helper_hidden && !is_forbidden(error) {
         return Ok(None);
     }
     let Some(spec) = crate::cluster::exec_spec_for_context(context_name, source_path)? else {
@@ -395,6 +406,15 @@ fn hint_for_context_with(
         return Ok(Some(gcloud::compose_blocked_hint(
             gcloud::blocked_path(error).as_deref(),
         )));
+    }
+    if helper_hidden {
+        // Same restriction as `blocked`: the classifier and the note's prose are
+        // both gcloud's, so another provider would get confident advice about an
+        // SDK it does not use.
+        if provider != Provider::Gcloud {
+            return Ok(None);
+        }
+        return Ok(Some(gcloud::compose_hidden_helper_hint()));
     }
     if reauth {
         // Only gcloud is claimed here. AWS mints per call (no session to lapse),

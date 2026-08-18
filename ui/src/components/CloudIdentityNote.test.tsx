@@ -797,6 +797,44 @@ describe("CloudIdentityNote", () => {
     });
   });
 
+  it("offers grant + restart, and no invented xattr, when the helper is hidden", async () => {
+    // The plugin ran but could not see its gcloud: no path was named, so a
+    // quarantine strip would have to be guessed. Grant and restart are the
+    // honest remedies.
+    const HIDDEN: ConnectHint = {
+      ...BLOCKED,
+      title: "macOS is hiding the gcloud SDK",
+      detail:
+        "The auth plugin ran, so the SDK is installed — but it could not find the `gcloud` beside it. If you have just granted this app access, restart FerrisScope to pick it up, because reconnecting will keep failing.",
+      unblock: { path: null, settings_url: BLOCKED.unblock!.settings_url, command: null },
+    };
+    const openCalls: string[] = [];
+    setMockInvoke((cmd) => {
+      if (cmd === "connect_hint_cmd") return HIDDEN;
+      openCalls.push(cmd);
+      return undefined;
+    });
+
+    renderNote();
+
+    await waitFor(() => {
+      expect(screen.getByText(/hiding the gcloud SDK/)).toBeInTheDocument();
+    });
+    const note = screen.getByRole("note");
+    expect(note).not.toHaveTextContent("xattr");
+    expect(note).toHaveTextContent(/restart/i);
+    expect(
+      screen.getByRole("button", { name: /open privacy settings/i }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /restart ferrisscope/i }),
+    );
+    await waitFor(() => {
+      expect(openCalls).toEqual(["restart_app_cmd"]);
+    });
+  });
+
   it("offers a restart on the blocked note, because a grant misses this process", async () => {
     const openCalls: string[] = [];
     setMockInvoke((cmd) => {

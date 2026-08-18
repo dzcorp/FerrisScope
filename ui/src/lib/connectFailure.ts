@@ -61,6 +61,22 @@ export function isPermanentConnectFailure(message: string): boolean {
   ) {
     return true;
   }
+  // The plugin ran but could not find its gcloud helper. A guarded folder fails
+  // macOS's access check and Go's LookPath calls that "not found", so this
+  // carries no EPERM — but it is just as terminal, and its note holds the one
+  // remedy an operator cannot guess (restart, because a grant made while the
+  // app runs reaches new processes only). Requires the plugin's own marker: our
+  // "plugin not found on PATH" rendering is about the plugin itself, which
+  // really is absent and really does heal once installed.
+  // Kept in step with `cloud_identity::gcloud::classify_exec_failure`.
+  if (
+    m.includes("not found in $path") &&
+    (m.includes("credential plugin") ||
+      m.includes("while executing") ||
+      m.includes("cred.go"))
+  ) {
+    return true;
+  }
   // Kubernetes embeds "Forbidden:" *inside* HTTP 422 validation messages to
   // mean "this field can't be changed". That is not an authorization failure
   // and must be excluded first — the same ordering guard `classifyDetailError`

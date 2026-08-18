@@ -84,6 +84,28 @@ describe("isPermanentConnectFailure", () => {
     ).toBe(true);
   });
 
+  it("treats a hidden gcloud helper as permanent", () => {
+    // Captured after granting the app Downloads access: the grant reached new
+    // processes only, so the stale app's plugin had its access check refused —
+    // surfaced as "not found", with no EPERM to match on. Just as terminal, and
+    // its note carries the restart the operator cannot guess.
+    expect(
+      isPermanentConnectFailure(
+        "exec credential plugin 'gke-gcloud-auth-plugin' failed (exit 1) — cred.go:150] failure while executing gcloud, with args [config config-helper --format=json]: exec: \"gcloud\": executable file not found in $PATH (err: )",
+      ),
+    ).toBe(true);
+  });
+
+  it("still retries a genuinely missing plugin, which installing does fix", () => {
+    // No plugin wrapper: the plugin never ran, so it really is absent. This
+    // must not inherit the permanence (or the grant/restart advice) above.
+    expect(
+      isPermanentConnectFailure(
+        'exec: "gke-gcloud-auth-plugin": executable file not found in $PATH',
+      ),
+    ).toBe(false);
+  });
+
   it("still retries a plain expired token", () => {
     // A 401 heals on reconnect: `Config` is rebuilt and the credential plugin
     // re-runs. Only the reauth wording above is terminal.

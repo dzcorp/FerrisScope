@@ -293,6 +293,17 @@ pub enum ExecFailure {
     /// not permitted"): macOS TCC guarding a Downloads/Desktop/Documents
     /// install, or a quarantine xattr. No gcloud command cures this.
     ExecBlocked,
+    /// The plugin ran but could not find `gcloud` on its own PATH. Because the
+    /// plugin itself executed, the SDK plainly *is* installed, so the helper
+    /// beside it is far more likely hidden than absent: macOS refuses the
+    /// access check on a guarded folder, and Go's `LookPath` reports that as
+    /// "not found" rather than as a denial — losing the EPERM that would have
+    /// classified as [`ExecFailure::ExecBlocked`].
+    ///
+    /// Its own variant because the remedies differ from every neighbour: a
+    /// folder grant *plus a restart*, since macOS applies a grant made while
+    /// the app runs to new processes only.
+    HelperHidden,
     /// Anything else: a broken plugin, a bad `--account`, gcloud not installed.
     Other,
 }
@@ -339,7 +350,52 @@ pub fn classify_exec_failure(stderr: &str) -> ExecFailure {
     {
         return ExecFailure::ExecBlocked;
     }
+    // The plugin ran and reported that *it* could not find its gcloud helper.
+    // Gated on the plugin's own wrapper for the same reason as above: our
+    // `ExecPluginNotFound` rendering says "not found on PATH" about the plugin
+    // itself, and that one really is missing — nothing to grant, nothing to
+    // restart. Only a message carrying the plugin's marker proves it executed,
+    // which is what makes "installed but hidden" the likelier reading.
+    if (m.contains("executable file not found in $path") || m.contains("not found in $path"))
+        && (m.contains("credential plugin")
+            || m.contains("while executing")
+            || m.contains("cred.go"))
+    {
+        return ExecFailure::HelperHidden;
+    }
     ExecFailure::Other
+}
+
+/// Build the "the SDK is installed but this process cannot see it" note.
+///
+/// Offers no quarantine command: nothing named a path, and a strip against a
+/// guess would be worse than silence. The two remedies that fit are a folder
+/// grant and — the one the operator cannot discover alone — a restart, because
+/// a grant made while the app is running reaches new processes only.
+#[must_use]
+pub fn compose_hidden_helper_hint() -> ConnectHint {
+    ConnectHint {
+        provider: Provider::Gcloud,
+        title: "macOS is hiding the gcloud SDK".to_owned(),
+        detail: "The auth plugin ran, so the SDK is installed — but it could not find the \
+                 `gcloud` beside it. On macOS a guarded folder (Downloads, Desktop, Documents, \
+                 iCloud Drive, a network or removable volume) fails the access check, and that \
+                 reads as \"not found\" rather than \"denied\". If you have just granted this app \
+                 access, the grant applies to newly started processes only — restart FerrisScope \
+                 to pick it up, because reconnecting will keep failing. Otherwise grant access \
+                 below, or move the SDK somewhere unguarded."
+            .to_owned(),
+        authenticated_as: None,
+        identities: Vec::new(),
+        active_identity: None,
+        pin: None,
+        reauth: None,
+        unblock: Some(super::UnblockOffer {
+            path: None,
+            settings_url: MACOS_PRIVACY_SETTINGS_URL.to_owned(),
+            command: None,
+        }),
+    }
 }
 
 /// The absolute path the OS refused to execute, when the stderr names one.
@@ -650,6 +706,59 @@ mod tests {
                 "quarantine target should be the SDK root under {root}"
             );
         }
+    }
+
+    /// Verbatim from a macOS reproduction, captured immediately after granting
+    /// the app Downloads access: the grant reached new processes only, so the
+    /// still-stale app spawned a plugin whose `LookPath` access check was
+    /// refused — reported as "not found", with no EPERM anywhere in the string.
+    const HIDDEN_HELPER_STDERR: &str = "exec credential plugin \
+         'gke-gcloud-auth-plugin' failed (exit 1) — F0818 19:20:10.265588 39265 cred.go:150] \
+         print credential failed with error: failed to retrieve access token: failure while \
+         executing gcloud, with args [config config-helper --format=json]: exec: \"gcloud\": \
+         executable file not found in $PATH (err: )";
+
+    #[test]
+    fn a_hidden_gcloud_helper_is_its_own_verdict() {
+        // Not `Other`: that renders the bare plugin-failed banner, whose advice
+        // ("check you're logged in") is useless, and not `ExecBlocked` either —
+        // there is no EPERM and no path to strip a quarantine from.
+        assert_eq!(
+            classify_exec_failure(HIDDEN_HELPER_STDERR),
+            ExecFailure::HelperHidden
+        );
+        // No path was named, so no quarantine command may be invented; the
+        // grant remedy stands alone and the prose carries the restart.
+        let hint = compose_hidden_helper_hint();
+        let unblock = hint.unblock.expect("a grant remedy");
+        assert_eq!(unblock.path, None);
+        assert_eq!(unblock.command, None);
+        assert_eq!(unblock.settings_url, MACOS_PRIVACY_SETTINGS_URL);
+        assert!(
+            hint.detail.to_ascii_lowercase().contains("restart"),
+            "the note must name the one remedy the operator cannot guess"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_missing_plugin_is_not_mistaken_for_a_hidden_helper() {
+        // Our own `ExecPluginNotFound` rendering: the plugin never ran, so the
+        // binary really is absent. Installing it fixes this, and offering a
+        // privacy grant plus a restart would send the operator nowhere.
+        assert_eq!(
+            classify_exec_failure(
+                "exec credential plugin 'gke-gcloud-auth-plugin' not found on PATH — install \
+                 the gcloud CLI and run `gcloud components install gke-gcloud-auth-plugin`"
+            ),
+            ExecFailure::Other
+        );
+        // kube-rs's own spawn failure, likewise with no plugin wrapper.
+        assert_eq!(
+            classify_exec_failure(
+                "exec: \"gke-gcloud-auth-plugin\": executable file not found in $PATH"
+            ),
+            ExecFailure::Other
+        );
     }
 
     #[test]
