@@ -226,6 +226,7 @@ pub fn compose_hint(error: &str, accounts: &Identities) -> Option<ConnectHint> {
             ],
         }),
         reauth: None,
+        unblock: None,
     })
 }
 
@@ -273,6 +274,7 @@ pub fn compose_reauth_hint(account: Option<&str>, accounts: &Identities) -> Conn
             command,
             account: account.map(str::to_owned),
         }),
+        unblock: None,
     }
 }
 
@@ -287,6 +289,10 @@ pub enum ExecFailure {
     /// No usable credentials for that account at all — never logged in, or the
     /// grant was revoked.
     CredentialsInvalid,
+    /// The OS refused to execute the plugin or its gcloud helper ("Operation
+    /// not permitted"): macOS TCC guarding a Downloads/Desktop/Documents
+    /// install, or a quarantine xattr. No gcloud command cures this.
+    ExecBlocked,
     /// Anything else: a broken plugin, a bad `--account`, gcloud not installed.
     Other,
 }
@@ -295,7 +301,10 @@ pub enum ExecFailure {
 ///
 /// Reauth is tested first and wins: gcloud prints the same "Please run: $ gcloud
 /// auth login" footer for a lapsed session as for absent credentials, so the
-/// footer distinguishes nothing while the reauth sentence does.
+/// footer distinguishes nothing while the reauth sentence does. The blocked
+/// test comes last for the same kind of reason — its phrase is the OS's
+/// generic EPERM string, so a message carrying both a reauth sentence and an
+/// EPERM must resolve to the remedy that is actually actionable (login).
 #[must_use]
 pub fn classify_exec_failure(stderr: &str) -> ExecFailure {
     let m = stderr.to_ascii_lowercase();
@@ -314,8 +323,98 @@ pub fn classify_exec_failure(stderr: &str) -> ExecFailure {
     {
         return ExecFailure::CredentialsInvalid;
     }
+    // "Operation not permitted" alone is any EPERM — a macOS firewall refusing
+    // an outbound connect produces the same words, and this classifier also
+    // runs over whole connect-error strings via `looks_like_exec_blocked`.
+    // Require a marker tying the refusal to the exec plugin: the plugin's own
+    // wrapper ("failure while executing gcloud" / its `cred.go` log prefix),
+    // the shell's can't-exec report, exit 126, or our own error renderings
+    // ("exec credential plugin …").
+    if m.contains("operation not permitted")
+        && (m.contains("credential plugin")
+            || m.contains("while executing")
+            || m.contains("cred.go")
+            || m.contains("/bin/sh:")
+            || m.contains("exit status 126"))
+    {
+        return ExecFailure::ExecBlocked;
+    }
     ExecFailure::Other
 }
+
+/// The absolute path the OS refused to execute, when the stderr names one.
+///
+/// The plugin wraps the shell's report — `… (err: /bin/sh:
+/// /path/to/gcloud: Operation not permitted` — so the path is the `": "`-token
+/// immediately before the marker. `None` unless that token is an absolute Unix
+/// path of sane length: a relative token is the shell's own name or prose, and
+/// this string ends up rendered in the hint.
+#[must_use]
+pub fn blocked_path(stderr: &str) -> Option<String> {
+    // Last occurrence: our own `Error::ExecPluginBlocked` rendering repeats
+    // the phrase in its header, and only the embedded stderr's occurrence has
+    // the path in front of it.
+    let lower = stderr.to_ascii_lowercase();
+    let at = lower.rfind("operation not permitted")?;
+    let before = stderr[..at].trim_end().trim_end_matches(':');
+    let candidate = before.rsplit(": ").next()?.trim();
+    (candidate.starts_with('/') && candidate.len() <= 512 && !candidate.contains(['\n', '\r']))
+        .then(|| candidate.to_owned())
+}
+
+/// Build the "the OS blocked the plugin" note.
+///
+/// Like [`compose_reauth_hint`] there are no gates: the stderr said exactly
+/// what happened. Offers no pin and no reauth — neither touches the cause. The
+/// [`super::UnblockOffer`] carries the two real remedies: a macOS privacy
+/// grant (Settings deep link) and a quarantine strip (copyable `xattr`).
+#[must_use]
+pub fn compose_blocked_hint(path: Option<&str>) -> ConnectHint {
+    let what = path.map_or_else(|| "the gcloud SDK".to_owned(), |p| format!("`{p}`"));
+    // `<sdk>/bin/gcloud` → strip the quarantine off the whole SDK, not one
+    // file — gcloud is a launcher that execs siblings, each quarantined too.
+    let quarantine_target = path.map(|p| {
+        let pb = std::path::Path::new(p);
+        pb.parent()
+            .filter(|bin| bin.file_name().is_some_and(|n| n == "bin"))
+            .and_then(std::path::Path::parent)
+            .filter(|root| !root.as_os_str().is_empty())
+            .map_or_else(|| p.to_owned(), |root| root.to_string_lossy().into_owned())
+    });
+    ConnectHint {
+        provider: Provider::Gcloud,
+        title: "macOS blocked the auth plugin".to_owned(),
+        detail: format!(
+            "The OS refused to run {what} (\"Operation not permitted\"), so no token could be \
+             minted. Two common causes: the SDK sits in a location macOS guards per-app \
+             (Downloads, Desktop, Documents, iCloud Drive, network or removable volumes) and \
+             this app has no grant for it, or the SDK still carries the quarantine flag from \
+             being downloaded as an archive. Grant access in System Settings → Privacy & \
+             Security → Files and Folders, or clear the quarantine with the command below — \
+             moving the SDK to an unguarded location fixes it for every app at once."
+        ),
+        authenticated_as: None,
+        identities: Vec::new(),
+        active_identity: None,
+        pin: None,
+        reauth: None,
+        unblock: Some(super::UnblockOffer {
+            path: path.map(str::to_owned),
+            settings_url: MACOS_PRIVACY_SETTINGS_URL.to_owned(),
+            command: quarantine_target.map(|t| {
+                format!(
+                    "xattr -r -d com.apple.quarantine '{}'",
+                    t.replace('\'', "'\\''")
+                )
+            }),
+        }),
+    }
+}
+
+/// Deep link to the pane holding the per-app folder grants. The legacy pane id
+/// still resolves on Ventura+ System Settings.
+pub const MACOS_PRIVACY_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
 
 /// Write `--account=<identity>` into an exec mapping, replacing any prior form.
 ///
@@ -471,6 +570,115 @@ mod tests {
         assert_eq!(
             classify_exec_failure("invalid credentials for project foo"),
             ExecFailure::Other
+        );
+    }
+
+    /// Verbatim stderr from a macOS install where the SDK sits in ~/Downloads
+    /// and TCC denies the exec (client report, account/user preserved in
+    /// shape). The exact wording is what the classifier and path parser key
+    /// on, so a paraphrase would test nothing.
+    const BLOCKED_STDERR: &str = "print credential failed with error: Failed to retrieve access \
+         token:: failure while executing gcloud, with args [config config-helper --format=json \
+         --account=a@example.com]: exit status 126 (err: /bin/sh: \
+         /Users/u/Downloads/google-cloud-sdk/bin/gcloud: Operation not permitted\n)";
+
+    #[test]
+    fn an_os_exec_refusal_is_classified_as_blocked() {
+        assert_eq!(
+            classify_exec_failure(BLOCKED_STDERR),
+            ExecFailure::ExecBlocked
+        );
+        // The bare shell report, without the plugin's wrapper.
+        assert_eq!(
+            classify_exec_failure(
+                "/bin/sh: /Users/u/Downloads/sdk/bin/gcloud: Operation not permitted"
+            ),
+            ExecFailure::ExecBlocked
+        );
+        // Reauth wording wins when both could match — its remedy is cheaper
+        // and its sentence is the more specific signal.
+        assert_eq!(
+            classify_exec_failure(
+                "Reauthentication failed. cannot prompt during non-interactive execution. \
+                 Operation not permitted"
+            ),
+            ExecFailure::ReauthRequired
+        );
+        // A bare EPERM with no exec-plugin marker is any OS refusal — a macOS
+        // firewall blocking an outbound connect says the same words. This
+        // classifier also runs over whole connect-error strings, so the phrase
+        // alone must not claim the SDK is blocked.
+        assert_eq!(
+            classify_exec_failure("dial tcp 10.0.0.1:443: connect: operation not permitted"),
+            ExecFailure::Other
+        );
+        assert_eq!(
+            classify_exec_failure("Operation not permitted"),
+            ExecFailure::Other
+        );
+        // Our own `ExecPluginFailed` rendering of a kube-rs-spawned failure
+        // carries the marker, so the enriched path still classifies.
+        assert_eq!(
+            classify_exec_failure(
+                "exec credential plugin 'gke-gcloud-auth-plugin' failed (exit 1) — \
+                 gcloud: Operation not permitted"
+            ),
+            ExecFailure::ExecBlocked
+        );
+    }
+
+    #[test]
+    fn blocked_path_extracts_the_refused_binary() {
+        assert_eq!(
+            blocked_path(BLOCKED_STDERR).as_deref(),
+            Some("/Users/u/Downloads/google-cloud-sdk/bin/gcloud")
+        );
+        // No path named — e.g. a kernel-level EPERM without the shell wrapper.
+        assert_eq!(blocked_path("gcloud: Operation not permitted"), None);
+        assert_eq!(blocked_path("Operation not permitted"), None);
+        // A relative token is the shell's own name, not a path.
+        assert_eq!(blocked_path("sh: gcloud: Operation not permitted"), None);
+    }
+
+    #[test]
+    fn the_blocked_note_offers_a_grant_and_a_quarantine_strip() {
+        let hint = compose_blocked_hint(Some("/Users/u/Downloads/google-cloud-sdk/bin/gcloud"));
+        assert_eq!(hint.provider, Provider::Gcloud);
+        // Neither a pin nor a login touches an OS exec refusal.
+        assert_eq!(hint.pin, None);
+        assert_eq!(hint.reauth, None);
+        let offer = hint.unblock.expect("unblock offer");
+        assert_eq!(offer.settings_url, MACOS_PRIVACY_SETTINGS_URL);
+        assert_eq!(
+            offer.path.as_deref(),
+            Some("/Users/u/Downloads/google-cloud-sdk/bin/gcloud")
+        );
+        // The strip targets the SDK root, not one file — gcloud execs
+        // quarantined siblings.
+        assert_eq!(
+            offer.command.as_deref(),
+            Some("xattr -r -d com.apple.quarantine '/Users/u/Downloads/google-cloud-sdk'")
+        );
+        assert!(hint.detail.contains("Operation not permitted"));
+    }
+
+    #[test]
+    fn the_blocked_note_survives_an_unparsed_path() {
+        let hint = compose_blocked_hint(None);
+        let offer = hint.unblock.expect("unblock offer");
+        assert_eq!(offer.path, None);
+        // No path → no quarantine target to name; only the grant remedy.
+        assert_eq!(offer.command, None);
+        assert_eq!(offer.settings_url, MACOS_PRIVACY_SETTINGS_URL);
+    }
+
+    #[test]
+    fn the_quarantine_target_falls_back_to_the_file_outside_a_bin_layout() {
+        let hint = compose_blocked_hint(Some("/opt/gcloud"));
+        let offer = hint.unblock.expect("unblock offer");
+        assert_eq!(
+            offer.command.as_deref(),
+            Some("xattr -r -d com.apple.quarantine '/opt/gcloud'")
         );
     }
 

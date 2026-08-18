@@ -495,6 +495,28 @@ pub(crate) async fn connect_hint_cmd(
     .map_err(|e| e.to_string())
 }
 
+/// Open the System Settings pane holding the per-app folder grants — the
+/// remedy for a TCC-blocked auth plugin (`ConnectHint.unblock`).
+///
+/// The URL is a compile-time constant rather than an argument on purpose: an
+/// open-any-URL command reachable from the webview would bypass the opener
+/// capability's scope, and this pane is the only OS-settings surface the note
+/// needs. macOS-only by nature; elsewhere the scheme has no handler, so refuse
+/// with a message instead of letting the opener fail opaquely.
+#[tauri::command]
+pub(crate) async fn open_privacy_settings_cmd(app: tauri::AppHandle) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("privacy settings deep link is only available on macOS".to_owned());
+    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(
+            ferrisscope_core::cloud_identity::gcloud::MACOS_PRIVACY_SETTINGS_URL,
+            None::<&str>,
+        )
+        .map_err(|e| format!("could not open System Settings: {e}"))
+}
+
 /// Pin a context's exec entry to an explicit cloud identity — a gcloud
 /// `--account` or an AWS `AWS_PROFILE`, whichever the exec command calls for.
 ///

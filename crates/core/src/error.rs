@@ -42,6 +42,19 @@ pub enum Error {
         message: String,
     },
 
+    /// The OS refused to execute the plugin's helper (macOS TCC on a
+    /// Downloads/Desktop/Documents install, or a quarantine xattr). Separate
+    /// from [`Error::ExecPluginFailed`] because no gcloud command fixes it —
+    /// the remedy is a privacy grant or moving the SDK.
+    #[error("the OS blocked the exec credential plugin '{command}' — operation not permitted{} ({message})",
+        path.as_ref().map(|p| format!(" executing {p}")).unwrap_or_default())]
+    ExecPluginBlocked {
+        command: String,
+        /// The blocked binary, when the plugin's stderr named it.
+        path: Option<String>,
+        message: String,
+    },
+
     #[error("context not found: {0}")]
     ContextNotFound(String),
 

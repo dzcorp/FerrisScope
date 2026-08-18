@@ -24,6 +24,7 @@ const GCLOUD: ConnectHint = {
     ],
   },
   reauth: null,
+  unblock: null,
 };
 
 const AWS: ConnectHint = {
@@ -41,6 +42,7 @@ const AWS: ConnectHint = {
     ],
   },
   reauth: null,
+  unblock: null,
 };
 
 const AZURE: ConnectHint = {
@@ -54,6 +56,7 @@ const AZURE: ConnectHint = {
   // The whole point of the Azure case: nothing to write, so no button.
   pin: null,
   reauth: null,
+  unblock: null,
 };
 
 // A lapsed Google session: the plugin never produced a token, so there is no
@@ -70,6 +73,26 @@ const REAUTH: ConnectHint = {
   reauth: {
     command: "gcloud auth login --account=ops@example.net",
     account: "ops@example.net",
+  },
+  unblock: null,
+};
+
+const BLOCKED: ConnectHint = {
+  provider: "gcloud",
+  title: "macOS blocked the auth plugin",
+  detail:
+    'The OS refused to run `/Users/u/Downloads/google-cloud-sdk/bin/gcloud` ("Operation not permitted"), so no token could be minted.',
+  authenticated_as: null,
+  identities: [],
+  active_identity: null,
+  pin: null,
+  reauth: null,
+  unblock: {
+    path: "/Users/u/Downloads/google-cloud-sdk/bin/gcloud",
+    settings_url:
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
+    command:
+      "xattr -r -d com.apple.quarantine '/Users/u/Downloads/google-cloud-sdk'",
   },
 };
 
@@ -739,5 +762,56 @@ describe("CloudIdentityNote", () => {
     expect(
       screen.queryByRole("button", { name: /^cancel$/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("offers the privacy grant and quarantine strip when the OS blocked the plugin", async () => {
+    const openCalls: string[] = [];
+    setMockInvoke((cmd) => {
+      if (cmd === "connect_hint_cmd") return BLOCKED;
+      openCalls.push(cmd);
+      return undefined;
+    });
+
+    renderNote();
+
+    await waitFor(() => {
+      expect(screen.getByText(/macOS blocked the auth plugin/)).toBeInTheDocument();
+    });
+    const note = screen.getByRole("note");
+    // The exact strip command, targeting the SDK root — copyable verbatim.
+    expect(note).toHaveTextContent(
+      "xattr -r -d com.apple.quarantine '/Users/u/Downloads/google-cloud-sdk'",
+    );
+    // Neither a pin nor a login belongs here: no account choice and no gcloud
+    // command changes an OS exec refusal.
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /log in/i }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /open privacy settings/i }),
+    );
+    await waitFor(() => {
+      expect(openCalls).toEqual(["open_privacy_settings_cmd"]);
+    });
+  });
+
+  it("drops the strip command from the blocked note when no path was parsed", async () => {
+    setMockInvoke(() => ({
+      ...BLOCKED,
+      unblock: { ...BLOCKED.unblock!, path: null, command: null },
+    }));
+
+    renderNote();
+
+    await waitFor(() => {
+      expect(screen.getByText(/macOS blocked the auth plugin/)).toBeInTheDocument();
+    });
+    expect(screen.getByRole("note")).not.toHaveTextContent("xattr");
+    // The grant remedy stands on its own.
+    expect(
+      screen.getByRole("button", { name: /open privacy settings/i }),
+    ).toBeInTheDocument();
   });
 });

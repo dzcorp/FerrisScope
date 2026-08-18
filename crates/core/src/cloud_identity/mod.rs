@@ -93,6 +93,25 @@ pub struct ReauthOffer {
     pub account: Option<String>,
 }
 
+/// What clears an OS refusal to execute the credential plugin's helper
+/// (macOS TCC or a quarantine xattr — "Operation not permitted").
+///
+/// Separate from [`ReauthOffer`] because no cloud command is involved: the
+/// remedies are a per-app privacy grant (the deep link) or stripping the
+/// quarantine flag (the command), both outside the provider's CLI entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnblockOffer {
+    /// The binary the OS refused, when the plugin's stderr named it.
+    pub path: Option<String>,
+    /// Deep link to the System Settings pane holding the per-app folder
+    /// grants. Rendered as a button; also copyable for operators on an OS
+    /// where the scheme doesn't resolve.
+    pub settings_url: String,
+    /// Verbatim quarantine-strip command for the SDK root, when the blocked
+    /// path was parseable. `None` leaves only the grant remedy.
+    pub command: Option<String>,
+}
+
 /// An actionable note to render alongside a failed connect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConnectHint {
@@ -114,6 +133,10 @@ pub struct ConnectHint {
     /// rather than identity drift. Pinning cannot fix that — only an interactive
     /// login can — so the two are mutually exclusive in practice.
     pub reauth: Option<ReauthOffer>,
+    /// Set when the OS refused to execute the plugin's helper. Mutually
+    /// exclusive with both [`Self::pin`] and [`Self::reauth`] — neither a pin
+    /// nor a login touches an exec refusal.
+    pub unblock: Option<UnblockOffer>,
 }
 
 /// Pull the identity out of an apiserver RBAC denial (`User "x" cannot …`).
@@ -172,6 +195,16 @@ pub fn looks_like_reauth(message: &str) -> bool {
         || message
             .to_ascii_lowercase()
             .contains("cloud session expired")
+}
+
+/// Does this error look like the OS refusing to execute the plugin's helper?
+///
+/// Matches both the plugin's stderr and our rendering of
+/// [`crate::Error::ExecPluginBlocked`] — both carry "operation not permitted",
+/// so one test covers whichever layer formatted the string.
+#[must_use]
+pub fn looks_like_exec_blocked(message: &str) -> bool {
+    gcloud::classify_exec_failure(message) == gcloud::ExecFailure::ExecBlocked
 }
 
 /// Does this error string look like a genuine RBAC 403?
@@ -335,13 +368,15 @@ fn hint_for_context_with(
     error: &str,
     probe: &dyn Fn(Provider) -> Identities,
 ) -> Result<Option<ConnectHint>> {
-    // Two different failures reach here. A 403 means the connect *authenticated*
-    // and was refused, which is where identity drift shows up. A lapsed cloud
-    // session never gets that far — the exec plugin refuses to produce a token
-    // at all — so it needs its own gate, and it must come first: the reauth
-    // message is not a 403 and would otherwise be dropped by the check below.
+    // Three different failures reach here. A 403 means the connect
+    // *authenticated* and was refused, which is where identity drift shows up.
+    // A lapsed cloud session never gets that far — the exec plugin refuses to
+    // produce a token at all — and an OS exec refusal never even runs the
+    // helper. The last two need their own gates, and they must come first:
+    // neither message is a 403 and both would otherwise be dropped below.
     let reauth = looks_like_reauth(error);
-    if !reauth && !is_forbidden(error) {
+    let blocked = looks_like_exec_blocked(error);
+    if !reauth && !blocked && !is_forbidden(error) {
         return Ok(None);
     }
     let Some(spec) = crate::cluster::exec_spec_for_context(context_name, source_path)? else {
@@ -350,6 +385,17 @@ fn hint_for_context_with(
     let Some((provider, binding)) = classify(&spec.command, &spec.args, &spec.env) else {
         return Ok(None);
     };
+    if blocked {
+        // Only gcloud: the classifier that produced `blocked` is gcloud's, and
+        // the note's prose names the gcloud SDK layout. Another provider's
+        // EPERM would get confident prose about the wrong SDK.
+        if provider != Provider::Gcloud {
+            return Ok(None);
+        }
+        return Ok(Some(gcloud::compose_blocked_hint(
+            gcloud::blocked_path(error).as_deref(),
+        )));
+    }
     if reauth {
         // Only gcloud is claimed here. AWS mints per call (no session to lapse),
         // and kubelogin's device/interactive modes fail differently — inventing
@@ -948,6 +994,41 @@ mod tests {
         assert_eq!(offer.account.as_deref(), Some("a@example.com"));
         assert_eq!(offer.command, "gcloud auth login --account=a@example.com");
         assert!(hint.detail.contains("terminal"));
+    }
+
+    /// Verbatim from `Error::ExecPluginBlocked`'s rendering — the string the
+    /// frontend hands back to `connect_hint` after a TCC-blocked preflight.
+    const BLOCKED_ERROR: &str = "the OS blocked the exec credential plugin \
+         'gke-gcloud-auth-plugin' — operation not permitted executing \
+         /Users/u/Downloads/google-cloud-sdk/bin/gcloud (print credential failed with error: \
+         Failed to retrieve access token:: failure while executing gcloud: exit status 126 \
+         (err: /bin/sh: /Users/u/Downloads/google-cloud-sdk/bin/gcloud: Operation not permitted))";
+
+    #[test]
+    fn a_blocked_plugin_gets_an_unblock_note_without_probing() {
+        // Never reaches the apiserver (no 403) and never ran gcloud (no reauth
+        // wording) — only the blocked gate can admit it. The probe must stay
+        // unconsulted: no account list changes the remedy for an OS refusal.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
+        let hint = hint_for_context_with("gke", Some(&path), BLOCKED_ERROR, &no_probe)
+            .expect("hint")
+            .expect("an unblock note");
+
+        assert_eq!(hint.provider, Provider::Gcloud);
+        assert_eq!(hint.pin, None);
+        assert_eq!(hint.reauth, None);
+        let offer = hint.unblock.expect("unblock offer");
+        assert_eq!(
+            offer.path.as_deref(),
+            Some("/Users/u/Downloads/google-cloud-sdk/bin/gcloud")
+        );
+        assert_eq!(offer.settings_url, gcloud::MACOS_PRIVACY_SETTINGS_URL);
+        // A context with no exec plugin can't have had its plugin blocked.
+        assert_eq!(
+            hint_for_context_with("plain", Some(&path), BLOCKED_ERROR, &no_probe).expect("hint"),
+            None
+        );
     }
 
     #[test]

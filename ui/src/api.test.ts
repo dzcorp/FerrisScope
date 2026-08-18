@@ -160,6 +160,13 @@ describe("contexts + connect", () => {
     ).toBeNull();
   });
 
+  it("openPrivacySettings → 'open_privacy_settings_cmd' with no args", async () => {
+    const cap = captureNext(undefined);
+    await api.openPrivacySettings();
+    expect(cap.calls[0]?.cmd).toBe("open_privacy_settings_cmd");
+    expect(cap.calls[0]?.args).toBeUndefined();
+  });
+
   it("pinCloudIdentity → 'pin_cloud_identity_cmd' with name + identity", async () => {
     const cap = captureNext(undefined);
     await api.pinCloudIdentity("default::ctx-a", "a@b.io");

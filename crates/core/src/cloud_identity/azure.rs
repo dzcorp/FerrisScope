@@ -160,6 +160,7 @@ pub fn compose_hint(error: &str, accounts: &Identities) -> Option<ConnectHint> {
         // kubeconfig edit.
         pin: None,
         reauth: None,
+        unblock: None,
     })
 }
 

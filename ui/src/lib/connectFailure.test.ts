@@ -73,6 +73,17 @@ describe("isPermanentConnectFailure", () => {
     }
   });
 
+  it("treats an OS exec refusal as permanent", () => {
+    // macOS TCC (or a quarantine xattr) refusing to run the plugin's helper
+    // heals only when the operator grants access or moves the SDK — the banner
+    // behind this flag is the one carrying those remedies.
+    expect(
+      isPermanentConnectFailure(
+        "the OS blocked the exec credential plugin 'gke-gcloud-auth-plugin' — operation not permitted executing /Users/u/Downloads/google-cloud-sdk/bin/gcloud",
+      ),
+    ).toBe(true);
+  });
+
   it("still retries a plain expired token", () => {
     // A 401 heals on reconnect: `Config` is rebuilt and the credential plugin
     // re-runs. Only the reauth wording above is terminal.

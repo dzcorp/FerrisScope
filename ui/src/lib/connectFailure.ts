@@ -41,6 +41,26 @@ export function isPermanentConnectFailure(message: string): boolean {
   ) {
     return true;
   }
+  // The OS refusing to execute the credential plugin's helper (macOS TCC on a
+  // Downloads install, or a quarantine xattr) is equally deterministic: it
+  // heals only when the operator grants access or moves the SDK, and the
+  // banner under this flag is the one carrying those remedies. Not the phrase
+  // alone — "operation not permitted" is any EPERM (a macOS firewall refusing
+  // an outbound connect says the same words, and that one heals on retry), so
+  // require a marker tying it to the exec plugin. Both backend renderings
+  // (`ExecPluginBlocked`, `ExecPluginFailed`) carry "credential plugin"; the
+  // raw plugin stderr carries its own wrapper. Kept in step with
+  // `cloud_identity::gcloud::classify_exec_failure`.
+  if (
+    m.includes("operation not permitted") &&
+    (m.includes("credential plugin") ||
+      m.includes("while executing") ||
+      m.includes("cred.go") ||
+      m.includes("/bin/sh:") ||
+      m.includes("exit status 126"))
+  ) {
+    return true;
+  }
   // Kubernetes embeds "Forbidden:" *inside* HTTP 422 validation messages to
   // mean "this field can't be changed". That is not an authorization failure
   // and must be excluded first — the same ordering guard `classifyDetailError`

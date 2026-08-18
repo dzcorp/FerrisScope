@@ -152,6 +152,10 @@ export const api = {
   /// is cleared alongside — is the backend's call, per provider.
   pinCloudIdentity: (name: string, identity: string) =>
     invoke<void>("pin_cloud_identity_cmd", { name, identity }),
+  /// Open the macOS Files-and-Folders privacy pane — the remedy button for a
+  /// TCC-blocked auth plugin (`ConnectHint.unblock`). The target URL is a
+  /// backend constant, not an argument, so this is not a general URL opener.
+  openPrivacySettings: () => invoke<void>("open_privacy_settings_cmd"),
 
   listResourceKinds: () => invoke<ResourceKind[]>("list_resource_kinds"),
   // CRD-derived dynamic kinds. Per-cluster (CRDs are cluster-local), so
