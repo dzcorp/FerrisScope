@@ -153,6 +153,7 @@ fn deployment_row_format_matches_kubectl() {
     assert_eq!(row["ready"], "4/5");
     assert_eq!(row["up_to_date"], 5);
     assert_eq!(row["available"], 4);
+    assert_eq!(row["pods"], 5);
     snap("deployment_row", &row);
 }
 
@@ -175,6 +176,9 @@ fn job_succeeded_row_and_detail() {
     let row = ferrisscope_kube_ext::kinds::jobs::JobSpec::project(&j);
     assert_eq!(row["completions"], "1/1");
     assert_eq!(row["phase"], "Succeeded");
+    // Pods created = active + succeeded + failed; the one succeeded pod still
+    // counts even though the apiserver may already have collected it.
+    assert_eq!(row["pods"], 1);
     snap("job_succeeded_row", &row);
 
     let detail = ferrisscope_kube_ext::kinds::jobs::project_detail(&j);
@@ -312,6 +316,7 @@ fn daemonset_row_and_detail() {
 fn statefulset_row_and_detail() {
     let ss: StatefulSet = fixture_json("k8s/statefulset.json");
     let row = ferrisscope_kube_ext::kinds::stateful_sets::StatefulSetSpec::project(&ss);
+    assert_eq!(row["pods"], 3);
     snap("statefulset_row", &row);
     let detail = ferrisscope_kube_ext::kinds::stateful_sets::project_detail(&ss);
     snap("statefulset_detail", &detail);

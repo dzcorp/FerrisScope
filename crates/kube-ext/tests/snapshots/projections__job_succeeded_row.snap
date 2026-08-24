@@ -7,5 +7,6 @@ expression: value
   "creation_timestamp": "2026-04-15T09:00:00Z",
   "name": "migrate-1",
   "namespace": "default",
-  "phase": "Succeeded"
+  "phase": "Succeeded",
+  "pods": 1
 }

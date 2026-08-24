@@ -165,38 +165,42 @@ async fn resolve_one(client: Client, t: &LogPodTarget) -> Result<Vec<ResolvedLog
         let pod = api.get(&t.name).await?;
         return Ok(vec![resolved_from_pod(&pod)]);
     }
-    let selector = workload_selector(client.clone(), t).await?;
+    let selector = workload_selector(client.clone(), &t.kind_id, &t.namespace, &t.name).await?;
     list_by_selector(client, t, selector.as_ref()).await
 }
 
 /// GET a workload and return its pod `LabelSelector`. Shared by the one-shot
-/// [`resolve_one`] and the live [`start_log_pod_watch`]. `None` only when the
-/// workload carries no selector (just the optional `Job.spec.selector`).
-/// `UnknownKind` for anything that isn't a pod-owning workload.
-async fn workload_selector(
+/// [`resolve_one`], the live [`start_log_pod_watch`], and
+/// `fetch::list_pods_for_workload`. `None` only when the workload carries no
+/// selector (just the optional `Job.spec.selector`). `UnknownKind` for
+/// anything that isn't a pod-owning workload — notably `cronjobs`, whose pods
+/// are reached through its child Jobs rather than a selector of its own.
+pub(crate) async fn workload_selector(
     client: Client,
-    t: &LogPodTarget,
+    kind_id: &str,
+    namespace: &str,
+    name: &str,
 ) -> Result<Option<LabelSelector>, FetchError> {
-    match t.kind_id.as_str() {
+    match kind_id {
         "deployments" => {
-            let api: Api<Deployment> = Api::namespaced(client, &t.namespace);
-            Ok(api.get(&t.name).await?.spec.map(|s| s.selector))
+            let api: Api<Deployment> = Api::namespaced(client, namespace);
+            Ok(api.get(name).await?.spec.map(|s| s.selector))
         }
         "statefulsets" => {
-            let api: Api<StatefulSet> = Api::namespaced(client, &t.namespace);
-            Ok(api.get(&t.name).await?.spec.map(|s| s.selector))
+            let api: Api<StatefulSet> = Api::namespaced(client, namespace);
+            Ok(api.get(name).await?.spec.map(|s| s.selector))
         }
         "daemonsets" => {
-            let api: Api<DaemonSet> = Api::namespaced(client, &t.namespace);
-            Ok(api.get(&t.name).await?.spec.map(|s| s.selector))
+            let api: Api<DaemonSet> = Api::namespaced(client, namespace);
+            Ok(api.get(name).await?.spec.map(|s| s.selector))
         }
         "replicasets" => {
-            let api: Api<ReplicaSet> = Api::namespaced(client, &t.namespace);
-            Ok(api.get(&t.name).await?.spec.map(|s| s.selector))
+            let api: Api<ReplicaSet> = Api::namespaced(client, namespace);
+            Ok(api.get(name).await?.spec.map(|s| s.selector))
         }
         "jobs" => {
-            let api: Api<Job> = Api::namespaced(client, &t.namespace);
-            Ok(api.get(&t.name).await?.spec.and_then(|s| s.selector))
+            let api: Api<Job> = Api::namespaced(client, namespace);
+            Ok(api.get(name).await?.spec.and_then(|s| s.selector))
         }
         other => Err(FetchError::UnknownKind(other.to_owned())),
     }
@@ -225,7 +229,7 @@ async fn list_by_selector(
 /// empty selector (no labels, no expressions) — which would match the entire
 /// namespace, never what a workload means. matchLabels iterate in `BTreeMap`
 /// key order so the query is deterministic.
-fn selector_query(sel: &LabelSelector) -> Option<String> {
+pub(crate) fn selector_query(sel: &LabelSelector) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(labels) = sel.match_labels.as_ref() {
         for (k, v) in labels {
@@ -476,7 +480,13 @@ pub async fn start_log_pod_watch(
     client: Client,
     target: &LogPodTarget,
 ) -> Result<Arc<LogPodWatch>, FetchError> {
-    let selector = workload_selector(client.clone(), target).await?;
+    let selector = workload_selector(
+        client.clone(),
+        &target.kind_id,
+        &target.namespace,
+        &target.name,
+    )
+    .await?;
     let Some(query) = selector.as_ref().and_then(selector_query) else {
         return Err(FetchError::NoSelector(target.name.clone()));
     };

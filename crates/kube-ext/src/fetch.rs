@@ -2405,6 +2405,52 @@ pub async fn list_pods_on_node(client: Client, node: &str) -> Result<Vec<Value>,
     Ok(rows)
 }
 
+/// Row-shaped projection of every pod owned by a workload, resolved through
+/// the workload's own label selector — the same resolution the log surface
+/// uses (`log_pods::workload_selector`), so the two never disagree about which
+/// pods belong to a controller.
+///
+/// Selection is server-side: the apiserver applies the selector, we never ship
+/// a namespace of pods just to drop most of them. For a Deployment this
+/// deliberately spans *every* ReplicaSet it owns, including a rollout's
+/// outgoing one — those surge pods are its pods.
+///
+/// `kind_id` must be a selector-owning workload; `cronjobs` is rejected with
+/// `UnknownKind` because a CronJob reaches its pods through its child Jobs.
+pub async fn list_pods_for_workload(
+    client: Client,
+    kind_id: &str,
+    namespace: &str,
+    name: &str,
+) -> Result<Vec<Value>, FetchError> {
+    let selector = crate::log_pods::workload_selector(client.clone(), kind_id, namespace, name)
+        .await?
+        .ok_or_else(|| FetchError::NoSelector(name.to_owned()))?;
+    let query = crate::log_pods::selector_query(&selector)
+        // An empty selector would match the whole namespace — surface it
+        // rather than showing the operator pods the workload doesn't own.
+        .ok_or_else(|| FetchError::NoSelector(name.to_owned()))?;
+
+    let pods: Api<Pod> = Api::namespaced(client, namespace);
+    let list = pods.list(&ListParams::default().labels(&query)).await?;
+    let rows: Vec<Value> = list
+        .items
+        .iter()
+        .map(|pod| {
+            let mut row = <crate::kinds::pods::PodSpec as crate::registry::KindSpec>::project(pod);
+            // Same reason as `list_pods_on_node`: the watcher's delta path
+            // injects `uid` via `with_uid`, this list path bypasses it, and
+            // without a uid the frontend's dedup map collapses every row onto
+            // `undefined` so only the last pod survives.
+            if let (Some(map), Some(uid)) = (row.as_object_mut(), pod.metadata.uid.as_ref()) {
+                map.insert("uid".to_owned(), Value::String(uid.clone()));
+            }
+            row
+        })
+        .collect();
+    Ok(rows)
+}
+
 /// Evict a single pod via the policy/v1 Eviction subresource. Unlike a plain
 /// DELETE this is graceful *and* PDB-aware: the apiserver refuses with 429 if
 /// the eviction would violate a PodDisruptionBudget, which we surface as a

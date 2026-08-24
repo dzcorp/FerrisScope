@@ -256,9 +256,10 @@ type Tab = "summary" | "yaml" | "events" | "related" | "logs" | "metrics";
 
 // Kinds that surface a Related tab. Today: Pod (owner chain, node, SA,
 // image-pull-secrets, mounted ConfigMaps/Secrets/PVCs) and the workload
-// kinds (owner chain only — child-pod resolution lives in their Summary).
-// Other kinds get nothing useful from this view yet, so we hide the tab
-// rather than showing an empty pane.
+// kinds, which show the owner chain *upwards* only — the pods below them
+// are a live list in their Summary (`detail/podList.tsx`) rather than a
+// static entry here. Other kinds get nothing useful from this view yet, so
+// we hide the tab rather than showing an empty pane.
 const RELATED_KINDS = new Set([
   "pods",
   "deployments",
@@ -1211,7 +1212,7 @@ export function DetailPanel({
             // is contained here instead of unwinding to the React root and
             // whiting out the whole window. Keyed on the object + tab so a
             // fault resets automatically when the operator navigates elsewhere.
-            key={`${kind.id} ${target.namespace ?? ""} ${target.name} ${tab}`}
+            key={`${kind.id}\u0000${target.namespace ?? ""}\u0000${target.name}\u0000${tab}`}
             onError={logErr("detail-panel")}
             fallback={(err) => (
               <ErrorBlock

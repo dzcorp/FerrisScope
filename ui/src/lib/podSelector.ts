@@ -1,0 +1,52 @@
+// Client-side label-selector matching for pod deltas.
+//
+// The backend does the authoritative selection server-side; this only decides
+// whether a *live delta* off the pods watcher belongs to the workload being
+// viewed. Pod labels ride the bus already (the watcher injects `__labels`), so
+// no extra payload is needed for the join.
+
+import type { LabelSelectorSummary, ResourceRow } from "../types";
+
+/// Every `match_labels` pair must be present and equal on the pod. An absent
+/// or wholly empty selector matches *nothing* — over-matching a namespace is
+/// worse than showing an empty list.
+export function matchesLabelSelector(
+  labels: Record<string, string> | undefined,
+  selector: LabelSelectorSummary | null,
+): boolean {
+  if (!selector) return false;
+  const pairs = selector.match_labels;
+  if (pairs.length === 0) return false;
+  if (!labels) return false;
+  return pairs.every(([k, v]) => labels[k] === v);
+}
+
+/// `LabelSelectorSummary` carries `match_expressions` as a *count*, not the
+/// expressions themselves, so a selector using them can't be evaluated here.
+/// Callers must then trust only the server-fetched list and refuse to admit
+/// unknown pods from the delta stream.
+export function selectorIsClientEvaluable(
+  selector: LabelSelectorSummary | null,
+): boolean {
+  return !!selector && selector.match_expressions === 0;
+}
+
+/// Whether a pod delta should be folded into a workload's pod list.
+///
+/// `known` is the set of uids the server-fetched list already vouched for.
+/// When the selector uses `matchExpressions` we can only confirm updates to
+/// pods we were told about — admitting a new pod on `matchLabels` alone could
+/// pull in one the expressions exclude.
+export function acceptsPodDelta(
+  row: ResourceRow,
+  selector: LabelSelectorSummary | null,
+  known: ReadonlySet<string>,
+): boolean {
+  if (known.has(row.uid)) {
+    return selectorIsClientEvaluable(selector)
+      ? matchesLabelSelector(row.__labels, selector)
+      : true;
+  }
+  if (!selectorIsClientEvaluable(selector)) return false;
+  return matchesLabelSelector(row.__labels, selector);
+}

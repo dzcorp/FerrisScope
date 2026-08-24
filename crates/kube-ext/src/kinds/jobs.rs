@@ -32,6 +32,11 @@ impl KindSpec for JobSpec {
                     kind: Some(ColumnKind::Text),
                 },
                 ColumnDef {
+                    id: "pods",
+                    header: "Pods",
+                    kind: Some(ColumnKind::Number),
+                },
+                ColumnDef {
                     id: "completions",
                     header: "Completions",
                     kind: Some(ColumnKind::Text),
@@ -72,6 +77,10 @@ impl KindSpec for JobSpec {
         json!({
             "namespace": meta.namespace.clone().unwrap_or_default(),
             "name": meta.name.clone().unwrap_or_default(),
+            // Pods *created*, matching `kubectl describe job`'s "Pods Statuses"
+            // line — not a live count. Succeeded pods stay counted here after
+            // the apiserver has garbage-collected them.
+            "pods": active + succeeded + failed,
             "completions": format!("{succeeded}/{desired}"),
             "phase": phase,
             "creation_timestamp": meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),

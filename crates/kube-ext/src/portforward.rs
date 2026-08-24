@@ -30,6 +30,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 
+use crate::log_pods::selector_query;
+
 /// Channel size for status events. Generous — the UI subscribes once and we
 /// emit at human pace (start / listening / connection-error / stopped).
 const STATUS_BUFFER: usize = 64;
@@ -359,36 +361,24 @@ where
     Ok((pod_name, remote_port))
 }
 
-fn label_selector_to_query(
-    sel: &k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector,
-) -> Option<String> {
-    let labels = sel.match_labels.as_ref()?;
-    if labels.is_empty() {
-        return None;
-    }
-    Some(
-        labels
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(","),
-    )
-}
-
+// Selector serialisation is shared with the log-pod resolver. A local copy
+// here used to read `matchLabels` only, so an expression-bearing selector
+// either resolved to nothing or, worse, over-matched and forwarded to a pod
+// the workload doesn't own.
 fn workload_selector_deployment(d: &Deployment) -> Option<String> {
-    label_selector_to_query(&d.spec.as_ref()?.selector)
+    selector_query(&d.spec.as_ref()?.selector)
 }
 fn workload_selector_stateful_set(s: &StatefulSet) -> Option<String> {
-    label_selector_to_query(&s.spec.as_ref()?.selector)
+    selector_query(&s.spec.as_ref()?.selector)
 }
 fn workload_selector_daemon_set(d: &DaemonSet) -> Option<String> {
-    label_selector_to_query(&d.spec.as_ref()?.selector)
+    selector_query(&d.spec.as_ref()?.selector)
 }
 fn workload_selector_replica_set(r: &ReplicaSet) -> Option<String> {
-    label_selector_to_query(&r.spec.as_ref()?.selector)
+    selector_query(&r.spec.as_ref()?.selector)
 }
 fn workload_selector_job(j: &Job) -> Option<String> {
-    label_selector_to_query(j.spec.as_ref()?.selector.as_ref()?)
+    selector_query(j.spec.as_ref()?.selector.as_ref()?)
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────
