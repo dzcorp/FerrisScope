@@ -57,6 +57,9 @@ export type PodListSectionProps = {
   /// Show each pod's namespace. Worth a column only where it varies — on a
   /// workload every pod shares the controller's namespace.
   showNamespace?: boolean;
+  /// Which controller a pod belongs to, when the list unions several. Renders
+  /// a leading chip; omit for a single-owner list where it would be constant.
+  ownerOf?: (row: ResourceRow) => string | null;
   emptyLabel: string;
   /// Node panel only — drains are driven from there.
   enableEvict?: boolean;
@@ -260,6 +263,7 @@ export function PodListSection(props: PodListSectionProps) {
               row={row}
               showNode={showNode}
               showNamespace={showNamespace}
+              owner={props.ownerOf?.(row) ?? null}
               enableEvict={enableEvict}
               onNavigate={props.onNavigate}
             />
@@ -276,6 +280,7 @@ function PodRow({
   row,
   showNode,
   showNamespace,
+  owner,
   enableEvict,
   onNavigate,
 }: {
@@ -285,6 +290,7 @@ function PodRow({
   row: ResourceRow;
   showNode: boolean;
   showNamespace: boolean;
+  owner: string | null;
   enableEvict: boolean;
   onNavigate?: DetailNavigate;
 }) {
@@ -336,6 +342,30 @@ function PodRow({
     // workload every pod shares the controller's namespace, so the column
     // would be the same word repeated down the whole list.
     <DetailRow t={t} label={showNamespace ? (ns ?? "—") : null}>
+      {/* Which controller this pod came from, when the list unions several.
+          Muted and unclickable — the owner is already in the selection, so
+          this is orientation, not a destination. */}
+      {owner && (
+        <span
+          style={{
+            fontFamily: FF_MONO,
+            fontSize: FS_XS,
+            color: t.textMuted,
+            background: t.chip,
+            border: `1px solid ${t.borderSoft}`,
+            borderRadius: R_SM,
+            padding: "0 6px",
+            flexShrink: 0,
+            maxWidth: 160,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={owner}
+        >
+          {owner}
+        </span>
+      )}
       {/* Identity first and unshrinkable — a pod name truncated in the middle
           of its hash is unreadable. The node beside it gives up width
           instead. */}

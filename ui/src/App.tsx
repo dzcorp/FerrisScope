@@ -51,6 +51,11 @@ import {
   type CompareTarget,
 } from "./components/ComparePanel";
 import {
+  InspectPanel,
+  inspectTargetFromSelection,
+  type InspectTarget,
+} from "./components/inspect";
+import {
   LogPanel,
   OBSERVABLE_KIND_IDS,
   type ObserveTab,
@@ -249,6 +254,33 @@ export default function App() {
             (cid) => colorIdx[cid] ?? 0,
           );
           if (target) setCompareTarget(target);
+        },
+      },
+    ];
+  };
+
+  // Structured N-way comparison drawer — any kind, 2+ selected. Sibling to
+  // Compare YAML: that one diffs a pair's raw manifests, this one compares
+  // fields across N and merges their events and pods.
+  const [inspectTarget, setInspectTarget] = useState<InspectTarget | null>(
+    null,
+  );
+  const inspectActions = (): BulkAction[] => {
+    if (!selectedKind || selection.size < 2) return [];
+    return [
+      {
+        icon: Icons.layers,
+        label: "Inspect",
+        onClick: () => {
+          const colorIdx = clusterColorIndexMap(activeClusterIds);
+          const target = inspectTargetFromSelection(
+            selection,
+            selectedKind.id,
+            selectedKind.kind,
+            clusterLabelFor,
+            (cid) => colorIdx[cid] ?? 0,
+          );
+          if (target) setInspectTarget(target);
         },
       },
     ];
@@ -970,14 +1002,15 @@ export default function App() {
           Hidden (zIndex 35 > drawer 31) while the compare drawer is open —
           the selection itself survives so the operator can act on the same
           rows after closing the diff. */}
-      {!compareTarget && !observeTarget && selectedKind?.id === "pods" && activeContexts.length > 0 && selection.size > 0 && (
+      {!compareTarget && !observeTarget && !inspectTarget && selectedKind?.id === "pods" && activeContexts.length > 0 && selection.size > 0 && (
         <BulkBar
           mode={themeMode}
           count={selection.size}
           onClear={clearSelection}
           actions={[
             ...observeActions(),
-            ...compareActions(),
+            ...inspectActions(),
+              ...compareActions(),
             ...buildPodBulkActions(
               selection,
               confirmDestructive,
@@ -990,6 +1023,7 @@ export default function App() {
       )}
       {!compareTarget &&
         !observeTarget &&
+        !inspectTarget &&
         selectedKind?.id === "nodes" &&
         activeContexts.length > 0 &&
         selection.size > 0 && (
@@ -998,6 +1032,7 @@ export default function App() {
             count={selection.size}
             onClear={clearSelection}
             actions={[
+              ...inspectActions(),
               ...compareActions(),
               ...buildNodeBulkActions(
                 selection,
@@ -1013,6 +1048,7 @@ export default function App() {
           needed. Restart / cordon / drain stay pod- and node-specific. */}
       {!compareTarget &&
         !observeTarget &&
+        !inspectTarget &&
         selectedKind &&
         selectedKind.id !== "pods" &&
         selectedKind.id !== "nodes" &&
@@ -1024,6 +1060,7 @@ export default function App() {
             onClear={clearSelection}
             actions={[
               ...observeActions(),
+              ...inspectActions(),
               ...compareActions(),
               ...buildGenericBulkActions(
                 selectedKind,
@@ -1036,6 +1073,14 @@ export default function App() {
             ]}
           />
         )}
+
+      {inspectTarget && (
+        <InspectPanel
+          mode={themeMode}
+          target={inspectTarget}
+          onClose={() => setInspectTarget(null)}
+        />
+      )}
 
       {compareTarget && (
         <ComparePanel

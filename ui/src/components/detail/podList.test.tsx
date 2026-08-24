@@ -309,3 +309,52 @@ describe("PodListSection row chrome", () => {
     expect(node).not.toHaveStyle({ color: t.accent });
   });
 });
+
+describe("PodListSection owner chip", () => {
+  const BASE = {
+    t: tokens("dark"),
+    mode: "dark" as const,
+    clusterId: "ctx",
+    acceptsDelta: () => true,
+    subjectKey: "deployments/production/web",
+    refetchKey: 0,
+    emptyLabel: "none",
+    fetchPods: () => Promise.resolve([POD]),
+    onNavigate: () => {},
+  };
+
+  async function show(extra: Record<string, unknown>) {
+    setMockInvoke((cmd) => {
+      if (cmd === "subscribe_resource") return { rows: [], init_done: true };
+      if (cmd === "unsubscribe_resource") return undefined;
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    await act(async () => {
+      render(
+        <PodListSection
+          {...({ ...BASE, ...extra } as React.ComponentProps<
+            typeof PodListSection
+          >)}
+        />,
+      );
+    });
+  }
+
+  // A union list needs to say which controller each pod came from.
+  it("renders the owner when ownerOf is supplied", async () => {
+    await show({ ownerOf: () => "web-a" });
+    expect(await screen.findByText("web-a")).toBeInTheDocument();
+  });
+
+  // On a single-owner list the chip would be the same word on every row.
+  it("renders no owner chip by default", async () => {
+    await show({});
+    expect(await screen.findByText("web-7d9f-abc")).toBeInTheDocument();
+    expect(screen.queryByText("web-a")).not.toBeInTheDocument();
+  });
+
+  it("omits the chip for a pod with no resolvable owner", async () => {
+    await show({ ownerOf: () => null });
+    expect(await screen.findByText("web-7d9f-abc")).toBeInTheDocument();
+  });
+});
