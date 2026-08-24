@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FF_MONO, type ThemeMode, R_LG, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../theme";
 import { useAppStore, useResolvedTheme } from "../store";
-import { Btn, Icons, Kbd, KindIcons } from "./ui";
+import { Btn, IconBtn, Icons, Kbd, KindIcons } from "./ui";
 
 // Treat anything in the kube-* family plus the dashboard add-ons as "system."
 // Surfaced behind the Settings → General → Show system namespaces toggle.
@@ -199,21 +199,9 @@ export function NamespaceModal({
                   : ""}
               </div>
             </div>
-            <button
-              type="button"
-              onClick={onClose}
-              style={{
-                border: "none",
-                background: "transparent",
-                cursor: "pointer",
-                color: t.textMuted,
-                padding: 4,
-                borderRadius: R_MD,
-                display: "flex",
-              }}
-            >
+            <IconBtn t={t} title="Close (Esc)" onClick={onClose}>
               {Icons.close}
-            </button>
+            </IconBtn>
           </div>
           <div style={{ position: "relative" }}>
             <span

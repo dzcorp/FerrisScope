@@ -63,6 +63,14 @@ export type PodListSectionProps = {
   emptyLabel: string;
   /// Node panel only — drains are driven from there.
   enableEvict?: boolean;
+  /// Left-hand label for the pane toolbar (a cluster name when the Inspect
+  /// tab groups by cluster). Ignored in `section` variant.
+  paneLabel?: string;
+  /// `section` (default) is a titled block among other sections in a detail
+  /// panel: "Pods" header, count on the right, compact inline loader.
+  /// `pane` is the whole surface — no header (the tab already says "Pods")
+  /// and a centred full-height loader, matching the other Inspect tabs.
+  variant?: "section" | "pane";
   onNavigate?: DetailNavigate;
 };
 
@@ -73,6 +81,7 @@ export function PodListSection(props: PodListSectionProps) {
     showNode = false,
     showNamespace = false,
     enableEvict = false,
+    variant = "section",
   } = props;
   const [state, setState] = useState<LoadState<ResourceRow[]>>({
     kind: "loading",
@@ -280,6 +289,66 @@ export function PodListSection(props: PodListSectionProps) {
         })
       : [];
 
+  const body = (
+    <>
+      {state.kind === "error" && (
+        <div style={{ padding: "6px 0" }}>
+          <ErrorBlock t={t} message={state.message} kindLabel="pods" inline />
+        </div>
+      )}
+      {state.kind === "ready" && rows.length === 0 && (
+        <Mute t={t}>{props.emptyLabel}</Mute>
+      )}
+      {state.kind === "ready" &&
+        rows.map((row) => (
+            <PodRow
+              key={row.uid}
+              t={t}
+              mode={mode}
+              clusterId={props.clusterId}
+              row={row}
+              showNode={showNode}
+              showNamespace={showNamespace}
+              owner={props.ownerOf?.(row) ?? null}
+              enableEvict={enableEvict}
+              onNavigate={props.onNavigate}
+          />
+        ))}
+    </>
+  );
+
+  // As the whole pane: the tab label already says "Pods", so a section header
+  // would repeat it, and the centred loader matches the sibling tabs.
+  if (variant === "pane") {
+    return (
+      <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "10px 22px",
+            borderBottom: `1px solid ${t.borderSoft}`,
+            flexShrink: 0,
+            fontSize: FS_XS,
+            color: t.textMuted,
+            fontFamily: FF_MONO,
+          }}
+        >
+          {props.paneLabel ?? "Pods"}
+          {state.kind === "ready" && <span>{state.detail.length} total</span>}
+        </div>
+        {state.kind === "loading" ? (
+          <LoadingLine t={t} label="Loading pods…" />
+        ) : (
+          <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "0 22px" }}>
+            {body}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <>
       <Section
@@ -303,29 +372,7 @@ export function PodListSection(props: PodListSectionProps) {
         {state.kind === "loading" && (
           <LoadingLine t={t} label="Loading pods…" inline />
         )}
-        {state.kind === "error" && (
-          <div style={{ padding: "6px 0" }}>
-            <ErrorBlock t={t} message={state.message} kindLabel="pods" inline />
-          </div>
-        )}
-        {state.kind === "ready" && rows.length === 0 && (
-          <Mute t={t}>{props.emptyLabel}</Mute>
-        )}
-        {state.kind === "ready" &&
-          rows.map((row) => (
-            <PodRow
-              key={row.uid}
-              t={t}
-              mode={mode}
-              clusterId={props.clusterId}
-              row={row}
-              showNode={showNode}
-              showNamespace={showNamespace}
-              owner={props.ownerOf?.(row) ?? null}
-              enableEvict={enableEvict}
-              onNavigate={props.onNavigate}
-            />
-          ))}
+        {body}
       </div>
     </>
   );

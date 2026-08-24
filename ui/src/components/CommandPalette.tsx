@@ -6,7 +6,7 @@ import {
   useResolvedTheme,
 } from "../store";
 import { FF_MONO, type ThemeMode, R_LG, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
-import { Icons, Kbd, resolveKindIcon } from "./ui";
+import { Eyebrow, Icons, Kbd, resolveKindIcon } from "./ui";
 import { MOD_KEY } from "../lib/keyboard";
 import { api } from "../api";
 import { mergeSearchHits } from "../lib/multiCluster";
@@ -489,19 +489,9 @@ export function CommandPalette({ mode, onClose }: Props) {
           ) : (
             groups.map(([groupName, list]) => (
               <div key={groupName} style={{ marginBottom: 4 }}>
-                <div
-                  style={{
-                    fontSize: FS_XS,
-                    fontWeight: 700,
-                    color: t.textMuted,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.6,
-                    fontFamily: FF_MONO,
-                    padding: "8px 18px 4px",
-                  }}
-                >
+                <Eyebrow t={t} style={{ padding: "8px 18px 4px" }}>
                   {groupName}
-                </div>
+                </Eyebrow>
                 {list.map((it) => {
                   const isHi = filtered[hi]?.id === it.id;
                   return (

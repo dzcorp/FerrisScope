@@ -14,6 +14,7 @@ import {
 } from "../store";
 import { tokens, FF_MONO, type ThemeMode, FS_LG, FS_SM, FS_XS } from "../theme";
 import {
+  Btn,
   EmptyState,
   ErrorBlock,
   Eyebrow,
@@ -727,23 +728,9 @@ export function LogPanel({
                 kindLabel="pods"
                 verb="load"
               />
-              <button
-                type="button"
-                onClick={retry}
-                style={{
-                  marginTop: 10,
-                  padding: "4px 12px",
-                  border: `1px solid ${t.border}`,
-                  borderRadius: 4,
-                  background: t.surface,
-                  color: t.text,
-                  fontFamily: FF_MONO,
-                  fontSize: FS_SM,
-                  cursor: "pointer",
-                }}
-              >
+              <Btn t={t} size="sm" onClick={retry}>
                 Retry
-              </button>
+              </Btn>
             </div>
           ) : state.pods.length === 0 ? (
             <EmptyState

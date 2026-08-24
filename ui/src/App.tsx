@@ -189,6 +189,10 @@ export default function App() {
   const selectedKind = useAppStore((s) =>
     s.kinds.find((kk) => kk.id === s.selectedKindId),
   );
+  // Kind-name -> registry-id resolution for the Inspect drawer's cross-kind
+  // links (a pod row's Pod / Node names).
+  const kinds = useAppStore((s) => s.kinds);
+  const navigateToDetail = useAppStore((s) => s.navigateToDetail);
 
   const paletteOpen = useAppStore((s) => s.paletteOpen);
   const openPalette = useAppStore((s) => s.openPalette);
@@ -1083,6 +1087,18 @@ export default function App() {
           mode={themeMode}
           target={inspectTarget}
           onClose={() => setInspectTarget(null)}
+          onNavigate={(targetKindName, namespace, name) => {
+            // Same Kind-name -> registry-id mapping the detail panel uses.
+            // Every subject in one Inspect shares a kind, so the first
+            // subject's cluster is the right scope for its pods.
+            const target = kinds.find((k) => k.kind === targetKindName);
+            if (!target) return;
+            const clusterId = inspectTarget.subjects[0]?.clusterId ?? null;
+            // Close first: the drawer sits at the same z-index as the detail
+            // panel and would cover whatever we just opened.
+            setInspectTarget(null);
+            navigateToDetail(target.id, namespace, name, clusterId);
+          }}
         />
       )}
 

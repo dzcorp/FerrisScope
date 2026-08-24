@@ -28,7 +28,6 @@ import {
   FF_MONO,
   type ThemeMode,
   R_MD,
-  R_SM,
   FS_MD,
   FS_SM,
   FS_XS,
@@ -458,42 +457,20 @@ export function Dock({
                   {tab.title}
                 </span>
                 {tabs.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      closeTab(tab.id);
-                    }}
-                    title="Close tab"
-                    onMouseEnter={(e) =>
-                      (e.currentTarget.style.background = t.hover)
-                    }
-                    onMouseLeave={(e) =>
-                      (e.currentTarget.style.background = "transparent")
-                    }
-                    style={{
-                      border: "none",
-                      background: "transparent",
-                      padding: 2,
-                      marginLeft: 2,
-                      cursor: "pointer",
-                      color: t.textMuted,
-                      display: "flex",
-                      borderRadius: R_SM,
-                    }}
+                  <span
+                    style={{ display: "flex", marginLeft: 2 }}
+                    // The tab itself is the click target for switching, so the
+                    // close button must not also trigger it.
+                    onClick={(e) => e.stopPropagation()}
                   >
-                    <svg
-                      width="9"
-                      height="9"
-                      viewBox="0 0 10 10"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
+                    <IconBtn
+                      t={t}
+                      title="Close tab"
+                      onClick={() => closeTab(tab.id)}
                     >
-                      <path d="M2 2l6 6M8 2l-6 6" />
-                    </svg>
-                  </button>
+                      {Icons.close}
+                    </IconBtn>
+                  </span>
                 )}
               </div>
             );
@@ -581,17 +558,7 @@ export function Dock({
             title="Minimize"
             onClick={() => setDockMin(placement, true)}
           >
-            <svg
-              width="11"
-              height="11"
-              viewBox="0 0 12 12"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-            >
-              <path d="M2 9h8" />
-            </svg>
+{Icons.windowMin}
           </IconBtn>
           <IconBtn
             t={t}

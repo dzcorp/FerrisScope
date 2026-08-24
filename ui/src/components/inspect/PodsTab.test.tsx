@@ -1,5 +1,5 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetMockInvoke, setMockInvoke } from "../../test/tauri-mock";
 import { resetEventMock } from "../../test/tauri-event-mock";
 import { PodsTab, selectorFrom } from "./PodsTab";
@@ -55,6 +55,7 @@ async function show(
   subjects: InspectSubject[],
   docs: [string, DocState][],
   podsFor: (name: string) => unknown[],
+  onNavigate?: (k: string, ns: string | null, n: string) => void,
 ) {
   setMockInvoke((cmd, args) => {
     if (cmd === "subscribe_resource") return { rows: [], init_done: true };
@@ -71,6 +72,7 @@ async function show(
         kindId="deployments"
         subjects={subjects}
         docs={new Map(docs)}
+        onNavigate={onNavigate}
       />,
     );
   });
@@ -179,6 +181,32 @@ describe("PodsTab", () => {
     );
     expect(await screen.findByText("ctx")).toBeInTheDocument();
     expect(screen.getByText("other")).toBeInTheDocument();
+  });
+
+  // The tab rendered pod and node names as plain text until onNavigate was
+  // plumbed through from App.
+  it("navigates to a pod's detail", async () => {
+    const onNavigate = vi.fn();
+    await show(
+      [A],
+      [[A.sid, doc("a")]],
+      () => [pod("p1", "web-a-1", "a")],
+      onNavigate,
+    );
+    (await screen.findByText("web-a-1")).click();
+    expect(onNavigate).toHaveBeenCalledWith("Pod", "default", "web-a-1");
+  });
+
+  it("navigates to a node's detail with a null namespace", async () => {
+    const onNavigate = vi.fn();
+    await show(
+      [A],
+      [[A.sid, doc("a")]],
+      () => [pod("p1", "web-a-1", "a")],
+      onNavigate,
+    );
+    (await screen.findByText("worker-1")).click();
+    expect(onNavigate).toHaveBeenCalledWith("Node", null, "worker-1");
   });
 
   it("explains an unreadable selection rather than blaming the selector", async () => {

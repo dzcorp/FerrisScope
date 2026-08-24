@@ -14,13 +14,7 @@ import { api } from "../../api";
 import { acceptsPodDelta } from "../../lib/podSelector";
 import type { LabelSelectorSummary, ResourceRow } from "../../types";
 import type { Json } from "../../lib/yamlEdit";
-import {
-  clusterAccent,
-  FF_MONO,
-  FS_XS,
-  type ThemeMode,
-  type Tokens,
-} from "../../theme";
+import type { ThemeMode, Tokens } from "../../theme";
 import { PodListSection } from "../detail/podList";
 import { DETAIL_POLL_MS } from "../detail/detailPoll";
 import type { DetailNavigate } from "../detail";
@@ -80,7 +74,14 @@ export function PodsTab({
   }
 
   return (
-    <div style={{ height: "100%", overflow: "auto", padding: "4px 22px 22px" }}>
+    <div
+      style={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+      }}
+    >
       {groups.map(([clusterId, usable]) => (
         <ClusterPodList
           key={clusterId}
@@ -89,7 +90,7 @@ export function PodsTab({
           kindId={kindId}
           clusterId={clusterId}
           usable={usable}
-          showClusterHeading={groups.length > 1}
+          showClusterName={groups.length > 1}
           onNavigate={onNavigate}
         />
       ))}
@@ -103,7 +104,7 @@ function ClusterPodList({
   kindId,
   clusterId,
   usable,
-  showClusterHeading,
+  showClusterName,
   onNavigate,
 }: {
   t: Tokens;
@@ -111,7 +112,7 @@ function ClusterPodList({
   kindId: string;
   clusterId: string;
   usable: Usable[];
-  showClusterHeading: boolean;
+  showClusterName: boolean;
   onNavigate?: DetailNavigate;
 }) {
   // The true owner mapping comes from the fetch itself — each promise's index
@@ -199,32 +200,7 @@ function ClusterPodList({
     new Set(usable.map(({ subject }) => subject.namespace)).size > 1;
 
   return (
-    <>
-      {showClusterHeading && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            marginTop: 14,
-            fontFamily: FF_MONO,
-            fontSize: FS_XS,
-            color: t.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 0.6,
-          }}
-        >
-          <span
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: "50%",
-              background: clusterAccent(usable[0]!.subject.colorIdx),
-            }}
-          />
-          {usable[0]!.subject.clusterName}
-        </div>
-      )}
+    <div style={{ flex: 1, minHeight: 0 }}>
       <PodListSection
         t={t}
         mode={mode}
@@ -238,8 +214,10 @@ function ClusterPodList({
         showNamespace={showNamespace}
         ownerOf={ownerOf}
         onNavigate={onNavigate}
+        variant="pane"
+        paneLabel={showClusterName ? usable[0]!.subject.clusterName : undefined}
       />
-    </>
+    </div>
   );
 }
 

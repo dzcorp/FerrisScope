@@ -177,7 +177,7 @@ describe("ComparePanel", () => {
     );
     const calls = getResourceYamlMock.mock.calls.length;
 
-    fireEvent.click(screen.getByLabelText("Swap sides"));
+    fireEvent.click(screen.getByRole("button", { name: /Swap/ }));
     await waitFor(() =>
       expect(
         (screen.getByTestId("diff-original") as HTMLTextAreaElement).value,

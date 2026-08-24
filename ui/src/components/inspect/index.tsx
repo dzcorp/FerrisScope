@@ -18,14 +18,23 @@ import { parseScopedUid } from "../../lib/multiCluster";
 import {
   clusterAccent,
   FF_MONO,
-  FS_MD,
+  FS_LG,
   FS_SM,
   FS_XS,
   R_MD,
   type ThemeMode,
   type Tokens,
 } from "../../theme";
-import { ErrorBlock, Icons, IconBtn, LoadingLine, TabButton } from "../ui";
+import {
+  Btn,
+  ErrorBlock,
+  Eyebrow,
+  Icons,
+  IconBtn,
+  LoadingLine,
+  TabButton,
+} from "../ui";
+import type { DetailNavigate } from "../detail";
 import { FieldsTab } from "./FieldsTab";
 import { EventsTab } from "./EventsTab";
 import { PodsTab } from "./PodsTab";
@@ -175,9 +184,12 @@ type Props = {
   mode: ThemeMode;
   target: InspectTarget;
   onClose: () => void;
+  /// Cross-kind navigation, same contract as DetailPanel's — takes a
+  /// Kubernetes Kind name. Closing the drawer first is the caller's job.
+  onNavigate?: DetailNavigate;
 };
 
-export function InspectPanel({ mode, target, onClose }: Props) {
+export function InspectPanel({ mode, target, onClose, onNavigate }: Props) {
   const t = useResolvedTheme().tokens;
   const [tab, setTab] = useState<InspectTab>("fields");
   const [attempt, setAttempt] = useState(0);
@@ -266,12 +278,15 @@ export function InspectPanel({ mode, target, onClose }: Props) {
           animation: "fs-slide-from-right .22s cubic-bezier(.2,.7,.2,1)",
         }}
       >
+        {/* Same chrome as DetailPanel's header — this is a detail surface and
+            should not look like a different app. */}
         <header
           style={{
-            padding: "16px 22px 0",
+            padding: "16px 22px 12px",
+            borderBottom: `1px solid ${t.borderSoft}`,
             display: "flex",
-            alignItems: "flex-start",
-            gap: 10,
+            alignItems: "center",
+            gap: 12,
             flexShrink: 0,
             minWidth: 0,
           }}
@@ -279,31 +294,40 @@ export function InspectPanel({ mode, target, onClose }: Props) {
           <div style={{ minWidth: 0, flex: 1 }}>
             <div
               style={{
-                fontSize: FS_XS,
-                color: t.textMuted,
-                fontFamily: FF_MONO,
-                textTransform: "uppercase",
-                letterSpacing: 0.6,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                marginBottom: 6,
               }}
             >
-              {subjects.length}{" "}
-              {subjects.length === 1
-                ? target.kindLabel
-                : pluralizeKind(target.kindLabel)}{" "}
-              · compared
+              <Eyebrow t={t}>{target.kindLabel}</Eyebrow>
+              <span style={{ color: t.textMuted, fontSize: FS_SM }}>·</span>
+              <span
+                style={{
+                  fontFamily: FF_MONO,
+                  fontSize: FS_SM,
+                  color: t.textDim,
+                }}
+              >
+                {subjects.length}{" "}
+                {subjects.length === 1
+                  ? target.kindLabel
+                  : pluralizeKind(target.kindLabel)}{" "}
+                compared
+              </span>
             </div>
             <div
               style={{
-                fontSize: FS_MD,
+                fontSize: FS_LG,
                 fontWeight: 600,
+                fontFamily: FF_MONO,
+                lineHeight: 1.3,
                 color: t.text,
-                letterSpacing: -0.2,
-                marginTop: 4,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
               }}
-              title={subjects.map((s) => s.name).join(", ")}
+              title={subjects.map(labelFor).join(", ")}
             >
               {title}
             </div>
@@ -321,7 +345,7 @@ export function InspectPanel({ mode, target, onClose }: Props) {
               ))}
             </div>
           </div>
-          <IconBtn t={t} title="Close (Esc)" onClick={onClose}>
+          <IconBtn t={t} size="lg" title="Close (Esc)" onClick={onClose}>
             {Icons.close}
           </IconBtn>
         </header>
@@ -345,25 +369,15 @@ export function InspectPanel({ mode, target, onClose }: Props) {
               <div>+{allWarnings.length - 4} more</div>
             )}
             {warnings.length > 0 && !allFailed && (
-              <button
-                type="button"
-                onClick={() => setAttempt((n) => n + 1)}
-                style={{
-                  alignSelf: "flex-start",
-                  marginTop: 4,
-                  border: `1px solid ${t.border}`,
-                  background: t.surface,
-                  color: t.textDim,
-                  height: 22,
-                  padding: "0 8px",
-                  borderRadius: R_MD,
-                  fontSize: FS_XS,
-                  fontFamily: "inherit",
-                  cursor: "pointer",
-                }}
-              >
-                Retry
-              </button>
+              <span style={{ alignSelf: "flex-start", marginTop: 4 }}>
+                <Btn
+                  t={t}
+                  size="sm"
+                  onClick={() => setAttempt((n) => n + 1)}
+                >
+                  Retry
+                </Btn>
+              </span>
             )}
           </div>
         )}
@@ -371,8 +385,10 @@ export function InspectPanel({ mode, target, onClose }: Props) {
         <div
           style={{
             display: "flex",
+            gap: 0,
+            padding: "0 14px",
             borderBottom: `1px solid ${t.borderSoft}`,
-            padding: "10px 12px 0",
+            background: t.headerAlt,
             flexShrink: 0,
           }}
         >
@@ -424,24 +440,11 @@ export function InspectPanel({ mode, target, onClose }: Props) {
                 message={allWarnings.join("\n") || "every subject failed"}
                 kindLabel={target.kindLabel}
               />
-              <button
-                type="button"
-                onClick={() => setAttempt((n) => n + 1)}
-                style={{
-                  marginTop: 12,
-                  border: `1px solid ${t.border}`,
-                  background: t.surface,
-                  color: t.textDim,
-                  height: 28,
-                  padding: "0 12px",
-                  borderRadius: R_MD,
-                  fontSize: FS_SM,
-                  fontFamily: "inherit",
-                  cursor: "pointer",
-                }}
-              >
-                Retry
-              </button>
+              <div style={{ marginTop: 12 }}>
+                <Btn t={t} onClick={() => setAttempt((n) => n + 1)}>
+                  Retry
+                </Btn>
+              </div>
             </div>
           )}
 
@@ -470,6 +473,7 @@ export function InspectPanel({ mode, target, onClose }: Props) {
               kindId={target.kindId}
               subjects={subjects}
               docs={docs}
+              onNavigate={onNavigate}
             />
           )}
         </div>

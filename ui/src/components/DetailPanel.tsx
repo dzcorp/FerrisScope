@@ -26,6 +26,7 @@ import {
   R_SM,
 } from "../theme";
 import {
+  EmptyState,
   Chip,
   ContainerDots,
   ErrorBlock,
@@ -1693,18 +1694,12 @@ export function ObjectEvents({
   }
   if (sorted.length === 0) {
     return (
-      <div style={{ padding: 18, height: "100%", background: t.bg }}>
-        <Eyebrow t={t}>No events for this object</Eyebrow>
-        <div
-          style={{
-            marginTop: 6,
-            fontSize: FS_MD,
-            color: t.textMuted,
-          }}
-        >
-          Events appear here as the API server records them. They expire after
-          ~1h by cluster default.
-        </div>
+      <div style={{ height: "100%", background: t.bg }}>
+        <EmptyState
+          t={t}
+          title="No events for this object"
+          hint="Events appear here as the API server records them. They expire after ~1h by cluster default."
+        />
       </div>
     );
   }
