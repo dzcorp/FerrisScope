@@ -349,6 +349,7 @@ export function NodeSummary(props: {
         subjectKey={props.name}
         refetchKey={props.detailVersion}
         emptyLabel="No pods scheduled on this node."
+        showNamespace
         enableEvict
         onNavigate={props.onNavigate}
       />

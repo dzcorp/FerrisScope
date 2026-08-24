@@ -246,3 +246,66 @@ describe("PodListSection subject + refetch keys", () => {
     expect(fetches).toBe(2);
   });
 });
+
+describe("PodListSection row chrome", () => {
+  const BASE = {
+    t: tokens("dark"),
+    mode: "dark" as const,
+    clusterId: "ctx",
+    acceptsDelta: () => true,
+    subjectKey: "deployments/production/web",
+    refetchKey: 0,
+    emptyLabel: "none",
+    fetchPods: () => Promise.resolve([POD]),
+    onNavigate: () => {},
+  };
+
+  function stubInvoke() {
+    setMockInvoke((cmd) => {
+      if (cmd === "subscribe_resource") return { rows: [], init_done: true };
+      if (cmd === "unsubscribe_resource") return undefined;
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+  }
+
+  async function show(extra: Record<string, unknown>) {
+    stubInvoke();
+    await act(async () => {
+      render(
+        <PodListSection
+          {...({ ...BASE, ...extra } as React.ComponentProps<
+            typeof PodListSection
+          >)}
+        />,
+      );
+    });
+  }
+
+  // On a workload every pod shares the controller's namespace, so the label
+  // column would be the same word repeated down the whole list.
+  it("omits the namespace label by default", async () => {
+    await show({ showNode: true });
+    expect(await screen.findByText("web-7d9f-abc")).toBeInTheDocument();
+    expect(screen.queryByText("production")).not.toBeInTheDocument();
+  });
+
+  // The Node panel's pods really do span namespaces, so it opts back in.
+  it("shows the namespace label when asked", async () => {
+    await show({ showNode: false, showNamespace: true });
+    expect(await screen.findByText("web-7d9f-abc")).toBeInTheDocument();
+    expect(screen.getByText("production")).toBeInTheDocument();
+  });
+
+  // The node is a secondary reference — clickable, but it must not carry the
+  // accent colour that marks the pod's own name.
+  it("renders the node muted while keeping it clickable", async () => {
+    await show({ showNode: true });
+    const t = tokens("dark");
+    const node = await screen.findByText("worker-1");
+    const pod = screen.getByText("web-7d9f-abc");
+    expect(node).toHaveStyle({ color: t.textMuted });
+    expect(node).toHaveStyle({ cursor: "pointer" });
+    expect(pod).toHaveStyle({ color: t.accent });
+    expect(node).not.toHaveStyle({ color: t.accent });
+  });
+});

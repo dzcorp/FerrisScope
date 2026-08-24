@@ -7,7 +7,6 @@ expression: value
   "creation_timestamp": "2026-02-10T08:30:00Z",
   "name": "web",
   "namespace": "default",
-  "pods": 5,
   "ready": "4/5",
   "up_to_date": 5
 }

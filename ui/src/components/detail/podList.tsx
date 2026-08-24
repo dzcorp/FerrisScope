@@ -54,6 +54,9 @@ export type PodListSectionProps = {
   refetchKey: number;
   /// Show which node each pod landed on. Redundant on the Node panel.
   showNode?: boolean;
+  /// Show each pod's namespace. Worth a column only where it varies — on a
+  /// workload every pod shares the controller's namespace.
+  showNamespace?: boolean;
   emptyLabel: string;
   /// Node panel only — drains are driven from there.
   enableEvict?: boolean;
@@ -61,7 +64,13 @@ export type PodListSectionProps = {
 };
 
 export function PodListSection(props: PodListSectionProps) {
-  const { t, mode, showNode = false, enableEvict = false } = props;
+  const {
+    t,
+    mode,
+    showNode = false,
+    showNamespace = false,
+    enableEvict = false,
+  } = props;
   const [state, setState] = useState<LoadState<ResourceRow[]>>({
     kind: "loading",
   });
@@ -250,6 +259,7 @@ export function PodListSection(props: PodListSectionProps) {
               clusterId={props.clusterId}
               row={row}
               showNode={showNode}
+              showNamespace={showNamespace}
               enableEvict={enableEvict}
               onNavigate={props.onNavigate}
             />
@@ -265,6 +275,7 @@ function PodRow({
   clusterId,
   row,
   showNode,
+  showNamespace,
   enableEvict,
   onNavigate,
 }: {
@@ -273,6 +284,7 @@ function PodRow({
   clusterId: string;
   row: ResourceRow;
   showNode: boolean;
+  showNamespace: boolean;
   enableEvict: boolean;
   onNavigate?: DetailNavigate;
 }) {
@@ -320,15 +332,24 @@ function PodRow({
   };
 
   return (
-    <DetailRow t={t} label={ns ?? "—"}>
-      <LinkValue
-        t={t}
-        onClick={() => onNavigate?.("Pod", ns, name)}
-        copyText={ns ? `${ns}/${name}` : name}
-        enabled={!!onNavigate}
-      >
-        {name}
-      </LinkValue>
+    // Label only where the namespace actually varies (the Node panel). On a
+    // workload every pod shares the controller's namespace, so the column
+    // would be the same word repeated down the whole list.
+    <DetailRow t={t} label={showNamespace ? (ns ?? "—") : null}>
+      {/* Identity first and unshrinkable — a pod name truncated in the middle
+          of its hash is unreadable. The node beside it gives up width
+          instead. */}
+      <span style={{ flex: "0 1 auto", minWidth: 0 }}>
+        <LinkValue
+          t={t}
+          onClick={() => onNavigate?.("Pod", ns, name)}
+          copyText={ns ? `${ns}/${name}` : name}
+          enabled={!!onNavigate}
+          truncate
+        >
+          {name}
+        </LinkValue>
+      </span>
       <StatusPill status={phase} t={t} mode={mode} dense />
       {ready && (
         <span
@@ -355,17 +376,29 @@ function PodRow({
       )}
       {showNode &&
         (node ? (
-          <LinkValue
-            t={t}
-            onClick={() => onNavigate?.("Node", null, node)}
-            copyText={node}
-            enabled={!!onNavigate}
+          // Muted: a secondary reference that shouldn't compete with the pod
+          // name. Takes the slack in the row and ellipsizes first — the full
+          // name is in the tooltip and on copy.
+          <span
+            style={{ flex: "1 1 0", minWidth: 60, marginLeft: "auto" }}
+            title={node}
           >
-            {node}
-          </LinkValue>
+            <LinkValue
+              t={t}
+              onClick={() => onNavigate?.("Node", null, node)}
+              copyText={node}
+              enabled={!!onNavigate}
+              tone="muted"
+              truncate
+            >
+              {node}
+            </LinkValue>
+          </span>
         ) : (
           // Unscheduled (Pending) — a dead link would read as a real node.
-          <Mute t={t}>—</Mute>
+          <span style={{ flex: "1 1 0", marginLeft: "auto" }}>
+            <Mute t={t}>—</Mute>
+          </span>
         ))}
       {created && (
         <span
@@ -373,7 +406,9 @@ function PodRow({
             fontSize: FS_SM,
             color: t.textMuted,
             fontFamily: FF_MONO,
-            marginLeft: "auto",
+            fontVariantNumeric: "tabular-nums",
+            flex: "0 0 auto",
+            marginLeft: showNode ? 0 : "auto",
           }}
         >
           {ageFromIso(created)}

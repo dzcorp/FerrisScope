@@ -80,6 +80,11 @@ impl KindSpec for JobSpec {
             // Pods *created*, matching `kubectl describe job`'s "Pods Statuses"
             // line — not a live count. Succeeded pods stay counted here after
             // the apiserver has garbage-collected them.
+            //
+            // Earns a column where Deployment's didn't: `completions` counts
+            // only successes, so a job that failed twice before succeeding
+            // reads 1/1 there and 3 here. Deployment/StatefulSet dropped
+            // theirs — `ready` already carried the same number.
             "pods": active + succeeded + failed,
             "completions": format!("{succeeded}/{desired}"),
             "phase": phase,
@@ -146,4 +151,47 @@ pub fn project_detail(job: &Job) -> Value {
         "conditions": conditions,
         "pod_template": pod_template,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The case that earns Job its Pods column: `completions` counts only
+    /// successes, so a job that burned two pods before succeeding still reads
+    /// 1/1 there. Only `pods` shows that three pods actually ran.
+    #[test]
+    fn pods_counts_failed_attempts_that_completions_hides() {
+        let job: Job = serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": { "name": "migrate", "namespace": "default" },
+            "spec": { "completions": 1, "backoffLimit": 4 },
+            "status": {
+                "succeeded": 1,
+                "failed": 2,
+                "completionTime": "2026-04-15T09:00:30Z"
+            }
+        }))
+        .expect("valid Job fixture");
+
+        let row = JobSpec::project(&job);
+        assert_eq!(row["completions"], "1/1");
+        assert_eq!(row["pods"], 3);
+    }
+
+    /// A Job the controller hasn't touched yet has no `status`. Projection
+    /// must be total — 0, never a panic or a null.
+    #[test]
+    fn pods_defaults_to_zero_without_status() {
+        let job: Job = serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": { "name": "fresh", "namespace": "default" },
+            "spec": { "completions": 1 }
+        }))
+        .expect("valid Job fixture");
+
+        assert_eq!(JobSpec::project(&job)["pods"], 0);
+    }
 }

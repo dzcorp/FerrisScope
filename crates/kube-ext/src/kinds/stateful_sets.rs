@@ -32,11 +32,6 @@ impl KindSpec for StatefulSetSpec {
                     kind: Some(ColumnKind::Text),
                 },
                 ColumnDef {
-                    id: "pods",
-                    header: "Pods",
-                    kind: Some(ColumnKind::Number),
-                },
-                ColumnDef {
                     id: "ready",
                     header: "Ready",
                     kind: Some(ColumnKind::Text),
@@ -62,14 +57,10 @@ impl KindSpec for StatefulSetSpec {
         let desired = spec.and_then(|s| s.replicas).unwrap_or(0);
         let ready = status.and_then(|s| s.ready_replicas).unwrap_or(0);
         let service = spec.map(|s| s.service_name.clone()).unwrap_or_default();
-        // Replicas the controller currently has created, including ones still
-        // starting up or being torn down during an ordered rolling update.
-        let pods = status.map(|s| s.replicas).unwrap_or(0);
 
         json!({
             "namespace": meta.namespace.clone().unwrap_or_default(),
             "name": meta.name.clone().unwrap_or_default(),
-            "pods": pods,
             "ready": format!("{ready}/{desired}"),
             "service": service,
             "creation_timestamp": meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),

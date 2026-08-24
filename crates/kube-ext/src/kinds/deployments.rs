@@ -32,11 +32,6 @@ impl KindSpec for DeploymentSpec {
                     kind: Some(ColumnKind::Text),
                 },
                 ColumnDef {
-                    id: "pods",
-                    header: "Pods",
-                    kind: Some(ColumnKind::Number),
-                },
-                ColumnDef {
                     id: "ready",
                     header: "Ready",
                     kind: Some(ColumnKind::Text),
@@ -68,15 +63,10 @@ impl KindSpec for DeploymentSpec {
         let ready = status.and_then(|s| s.ready_replicas).unwrap_or(0);
         let up_to_date = status.and_then(|s| s.updated_replicas).unwrap_or(0);
         let available = status.and_then(|s| s.available_replicas).unwrap_or(0);
-        // Pods across *every* ReplicaSet the Deployment owns, so a rollout's
-        // surge pods are counted — `ready`/`available` can't show those.
-        // Controller bookkeeping, so it trails the apiserver by one reconcile.
-        let pods = status.and_then(|s| s.replicas).unwrap_or(0);
 
         json!({
             "namespace": meta.namespace.clone().unwrap_or_default(),
             "name": meta.name.clone().unwrap_or_default(),
-            "pods": pods,
             "ready": format!("{ready}/{desired}"),
             "up_to_date": up_to_date,
             "available": available,
@@ -150,52 +140,5 @@ fn intorstring_to_string(v: &k8s_openapi::apimachinery::pkg::util::intstr::IntOr
     match v {
         k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(i) => i.to_string(),
         k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String(s) => s.clone(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::registry::KindSpec;
-
-    /// Mid-rollout a Deployment carries surge pods from the outgoing
-    /// ReplicaSet, so `status.replicas` exceeds `spec.replicas`. That gap is
-    /// the whole reason the Pods column exists — `ready` (4/3) and `available`
-    /// both cap at the desired count and hide the fourth pod.
-    #[test]
-    fn pods_counts_surge_replicas_above_desired() {
-        let dep: Deployment = serde_json::from_value(json!({
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": { "name": "web", "namespace": "default" },
-            "spec": { "replicas": 3, "selector": { "matchLabels": { "app": "web" } } },
-            "status": {
-                "replicas": 4,
-                "readyReplicas": 3,
-                "updatedReplicas": 1,
-                "availableReplicas": 3
-            }
-        }))
-        .expect("valid Deployment fixture");
-
-        let row = DeploymentSpec::project(&dep);
-        assert_eq!(row["pods"], 4);
-        assert_eq!(row["ready"], "3/3");
-        assert_eq!(row["available"], 3);
-    }
-
-    /// A Deployment the controller hasn't reconciled yet has no `status`
-    /// at all. Projection must be total — 0, never a panic or a null.
-    #[test]
-    fn pods_defaults_to_zero_without_status() {
-        let dep: Deployment = serde_json::from_value(json!({
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": { "name": "fresh", "namespace": "default" },
-            "spec": { "replicas": 2, "selector": { "matchLabels": { "app": "fresh" } } }
-        }))
-        .expect("valid Deployment fixture");
-
-        assert_eq!(DeploymentSpec::project(&dep)["pods"], 0);
     }
 }

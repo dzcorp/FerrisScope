@@ -41,33 +41,40 @@ export function DetailRow({
   // ReactNode so callers can decorate the label (e.g. add a doc-tooltip icon
   // next to the field name). String labels still render exactly as before
   // since the wrapper applies the canonical mono/uppercase styling.
-  label: ReactNode;
+  //
+  // `null` drops the label column entirely and gives the value the full
+  // width — for repeating rows whose label would be the same word over and
+  // over (a workload's pods all share its namespace).
+  label?: ReactNode;
   children: ReactNode;
 }) {
+  const labelled = label != null;
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "180px 1fr",
+        gridTemplateColumns: labelled ? "180px 1fr" : "1fr",
         gap: 16,
         alignItems: "baseline",
         padding: "8px 0",
         borderBottom: `1px solid ${t.borderSoft}`,
       }}
     >
-      <div
-        style={{
-          fontSize: FS_XS,
-          fontWeight: 700,
-          color: t.textMuted,
-          textTransform: "uppercase",
-          letterSpacing: 0.6,
-          fontFamily: FF_MONO,
-          marginTop: 2,
-        }}
-      >
-        {label}
-      </div>
+      {labelled && (
+        <div
+          style={{
+            fontSize: FS_XS,
+            fontWeight: 700,
+            color: t.textMuted,
+            textTransform: "uppercase",
+            letterSpacing: 0.6,
+            fontFamily: FF_MONO,
+            marginTop: 2,
+          }}
+        >
+          {label}
+        </div>
+      )}
       <div
         style={{
           minWidth: 0,
@@ -448,12 +455,22 @@ export function LinkValue({
   onClick,
   copyText,
   enabled,
+  tone = "accent",
+  truncate = false,
   children,
 }: {
   t: Tokens;
   onClick: () => void;
   copyText: string;
   enabled: boolean;
+  /// `muted` keeps the click target but drops the accent colour, so a
+  /// secondary reference (the node a pod landed on) doesn't compete with the
+  /// object's own name. Matches how the table renders its namespace / node
+  /// cells: ordinary text, pointer cursor as the only affordance.
+  tone?: "accent" | "muted";
+  /// Ellipsize instead of wrapping. For long values in a fixed-width row —
+  /// the full string is still in the tooltip and on copy.
+  truncate?: boolean;
   children: ReactNode;
 }) {
   const [ref, flash] = useCopyFlash();
@@ -479,15 +496,23 @@ export function LinkValue({
         className="fs-copyable"
         onClick={handleClick}
         style={{
-          display: "inline-flex",
+          display: truncate ? "block" : "inline-flex",
           alignItems: "center",
           fontFamily: FF_MONO,
           fontSize: FS_MD,
-          color: enabled ? t.accent : t.text,
+          color: tone === "muted" ? t.textMuted : enabled ? t.accent : t.text,
           textDecoration: "none",
           padding: "1px 4px",
           margin: "-1px -4px",
           cursor: enabled ? "pointer" : "copy",
+          ...(truncate
+            ? {
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap" as const,
+              }
+            : null),
         }}
       >
         {children}
