@@ -1,5 +1,5 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetMockInvoke, setMockInvoke } from "../../test/tauri-mock";
 import { EventsTab } from "./EventsTab";
 import { tokens } from "../../theme";
@@ -92,6 +92,38 @@ describe("EventsTab", () => {
       [A],
     );
     expect(screen.getByText("No events")).toBeInTheDocument();
+  });
+
+  // Gating the initial load on document.hidden (not just the poll) left the
+  // tab stuck on "Loading events…" until the window was visible AND a 10s
+  // tick landed.
+  it("still fetches when the window is backgrounded", async () => {
+    const spy = vi
+      .spyOn(document, "hidden", "get")
+      .mockReturnValue(true);
+    try {
+      await mount(
+        () => [event("e1", "uid-a", "ScaledUp", "2026-08-25T10:00:00Z")],
+        [A],
+      );
+      expect(screen.getByText("ScaledUp happened")).toBeInTheDocument();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Absent timestamps sorted lexically landed at the bottom regardless of the
+  // event's real time.
+  it("orders by parsed timestamp, not string compare", async () => {
+    await mount(
+      () => [
+        event("e1", "uid-a", "Older", "2026-08-25T09:00:00Z"),
+        event("e2", "uid-a", "Newer", "2026-08-25T10:00:00Z"),
+      ],
+      [A],
+    );
+    const rows = screen.getAllByText(/happened$/);
+    expect(rows[0]?.textContent).toContain("Newer");
   });
 
   it("shows an empty state when nothing has events", async () => {

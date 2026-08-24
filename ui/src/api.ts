@@ -632,9 +632,8 @@ export const api = {
   drainNode: (clusterId: string, name: string, force: boolean) =>
     invoke<DrainReport>("drain_node_cmd", { clusterId, name, force }),
 
-  // Pods scheduled on a given node. Same row shape as the pod table watcher.
-  // Pods owned by a workload, resolved server-side through its label
-  // selector. Same row shape as the pod table watcher.
+  // Pods matching a workload's label selector, resolved server-side. Same row
+  // shape as the pod table watcher.
   listPodsForWorkload: (
     clusterId: string,
     kindId: string,
@@ -648,6 +647,7 @@ export const api = {
       name,
     }),
 
+  // Pods scheduled on a given node. Same row shape as the pod table watcher.
   listPodsOnNode: (clusterId: string, node: string) =>
     invoke<ResourceRow[]>("list_pods_on_node_cmd", { clusterId, node }),
 

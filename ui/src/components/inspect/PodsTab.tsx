@@ -9,7 +9,7 @@
 // cross-cluster mix would match cluster A's pods against cluster B's selectors
 // and silently miss deltas for every cluster but one.
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import { acceptsPodDelta } from "../../lib/podSelector";
 import type { LabelSelectorSummary, ResourceRow } from "../../types";
@@ -22,7 +22,9 @@ import {
   type Tokens,
 } from "../../theme";
 import { PodListSection } from "../detail/podList";
-import { Mute, type DetailNavigate } from "../detail";
+import { DETAIL_POLL_MS } from "../detail/detailPoll";
+import type { DetailNavigate } from "../detail";
+import { EmptyState } from "../ui";
 import type { DocState, InspectSubject } from ".";
 
 type Usable = { subject: InspectSubject; selector: LabelSelectorSummary | null };
@@ -56,12 +58,24 @@ export function PodsTab({
   }, [subjects, docs]);
 
   if (groups.length === 0) {
+    // Three different causes end up here; say which one it was rather than
+    // blaming the selector for a failed fetch.
+    const anyReadable = subjects.some(
+      (s) => docs.get(s.sid)?.status === "ok",
+    );
+    const anyNamespaced = subjects.some((s) => s.namespace);
     return (
-      <div style={{ padding: "18px 22px" }}>
-        <Mute t={t}>
-          No selected object carries a pod selector we could read.
-        </Mute>
-      </div>
+      <EmptyState
+        t={t}
+        title="No pods to show"
+        hint={
+          !anyReadable
+            ? "None of the selected manifests could be read."
+            : !anyNamespaced
+              ? "These objects are cluster-scoped, so they own no pods."
+              : "No selected object carries a pod selector we could read."
+        }
+      />
     );
   }
 
@@ -100,6 +114,13 @@ function ClusterPodList({
   showClusterHeading: boolean;
   onNavigate?: DetailNavigate;
 }) {
+  // The true owner mapping comes from the fetch itself — each promise's index
+  // says which controller returned that pod. Re-deriving it from selectors
+  // would misattribute overlapping selectors (`app=web` vs
+  // `app=web,tier=fe`) and return nothing at all for a matchExpressions
+  // selector, which can't be evaluated client-side.
+  const ownerByUid = useRef(new Map<string, string>());
+
   const fetchPods = useMemo(
     () => async () => {
       const results = await Promise.allSettled(
@@ -115,10 +136,18 @@ function ClusterPodList({
       // A controller whose pods fail to list drops out; the others still show.
       // Dedup by uid — two selectors can legitimately match the same pod.
       const merged = new Map<string, ResourceRow>();
-      for (const res of results) {
-        if (res.status !== "fulfilled") continue;
-        for (const row of res.value) merged.set(row.uid, row);
-      }
+      const owners = new Map<string, string>();
+      results.forEach((res, i) => {
+        if (res.status !== "fulfilled") return;
+        const name = usable[i]!.subject.name;
+        for (const row of res.value) {
+          merged.set(row.uid, row);
+          // First writer wins, so a pod claimed by two overlapping selectors
+          // is attributed to the earlier subject rather than flip-flopping.
+          if (!owners.has(row.uid)) owners.set(row.uid, name);
+        }
+      });
+      ownerByUid.current = owners;
       return Array.from(merged.values());
     },
     [usable, clusterId, kindId],
@@ -126,19 +155,23 @@ function ClusterPodList({
 
   const acceptsDelta = useMemo(
     () => (row: ResourceRow, known: ReadonlySet<string>) =>
-      usable.some(({ selector }) => acceptsPodDelta(row, selector, known)),
+      usable.some(({ subject, selector }) =>
+        acceptsPodDelta(row, subject.namespace, selector, known),
+      ),
     [usable],
   );
 
-  // Which controller a pod belongs to, for the owner chip. A pod has one
-  // controller, so the first matching selector is the right answer even when
-  // two selectors overlap.
+  // Owner chip. A pod that arrived by delta after the last fetch has no
+  // recorded owner yet; fall back to a selector match, which is right whenever
+  // the selectors don't overlap.
   const ownerOf = useMemo(
     () =>
       (row: ResourceRow): string | null =>
-        usable.find(({ selector }) =>
-          acceptsPodDelta(row, selector, new Set()),
-        )?.subject.name ?? null,
+        ownerByUid.current.get(row.uid) ??
+        usable.find(({ subject, selector }) =>
+          acceptsPodDelta(row, subject.namespace, selector, new Set()),
+        )?.subject.name ??
+        null,
     [usable],
   );
 
@@ -146,6 +179,24 @@ function ClusterPodList({
     () => usable.map(({ subject }) => subject.sid).join("|"),
     [usable],
   );
+
+  // `PodListSection` keeps itself current from the pod delta stream, but a
+  // selector it can't evaluate (matchExpressions) refuses unknown pods — so
+  // without a periodic authoritative refetch that list would freeze at mount
+  // and never show a scale-up. Matches the detail panel's poll interval.
+  const [refetchKey, setRefetchKey] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (document.hidden) return;
+      setRefetchKey((n) => n + 1);
+    }, DETAIL_POLL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  // The union can span namespaces inside one cluster; label the rows when it
+  // does, so two same-named controllers aren't an unattributed mixed list.
+  const showNamespace =
+    new Set(usable.map(({ subject }) => subject.namespace)).size > 1;
 
   return (
     <>
@@ -181,9 +232,10 @@ function ClusterPodList({
         fetchPods={fetchPods}
         acceptsDelta={acceptsDelta}
         subjectKey={subjectKey}
-        refetchKey={0}
+        refetchKey={refetchKey}
         emptyLabel="No pods match these controllers."
         showNode
+        showNamespace={showNamespace}
         ownerOf={ownerOf}
         onNavigate={onNavigate}
       />

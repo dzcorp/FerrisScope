@@ -91,12 +91,30 @@ export function PodListSection(props: PodListSectionProps) {
   acceptsRef.current = props.acceptsDelta;
   const fetchRef = useRef(props.fetchPods);
   fetchRef.current = props.fetchPods;
+  // Monotonic across BOTH effects: they share `localMap`, so the identity
+  // guard can't tell them apart. Only the newest-issued fetch may write.
+  const fetchSeqRef = useRef(0);
+  const inFlightRef = useRef(false);
+  // Uids the delta stream admitted since the in-flight fetch was issued.
+  const admittedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
+    // Only unsubscribe if we actually subscribed. `unsubscribe_resource`
+    // decrements a SHARED refcount, so a spurious decrement — unmount while
+    // `onResourceDelta`'s listen() is still pending, or a rejected subscribe —
+    // steals the Pods table's subscription and its watcher dies after the
+    // linger window. StrictMode makes that deterministic in dev.
+    let subscribed = false;
     const localMap = new Map<string, ResourceRow>();
     mapRef.current = localMap;
+    // A new subject means the previous subject's vouched-for uids are
+    // meaningless. Left stale, `acceptsPodDelta`'s `known.has(uid)`
+    // short-circuit would admit the OLD subject's pods into the new list and
+    // the initial merge would then make them permanent.
+    knownRef.current = new Set();
+    admittedRef.current = new Set();
     // Intentionally do NOT setState({ loading }) on refetch — we keep showing
     // the previous rows until the new snapshot lands. Otherwise the section
     // briefly empties, the panel's content height collapses, and the
@@ -121,6 +139,9 @@ export function PodListSection(props: PodListSectionProps) {
             if (delta.kind === "upsert") {
               if (acceptsRef.current(delta.row, knownRef.current)) {
                 localMap.set(delta.row.uid, delta.row);
+                // Remember it so an in-flight fetch, whose snapshot predates
+                // this pod, doesn't drop it when it lands.
+                admittedRef.current.add(delta.row.uid);
                 publish();
               } else if (localMap.has(delta.row.uid)) {
                 // Stopped matching — moved node, or relabelled out of the
@@ -145,11 +166,23 @@ export function PodListSection(props: PodListSectionProps) {
 
         // Start the cluster's pods watcher (ref-counted; cheap if already up
         // because the operator has Pods open elsewhere).
+        // Counts against the same in-flight guard as a refetch — otherwise a
+        // bump arriving during mount would fire a second concurrent LIST.
+        const mySeq = ++fetchSeqRef.current;
+        inFlightRef.current = true;
         const [, initial] = await Promise.all([
-          api.subscribeResource(props.clusterId, "pods", null),
+          api.subscribeResource(props.clusterId, "pods", null).then((r) => {
+            subscribed = true;
+            return r;
+          }),
           fetchRef.current(),
-        ]);
+        ]).finally(() => {
+          inFlightRef.current = false;
+        });
         if (cancelled) return;
+        // A refetch issued after us may already have landed; it is newer and
+        // authoritative, so don't roll `known` back to this older snapshot.
+        if (fetchSeqRef.current !== mySeq) return;
 
         knownRef.current = new Set(initial.map((r) => r.uid));
         // Merge: initial fetch under any deltas already received (deltas win).
@@ -167,9 +200,11 @@ export function PodListSection(props: PodListSectionProps) {
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
-      api
-        .unsubscribeResource(props.clusterId, "pods")
-        .catch(logErr("pod-list"));
+      if (subscribed) {
+        api
+          .unsubscribeResource(props.clusterId, "pods")
+          .catch(logErr("pod-list"));
+      }
     };
     // `refetchKey` is intentionally NOT a dep: the pod watcher's deltas keep
     // this list in sync, and re-running the effect on every parent bump would
@@ -187,18 +222,39 @@ export function PodListSection(props: PodListSectionProps) {
   useEffect(() => {
     if (props.refetchKey === lastRefetchRef.current) return;
     lastRefetchRef.current = props.refetchKey;
+    // `detailVersion` bumps once per debounced watcher delta for the viewed
+    // object, so a churning rollout would otherwise fire several LISTs a
+    // second at the apiserver. One in flight at a time is enough — the delta
+    // stream carries the interim state anyway.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     let cancelled = false;
     const localMap = mapRef.current;
+    const mySeq = ++fetchSeqRef.current;
+    // Anything the delta stream admits from here on postdates this snapshot,
+    // so it must survive the merge rather than being treated as stale.
+    admittedRef.current = new Set();
     (async () => {
       try {
         const fresh = await fetchRef.current();
         if (cancelled || mapRef.current !== localMap) return;
-        knownRef.current = new Set(fresh.map((r) => r.uid));
+        if (fetchSeqRef.current !== mySeq) return;
+        const admitted = admittedRef.current;
+        knownRef.current = new Set([
+          ...fresh.map((r) => r.uid),
+          ...admitted,
+        ]);
         // The fetch is authoritative about membership, so rows it dropped
-        // leave the list. Deltas still win on content for rows in both.
+        // leave the list — except pods the stream admitted after the fetch was
+        // issued, which it simply couldn't have seen. Deltas still win on
+        // content for rows in both.
         const merged = new Map<string, ResourceRow>();
         for (const row of fresh) {
           merged.set(row.uid, localMap.get(row.uid) ?? row);
+        }
+        for (const uid of admitted) {
+          const row = localMap.get(uid);
+          if (row) merged.set(uid, row);
         }
         localMap.clear();
         for (const [uid, row] of merged) localMap.set(uid, row);
@@ -206,6 +262,8 @@ export function PodListSection(props: PodListSectionProps) {
       } catch {
         // A failed refetch keeps the delta-maintained list on screen — it is
         // still live and useful. Errors only surface from the initial load.
+      } finally {
+        inFlightRef.current = false;
       }
     })();
     return () => {
@@ -366,16 +424,16 @@ function PodRow({
           {owner}
         </span>
       )}
-      {/* Identity first and unshrinkable — a pod name truncated in the middle
-          of its hash is unreadable. The node beside it gives up width
-          instead. */}
-      <span style={{ flex: "0 1 auto", minWidth: 0 }}>
+      {/* Identity first and genuinely unshrinkable — a pod name cut mid-hash
+          is unreadable, so the node beside it gives up width instead. The
+          row wraps before this shrinks, which is why there's no `truncate`
+          here: it could never fire. */}
+      <span style={{ flex: "0 0 auto", minWidth: 0 }}>
         <LinkValue
           t={t}
           onClick={() => onNavigate?.("Pod", ns, name)}
           copyText={ns ? `${ns}/${name}` : name}
           enabled={!!onNavigate}
-          truncate
         >
           {name}
         </LinkValue>

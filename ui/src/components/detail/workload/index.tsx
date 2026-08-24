@@ -230,7 +230,9 @@ export function DeploymentSummary(props: {
           fetchPods={() =>
             api.listPodsForWorkload(props.clusterId, "deployments", ns, props.name)
           }
-          acceptsDelta={(row, known) => acceptsPodDelta(row, d.selector, known)}
+          acceptsDelta={(row, known) =>
+            acceptsPodDelta(row, ns, d.selector, known)
+          }
           subjectKey={`deployments/${ns}/${props.name}`}
           refetchKey={props.detailVersion}
           emptyLabel="No pods match this Deployment's selector."
@@ -370,7 +372,9 @@ export function ReplicaSetSummary(props: {
           fetchPods={() =>
             api.listPodsForWorkload(props.clusterId, "replicasets", ns, props.name)
           }
-          acceptsDelta={(row, known) => acceptsPodDelta(row, d.selector, known)}
+          acceptsDelta={(row, known) =>
+            acceptsPodDelta(row, ns, d.selector, known)
+          }
           subjectKey={`replicasets/${ns}/${props.name}`}
           refetchKey={props.detailVersion}
           emptyLabel="No pods match this ReplicaSet's selector."
@@ -589,7 +593,9 @@ export function StatefulSetSummary(props: {
           fetchPods={() =>
             api.listPodsForWorkload(props.clusterId, "statefulsets", ns, props.name)
           }
-          acceptsDelta={(row, known) => acceptsPodDelta(row, d.selector, known)}
+          acceptsDelta={(row, known) =>
+            acceptsPodDelta(row, ns, d.selector, known)
+          }
           subjectKey={`statefulsets/${ns}/${props.name}`}
           refetchKey={props.detailVersion}
           emptyLabel="No pods match this StatefulSet's selector."
@@ -746,7 +752,9 @@ export function DaemonSetSummary(props: {
           fetchPods={() =>
             api.listPodsForWorkload(props.clusterId, "daemonsets", ns, props.name)
           }
-          acceptsDelta={(row, known) => acceptsPodDelta(row, d.selector, known)}
+          acceptsDelta={(row, known) =>
+            acceptsPodDelta(row, ns, d.selector, known)
+          }
           subjectKey={`daemonsets/${ns}/${props.name}`}
           refetchKey={props.detailVersion}
           emptyLabel="No pods match this DaemonSet's selector."
@@ -928,7 +936,9 @@ export function JobSummary(props: {
           fetchPods={() =>
             api.listPodsForWorkload(props.clusterId, "jobs", ns, props.name)
           }
-          acceptsDelta={(row, known) => acceptsPodDelta(row, d.selector, known)}
+          acceptsDelta={(row, known) =>
+            acceptsPodDelta(row, ns, d.selector, known)
+          }
           subjectKey={`jobs/${ns}/${props.name}`}
           refetchKey={props.detailVersion}
           emptyLabel="No pods match this Job's selector."

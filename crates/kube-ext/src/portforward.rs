@@ -516,3 +516,83 @@ pub async fn snapshot(handle: &ForwardHandle) -> ForwardEntry {
 pub fn new_status_channel() -> broadcast::Sender<(String, ForwardStatus)> {
     broadcast::channel(STATUS_BUFFER).0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, LabelSelectorRequirement};
+    use std::collections::BTreeMap;
+
+    fn deployment(sel: LabelSelector) -> Deployment {
+        Deployment {
+            spec: Some(k8s_openapi::api::apps::v1::DeploymentSpec {
+                selector: sel,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The bug this shares `selector_query` to fix: a local serialiser read
+    /// `matchLabels` only, so an expression term vanished and the query
+    /// widened — port-forward then bridged traffic to a pod outside the
+    /// workload.
+    #[test]
+    fn workload_selector_emits_both_labels_and_expressions() {
+        let mut labels = BTreeMap::new();
+        labels.insert("app".to_owned(), "web".to_owned());
+        let q = workload_selector_deployment(&deployment(LabelSelector {
+            match_labels: Some(labels),
+            match_expressions: Some(vec![LabelSelectorRequirement {
+                key: "tier".to_owned(),
+                operator: "NotIn".to_owned(),
+                values: Some(vec!["canary".to_owned()]),
+            }]),
+        }))
+        .expect("selector serialises");
+
+        assert!(q.contains("app=web"), "lost matchLabels: {q}");
+        assert!(q.contains("tier notin (canary)"), "lost expression: {q}");
+    }
+
+    /// An expression-only selector used to serialise to `None` (no forward at
+    /// all); it now produces a real set-based query.
+    #[test]
+    fn workload_selector_handles_expression_only_selectors() {
+        let q = workload_selector_deployment(&deployment(LabelSelector {
+            match_labels: None,
+            match_expressions: Some(vec![LabelSelectorRequirement {
+                key: "app".to_owned(),
+                operator: "In".to_owned(),
+                values: Some(vec!["web".to_owned(), "api".to_owned()]),
+            }]),
+        }));
+        assert_eq!(q.as_deref(), Some("app in (web,api)"));
+    }
+
+    /// An operator we don't understand must refuse the whole selector rather
+    /// than drop the term — dropping a restricting term widens the match.
+    #[test]
+    fn workload_selector_refuses_an_unknown_operator() {
+        let mut labels = BTreeMap::new();
+        labels.insert("app".to_owned(), "web".to_owned());
+        let q = workload_selector_deployment(&deployment(LabelSelector {
+            match_labels: Some(labels),
+            match_expressions: Some(vec![LabelSelectorRequirement {
+                key: "tier".to_owned(),
+                operator: "GreaterThan".to_owned(),
+                values: Some(vec!["3".to_owned()]),
+            }]),
+        }));
+        assert_eq!(
+            q, None,
+            "must not fall back to the widened matchLabels query"
+        );
+    }
+
+    /// No spec at all — total, not a panic.
+    #[test]
+    fn workload_selector_tolerates_a_specless_object() {
+        assert_eq!(workload_selector_deployment(&Deployment::default()), None);
+    }
+}

@@ -8,12 +8,37 @@ describe("flattenFields", () => {
     expect(m.get("spec.paused")).toBe("false");
   });
 
-  it("indexes array entries", () => {
+  // Kubernetes merges these lists by `name`, not position, so two identical
+  // objects whose containers happen to be ordered differently must compare
+  // equal rather than reporting every element as changed.
+  it("keys array entries by their Kubernetes merge key", () => {
     const m = flattenFields({
       spec: { containers: [{ name: "api" }, { name: "sidecar" }] },
     });
-    expect(m.get("spec.containers[0].name")).toBe("api");
-    expect(m.get("spec.containers[1].name")).toBe("sidecar");
+    expect(m.get("spec.containers[api].name")).toBe("api");
+    expect(m.get("spec.containers[sidecar].name")).toBe("sidecar");
+  });
+
+  it("falls back to the index for entries with no merge key", () => {
+    const m = flattenFields({ spec: { args: ["--a", "--b"] } });
+    expect(m.get("spec.args[0]")).toBe("--a");
+    expect(m.get("spec.args[1]")).toBe("--b");
+  });
+
+  // `{a: {b: 1}}` and `{"a.b": 2}` both wanted the path `a.b`; one silently
+  // won and the other vanished from the comparison entirely.
+  it("quotes keys containing dots so they cannot collide with nesting", () => {
+    const m = flattenFields({ a: { b: 1 }, "a.b": 2 });
+    expect(m.get("a.b")).toBe("1");
+    expect(m.get('["a.b"]')).toBe("2");
+    expect(m.size).toBe(2);
+  });
+
+  it("quotes real Kubernetes label keys", () => {
+    const m = flattenFields({
+      metadata: { labels: { "app.kubernetes.io/name": "web" } },
+    });
+    expect(m.get('metadata.labels["app.kubernetes.io/name"]')).toBe("web");
   });
 
   // "absent" and "empty" are different facts, and telling them apart is
@@ -82,6 +107,23 @@ describe("buildFieldRows", () => {
     const paths = buildFieldRows([doc]).map((r) => r.path);
     expect(paths[2]).toBe("xs[2]");
     expect(paths[10]).toBe("xs[10]");
+  });
+
+  it("reports no difference when merge-keyed lists are reordered", () => {
+    const a = flattenFields({
+      spec: { containers: [{ name: "api", image: "v1" }, { name: "log", image: "v2" }] },
+    });
+    const b = flattenFields({
+      spec: { containers: [{ name: "log", image: "v2" }, { name: "api", image: "v1" }] },
+    });
+    expect(buildFieldRows([a, b]).some((r) => r.differs)).toBe(false);
+  });
+
+  // Order IS the meaning for args/command, so a reorder must still show up.
+  it("still reports a difference when an order-significant list is reordered", () => {
+    const a = flattenFields({ spec: { args: ["--a", "--b"] } });
+    const b = flattenFields({ spec: { args: ["--b", "--a"] } });
+    expect(buildFieldRows([a, b]).some((r) => r.differs)).toBe(true);
   });
 
   it("handles a single subject — every row matches itself", () => {

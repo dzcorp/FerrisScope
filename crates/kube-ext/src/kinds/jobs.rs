@@ -77,15 +77,18 @@ impl KindSpec for JobSpec {
         json!({
             "namespace": meta.namespace.clone().unwrap_or_default(),
             "name": meta.name.clone().unwrap_or_default(),
-            // Pods *created*, matching `kubectl describe job`'s "Pods Statuses"
-            // line — not a live count. Succeeded pods stay counted here after
-            // the apiserver has garbage-collected them.
+            // `active + succeeded + failed`, matching `kubectl describe job`'s
+            // "Pods Statuses" line. Not a live count: succeeded pods stay
+            // counted after the apiserver garbage-collects them, and the
+            // number dips while pods terminate. Widened to i64 because a
+            // projection must be total — i32 addition on apiserver-supplied
+            // values panics in debug and wraps negative in release.
             //
             // Earns a column where Deployment's didn't: `completions` counts
             // only successes, so a job that failed twice before succeeding
             // reads 1/1 there and 3 here. Deployment/StatefulSet dropped
             // theirs — `ready` already carried the same number.
-            "pods": active + succeeded + failed,
+            "pods": i64::from(active) + i64::from(succeeded) + i64::from(failed),
             "completions": format!("{succeeded}/{desired}"),
             "phase": phase,
             "creation_timestamp": meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),

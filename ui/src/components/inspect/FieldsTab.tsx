@@ -27,10 +27,14 @@ export function FieldsTab({
   t,
   subjects,
   docs,
+  labelFor,
 }: {
   t: Tokens;
   subjects: InspectSubject[];
   docs: Map<string, DocState>;
+  /// Namespace-qualified when the selection spans namespaces, so two
+  /// same-named objects don't render identical column headers.
+  labelFor?: (s: InspectSubject) => string;
 }) {
   const [diffOnly, setDiffOnly] = useState(true);
 
@@ -148,7 +152,7 @@ export function FieldsTab({
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {s.name}
+                      {labelFor ? labelFor(s) : s.name}
                     </span>
                   </span>
                 </HeadCell>

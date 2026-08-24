@@ -25,6 +25,7 @@ const layers = (over?: Partial<HotkeyLayers>): HotkeyLayers => ({
   nsModalOpen: false,
   filterEditing: false,
   hasSelection: false,
+  drawerOpen: false,
   inTextInput: false,
   ...over,
 });
@@ -171,5 +172,33 @@ describe("intentPreventsDefault", () => {
     expect(intentPreventsDefault("toggle-palette")).toBe(true);
     expect(intentPreventsDefault("esc-palette")).toBe(false);
     expect(intentPreventsDefault("esc-selection")).toBe(false);
+  });
+});
+
+describe("Esc while a drawer is open", () => {
+  // The drawers close themselves on Esc. If App also consumed it, one press
+  // would close the drawer AND wipe the selection it was built from —
+  // contradicting the promise that the selection survives.
+  it("does not clear the selection", () => {
+    expect(
+      hotkeyIntent(ev({ key: "Escape" }), {
+        ...layers({ hasSelection: true, drawerOpen: true }),
+      }),
+    ).toBeNull();
+  });
+
+  it("still clears the selection when no drawer is open", () => {
+    expect(
+      hotkeyIntent(ev({ key: "Escape" }), layers({ hasSelection: true })),
+    ).toBe("esc-selection");
+  });
+
+  // Modal layers sit above the drawers and keep their Esc.
+  it("leaves shallower modal layers alone", () => {
+    expect(
+      hotkeyIntent(ev({ key: "Escape" }), {
+        ...layers({ hasSelection: true, drawerOpen: true, paletteOpen: true }),
+      }),
+    ).toBe("esc-palette");
   });
 });

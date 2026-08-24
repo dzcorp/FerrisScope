@@ -358,3 +358,82 @@ describe("PodListSection owner chip", () => {
     expect(await screen.findByText("web-7d9f-abc")).toBeInTheDocument();
   });
 });
+
+describe("PodListSection subscription hygiene", () => {
+  const BASE = {
+    t: tokens("dark"),
+    mode: "dark" as const,
+    clusterId: "ctx",
+    acceptsDelta: () => true,
+    subjectKey: "deployments/production/web",
+    emptyLabel: "none",
+    onNavigate: () => {},
+  };
+
+  function track() {
+    const calls: string[] = [];
+    setMockInvoke((cmd) => {
+      calls.push(cmd);
+      if (cmd === "subscribe_resource") return { rows: [], init_done: true };
+      if (cmd === "unsubscribe_resource") return undefined;
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    return calls;
+  }
+
+  // `unsubscribe_resource` decrements a SHARED refcount. Unsubscribing when we
+  // never subscribed steals the Pods table's watcher.
+  it("does not unsubscribe when the initial fetch failed", async () => {
+    const calls = track();
+    const { unmount } = render(
+      <PodListSection
+        {...({
+          ...BASE,
+          refetchKey: 0,
+          fetchPods: () => Promise.reject(new Error("nope")),
+        } as React.ComponentProps<typeof PodListSection>)}
+      />,
+    );
+    await act(async () => {});
+    unmount();
+    await act(async () => {});
+    const subs = calls.filter((c) => c === "subscribe_resource").length;
+    const unsubs = calls.filter((c) => c === "unsubscribe_resource").length;
+    expect(unsubs).toBeLessThanOrEqual(subs);
+  });
+
+  // detailVersion bumps per debounced watcher delta; a churning rollout would
+  // otherwise fire several LISTs a second.
+  it("coalesces overlapping refetches into one in-flight request", async () => {
+    track();
+    let fetches = 0;
+    let release: (v: ResourceRow[]) => void = () => {};
+    const props = {
+      ...BASE,
+      refetchKey: 1,
+      fetchPods: () => {
+        fetches += 1;
+        return new Promise<ResourceRow[]>((res) => {
+          release = res;
+        });
+      },
+    } as React.ComponentProps<typeof PodListSection>;
+
+    const { rerender } = render(<PodListSection {...props} />);
+    await act(async () => {});
+    const afterMount = fetches;
+
+    // Three bumps while the first fetch is still outstanding — all three must
+    // be swallowed by the in-flight guard.
+    for (const k of [2, 3, 4]) {
+      await act(async () => {
+        rerender(<PodListSection {...props} refetchKey={k} />);
+      });
+    }
+    expect(fetches).toBe(afterMount);
+
+    await act(async () => {
+      release([]);
+    });
+  });
+});

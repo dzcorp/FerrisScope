@@ -25,6 +25,14 @@ import type { InspectSubject } from ".";
 
 type Tagged = { row: ResourceRow; subject: InspectSubject };
 
+/// Epoch millis, 0 for anything unparseable — mirrors `DetailPanel`'s helper
+/// so the two event surfaces order identically.
+function parseTs(v: unknown): number {
+  if (typeof v !== "string") return 0;
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? 0 : t;
+}
+
 type State =
   | { kind: "loading" }
   | { kind: "ready"; rows: Tagged[]; warnings: string[] }
@@ -34,10 +42,13 @@ export function EventsTab({
   t,
   mode,
   subjects,
+  labelFor,
 }: {
   t: Tokens;
   mode: ThemeMode;
   subjects: InspectSubject[];
+  /// Namespace-qualified when the selection spans namespaces.
+  labelFor?: (s: InspectSubject) => string;
 }) {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [, setTick] = useState(0);
@@ -48,9 +59,10 @@ export function EventsTab({
   useEffect(() => {
     let cancelled = false;
     let inFlight = false;
+    setState({ kind: "loading" });
 
     const load = async () => {
-      if (inFlight || document.hidden) return;
+      if (inFlight) return;
       inFlight = true;
       const list = subjectsRef.current;
       try {
@@ -76,11 +88,7 @@ export function EventsTab({
             if (row.involved_uid === subject.uid) rows.push({ row, subject });
           }
         });
-        rows.sort((a, b) =>
-          String(b.row.last_seen ?? "").localeCompare(
-            String(a.row.last_seen ?? ""),
-          ),
-        );
+        rows.sort((a, b) => parseTs(b.row.last_seen) - parseTs(a.row.last_seen));
         setState({ kind: "ready", rows, warnings });
       } catch (e) {
         if (!cancelled) setState({ kind: "error", message: String(e) });
@@ -89,11 +97,20 @@ export function EventsTab({
       }
     };
 
+    // Fetch immediately, always. Gating this on `document.hidden` too would
+    // leave the tab stuck on "Loading events…" when the drawer is opened with
+    // the window backgrounded, until it is visible AND a tick lands.
     void load();
-    const poll = setInterval(() => void load(), DETAIL_POLL_MS);
+    const poll = setInterval(() => {
+      if (typeof document === "undefined" || !document.hidden) void load();
+    }, DETAIL_POLL_MS);
     // Ages are relative; re-render once a second so they stay honest between
-    // polls without refetching.
-    const tick = setInterval(() => setTick((n) => n + 1), 1000);
+    // polls without refetching. Skipped while hidden — nobody is reading it.
+    const tick = setInterval(() => {
+      if (typeof document === "undefined" || !document.hidden) {
+        setTick((n) => n + 1);
+      }
+    }, 1000);
     return () => {
       cancelled = true;
       clearInterval(poll);
@@ -102,11 +119,9 @@ export function EventsTab({
   }, [key]);
 
   if (state.kind === "loading") {
-    return (
-      <div style={{ padding: "18px 22px" }}>
-        <LoadingLine t={t} label="Loading events…" />
-      </div>
-    );
+    // Straight into the pane — LoadingLine's centred layout is `height: 100%`
+    // and a padded auto-height wrapper would collapse it.
+    return <LoadingLine t={t} label="Loading events…" />;
   }
   if (state.kind === "error") {
     return (
@@ -214,7 +229,7 @@ export function EventsTab({
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {subject.name}
+                    {labelFor ? labelFor(subject) : subject.name}
                   </span>
                 </span>
               </td>

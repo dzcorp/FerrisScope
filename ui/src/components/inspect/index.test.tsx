@@ -6,6 +6,7 @@ import {
   InspectPanel,
   MAX_INSPECT_SUBJECTS,
   inspectTargetFromSelection,
+  pluralizeKind,
   type InspectSubject,
   type InspectTarget,
 } from ".";
@@ -160,7 +161,77 @@ describe("InspectPanel", () => {
   it("names the selection in the header", async () => {
     stubYaml();
     await open(target("deployments", 5));
-    expect(screen.getByText("5 Deployments · compared")).toBeInTheDocument();
+    expect(screen.getByText(/5\s+Deployments/)).toBeInTheDocument();
     expect(screen.getByText("web-0, web-1, web-2 +2")).toBeInTheDocument();
+  });
+
+  // Events reads uids off the selection, not the manifests, so a slow or
+  // failed manifest fetch must not hold it hostage.
+  it("renders Events even when every manifest failed", async () => {
+    setMockInvoke((cmd) => {
+      if (cmd === "get_resource_yaml_cmd") throw new Error("boom");
+      if (cmd === "list_object_events_cmd") return [];
+      throw new Error(`unexpected: ${cmd}`);
+    });
+    await open(target("deployments", 2));
+    await act(async () => {
+      fireEvent.click(screen.getByText("Events"));
+    });
+    expect(screen.getByText("No events")).toBeInTheDocument();
+  });
+
+  // Retry used to exist only when EVERY subject failed.
+  it("offers a retry when only some subjects failed", async () => {
+    let n = 0;
+    setMockInvoke((cmd) => {
+      if (cmd === "get_resource_yaml_cmd") {
+        n += 1;
+        if (n === 2) throw new Error("404");
+        return YAML;
+      }
+      return [];
+    });
+    await open(target("deployments", 2));
+    expect(screen.getByText("Retry")).toBeInTheDocument();
+  });
+
+  it("refetches when retry is clicked", async () => {
+    let calls = 0;
+    setMockInvoke((cmd) => {
+      if (cmd === "get_resource_yaml_cmd") {
+        calls += 1;
+        throw new Error("boom");
+      }
+      return [];
+    });
+    await open(target("deployments", 2));
+    const before = calls;
+    await act(async () => {
+      fireEvent.click(screen.getByText("Retry"));
+    });
+    expect(calls).toBeGreaterThan(before);
+  });
+
+  // Two objects of the same name in different namespaces were rendered
+  // identically — same text, same cluster dot.
+  it("qualifies names with the namespace when the selection spans them", async () => {
+    stubYaml();
+    const tgt = target("deployments", 2);
+    tgt.subjects[0]!.namespace = "staging";
+    tgt.subjects[0]!.name = "web";
+    tgt.subjects[1]!.namespace = "production";
+    tgt.subjects[1]!.name = "web";
+    await open(tgt);
+    expect(screen.getByText("staging/web, production/web")).toBeInTheDocument();
+  });
+});
+
+describe("pluralizeKind", () => {
+  it("handles the shapes a naive + \"s\" gets wrong", () => {
+    expect(pluralizeKind("Deployment")).toBe("Deployments");
+    expect(pluralizeKind("Ingress")).toBe("Ingresses");
+    expect(pluralizeKind("NetworkPolicy")).toBe("NetworkPolicies");
+    expect(pluralizeKind("StorageClass")).toBe("StorageClasses");
+    expect(pluralizeKind("Gateway")).toBe("Gateways");
   });
 });

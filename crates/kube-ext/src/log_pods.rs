@@ -212,9 +212,8 @@ async fn list_by_selector(
     selector: Option<&LabelSelector>,
 ) -> Result<Vec<ResolvedLogPod>, FetchError> {
     let Some(query) = selector.and_then(selector_query) else {
-        // A selector built only from matchExpressions can't be expressed as
-        // an equality list query — surface it rather than over-matching the
-        // whole namespace.
+        // No usable selector — empty, or carrying an operator we don't
+        // recognise. Surface it rather than over-matching the namespace.
         return Err(FetchError::NoSelector(t.name.clone()));
     };
     let pods: Api<Pod> = Api::namespaced(client, &t.namespace);
@@ -225,10 +224,12 @@ async fn list_by_selector(
 
 /// Serialize a `LabelSelector` into the apiserver's label-selector query string,
 /// covering BOTH `matchLabels` (equality) and `matchExpressions` (set-based:
-/// `In` / `NotIn` / `Exists` / `DoesNotExist`). Returns `None` only for a wholly
+/// `In` / `NotIn` / `Exists` / `DoesNotExist`). Returns `None` for a wholly
 /// empty selector (no labels, no expressions) — which would match the entire
-/// namespace, never what a workload means. matchLabels iterate in `BTreeMap`
-/// key order so the query is deterministic.
+/// namespace, never what a workload means — and for a selector carrying an
+/// operator we don't recognise, since silently dropping that term would widen
+/// the match. matchLabels iterate in `BTreeMap` key order so the query is
+/// deterministic.
 pub(crate) fn selector_query(sel: &LabelSelector) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(labels) = sel.match_labels.as_ref() {
@@ -244,9 +245,13 @@ pub(crate) fn selector_query(sel: &LabelSelector) -> Option<String> {
                 "NotIn" => parts.push(format!("{} notin ({})", e.key, values.join(","))),
                 "Exists" => parts.push(e.key.clone()),
                 "DoesNotExist" => parts.push(format!("!{}", e.key)),
-                // Unknown operator: skip rather than emit a query the apiserver
-                // would 400 on. Projections/selectors must be total.
-                _ => {}
+                // An unrecognised operator cannot be dropped: omitting a
+                // restricting term (NotIn / DoesNotExist) WIDENS the query, so
+                // we would match pods the workload doesn't own — and callers
+                // port-forward to, and offer actions on, whatever comes back.
+                // Refuse the whole selector instead; callers surface
+                // `NoSelector`.
+                _ => return None,
             }
         }
     }

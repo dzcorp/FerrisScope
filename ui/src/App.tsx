@@ -712,6 +712,7 @@ export default function App() {
         nsModalOpen,
         filterEditing,
         hasSelection: selection.size > 0,
+        drawerOpen: !!compareTarget || !!observeTarget || !!inspectTarget,
         inTextInput:
           tgt != null &&
           tgt.closest(
@@ -791,6 +792,9 @@ export default function App() {
     settingsOpen,
     nsModalOpen,
     selection,
+    compareTarget,
+    observeTarget,
+    inspectTarget,
     activeContexts,
     addDockTab,
     clearSelection,

@@ -29,6 +29,10 @@ export type HotkeyLayers = {
   nsModalOpen: boolean;
   filterEditing: boolean;
   hasSelection: boolean;
+  /// A right-hand drawer (detail / logs / compare / inspect) is open. Those
+  /// close themselves on Esc, so App must NOT also consume it — otherwise one
+  /// Esc closes the drawer AND wipes the selection the drawer was showing.
+  drawerOpen: boolean;
   /// The event target sits inside an input / textarea / contenteditable —
   /// suppresses the bare `/` shortcut so typing slashes keeps working.
   inTextInput: boolean;
@@ -92,16 +96,16 @@ export function hotkeyIntent(
   if (meta && e.key === "`" && l.scopeActive) return "new-terminal";
   if (meta && e.shiftKey && letter === "y" && l.scopeActive) return "new-yaml";
 
-  // R-13: Esc cascades from the deepest layer outward. DetailPanel and
-  // LogPanel register their own Esc to close themselves; this resolver
-  // only sees the layers App owns.
+  // R-13: Esc cascades from the deepest layer outward. The right-hand drawers
+  // register their own Esc to close themselves, so `drawerOpen` stops this
+  // resolver from consuming the same keypress for a shallower layer.
   if (e.key === "Escape") {
     if (l.addMenuOpen) return "esc-add-menu";
     if (l.paletteOpen) return "esc-palette";
     if (l.filterEditing) return "esc-filter";
     if (l.settingsOpen) return "esc-settings";
     if (l.nsModalOpen) return "esc-ns-modal";
-    if (l.hasSelection) return "esc-selection";
+    if (l.hasSelection && !l.drawerOpen) return "esc-selection";
   }
   return null;
 }

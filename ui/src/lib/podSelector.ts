@@ -33,15 +33,23 @@ export function selectorIsClientEvaluable(
 
 /// Whether a pod delta should be folded into a workload's pod list.
 ///
+/// `namespace` is load-bearing, not decoration: the delta stream is
+/// CLUSTER-WIDE while the server-side list is namespaced, so matching on
+/// labels alone would pull in a same-labelled pod from another namespace —
+/// `app=web` in both `staging` and `production` is the common case, and
+/// workload panels hide the namespace column, so the operator couldn't see it.
+///
 /// `known` is the set of uids the server-fetched list already vouched for.
 /// When the selector uses `matchExpressions` we can only confirm updates to
 /// pods we were told about — admitting a new pod on `matchLabels` alone could
 /// pull in one the expressions exclude.
 export function acceptsPodDelta(
   row: ResourceRow,
+  namespace: string | null,
   selector: LabelSelectorSummary | null,
   known: ReadonlySet<string>,
 ): boolean {
+  if (namespace !== null && row.namespace !== namespace) return false;
   if (known.has(row.uid)) {
     return selectorIsClientEvaluable(selector)
       ? matchesLabelSelector(row.__labels, selector)

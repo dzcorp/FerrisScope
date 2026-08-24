@@ -497,7 +497,8 @@ export function LinkValue({
         onClick={handleClick}
         style={{
           display: truncate ? "block" : "inline-flex",
-          alignItems: "center",
+          // Only meaningful in the inline-flex layout; `block` ignores it.
+          ...(truncate ? null : { alignItems: "center" as const }),
           fontFamily: FF_MONO,
           fontSize: FS_MD,
           color: tone === "muted" ? t.textMuted : enabled ? t.accent : t.text,

@@ -3,7 +3,8 @@
 //
 // Sibling to ComparePanel, not a replacement: that one diffs a pair's raw
 // manifests in Monaco, this one compares N objects field by field and merges
-// their events and pods. Both can be open from the same selection.
+// their events and pods. Only one drawer is reachable at a time — the bulk bar
+// hides while any of them is open, same as ComparePanel and LogPanel.
 //
 // Every tab reads from ONE shared fetch of each subject's manifest via
 // `getResourceYaml`, which is generic across every kind including CRDs. That
@@ -51,6 +52,15 @@ export type InspectTarget = {
 };
 
 export type InspectTab = "fields" | "events" | "pods";
+
+/// Pluralize a Kubernetes Kind for display. The registry's `plural` is
+/// lowercase (`networkpolicies`), which would render as "Networkpolicies"
+/// beside a capitalised singular, and a naive `+ "s"` gives "Ingresss".
+export function pluralizeKind(kind: string): string {
+  if (/(s|x|z|ch|sh)$/i.test(kind)) return `${kind}es`;
+  if (/[^aeiou]y$/i.test(kind)) return `${kind.slice(0, -1)}ies`;
+  return `${kind}s`;
+}
 
 /// Cap on subjects one drawer fetches. Each is a live apiserver GET, and a
 /// 200-row bulk selection would fire 200 of them to feed a grid nobody can
@@ -207,10 +217,18 @@ export function InspectPanel({ mode, target, onClose }: Props) {
   const allFailed =
     !loading && subjects.every((s) => docs.get(s.sid)?.status === "error");
 
+  // Qualify names when the selection spans namespaces — comparing `frontend`
+  // in staging against `frontend` in production is a headline use case, and
+  // bare names would render the two identically.
+  const nsVaries =
+    new Set(subjects.map((s) => s.namespace ?? "")).size > 1;
+  const labelFor = (s: InspectSubject) =>
+    nsVaries && s.namespace ? `${s.namespace}/${s.name}` : s.name;
+
   const title =
     subjects
       .slice(0, 3)
-      .map((s) => s.name)
+      .map(labelFor)
       .join(", ") + (subjects.length > 3 ? ` +${subjects.length - 3}` : "");
 
   return (
@@ -268,8 +286,11 @@ export function InspectPanel({ mode, target, onClose }: Props) {
                 letterSpacing: 0.6,
               }}
             >
-              {subjects.length} {target.kindLabel}
-              {subjects.length === 1 ? "" : "s"} · compared
+              {subjects.length}{" "}
+              {subjects.length === 1
+                ? target.kindLabel
+                : pluralizeKind(target.kindLabel)}{" "}
+              · compared
             </div>
             <div
               style={{
@@ -296,7 +317,7 @@ export function InspectPanel({ mode, target, onClose }: Props) {
               }}
             >
               {subjects.map((s) => (
-                <SubjectChip key={s.sid} t={t} subject={s} />
+                <SubjectChip key={s.sid} t={t} subject={s} label={labelFor(s)} />
               ))}
             </div>
           </div>
@@ -322,6 +343,27 @@ export function InspectPanel({ mode, target, onClose }: Props) {
             ))}
             {allWarnings.length > 4 && (
               <div>+{allWarnings.length - 4} more</div>
+            )}
+            {warnings.length > 0 && !allFailed && (
+              <button
+                type="button"
+                onClick={() => setAttempt((n) => n + 1)}
+                style={{
+                  alignSelf: "flex-start",
+                  marginTop: 4,
+                  border: `1px solid ${t.border}`,
+                  background: t.surface,
+                  color: t.textDim,
+                  height: 22,
+                  padding: "0 8px",
+                  borderRadius: R_MD,
+                  fontSize: FS_XS,
+                  fontFamily: "inherit",
+                  cursor: "pointer",
+                }}
+              >
+                Retry
+              </button>
             )}
           </div>
         )}
@@ -359,14 +401,23 @@ export function InspectPanel({ mode, target, onClose }: Props) {
           )}
         </div>
 
-        <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
-          {loading && (
-            <div style={{ padding: "18px 22px" }}>
-              <LoadingLine t={t} label="Fetching manifests…" />
-            </div>
+        {/* Column flex so a child's `height: 100%` resolves — the centred
+            LoadingLine needs a definite height, and a padded auto-height
+            wrapper collapses it into a squashed bar at the top. */}
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          {loading && tab !== "events" && (
+            <LoadingLine t={t} label="Fetching manifests…" />
           )}
 
-          {!loading && allFailed && (
+          {!loading && allFailed && tab !== "events" && (
             <div style={{ padding: "18px 22px" }}>
               <ErrorBlock
                 t={t}
@@ -395,10 +446,22 @@ export function InspectPanel({ mode, target, onClose }: Props) {
           )}
 
           {!loading && !allFailed && tab === "fields" && (
-            <FieldsTab t={t} subjects={subjects} docs={docs} />
+            <FieldsTab
+              t={t}
+              subjects={subjects}
+              docs={docs}
+              labelFor={labelFor}
+            />
           )}
-          {!loading && !allFailed && tab === "events" && (
-            <EventsTab t={t} mode={mode} subjects={subjects} />
+          {/* Events reads uids off the selection, not the manifests, so it
+              renders even while those are still in flight or all failed. */}
+          {tab === "events" && (
+            <EventsTab
+              t={t}
+              mode={mode}
+              subjects={subjects}
+              labelFor={labelFor}
+            />
           )}
           {!loading && !allFailed && tab === "pods" && hasPods && (
             <PodsTab
@@ -415,7 +478,15 @@ export function InspectPanel({ mode, target, onClose }: Props) {
   );
 }
 
-function SubjectChip({ t, subject }: { t: Tokens; subject: InspectSubject }) {
+function SubjectChip({
+  t,
+  subject,
+  label,
+}: {
+  t: Tokens;
+  subject: InspectSubject;
+  label: string;
+}) {
   return (
     <span
       title={`${subject.clusterName} · ${subject.namespace ?? "cluster-scoped"} / ${subject.name}`}
@@ -450,7 +521,7 @@ function SubjectChip({ t, subject }: { t: Tokens; subject: InspectSubject }) {
           whiteSpace: "nowrap",
         }}
       >
-        {subject.name}
+        {label}
       </span>
     </span>
   );

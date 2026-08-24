@@ -7,8 +7,9 @@
 //! cargo test --workspace --features integration -- --test-threads=1 --nocapture
 //! ```
 //!
-//! Every fixture is scoped to a unique `fs-it-*` namespace and torn down at
-//! the end, so concurrent runs don't collide.
+//! Each test owns an `fs-it-*` namespace and deletes it on the way out. The
+//! namespace name is per-test, not per-run, so a re-run inside the previous
+//! run's termination window waits for it to disappear before seeding.
 
 #![cfg(feature = "integration")]
 
@@ -42,6 +43,23 @@ fn deployment_yaml(ns: &str, name: &str, replicas: u32) -> String {
     )
 }
 
+/// Wait for `ns` to be gone before seeding it. A previous run's `--wait=false`
+/// delete can still be terminating, and applying into a terminating namespace
+/// 403s partway through with a confusing error.
+async fn ensure_ns_absent(cluster: &KindCluster, ns: &str) {
+    let _ = timeout(Duration::from_secs(60), async {
+        loop {
+            // `kubectl` returns Err on a non-zero exit, so a missing namespace
+            // is exactly the error case.
+            if cluster.kubectl(&["get", "namespace", ns]).is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await;
+}
+
 /// A second Deployment in the same namespace with a different selector must
 /// not bleed into the first one's list — the selector is doing real work here,
 /// not just "list every pod in the namespace".
@@ -50,6 +68,7 @@ async fn lists_only_the_deployments_own_pods_with_uids() {
     let (cluster, _b) = ensure_two_clusters().await.expect("boot kind");
     let client = build_client(&cluster).await;
     let ns = "fs-it-wl-pods-1";
+    ensure_ns_absent(&cluster, ns).await;
 
     cluster.kubectl_apply(&ns_yaml(ns)).expect("apply ns");
     cluster
@@ -59,19 +78,33 @@ async fn lists_only_the_deployments_own_pods_with_uids() {
         .kubectl_apply(&deployment_yaml(ns, "theirs", 1))
         .expect("apply theirs");
 
-    let rows = timeout(Duration::from_secs(90), async {
+    // Wait for BOTH to have pods before asserting isolation. Returning as soon
+    // as `mine` has 2 would routinely fire before `theirs` existed at all, so
+    // the leak this test is here to catch could never show up.
+    let rows = timeout(Duration::from_secs(120), async {
         loop {
-            let rows = list_pods_for_workload(client.clone(), "deployments", ns, "mine")
+            let mine = list_pods_for_workload(client.clone(), "deployments", ns, "mine")
                 .await
-                .expect("list pods for deployment");
-            if rows.len() == 2 {
-                return rows;
+                .expect("list pods for mine");
+            let theirs = list_pods_for_workload(client.clone(), "deployments", ns, "theirs")
+                .await
+                .expect("list pods for theirs");
+            if mine.len() >= 2 && !theirs.is_empty() {
+                return mine;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     })
     .await
-    .expect("deployment never reached 2 pods");
+    .unwrap_or_else(|_| panic!("deployments never both produced pods in {ns}"));
+
+    // Exactly 2 — a selector leak would show up as 3 here, which the old
+    // `rows.len() == 2` loop condition would have hidden as a timeout.
+    assert_eq!(
+        rows.len(),
+        2,
+        "selector leaked pods from the other Deployment"
+    );
 
     for row in &rows {
         // Without a uid the frontend's dedup map collapses every row onto
