@@ -138,10 +138,14 @@ function ClusterPodList({
       // Dedup by uid — two selectors can legitimately match the same pod.
       const merged = new Map<string, ResourceRow>();
       const owners = new Map<string, string>();
+      // Any capped subject caps the union: the merged list is a prefix even if
+      // the other subjects returned in full.
+      let truncated = false;
       results.forEach((res, i) => {
         if (res.status !== "fulfilled") return;
         const name = usable[i]!.subject.name;
-        for (const row of res.value) {
+        if (res.value.truncated) truncated = true;
+        for (const row of res.value.rows) {
           merged.set(row.uid, row);
           // First writer wins, so a pod claimed by two overlapping selectors
           // is attributed to the earlier subject rather than flip-flopping.
@@ -149,7 +153,7 @@ function ClusterPodList({
         }
       });
       ownerByUid.current = owners;
-      return Array.from(merged.values());
+      return { rows: Array.from(merged.values()), truncated };
     },
     [usable, clusterId, kindId],
   );

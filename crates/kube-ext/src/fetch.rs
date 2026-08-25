@@ -2405,6 +2405,16 @@ pub async fn list_pods_on_node(client: Client, node: &str) -> Result<Vec<Value>,
     Ok(rows)
 }
 
+/// Result of [`list_pods_for_workload`]: the rows plus whether the apiserver
+/// had more to give. `truncated` must reach the UI — see the note on
+/// `list_pods_for_workload` for why a silently short list is worse than an
+/// obviously short one.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkloadPods {
+    pub rows: Vec<Value>,
+    pub truncated: bool,
+}
+
 /// Row-shaped projection of the pods a workload's label selector matches,
 /// using the same resolution the log surface uses
 /// (`log_pods::workload_selector`), so the two never disagree.
@@ -2423,7 +2433,11 @@ pub async fn list_pods_on_node(client: Client, node: &str) -> Result<Vec<Value>,
 /// Capped at [`log_pods::MAX_RESOLVED_PODS`]; a DaemonSet on a large cluster
 /// would otherwise deserialise thousands of Pods and ship them all over the
 /// IPC bridge. Overflow truncates rather than failing — the caller sees a
-/// usable prefix, matching how the log resolver treats the same situation.
+/// usable prefix — but it is REPORTED, never silent. A truncated list is not
+/// merely incomplete on screen: the frontend seeds its delta filter from these
+/// uids, so under a selector it cannot evaluate client-side (matchExpressions)
+/// every pod past the cap is refused from the live stream too, and would stay
+/// invisible with no signal at all.
 ///
 /// `kind_id` must be a selector-owning workload; `cronjobs` is rejected with
 /// `UnknownKind` because a CronJob reaches its pods through its child Jobs.
@@ -2432,7 +2446,7 @@ pub async fn list_pods_for_workload(
     kind_id: &str,
     namespace: &str,
     name: &str,
-) -> Result<Vec<Value>, FetchError> {
+) -> Result<WorkloadPods, FetchError> {
     let selector = crate::log_pods::workload_selector(client.clone(), kind_id, namespace, name)
         .await?
         .ok_or_else(|| FetchError::NoSelector(name.to_owned()))?;
@@ -2463,7 +2477,23 @@ pub async fn list_pods_for_workload(
             row
         })
         .collect();
-    Ok(rows)
+    // `continue_` is the apiserver's own "there is more" token; a full page
+    // without one is exactly `MAX_RESOLVED_PODS` pods and nothing omitted.
+    let truncated = list
+        .metadata
+        .continue_
+        .as_deref()
+        .is_some_and(|c| !c.is_empty());
+    if truncated {
+        tracing::warn!(
+            kind_id,
+            namespace,
+            name,
+            cap = crate::log_pods::MAX_RESOLVED_PODS,
+            "workload pod list truncated"
+        );
+    }
+    Ok(WorkloadPods { rows, truncated })
 }
 
 /// Evict a single pod via the policy/v1 Eviction subresource. Unlike a plain

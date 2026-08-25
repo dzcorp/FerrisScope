@@ -195,6 +195,7 @@ export default function App() {
   const navigateToDetail = useAppStore((s) => s.navigateToDetail);
 
   const paletteOpen = useAppStore((s) => s.paletteOpen);
+  const rowDrawerOpen = useAppStore((s) => s.rowDrawerOpen);
   const openPalette = useAppStore((s) => s.openPalette);
   const filterEditing = useAppStore((s) => s.filterEditing);
   const openFilterEditor = useAppStore((s) => s.openFilterEditor);
@@ -716,7 +717,13 @@ export default function App() {
         nsModalOpen,
         filterEditing,
         hasSelection: selection.size > 0,
-        drawerOpen: !!compareTarget || !!observeTarget || !!inspectTarget,
+        drawerOpen:
+          !!compareTarget ||
+          !!observeTarget ||
+          !!inspectTarget ||
+          // Detail panel / per-row logs live inside ResourceTable, which
+          // publishes this. App cannot observe them directly.
+          rowDrawerOpen,
         inTextInput:
           tgt != null &&
           tgt.closest(
@@ -1087,13 +1094,21 @@ export default function App() {
           mode={themeMode}
           target={inspectTarget}
           onClose={() => setInspectTarget(null)}
-          onNavigate={(targetKindName, namespace, name) => {
+          onNavigate={(targetKindName, namespace, name, fromCluster) => {
             // Same Kind-name -> registry-id mapping the detail panel uses.
-            // Every subject in one Inspect shares a kind, so the first
-            // subject's cluster is the right scope for its pods.
             const target = kinds.find((k) => k.kind === targetKindName);
-            if (!target) return;
-            const clusterId = inspectTarget.subjects[0]?.clusterId ?? null;
+            if (!target) {
+              // Registry not loaded, or a kind we don't model. Close anyway —
+              // leaving the drawer up on a dead click looks like a hang.
+              setInspectTarget(null);
+              return;
+            }
+            // The row's OWN cluster. An Inspect can span clusters (that is the
+            // point of it for a virtual context), and every subject sharing a
+            // kind says nothing about them sharing a cluster — keying off
+            // `subjects[0]` opened cluster B's pod inside cluster A.
+            const clusterId =
+              fromCluster ?? inspectTarget.subjects[0]?.clusterId ?? null;
             // Close first: the drawer sits at the same z-index as the detail
             // panel and would cover whatever we just opened.
             setInspectTarget(null);

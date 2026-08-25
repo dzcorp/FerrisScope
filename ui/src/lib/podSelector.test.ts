@@ -129,4 +129,20 @@ describe("acceptsPodDelta", () => {
       );
     });
   });
+
+// `null` is not "unevaluable" — it is a known-empty selection. The known-pod
+// branch trusts a server list that, with no selector, was never fetched.
+describe("with no selector at all", () => {
+  it("refuses a known pod rather than trusting a list that does not exist", () => {
+    expect(
+      acceptsPodDelta(row("p1", { app: "web" }), "production", null, new Set(["p1"])),
+    ).toBe(false);
+  });
+
+  it("refuses an unknown pod", () => {
+    expect(acceptsPodDelta(row("p2", { app: "web" }), "production", null, new Set())).toBe(
+      false,
+    );
+  });
+});
 });

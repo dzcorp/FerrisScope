@@ -89,7 +89,7 @@ async fn lists_only_the_deployments_own_pods_with_uids() {
             let theirs = list_pods_for_workload(client.clone(), "deployments", ns, "theirs")
                 .await
                 .expect("list pods for theirs");
-            if mine.len() >= 2 && !theirs.is_empty() {
+            if mine.rows.len() >= 2 && !theirs.rows.is_empty() {
                 return mine;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -101,12 +101,12 @@ async fn lists_only_the_deployments_own_pods_with_uids() {
     // Exactly 2 — a selector leak would show up as 3 here, which the old
     // `rows.len() == 2` loop condition would have hidden as a timeout.
     assert_eq!(
-        rows.len(),
+        rows.rows.len(),
         2,
         "selector leaked pods from the other Deployment"
     );
 
-    for row in &rows {
+    for row in &rows.rows {
         // Without a uid the frontend's dedup map collapses every row onto
         // `undefined` and only the last pod survives — the exact bug the
         // manual uid injection in `list_pods_for_workload` guards against.

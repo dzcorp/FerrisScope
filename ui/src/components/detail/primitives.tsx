@@ -22,10 +22,15 @@ import { Chip, Icons, Tooltip } from "../ui";
 // Kubernetes Kind name (e.g. "StatefulSet") + (namespace, name) to a
 // detail-panel switch. The parent (ResourceTable) resolves the kind name
 // against the registry and falls back silently if the kind isn't browseable.
+// `clusterId` is optional and defaults to the panel's own cluster. It exists
+// for surfaces that union objects from SEVERAL clusters in one list — the
+// Inspect drawer's Pods tab groups per cluster, so the row's cluster, not the
+// drawer's first subject, is the right scope to open it in.
 export type DetailNavigate = (
   kindName: string,
   namespace: string | null,
   name: string,
+  clusterId?: string,
 ) => void;
 
 // ── DetailRow ──────────────────────────────────────────────────────────────

@@ -61,7 +61,7 @@ async function show(
     if (cmd === "subscribe_resource") return { rows: [], init_done: true };
     if (cmd === "unsubscribe_resource") return undefined;
     if (cmd === "list_pods_for_workload_cmd")
-      return podsFor(String((args ?? {}).name));
+      return { rows: podsFor(String((args ?? {}).name)), truncated: false };
     throw new Error(`unexpected command: ${cmd}`);
   });
   await act(async () => {
@@ -194,7 +194,7 @@ describe("PodsTab", () => {
       onNavigate,
     );
     (await screen.findByText("web-a-1")).click();
-    expect(onNavigate).toHaveBeenCalledWith("Pod", "default", "web-a-1");
+    expect(onNavigate).toHaveBeenCalledWith("Pod", "default", "web-a-1", "ctx");
   });
 
   it("navigates to a node's detail with a null namespace", async () => {
@@ -206,7 +206,27 @@ describe("PodsTab", () => {
       onNavigate,
     );
     (await screen.findByText("worker-1")).click();
-    expect(onNavigate).toHaveBeenCalledWith("Node", null, "worker-1");
+    expect(onNavigate).toHaveBeenCalledWith("Node", null, "worker-1", "ctx");
+  });
+
+  // Inspect can span clusters — that is the point of it for a virtual context.
+  // Navigation used to key off `subjects[0].clusterId`, so clicking a row that
+  // came from the second cluster opened the object in the first one.
+  it("navigates into the row's own cluster, not the first subject's", async () => {
+    const onNavigate = vi.fn();
+    const far = subject("web-c", "other");
+    await show(
+      [A, far],
+      [
+        [A.sid, doc("a")],
+        [far.sid, doc("c")],
+      ],
+      (name) =>
+        name === "web-c" ? [pod("p9", "web-c-1", "c")] : [pod("p1", "web-a-1", "a")],
+      onNavigate,
+    );
+    (await screen.findByText("web-c-1")).click();
+    expect(onNavigate).toHaveBeenCalledWith("Pod", "default", "web-c-1", "other");
   });
 
   it("explains an unreadable selection rather than blaming the selector", async () => {

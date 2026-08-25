@@ -27,7 +27,8 @@ function walk(node: Json, path: string, out: Map<string, string>): void {
       if (path) out.set(path, "[]");
       return;
     }
-    node.forEach((v, i) => walk(v, `${path}[${arrayKey(v, i)}]`, out));
+    const keys = arrayKeys(node);
+    node.forEach((v, i) => walk(v, `${path}[${keys[i]}]`, out));
     return;
   }
   if (node !== null && typeof node === "object") {
@@ -53,16 +54,35 @@ function walk(node: Json, path: string, out: Map<string, string>): void {
 /// Identify an array entry by its merge key when it has one, so ordering
 /// doesn't masquerade as a difference. Falls back to the index for scalar
 /// entries and for lists whose order is the meaning (`command`, `args`).
-function arrayKey(entry: Json, index: number): string {
+/// A merge key identifies an entry only if every entry has one and no two
+/// share it. Violate either and the list is positional in practice: two
+/// tolerations on the same `key`, or `matchExpressions` on one key with two
+/// operators, would otherwise flatten onto a single path and the later entry
+/// would overwrite the earlier — silently deleting a field from a view whose
+/// entire job is to show differences. Kubernetes only declares merge keys for
+/// some lists anyway (`tolerations` is atomic), so the all-or-nothing test is
+/// what keeps this honest without a schema.
+function arrayKeys(node: Json[]): string[] {
+  const merged = node.map(mergeKeyOf);
+  if (merged.every((k) => k !== null)) {
+    const keys = merged as string[];
+    // `=` cannot appear in an index, so a merge-keyed segment can never be
+    // mistaken for a positional one — `xs[0]` (index) vs `xs[=0]` (port 0).
+    if (new Set(keys).size === keys.length) return keys.map((k) => `=${k}`);
+  }
+  return node.map((_, i) => String(i));
+}
+
+function mergeKeyOf(entry: Json): string | null {
   if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-    return String(index);
+    return null;
   }
   for (const k of MERGE_KEYS) {
     const v = entry[k];
     if (typeof v === "string" && v !== "") return v;
     if (typeof v === "number") return String(v);
   }
-  return String(index);
+  return null;
 }
 
 /// Kubernetes keys routinely contain dots — `app.kubernetes.io/name`,

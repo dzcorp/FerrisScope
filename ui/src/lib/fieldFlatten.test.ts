@@ -15,8 +15,8 @@ describe("flattenFields", () => {
     const m = flattenFields({
       spec: { containers: [{ name: "api" }, { name: "sidecar" }] },
     });
-    expect(m.get("spec.containers[api].name")).toBe("api");
-    expect(m.get("spec.containers[sidecar].name")).toBe("sidecar");
+    expect(m.get("spec.containers[=api].name")).toBe("api");
+    expect(m.get("spec.containers[=sidecar].name")).toBe("sidecar");
   });
 
   it("falls back to the index for entries with no merge key", () => {
@@ -128,5 +128,65 @@ describe("buildFieldRows", () => {
 
   it("handles a single subject — every row matches itself", () => {
     expect(buildFieldRows([a]).every((r) => !r.differs)).toBe(true);
+  });
+});
+
+// A comparison view that drops a field is worse than one that shows noise:
+// these all collapsed onto a single path before `arrayKeys` demanded that a
+// merge key be present on every entry AND unique across them.
+describe("merge-key collisions", () => {
+  it("keeps both tolerations that share a key", () => {
+    const m = flattenFields({
+      spec: {
+        tolerations: [
+          { key: "node-role.kubernetes.io/master", effect: "NoSchedule" },
+          { key: "node-role.kubernetes.io/master", effect: "NoExecute" },
+        ],
+      },
+    });
+    expect([...m.values()]).toContain("NoSchedule");
+    expect([...m.values()]).toContain("NoExecute");
+  });
+
+  it("keeps both matchExpressions on one key with different operators", () => {
+    const m = flattenFields({
+      spec: {
+        selector: {
+          matchExpressions: [
+            { key: "tier", operator: "In", values: ["a"] },
+            { key: "tier", operator: "NotIn", values: ["b"] },
+          ],
+        },
+      },
+    });
+    expect([...m.values()]).toContain("In");
+    expect([...m.values()]).toContain("NotIn");
+  });
+
+  it("keeps both ports exposing one containerPort as TCP and UDP", () => {
+    const m = flattenFields({
+      ports: [
+        { containerPort: 53, protocol: "TCP" },
+        { containerPort: 53, protocol: "UDP" },
+      ],
+    });
+    expect([...m.values()]).toContain("TCP");
+    expect([...m.values()]).toContain("UDP");
+  });
+
+  // A merge-keyed segment must never be readable as an index: `xs[0]` was the
+  // scalar at index 0 AND the object at index 1 whose port happened to be 0.
+  it("does not file a merge-keyed entry under another entry's index", () => {
+    const m = flattenFields({ xs: ["scalar", { port: 0 }] });
+    expect(m.get("xs[0]")).toBe("scalar");
+    expect(m.get("xs[0].port")).toBeUndefined();
+    expect(m.get("xs[1].port")).toBe("0");
+  });
+
+  // The happy path must still key by name, or a reordered container list
+  // reports every field as differing.
+  it("still merge-keys when the keys are unique", () => {
+    const m = flattenFields({ spec: { containers: [{ name: "api", image: "v1" }] } });
+    expect(m.get("spec.containers[=api].image")).toBe("v1");
   });
 });

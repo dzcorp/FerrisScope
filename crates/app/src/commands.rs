@@ -42,7 +42,7 @@ use ferrisscope_kube_ext::{
     list_secrets_in_namespace, list_services_in_namespace, lookup, merge_patch_resource, registry,
     restart_pod_owner, restart_pods_owners, restart_workload, set_node_cordon, start_forward,
     ApplyResult, DrainReport, ForwardEntry, ForwardStatus, HelmInstallResult, HelmUpgradeResult,
-    MergePatchResult, ResourceKind, ResourceKindEntry, RestartPodsReport,
+    MergePatchResult, ResourceKind, ResourceKindEntry, RestartPodsReport, WorkloadPods,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -2368,7 +2368,8 @@ pub(crate) async fn list_pods_on_node_cmd(
         .map_err(|e| e.to_string())
 }
 
-/// Pods owned by a workload, resolved server-side through its label selector.
+/// Pods MATCHED by a workload's label selector, resolved server-side. A label
+/// selector is not ownership — see `list_pods_for_workload`.
 /// Same row shape as the pod table watcher, so the detail panel renders it
 /// with the shared pod row component.
 #[tauri::command]
@@ -2378,7 +2379,7 @@ pub(crate) async fn list_pods_for_workload_cmd(
     namespace: String,
     name: String,
     state: State<'_, AppState>,
-) -> Result<Vec<Value>, String> {
+) -> Result<WorkloadPods, String> {
     let entry = state.entry(&cluster_id).await?;
     list_pods_for_workload(entry.cluster.client(), &kind_id, &namespace, &name)
         .await

@@ -50,6 +50,11 @@ export function acceptsPodDelta(
   known: ReadonlySet<string>,
 ): boolean {
   if (namespace !== null && row.namespace !== namespace) return false;
+  // A missing selector is not the same as one we merely can't evaluate. The
+  // branch below trusts the server-fetched list for `matchExpressions`, but
+  // with no selector there was no selection to trust — `matchesLabelSelector`
+  // already answers `false` here, so accepting known pods would contradict it.
+  if (!selector) return false;
   if (known.has(row.uid)) {
     return selectorIsClientEvaluable(selector)
       ? matchesLabelSelector(row.__labels, selector)

@@ -35,7 +35,7 @@ pub use fetch::{
     restart_pods_owners, restart_workload, set_node_cordon, ApplyConflict, ApplyOk, ApplyResult,
     DocApplyResult, DrainFailure, DrainReport, DrainSkipped, FetchError, HelmInstallResult,
     HelmUpdateAvailable, HelmUpgradeResult, MergePatchResult, RestartFailure, RestartPodsReport,
-    RestartedWorkload, FIELD_MANAGER, HELM_CLUSTER_SOURCE,
+    RestartedWorkload, WorkloadPods, FIELD_MANAGER, HELM_CLUSTER_SOURCE,
 };
 pub use log_pods::{
     resolve_log_pods, start_log_pod_watch, LogContainer, LogContainerKind, LogPodEvent,

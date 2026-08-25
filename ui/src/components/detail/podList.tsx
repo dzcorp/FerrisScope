@@ -32,13 +32,19 @@ import {
 } from ".";
 import type { ResourceRow } from "../../types";
 
+/// What `fetchPods` yields: the rows, plus whether the source capped them.
+export type PodFetch = { rows: ResourceRow[]; truncated?: boolean };
+
 export type PodListSectionProps = {
   t: Tokens;
   mode: ThemeMode;
   clusterId: string;
   /// Authoritative initial set. Server-filtered — we never ship a namespace of
-  /// pods just to drop most of them here.
-  fetchPods: () => Promise<ResourceRow[]>;
+  /// pods just to drop most of them here. `truncated` reports that the
+  /// apiserver had more than the server-side cap: the list is then a prefix,
+  /// AND (under a selector we can't evaluate client-side) every pod past the
+  /// cap is refused from the delta stream too, so it must be shown.
+  fetchPods: () => Promise<PodFetch>;
   /// Whether a live delta belongs in this list. Receives the set of uids the
   /// last fetch vouched for, so a caller that cannot fully evaluate its own
   /// predicate can decline to admit unknown pods.
@@ -103,19 +109,33 @@ export function PodListSection(props: PodListSectionProps) {
   // Monotonic across BOTH effects: they share `localMap`, so the identity
   // guard can't tell them apart. Only the newest-issued fetch may write.
   const fetchSeqRef = useRef(0);
-  const inFlightRef = useRef(false);
+  // Holds the seq of the fetch that owns the in-flight slot, not a bare flag:
+  // a stale fetch's `finally` would otherwise clear the flag out from under a
+  // live one, and the next bump would fire a second concurrent LIST.
+  // 0 means idle.
+  const inFlightRef = useRef(0);
+  // A bump that arrived while a fetch was in flight. It cannot simply be
+  // dropped: for an unevaluable matchExpressions selector the refetch is the
+  // only path by which a newly-created pod can ever join the list.
+  const pendingRefetchRef = useRef(false);
+  const [trailingTick, setTrailingTick] = useState(0);
+  const [truncated, setTruncated] = useState(false);
   // Uids the delta stream admitted since the in-flight fetch was issued.
   const admittedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    // Only unsubscribe if we actually subscribed. `unsubscribe_resource`
+    // The subscribe promise, not a "did it finish" flag. `unsubscribe_resource`
     // decrements a SHARED refcount, so a spurious decrement — unmount while
     // `onResourceDelta`'s listen() is still pending, or a rejected subscribe —
     // steals the Pods table's subscription and its watcher dies after the
-    // linger window. StrictMode makes that deterministic in dev.
-    let subscribed = false;
+    // linger window. But a flag set inside `.then` is still false when cleanup
+    // runs during an in-flight subscribe, so the decrement is skipped and the
+    // refcount leaks +1 per fast navigation. Chaining off the promise gets
+    // both: only a RESOLVED subscribe is ever released, whenever it resolves.
+    let subPromise: Promise<unknown> | null = null;
+    let subSettled = false;
     const localMap = new Map<string, ResourceRow>();
     mapRef.current = localMap;
     // A new subject means the previous subject's vouched-for uids are
@@ -149,8 +169,15 @@ export function PodListSection(props: PodListSectionProps) {
               if (acceptsRef.current(delta.row, knownRef.current)) {
                 localMap.set(delta.row.uid, delta.row);
                 // Remember it so an in-flight fetch, whose snapshot predates
-                // this pod, doesn't drop it when it lands.
-                admittedRef.current.add(delta.row.uid);
+                // this pod, doesn't drop it when it lands — but ONLY if the
+                // snapshot couldn't have seen it. Re-admitting an already-known
+                // pod makes a pod relabelled OUT of the selector immortal: the
+                // unevaluable-selector branch accepts its deltas because it is
+                // known, `admitted` survives it past the next fetch, and that
+                // fetch then puts it back into `known`.
+                if (!knownRef.current.has(delta.row.uid)) {
+                  admittedRef.current.add(delta.row.uid);
+                }
                 publish();
               } else if (localMap.has(delta.row.uid)) {
                 // Stopped matching — moved node, or relabelled out of the
@@ -178,25 +205,33 @@ export function PodListSection(props: PodListSectionProps) {
         // Counts against the same in-flight guard as a refetch — otherwise a
         // bump arriving during mount would fire a second concurrent LIST.
         const mySeq = ++fetchSeqRef.current;
-        inFlightRef.current = true;
-        const [, initial] = await Promise.all([
-          api.subscribeResource(props.clusterId, "pods", null).then((r) => {
-            subscribed = true;
+        inFlightRef.current = mySeq;
+        // Assigned synchronously so cleanup can chain off it even mid-flight.
+        subPromise = api
+          .subscribeResource(props.clusterId, "pods", null)
+          .then((r) => {
+            subSettled = true;
             return r;
-          }),
+          });
+        const [, initial] = await Promise.all([
+          subPromise,
           fetchRef.current(),
         ]).finally(() => {
-          inFlightRef.current = false;
+          if (inFlightRef.current === mySeq) inFlightRef.current = 0;
+          if (pendingRefetchRef.current && !cancelled) {
+            setTrailingTick((n) => n + 1);
+          }
         });
         if (cancelled) return;
         // A refetch issued after us may already have landed; it is newer and
         // authoritative, so don't roll `known` back to this older snapshot.
         if (fetchSeqRef.current !== mySeq) return;
 
-        knownRef.current = new Set(initial.map((r) => r.uid));
+        setTruncated(!!initial.truncated);
+        knownRef.current = new Set(initial.rows.map((r) => r.uid));
         // Merge: initial fetch under any deltas already received (deltas win).
         const merged = new Map<string, ResourceRow>();
-        for (const row of initial) merged.set(row.uid, row);
+        for (const row of initial.rows) merged.set(row.uid, row);
         for (const [uid, row] of localMap) merged.set(uid, row);
         localMap.clear();
         for (const [uid, row] of merged) localMap.set(uid, row);
@@ -209,9 +244,17 @@ export function PodListSection(props: PodListSectionProps) {
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
-      if (subscribed) {
+      if (subSettled) {
+        // Already incremented — release now, so the common path stays
+        // synchronous with cleanup rather than trailing a microtask behind it.
         api
           .unsubscribeResource(props.clusterId, "pods")
+          .catch(logErr("pod-list"));
+      } else if (subPromise) {
+        // Still in flight: defer until it lands, and release only if it
+        // actually resolved (a rejected subscribe never incremented).
+        void subPromise
+          .then(() => api.unsubscribeResource(props.clusterId, "pods"))
           .catch(logErr("pod-list"));
       }
     };
@@ -229,17 +272,25 @@ export function PodListSection(props: PodListSectionProps) {
   // opened), and firing on that would duplicate the initial fetch.
   const lastRefetchRef = useRef(props.refetchKey);
   useEffect(() => {
-    if (props.refetchKey === lastRefetchRef.current) return;
-    lastRefetchRef.current = props.refetchKey;
+    const bumped = props.refetchKey !== lastRefetchRef.current;
+    if (!bumped && !pendingRefetchRef.current) return;
     // `detailVersion` bumps once per debounced watcher delta for the viewed
     // object, so a churning rollout would otherwise fire several LISTs a
     // second at the apiserver. One in flight at a time is enough — the delta
-    // stream carries the interim state anyway.
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
+    // stream carries the interim state anyway. Record the bump as pending
+    // WITHOUT advancing `lastRefetchRef`: marking it handled while dropping it
+    // loses the refetch outright, and a scale-up under an unevaluable selector
+    // would stay invisible until some unrelated later bump.
+    if (inFlightRef.current) {
+      pendingRefetchRef.current = true;
+      return;
+    }
+    pendingRefetchRef.current = false;
+    lastRefetchRef.current = props.refetchKey;
     let cancelled = false;
     const localMap = mapRef.current;
     const mySeq = ++fetchSeqRef.current;
+    inFlightRef.current = mySeq;
     // Anything the delta stream admits from here on postdates this snapshot,
     // so it must survive the merge rather than being treated as stale.
     admittedRef.current = new Set();
@@ -248,9 +299,10 @@ export function PodListSection(props: PodListSectionProps) {
         const fresh = await fetchRef.current();
         if (cancelled || mapRef.current !== localMap) return;
         if (fetchSeqRef.current !== mySeq) return;
+        setTruncated(!!fresh.truncated);
         const admitted = admittedRef.current;
         knownRef.current = new Set([
-          ...fresh.map((r) => r.uid),
+          ...fresh.rows.map((r) => r.uid),
           ...admitted,
         ]);
         // The fetch is authoritative about membership, so rows it dropped
@@ -258,7 +310,7 @@ export function PodListSection(props: PodListSectionProps) {
         // issued, which it simply couldn't have seen. Deltas still win on
         // content for rows in both.
         const merged = new Map<string, ResourceRow>();
-        for (const row of fresh) {
+        for (const row of fresh.rows) {
           merged.set(row.uid, localMap.get(row.uid) ?? row);
         }
         for (const uid of admitted) {
@@ -272,13 +324,18 @@ export function PodListSection(props: PodListSectionProps) {
         // A failed refetch keeps the delta-maintained list on screen — it is
         // still live and useful. Errors only surface from the initial load.
       } finally {
-        inFlightRef.current = false;
+        if (inFlightRef.current === mySeq) inFlightRef.current = 0;
+        // Trailing edge: a bump that arrived mid-fetch fires now rather than
+        // waiting for the next unrelated one.
+        if (pendingRefetchRef.current && !cancelled) {
+          setTrailingTick((n) => n + 1);
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [props.refetchKey]);
+  }, [props.refetchKey, trailingTick]);
 
   const rows =
     state.kind === "ready"
@@ -317,6 +374,13 @@ export function PodListSection(props: PodListSectionProps) {
     </>
   );
 
+  // A capped list must never read as a complete one. Beyond the miscount, the
+  // uids fetched here seed the delta filter, so under a selector we can't
+  // evaluate client-side every pod past the cap is refused from the live
+  // stream too — invisible in both directions.
+  const countLabel = (n: number) =>
+    truncated ? `first ${n} — more exist` : `${n} total`;
+
   // As the whole pane: the tab label already says "Pods", so a section header
   // would repeat it, and the centred loader matches the sibling tabs.
   if (variant === "pane") {
@@ -336,7 +400,11 @@ export function PodListSection(props: PodListSectionProps) {
           }}
         >
           {props.paneLabel ?? "Pods"}
-          {state.kind === "ready" && <span>{state.detail.length} total</span>}
+          {state.kind === "ready" && (
+            <span style={truncated ? { color: t.warn } : undefined}>
+              {countLabel(state.detail.length)}
+            </span>
+          )}
         </div>
         {state.kind === "loading" ? (
           <LoadingLine t={t} label="Loading pods…" />
@@ -359,11 +427,11 @@ export function PodListSection(props: PodListSectionProps) {
             <span
               style={{
                 fontSize: FS_XS,
-                color: t.textMuted,
+                color: truncated ? t.warn : t.textMuted,
                 fontFamily: FF_MONO,
               }}
             >
-              {state.detail.length} total
+              {countLabel(state.detail.length)}
             </span>
           ) : null
         }
@@ -478,7 +546,7 @@ function PodRow({
       <span style={{ flex: "0 0 auto", minWidth: 0 }}>
         <LinkValue
           t={t}
-          onClick={() => onNavigate?.("Pod", ns, name)}
+          onClick={() => onNavigate?.("Pod", ns, name, clusterId)}
           copyText={ns ? `${ns}/${name}` : name}
           enabled={!!onNavigate}
         >
@@ -520,7 +588,7 @@ function PodRow({
           >
             <LinkValue
               t={t}
-              onClick={() => onNavigate?.("Node", null, node)}
+              onClick={() => onNavigate?.("Node", null, node, clusterId)}
               copyText={node}
               enabled={!!onNavigate}
               tone="muted"

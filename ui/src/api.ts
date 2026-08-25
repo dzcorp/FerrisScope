@@ -94,6 +94,7 @@ import type {
   ResourceKind,
   ResourceQuotaDetail,
   ResourceRow,
+  WorkloadPods,
   RestartPodsReport,
   SearchHit,
   RoleBindingDetail,
@@ -640,7 +641,7 @@ export const api = {
     namespace: string,
     name: string,
   ) =>
-    invoke<ResourceRow[]>("list_pods_for_workload_cmd", {
+    invoke<WorkloadPods>("list_pods_for_workload_cmd", {
       clusterId,
       kindId,
       namespace,

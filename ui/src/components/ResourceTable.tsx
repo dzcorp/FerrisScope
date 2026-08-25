@@ -318,6 +318,16 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     null,
   );
   const [detailTarget, setDetailTarget] = useState<DetailTarget | null>(null);
+  // Publish drawer open-ness so App's Esc router can see it. These two drawers
+  // are mounted here, not by App, and a row click opens the detail panel
+  // WITHOUT clearing the selection — so without this, one Esc closed the panel
+  // and wiped the selection behind it.
+  const setRowDrawerOpen = useAppStore((s) => s.setRowDrawerOpen);
+  const rowDrawerOpen = !!detailTarget || !!logTarget;
+  useEffect(() => {
+    setRowDrawerOpen(rowDrawerOpen);
+    return () => setRowDrawerOpen(false);
+  }, [rowDrawerOpen, setRowDrawerOpen]);
   const [menu, setMenu] = useState<{
     pos: MenuPosition;
     row: ScopedRow;

@@ -2751,3 +2751,11 @@ export type ChatEvent =
       delay_ms: number;
     }
   | { type: "title_updated"; title: string };
+
+/// Result of `list_pods_for_workload_cmd`. `truncated` is the apiserver's own
+/// "there is more" signal: the list is capped server-side, and a short list
+/// that does not say so reads as a complete one.
+export type WorkloadPods = {
+  rows: ResourceRow[];
+  truncated: boolean;
+};

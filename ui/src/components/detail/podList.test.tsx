@@ -42,7 +42,7 @@ function renderList(
     t: tokens("dark"),
     mode: "dark" as const,
     clusterId: "ctx",
-    fetchPods: () => Promise.resolve(pods),
+    fetchPods: () => Promise.resolve({ rows: pods }),
     acceptsDelta: () => true,
     subjectKey: "deployments/production/web",
     refetchKey: 0,
@@ -75,7 +75,7 @@ describe("PodListSection", () => {
   it("navigates to the pod detail by Kind name, not registry id", async () => {
     const { onNavigate } = await mount();
     (await screen.findByText("web-7d9f-abc")).click();
-    expect(onNavigate).toHaveBeenCalledWith("Pod", "production", "web-7d9f-abc");
+    expect(onNavigate).toHaveBeenCalledWith("Pod", "production", "web-7d9f-abc", "ctx");
   });
 
   // The node is cluster-scoped, so the namespace argument must be null —
@@ -83,7 +83,7 @@ describe("PodListSection", () => {
   it("navigates to the node detail with a null namespace", async () => {
     const { onNavigate } = await mount();
     (await screen.findByText("worker-1")).click();
-    expect(onNavigate).toHaveBeenCalledWith("Node", null, "worker-1");
+    expect(onNavigate).toHaveBeenCalledWith("Node", null, "worker-1", "ctx");
   });
 
   it("omits the node column when showNode is off", async () => {
@@ -100,6 +100,24 @@ describe("PodListSection", () => {
     expect(await screen.findByText("web-7d9f-abc")).toBeInTheDocument();
     expect(screen.queryByText("worker-1")).not.toBeInTheDocument();
     expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  // A capped list read as a complete one: "500 total" for a 3000-pod
+  // DaemonSet, with every pod past the cap also refused from the delta stream
+  // under a selector we cannot evaluate client-side.
+  it("says the list is a prefix when the source truncated it", async () => {
+    await mount({
+      fetchPods: () => Promise.resolve({ rows: [POD], truncated: true }),
+    });
+    expect(await screen.findByText("first 1 — more exist")).toBeInTheDocument();
+    expect(screen.queryByText("1 total")).not.toBeInTheDocument();
+  });
+
+  it("reports a complete list plainly", async () => {
+    await mount({
+      fetchPods: () => Promise.resolve({ rows: [POD], truncated: false }),
+    });
+    expect(await screen.findByText("1 total")).toBeInTheDocument();
   });
 
   it("shows the caller's empty label when nothing matches", async () => {
@@ -199,7 +217,7 @@ describe("PodListSection subject + refetch keys", () => {
     stubInvoke();
     const props = {
       ...BASE,
-      fetchPods: () => Promise.resolve([POD]),
+      fetchPods: () => Promise.resolve({ rows: [POD] }),
       subjectKey: "deployments/production/web",
       refetchKey: 3,
     };
@@ -212,7 +230,7 @@ describe("PodListSection subject + refetch keys", () => {
         <PodListSection
           {...props}
           fetchPods={() =>
-            Promise.resolve([{ ...POD, uid: "pod-2", name: "api-1" }])
+            Promise.resolve({ rows: [{ ...POD, uid: "pod-2", name: "api-1" }] })
           }
           subjectKey="deployments/production/api"
         />,
@@ -231,7 +249,7 @@ describe("PodListSection subject + refetch keys", () => {
       ...BASE,
       fetchPods: () => {
         fetches += 1;
-        return Promise.resolve([POD]);
+        return Promise.resolve({ rows: [POD] });
       },
       subjectKey: "deployments/production/web",
       refetchKey: 7,
@@ -256,7 +274,7 @@ describe("PodListSection row chrome", () => {
     subjectKey: "deployments/production/web",
     refetchKey: 0,
     emptyLabel: "none",
-    fetchPods: () => Promise.resolve([POD]),
+    fetchPods: () => Promise.resolve({ rows: [POD] }),
     onNavigate: () => {},
   };
 
@@ -319,7 +337,7 @@ describe("PodListSection owner chip", () => {
     subjectKey: "deployments/production/web",
     refetchKey: 0,
     emptyLabel: "none",
-    fetchPods: () => Promise.resolve([POD]),
+    fetchPods: () => Promise.resolve({ rows: [POD] }),
     onNavigate: () => {},
   };
 
@@ -399,7 +417,46 @@ describe("PodListSection subscription hygiene", () => {
     await act(async () => {});
     const subs = calls.filter((c) => c === "subscribe_resource").length;
     const unsubs = calls.filter((c) => c === "unsubscribe_resource").length;
-    expect(unsubs).toBeLessThanOrEqual(subs);
+    // Pairing, not `<=`: with unsubs=0 and subs=1 a `<=` assertion passes
+    // while leaking, so it could never fail for the bug it was guarding.
+    expect(unsubs).toBe(subs);
+  });
+
+  // The decrement used to hang off a flag set inside subscribe's `.then`.
+  // Unmounting while subscribe was still in flight left the flag false, cleanup
+  // skipped the decrement, and the refcount leaked +1 — pinning the cluster's
+  // pods watcher for the rest of the session.
+  it("releases a subscription that resolves after unmount", async () => {
+    const calls: string[] = [];
+    let releaseSub: (v: unknown) => void = () => {};
+    setMockInvoke((cmd) => {
+      calls.push(cmd);
+      if (cmd === "subscribe_resource") {
+        return new Promise((res) => {
+          releaseSub = res;
+        });
+      }
+      if (cmd === "unsubscribe_resource") return undefined;
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    const { unmount } = render(
+      <PodListSection
+        {...({
+          ...BASE,
+          refetchKey: 0,
+          fetchPods: () => Promise.resolve({ rows: [] }),
+        } as React.ComponentProps<typeof PodListSection>)}
+      />,
+    );
+    await act(async () => {});
+    unmount();
+    await act(async () => {});
+    // Subscribe lands only now — after cleanup already ran.
+    await act(async () => {
+      releaseSub({ rows: [], init_done: true });
+    });
+    expect(calls.filter((c) => c === "subscribe_resource")).toHaveLength(1);
+    expect(calls.filter((c) => c === "unsubscribe_resource")).toHaveLength(1);
   });
 
   // detailVersion bumps per debounced watcher delta; a churning rollout would
@@ -407,13 +464,13 @@ describe("PodListSection subscription hygiene", () => {
   it("coalesces overlapping refetches into one in-flight request", async () => {
     track();
     let fetches = 0;
-    let release: (v: ResourceRow[]) => void = () => {};
+    let release: (v: { rows: ResourceRow[] }) => void = () => {};
     const props = {
       ...BASE,
       refetchKey: 1,
       fetchPods: () => {
         fetches += 1;
-        return new Promise<ResourceRow[]>((res) => {
+        return new Promise<{ rows: ResourceRow[] }>((res) => {
           release = res;
         });
       },
@@ -433,7 +490,7 @@ describe("PodListSection subscription hygiene", () => {
     expect(fetches).toBe(afterMount);
 
     await act(async () => {
-      release([]);
+      release({ rows: [] });
     });
   });
 });

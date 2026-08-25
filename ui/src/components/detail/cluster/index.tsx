@@ -344,7 +344,9 @@ export function NodeSummary(props: {
         t={t}
         mode={props.mode}
         clusterId={props.clusterId}
-        fetchPods={() => api.listPodsOnNode(props.clusterId, props.name)}
+        fetchPods={() =>
+          api.listPodsOnNode(props.clusterId, props.name).then((rows) => ({ rows }))
+        }
         acceptsDelta={(row) => row.node === props.name}
         subjectKey={props.name}
         refetchKey={props.detailVersion}
