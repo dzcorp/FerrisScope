@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use ferrisscope_core::cluster::{Cluster, ClusterInfo};
 use ferrisscope_core::fleet::{self, ClusterProbe};
-use ferrisscope_core::health::ClusterHealthStatus;
+use ferrisscope_core::health::{ClusterHealthEvent, ClusterHealthStatus};
 use ferrisscope_core::kubeconfig::{self, ContextInfo};
 use ferrisscope_core::logs::{LogEvent, LogStream};
 use ferrisscope_core::metrics::{MetricsService, MetricsSnapshot};
@@ -703,7 +703,13 @@ pub(crate) async fn connect_context(
             // Cache the connected cluster so the next `state.entry(...)` call
             // (e.g. inside `subscribe_resource` when the operator clicks a
             // kind) reuses this client instead of re-running `Cluster::connect`.
-            let entry = state.insert_connected(name.clone(), cluster).await;
+            // A wedged entry is swapped out here instead of winning, which is
+            // what makes re-entering a dead cluster (tab switch, remount)
+            // recover it — no fleet round trip, no app restart.
+            let (entry, displaced) = state.insert_connected(name.clone(), cluster).await;
+            if let Some(wedged) = displaced {
+                tear_down_displaced(&state, &name, &wedged).await;
+            }
             // Health forwarder is wired separately via its own CAS so
             // it also runs on the lazy-connect path (eager namespaces
             // subscribe before connect_context). Cheap no-op if already
@@ -842,16 +848,25 @@ fn spawn_search_bootstrap(
     });
 }
 
-/// Spawn the health-event forwarder for `cluster_id` exactly once per
-/// `ClusterEntry` lifetime. Safe to call from every command that
-/// touches `state.entry()` — the CAS in `claim_health_wiring` makes
-/// repeat calls cheap no-ops. Without this on lazy-connect paths
-/// (App's eager namespaces subscribe runs before `connect_context`),
-/// the probe runs but its `Unavailable` event never reaches the UI.
+/// Spawn the health-event forwarder for `cluster_id` — once at a time per
+/// `ClusterEntry`. Safe to call from every command that touches
+/// `state.entry()` — the CAS in `claim_health_wiring` makes repeat calls
+/// cheap no-ops. Without this on lazy-connect paths (App's eager namespaces
+/// subscribe runs before `connect_context`), the probe runs but its
+/// `Unavailable` event never reaches the UI.
+///
+/// The claim is *released* when a forwarder exits, so a subsequent call
+/// re-spawns one and replays the current snapshot. That's what gets an
+/// `Unavailable` to a frontend listener that attached after the one-shot
+/// emit (operator returning to a background tab).
 fn wire_cluster_health(app: &AppHandle, cluster_id: &str, entry: Arc<crate::state::ClusterEntry>) {
     if entry.claim_health_wiring() {
-        let handle =
-            spawn_health_forwarder(app.clone(), cluster_id.to_owned(), entry.health.clone());
+        let handle = spawn_health_forwarder(
+            app.clone(),
+            cluster_id.to_owned(),
+            entry.health.clone(),
+            Arc::downgrade(&entry),
+        );
         // Stash on the entry so teardown paths can abort it. The CAS in
         // `claim_health_wiring` already guarantees we only get here
         // once per entry lifetime, but be defensive — replace any
@@ -1311,6 +1326,14 @@ async fn drop_all_kind_watchers(state: &AppState, cluster_id: &str) -> usize {
     let Some(entry) = state.get_existing(cluster_id).await else {
         return 0;
     };
+    drop_entry_watchers(&entry).await
+}
+
+/// The body of [`drop_all_kind_watchers`], addressed by entry rather than by
+/// id. Needed by the displaced-entry path in `connect_context`: once a wedged
+/// entry has been swapped out of the map, its id resolves to the *replacement*
+/// — tearing down by id there would kill the cluster we just rebuilt.
+async fn drop_entry_watchers(entry: &crate::state::ClusterEntry) -> usize {
     let mut slots = entry.kinds.lock().await;
     let mut dropped = 0;
     for (_kind, slot) in slots.iter_mut() {
@@ -1565,11 +1588,7 @@ pub(crate) async fn reconnect_cluster(
     cluster_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // The fresh `connect_context` rebuilds the kube `Client`; the old log
-    // streams / watches hold the wedged one, so abort them here too.
-    let logs_dropped = state.drop_cluster_logs(&cluster_id).await;
-    let dropped = drop_all_kind_watchers(&state, &cluster_id).await;
-    let removed = state.remove_cluster(&cluster_id).await.is_some();
+    let (logs_dropped, dropped, removed) = evict_cluster_entry(&state, &cluster_id).await;
     tracing::info!(
         cluster_id = %cluster_id,
         logs_dropped,
@@ -1582,6 +1601,92 @@ pub(crate) async fn reconnect_cluster(
     // pre-reconnect high-water.
     ferrisscope_mimalloc_ext::collect(true);
     Ok(())
+}
+
+/// Drop the cached entry for `cluster_id` — log streams, kind watchers,
+/// metrics service, event forwarders, and finally the `ClusterEntry` itself
+/// — so the next `connect_context` rebuilds from a fresh `Cluster`.
+/// Deliberately narrower than `drop_cluster_watchers`: terminals, chats and
+/// port-forwards survive, because this runs on *recovery* paths where the
+/// operator is staying on the cluster. Returns
+/// `(logs_dropped, watchers_dropped, entry_removed)`.
+async fn evict_cluster_entry(state: &AppState, cluster_id: &str) -> (usize, usize, bool) {
+    // The fresh `connect_context` rebuilds the kube `Client`; the old log
+    // streams / watches hold the wedged one, so abort them here too.
+    let logs_dropped = state.drop_cluster_logs(cluster_id).await;
+    let dropped = drop_all_kind_watchers(state, cluster_id).await;
+    let removed = state.remove_cluster(cluster_id).await.is_some();
+    (logs_dropped, dropped, removed)
+}
+
+/// Release a wedged entry that `insert_connected` swapped out of the map.
+/// Addressed by `Arc`, never by id — the id now resolves to the replacement,
+/// so an id-based teardown here would tear down the cluster we just rebuilt.
+/// Log streams ARE dropped by id: they hold the wedged client and the fresh
+/// entry has none yet.
+async fn tear_down_displaced(
+    state: &AppState,
+    cluster_id: &str,
+    wedged: &crate::state::ClusterEntry,
+) {
+    let logs_dropped = state.drop_cluster_logs(cluster_id).await;
+    let dropped = drop_entry_watchers(wedged).await;
+    tracing::warn!(
+        cluster_id = %cluster_id,
+        logs_dropped,
+        dropped,
+        "connect_context: wedged entry replaced, rebuilt from the fresh client"
+    );
+}
+
+/// Current health of `cluster_id` for a frontend that just mounted.
+///
+/// The probe broadcasts `Unavailable` exactly once and the forwarder exits
+/// after emitting it, so a listener attaching later (operator returns to a
+/// background tab, or Tauri's async `listen()` registration lost the race
+/// with the emit) would otherwise never learn the cluster is down. This is
+/// the pull-side counterpart to `cluster-health://` — cheap, non-creating,
+/// and safe to call on every panel mount.
+#[tauri::command]
+pub(crate) async fn get_cluster_health(
+    cluster_id: String,
+    state: State<'_, AppState>,
+) -> Result<ClusterHealthEvent, String> {
+    // Non-creating: an unconnected cluster is "healthy" — there's nothing
+    // wedged to report, and lazily connecting here would spend a full auth
+    // round trip just to answer a status question.
+    let Some(entry) = state.get_existing(&cluster_id).await else {
+        return Ok(healthy_event());
+    };
+    let unavailable = entry.unavailable.load(Ordering::SeqCst);
+    Ok(health_event_for(unavailable, entry.health.snapshot().await))
+}
+
+fn healthy_event() -> ClusterHealthEvent {
+    ClusterHealthEvent {
+        status: ClusterHealthStatus::Healthy,
+        reason: None,
+    }
+}
+
+/// Reconcile the entry's sticky `unavailable` gate with the probe's last
+/// broadcast. The gate is the authority: the probe goes dormant after
+/// declaring the cluster dead, and a rebuilt-but-not-yet-probed snapshot
+/// would otherwise report `Healthy` for a cluster whose data plane is torn
+/// down and whose `subscribe_*` calls all fail.
+fn health_event_for(unavailable: bool, snapshot: ClusterHealthEvent) -> ClusterHealthEvent {
+    if !unavailable {
+        return snapshot;
+    }
+    ClusterHealthEvent {
+        status: ClusterHealthStatus::Unavailable,
+        reason: snapshot.reason.or_else(|| {
+            Some(
+                "No response from the apiserver. Watchers and metrics have been torn down."
+                    .to_owned(),
+            )
+        }),
+    }
 }
 
 /// Permanently delete the per-cluster search index file. Called from the
@@ -3848,6 +3953,18 @@ pub(crate) async fn terminal_close(
     Ok(())
 }
 
+/// Releases `ClusterEntry::health_wired` when the health forwarder's future
+/// is dropped (normal exit *or* abort), re-arming `wire_cluster_health`.
+struct ReleaseHealthWiring(std::sync::Weak<crate::state::ClusterEntry>);
+
+impl Drop for ReleaseHealthWiring {
+    fn drop(&mut self) {
+        if let Some(entry) = self.0.upgrade() {
+            entry.release_health_wiring();
+        }
+    }
+}
+
 /// Bridge the per-cluster `ClusterHealth` broadcast to a Tauri event so
 /// the frontend can flip into an unavailable banner at the same moment
 /// the data plane gets torn down. Spawned once per cluster from the
@@ -3858,7 +3975,8 @@ pub(crate) async fn terminal_close(
 ///
 /// **Lifetime / memory.** Captures `Arc<ClusterHealth>` (not the full
 /// `Arc<ClusterEntry>` we used to take) so a forgotten abort can't pin
-/// the whole `Cluster` + kube `Client` HTTP/2 pool. The returned
+/// the whole `Cluster` + kube `Client` HTTP/2 pool — the entry is held
+/// as a `Weak`, purely to re-arm the wiring claim on exit. The returned
 /// `JoinHandle` is stored on `ClusterEntry::health_forwarder` and
 /// aborted by `drop_cluster_watchers` / `tear_down_unhealthy`; without
 /// the abort the forwarder's `rx.recv()` blocks forever (the only
@@ -3869,10 +3987,18 @@ fn spawn_health_forwarder(
     app: AppHandle,
     cluster_id: String,
     health: Arc<ferrisscope_core::health::ClusterHealth>,
+    entry: std::sync::Weak<crate::state::ClusterEntry>,
 ) -> tauri::async_runtime::JoinHandle<()> {
     let mut rx = health.subscribe();
     let event_name = format!("cluster-health://{}", sanitize_event_segment(&cluster_id));
     tauri::async_runtime::spawn(async move {
+        // Re-arm on every exit path — including abort, which drops this
+        // future and runs the guard — so the next `wire_cluster_health` (any
+        // `subscribe_*` on the cluster) spawns a replacement that replays the
+        // snapshot to whatever listener is attached by then. `Weak`, not
+        // `Arc`, so re-arming can't pin the entry (and its kube `Client`
+        // pool) past teardown; a dropped entry simply has nothing to re-arm.
+        let _rearm = ReleaseHealthWiring(entry);
         // Replay the current health snapshot so a forwarder spawned
         // *after* the probe already declared `Unavailable` (entry was
         // lazily created via `state.entry()` by some non-`connect_context`
@@ -4608,8 +4734,54 @@ fn emit_prom_changed(app: &AppHandle, cluster_id: &str, entry: Option<&PromCache
 
 #[cfg(test)]
 mod tests {
-    use super::{health_status_triggers_teardown, resource_event_name, sanitize_event_segment};
-    use ferrisscope_core::health::ClusterHealthStatus;
+    use super::{
+        health_event_for, health_status_triggers_teardown, healthy_event, resource_event_name,
+        sanitize_event_segment,
+    };
+    use ferrisscope_core::health::{ClusterHealthEvent, ClusterHealthStatus};
+
+    fn snap(status: ClusterHealthStatus, reason: Option<&str>) -> ClusterHealthEvent {
+        ClusterHealthEvent {
+            status,
+            reason: reason.map(str::to_owned),
+        }
+    }
+
+    /// The pull-side `get_cluster_health` must agree with the push-side
+    /// `cluster-health://` event, and the entry's sticky `unavailable` gate is
+    /// what `subscribe_*` actually refuses on — so it, not the dormant probe's
+    /// last broadcast, decides. Regression guard for the dead-end where the
+    /// UI read "healthy" while every subscribe failed with
+    /// "unavailable — reconnect first".
+    #[test]
+    fn unavailable_gate_wins_over_a_stale_healthy_snapshot() {
+        let out = health_event_for(true, snap(ClusterHealthStatus::Healthy, None));
+        assert_eq!(out.status, ClusterHealthStatus::Unavailable);
+        assert!(
+            out.reason.is_some(),
+            "an unavailable answer must carry a reason for the banner to render"
+        );
+    }
+
+    #[test]
+    fn unavailable_keeps_the_probe_reason_verbatim() {
+        let out = health_event_for(
+            true,
+            snap(ClusterHealthStatus::Unavailable, Some("connection reset")),
+        );
+        assert_eq!(out.status, ClusterHealthStatus::Unavailable);
+        assert_eq!(out.reason.as_deref(), Some("connection reset"));
+    }
+
+    #[test]
+    fn healthy_gate_passes_the_snapshot_through() {
+        let out = health_event_for(false, snap(ClusterHealthStatus::Healthy, None));
+        assert_eq!(out.status, ClusterHealthStatus::Healthy);
+        assert_eq!(out.reason, None);
+        // A never-connected cluster answers healthy rather than erroring —
+        // the frontend polls this on every panel mount.
+        assert_eq!(healthy_event().status, ClusterHealthStatus::Healthy);
+    }
 
     #[test]
     fn detail_cmd_invocations_forward_to_same_stem_inner_fn() {

@@ -154,6 +154,59 @@ describe("ResourceTable — multi-cluster merge", () => {
     expect(strip.textContent).toContain("connection refused");
   });
 
+  it("a member's 'unavailable' refusal flips that member's health, not its neighbours'", async () => {
+    // The backend refuses every subscribe against a cluster its heartbeat
+    // declared dead. That refusal is often the only signal the UI gets (the
+    // one-shot `cluster-health://` event is lost on anyone not listening at
+    // that instant), so it must land as a health transition — that's what
+    // raises the per-member Reconnect banner instead of a bare error strip.
+    mockSubscribe({
+      [CID_A]: [{ uid: "u1", name: "cm-a", namespace: "default" }],
+      [CID_B]: new Error(
+        `cluster ${CID_B} is unavailable — reconnect first`,
+      ),
+    });
+    await act(async () => {
+      render(
+        <ResourceTable
+          mode="dark"
+          clusters={TWO}
+          viewScopeId="vctx:test"
+          kind={configMapsKind}
+        />,
+      );
+    });
+    await act(async () => {});
+
+    const health = useAppStore.getState().clusterHealth;
+    expect(health[CID_B]).toBe("unavailable");
+    // The healthy member must stay untouched — a merged view degrades one
+    // cluster at a time.
+    expect(health[CID_A]).toBeUndefined();
+    expect(useAppStore.getState().clusterHealthReason[CID_B]).toContain(
+      "reconnect first",
+    );
+  });
+
+  it("an ordinary subscribe failure is not treated as a wedged cluster", async () => {
+    mockSubscribe({
+      [CID_A]: [{ uid: "u1", name: "cm-a", namespace: "default" }],
+      [CID_B]: new Error("configmaps is forbidden: User cannot list"),
+    });
+    await act(async () => {
+      render(
+        <ResourceTable
+          mode="dark"
+          clusters={TWO}
+          viewScopeId="vctx:test"
+          kind={configMapsKind}
+        />,
+      );
+    });
+    await act(async () => {});
+    expect(useAppStore.getState().clusterHealth[CID_B]).toBeUndefined();
+  });
+
   it("full-pane error when every member fails to subscribe", async () => {
     mockSubscribe({
       [CID_A]: new Error("boom-a"),

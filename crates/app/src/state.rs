@@ -167,6 +167,16 @@ impl ClusterEntry {
             .is_ok()
     }
 
+    /// Release the health-wiring claim so the next `wire_cluster_health`
+    /// spawns a fresh forwarder. Called when a forwarder exits (it returns
+    /// after emitting `Unavailable`). Without this the claim stays set for
+    /// the entry's lifetime and a frontend listener that attaches *after*
+    /// the emit — a background tab the operator comes back to — never
+    /// receives the snapshot replay.
+    pub(crate) fn release_health_wiring(&self) {
+        self.health_wired.store(false, Ordering::SeqCst);
+    }
+
     /// Atomically claim the right to install the always-on namespaces
     /// subscription. Returns `true` exactly once per `ClusterEntry`
     /// lifetime; subsequent callers no-op. See `namespaces_pinned` for
@@ -394,15 +404,30 @@ impl AppState {
     /// `ClusterEntry::claim_connect_probes` — that's the source of truth
     /// for "have we run the bench / cluster.info for this cluster yet",
     /// not whether `insert_connected` was the one to create the entry.
+    ///
+    /// **Exception: a wedged entry never wins.** `ClusterEntry::unavailable`
+    /// is sticky — the health probe sets it, goes dormant, and every
+    /// `subscribe_*` is refused from then on — so handing one back would
+    /// discard the freshly-proven client and leave the cluster refusing
+    /// everything with no way out but a restart. Such an entry is swapped
+    /// out **under the map lock** (no window for a concurrent
+    /// `state.entry()` to re-cache the wedged one) and returned as
+    /// `displaced` for the caller to tear down off-lock — its watchers,
+    /// forwarders and metrics service still need aborting, and those take
+    /// locks of their own.
     pub(crate) async fn insert_connected(
         &self,
         id: ClusterId,
         cluster: Cluster,
-    ) -> Arc<ClusterEntry> {
+    ) -> (Arc<ClusterEntry>, Option<Arc<ClusterEntry>>) {
         let mut map = self.inner.lock().await;
-        if let Some(existing) = map.get(&id) {
-            return existing.clone();
-        }
+        let displaced = match map.get(&id) {
+            Some(existing) if !existing.unavailable.load(Ordering::SeqCst) => {
+                return (existing.clone(), None);
+            }
+            Some(wedged) => Some(wedged.clone()),
+            None => None,
+        };
         let cluster = Arc::new(cluster);
         let health = ClusterHealth::start(cluster.client());
         let entry = Arc::new(ClusterEntry {
@@ -418,7 +443,7 @@ impl AppState {
             metrics_forwarder: std::sync::Mutex::new(None),
         });
         map.insert(id, entry.clone());
-        entry
+        (entry, displaced)
     }
 
     pub(crate) async fn insert_log_stream(

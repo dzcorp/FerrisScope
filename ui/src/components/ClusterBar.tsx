@@ -39,6 +39,25 @@ export function ClusterBar({ mode, context, state, style }: Props) {
   const setAddMenuOpen = useAppStore((s) => s.setAddMenuOpen);
   const addDockTab = useAppStore((s) => s.addDockTab);
 
+  // A connected socket is not a live cluster: the heartbeat can declare the
+  // apiserver gone while `connect_context` still reports success (its client
+  // is fresh, the data plane behind it is torn down). Reporting "Running"
+  // there is the lie that hid a dead cluster behind a green pill, so the
+  // pill reads the heartbeat first and the connect state second.
+  const health = useAppStore((s) => s.clusterHealth[context.id] ?? "healthy");
+  const reconnecting = useAppStore(
+    (s) => s.clusterReconnecting[context.id] ?? false,
+  );
+  const statusLabel = reconnecting
+    ? "Reconnecting"
+    : state.status === "ok"
+      ? health === "unavailable"
+        ? "Unavailable"
+        : "Running"
+      : state.status === "error"
+        ? "Error"
+        : "Pending";
+
   // Responsive bar: progressively hide secondary stats as width shrinks so
   // the namespace + add controls (right side) and the cluster name (left
   // side) stay legible. Thresholds picked empirically against long GKE
@@ -102,15 +121,7 @@ export function ClusterBar({ mode, context, state, style }: Props) {
       <Stat
         t={t}
         label="Status"
-        value={
-          state.status === "ok" ? (
-            <StatusPill status="Running" t={t} mode={mode} dense />
-          ) : state.status === "error" ? (
-            <StatusPill status="Error" t={t} mode={mode} dense />
-          ) : (
-            <StatusPill status="Pending" t={t} mode={mode} dense />
-          )
-        }
+        value={<StatusPill status={statusLabel} t={t} mode={mode} dense />}
       />
       {showNodes && (
         <Stat

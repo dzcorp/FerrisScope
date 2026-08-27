@@ -65,6 +65,7 @@ import { makeTerminalTab } from "./Dock";
 import { confirm, toast } from "../lib/dialog";
 import { latinLetter } from "../lib/keyboard";
 import { parseTableFilter } from "../lib/tableFilter";
+import { isClusterUnavailableError } from "../lib/unavailable";
 import {
   cellRaw,
   headerWidthFloor,
@@ -354,6 +355,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // changes on health transitions, so this subscription is near-free.
   const clusterHealth = useAppStore((s) => s.clusterHealth);
   const clusterReconnecting = useAppStore((s) => s.clusterReconnecting);
+  const applyClusterHealth = useAppStore((s) => s.applyClusterHealth);
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
   const density = useAppStore((s) => s.settings.density);
   const monoTables = useAppStore((s) => s.settings.monoTables);
@@ -552,6 +554,16 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       for (const s of settled) {
         if (s.error !== null && !ok.some((o) => o.cid === s.cid)) {
           errs[s.cid] = s.error;
+          // The backend refuses every subscribe against a cluster its health
+          // probe declared dead. That refusal may be the ONLY signal we get
+          // (the `cluster-health://` event fires once and is lost on anyone
+          // not listening then), so treat it as the health transition it is
+          // — the unavailable banner and its Reconnect hang off this state,
+          // per cluster, so a wedged member of a merged view surfaces on its
+          // own row while the healthy members keep serving.
+          if (isClusterUnavailableError(s.error)) {
+            applyClusterHealth(s.cid, "unavailable", s.error);
+          }
         }
       }
 
