@@ -1574,7 +1574,46 @@ const BULK_RESTARTABLE_KINDS = new Set([
   "daemonsets",
 ]);
 
-function buildGenericBulkActions(
+/// Apply `op` to every selected row, collect per-row failures, and report
+/// once. A bulk action must never fail silently on a subset — the operator
+/// cleared the selection expecting all of it to have happened.
+async function bulkRunForEach(
+  entries: [string, SelectionMeta][],
+  prefix: (m: SelectionMeta) => string,
+  op: (m: SelectionMeta) => Promise<unknown>,
+  report: { verb: string; noun: string; nounPlural: string },
+): Promise<void> {
+  const count = entries.length;
+  const failures: string[] = [];
+  await Promise.all(
+    entries.map(async ([, m]) => {
+      try {
+        await op(m);
+      } catch (e) {
+        failures.push(
+          `${prefix(m)}${m.namespace ? `${m.namespace}/` : ""}${m.name}: ${String(e)}`,
+        );
+      }
+    }),
+  );
+  if (failures.length > 0) {
+    toast.bad(
+      `${report.verb} failed for ${failures.length} of ${count}:\n${failures
+        .slice(0, 8)
+        .join(
+          "\n",
+        )}${failures.length > 8 ? `\n…and ${failures.length - 8} more` : ""}`,
+    );
+  } else {
+    toast.ok(
+      `${report.verb}: ${count} ${count === 1 ? report.noun : report.nounPlural}.`,
+    );
+  }
+}
+
+// Exported for tests: the bulk bar is where a mis-picked transport or a
+// silently-swallowed per-row failure does the most damage.
+export function buildGenericBulkActions(
   kind: ResourceKind,
   selection: Map<string, SelectionMeta>,
   confirmDestructive: boolean,
@@ -1597,6 +1636,95 @@ function buildGenericBulkActions(
   const more = count > 5 ? `\n…and ${count - 5} more` : "";
 
   const actions: BulkAction[] = [];
+
+  // Batch workloads. Suspend and Resume are separate actions rather than one
+  // toggle: the selection carries only cluster/namespace/name, so there is no
+  // per-row suspend state to flip against — same shape as the node bar's
+  // Cordon / Uncordon pair.
+  if (kind.id === "cronjobs" || kind.id === "jobs") {
+    const isCronJob = kind.id === "cronjobs";
+    const nouns = { noun: kindLabel, nounPlural: plural };
+    const confirmThen = async (
+      title: string,
+      body: string,
+      confirmLabel: string,
+      tone: "neutral" | "danger",
+      verb: string,
+      op: (m: SelectionMeta) => Promise<unknown>,
+    ) => {
+      if (confirmDestructive) {
+        const ok = await confirm({
+          title,
+          body: `${body}\n\n${summary}${more}`,
+          confirmLabel,
+          tone,
+        });
+        if (!ok) return;
+      }
+      await bulkRunForEach(entries, prefix, op, { verb, ...nouns });
+      clearSelection();
+    };
+
+    actions.push({
+      icon: isCronJob ? Icons.bolt : Icons.refresh,
+      label: isCronJob ? "Run now" : "Re-run",
+      disabled: degraded,
+      onClick: () => {
+        void confirmThen(
+          isCronJob
+            ? `Run ${count} ${count === 1 ? kindLabel : plural} now?`
+            : `Run ${count} ${count === 1 ? kindLabel : plural} again?`,
+          isCronJob
+            ? "Creates one Job per CronJob from its template, owned by it so history limits still apply. Schedules and suspend flags are unchanged."
+            : "A Job's spec is immutable, so each is copied under a new name. The originals are left in place.",
+          isCronJob ? "Run now" : "Re-run",
+          "neutral",
+          isCronJob ? "Triggered" : "Re-ran",
+          async (m) => {
+            if (!m.namespace) throw new Error("no namespace");
+            return isCronJob
+              ? api.triggerCronJob(m.clusterId, m.namespace, m.name)
+              : api.rerunJob(m.clusterId, m.namespace, m.name);
+          },
+        );
+      },
+    });
+
+    for (const suspend of [true, false]) {
+      actions.push({
+        icon: suspend ? Icons.pause : Icons.play,
+        label: suspend ? "Suspend" : "Resume",
+        disabled: degraded,
+        onClick: () => {
+          void confirmThen(
+            `${suspend ? "Suspend" : "Resume"} ${count} ${count === 1 ? kindLabel : plural}?`,
+            suspend
+              ? isCronJob
+                ? "No new Jobs will be created. Runs already in flight keep going, and missed schedules are not backfilled on resume."
+                : "The Job controller deletes each Job's running pods; their work is lost unless it is idempotent."
+              : "Already-running selections are unaffected; suspended ones start again.",
+            suspend ? "Suspend" : "Resume",
+            suspend ? "danger" : "neutral",
+            suspend ? "Suspended" : "Resumed",
+            async (m) => {
+              if (!m.namespace) throw new Error("no namespace");
+              // Merge patch, not SSA — see the note on the single-object
+              // path in DetailPanel: a partial SSA apply drops every other
+              // spec field this app's field manager owns.
+              return api.mergePatchResource(
+                m.clusterId,
+                kind.id,
+                m.namespace,
+                m.name,
+                { spec: { suspend } },
+                null,
+              );
+            },
+          );
+        },
+      });
+    }
+  }
 
   if (BULK_RESTARTABLE_KINDS.has(kind.id)) {
     actions.push({
