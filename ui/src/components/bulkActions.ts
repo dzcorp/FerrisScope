@@ -386,6 +386,25 @@ const BULK_RESTARTABLE_KINDS = new Set([
   "daemonsets",
 ]);
 
+/// The first few rows an action will touch, one per line, plus an "and N more"
+/// tail. Always built from the rows the action actually targets — a listing
+/// that names rows the verb will skip reads as a promise it won't keep.
+function bulkSummary(
+  entries: [string, SelectionMeta][],
+  prefix: (m: SelectionMeta) => string,
+): string {
+  const shown = entries
+    .slice(0, 5)
+    .map(
+      ([, m]) =>
+        `${prefix(m)}${m.namespace ? `${m.namespace}/${m.name}` : m.name}`,
+    )
+    .join("\n");
+  return entries.length > 5
+    ? `${shown}\n…and ${entries.length - 5} more`
+    : shown;
+}
+
 /// Apply `op` to every selected row, collect per-row failures, and report
 /// once. A bulk action must never fail silently on a subset — the operator
 /// cleared the selection expecting all of it to have happened.
@@ -467,11 +486,14 @@ export function buildGenericBulkActions(
         const skipped = count - subset.length;
         const ok = await confirm({
           title,
+          // The listing has to name the rows this action will actually touch.
+          // Reusing the whole-selection summary here would put rows the verb
+          // skips in front of the operator as if they were targets.
           body: `${body}${
             skipped > 0
               ? `\n\n${skipped} of the ${count} selected will be skipped — the verb can't affect them.`
               : ""
-          }\n\n${summary}${more}`,
+          }\n\n${bulkSummary(subset, prefix)}`,
           confirmLabel,
           tone,
         });
@@ -512,9 +534,7 @@ export function buildGenericBulkActions(
     // this only narrows Jobs.
     const settleable = isCronJob
       ? entries
-      : entries.filter(
-          ([, m]) => m.phase !== "Succeeded" && m.phase !== "Failed",
-        );
+      : entries.filter(([, m]) => m.finished !== true);
 
     // Only offer the direction that would change something. A row whose
     // suspend state we never captured lands in both lists: the patch is an

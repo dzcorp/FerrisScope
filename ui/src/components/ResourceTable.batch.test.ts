@@ -96,13 +96,13 @@ describe("buildRowActionContext — suspend", () => {
   it("reads the Job row's boolean suspend flag", () => {
     const running = contextFor(kindOf("jobs", "Job"), {
       suspend: false,
-      phase: "Running",
+      finished: false,
     });
     expect(running.suspendTo?.target).toBe(true);
 
     const paused = contextFor(kindOf("jobs", "Job"), {
       suspend: true,
-      phase: "Suspended",
+      finished: false,
     });
     expect(paused.suspendTo?.target).toBe(false);
   });
@@ -110,12 +110,25 @@ describe("buildRowActionContext — suspend", () => {
   /// Suspending a finished Job is accepted by the apiserver and ignored by the
   /// controller, so offering it would be a button that silently does nothing.
   it("offers no suspend for a Job that already finished", () => {
-    for (const phase of ["Succeeded", "Failed"]) {
-      const ctx = contextFor(kindOf("jobs", "Job"), { suspend: false, phase });
-      expect(ctx.suspendTo).toBeUndefined();
-      // Re-running one, on the other hand, is exactly what you want.
-      expect(ctx.rerun).toBeTypeOf("function");
-    }
+    const ctx = contextFor(kindOf("jobs", "Job"), {
+      suspend: false,
+      finished: true,
+    });
+    expect(ctx.suspendTo).toBeUndefined();
+    // Re-running one, on the other hand, is exactly what you want.
+    expect(ctx.rerun).toBeTypeOf("function");
+  });
+
+  /// `phase` reads "Failed" for a Job still working through its backoff
+  /// retries. Gating on it would take Suspend away from a Job that is very
+  /// much still running, which is why the gate is the row's own `finished`.
+  it("keeps suspend for a Job whose phase reads Failed but is still retrying", () => {
+    const ctx = contextFor(kindOf("jobs", "Job"), {
+      suspend: false,
+      finished: false,
+      phase: "Failed",
+    });
+    expect(ctx.suspendTo?.target).toBe(true);
   });
 });
 
@@ -140,7 +153,7 @@ describe("buildRowActionContext — trigger and re-run", () => {
     const ctx = contextFor(kindOf("jobs", "Job"), {
       name: "migrate",
       suspend: false,
-      phase: "Failed",
+      finished: true,
     });
 
     expect(ctx.trigger).toBeUndefined();
@@ -159,7 +172,7 @@ describe("buildRowActionContext — trigger and re-run", () => {
     const ctx = contextFor(kindOf("jobs", "Job"), {
       name: "migrate",
       suspend: false,
-      phase: "Failed",
+      finished: true,
     });
 
     ctx.delete!();
@@ -175,7 +188,7 @@ describe("buildRowActionContext — unknown suspend state", () => {
   /// "Suspend" for an already-suspended object points the operator at a verb
   /// that will do nothing.
   it("offers no suspend toggle when the row never projected one", () => {
-    const ctx = contextFor(kindOf("jobs", "Job"), { phase: "Running" });
+    const ctx = contextFor(kindOf("jobs", "Job"), { finished: false });
     expect(ctx.suspendTo).toBeUndefined();
     // The verbs that don't depend on suspend state stay available.
     expect(ctx.rerun).toBeTypeOf("function");
@@ -195,14 +208,14 @@ describe("selectionMetaOf", () => {
       name: "nightly",
       namespace: "demo",
       suspend: "true",
-      phase: "Active",
+      finished: false,
     } as unknown as Parameters<typeof selectionMetaOf>[0];
     expect(selectionMetaOf(row)).toEqual({
       clusterId: "ctx",
       namespace: "demo",
       name: "nightly",
       suspend: true,
-      phase: "Active",
+      finished: false,
     });
   });
 
@@ -214,7 +227,7 @@ describe("selectionMetaOf", () => {
       name: "migrate",
       namespace: "demo",
       suspend: false,
-      phase: "Running",
+      finished: false,
     } as unknown as Parameters<typeof selectionMetaOf>[0];
     expect(selectionMetaOf(row)).toMatchObject({ suspend: false });
   });

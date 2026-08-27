@@ -35,7 +35,7 @@ pub use fetch::{
     list_pods_on_node, list_secrets_in_namespace, list_services_in_namespace, manual_job_name,
     merge_patch_resource, rerun_job, rerun_job_name, restart_pod_owner, restart_pods_owners,
     restart_workload, set_node_cordon, trigger_cron_job, ApplyConflict, ApplyOk, ApplyResult,
-    Cascade, DocApplyResult, DrainFailure, DrainReport, DrainSkipped, FetchError,
+    Cascade, CronJobHistory, DocApplyResult, DrainFailure, DrainReport, DrainSkipped, FetchError,
     HelmInstallResult, HelmUpdateAvailable, HelmUpgradeResult, MergePatchResult, RestartFailure,
     RestartPodsReport, RestartedWorkload, WorkloadPods, FIELD_MANAGER, HELM_CLUSTER_SOURCE,
 };

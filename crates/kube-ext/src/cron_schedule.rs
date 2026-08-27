@@ -25,8 +25,9 @@ pub struct CronSchedule {
     months: u16,
     /// Bit `n` set ⇒ weekday `n` matches, Sunday = 0.
     dows: u8,
-    /// Whether the day-of-month field was something other than `*`. Together
-    /// with `dow_restricted` this selects cron's OR rule — see [`Self::matches_date`].
+    /// Whether the day-of-month field narrows anything — see [`is_restricted`].
+    /// Together with `dow_restricted` this selects cron's OR rule; see
+    /// [`Self::matches_date`].
     dom_restricted: bool,
     dow_restricted: bool,
 }
@@ -95,15 +96,16 @@ impl CronSchedule {
             doms,
             months,
             dows,
-            dom_restricted: fields[2] != "*",
-            dow_restricted: fields[4] != "*",
+            dom_restricted: is_restricted(fields[2]),
+            dow_restricted: is_restricted(fields[4]),
         })
     }
 
     /// Cron's day rule: when *both* day-of-month and day-of-week are
     /// restricted the fields are OR'd, not AND'd (so `0 0 1 * MON` fires on
-    /// the 1st *and* every Monday). If only one is restricted the other is
-    /// `*` and AND is equivalent.
+    /// the 1st *and* every Monday). If only one is restricted, AND is what
+    /// the controller does — including when the other side is `*/2`, which
+    /// counts as unrestricted.
     fn matches_date(&self, date: NaiveDate) -> bool {
         if self.months & (1u16 << date.month()) == 0 {
             return false;
@@ -198,10 +200,19 @@ fn parse_field(field: &str, min: u32, max: u32, names: Option<&[&str]>) -> Optio
             return None;
         }
         let (range, step) = match part.split_once('/') {
-            Some((r, s)) => (r, s.parse::<u32>().ok().filter(|s| *s > 0)?),
+            // Clamp to the field's own width. A step wider than the range can
+            // only ever set the first bit, and leaving it unclamped overflows
+            // the `v += step` walk below on an operator-authored `5/4294967295`.
+            Some((r, s)) => (
+                r,
+                s.parse::<u32>()
+                    .ok()
+                    .filter(|s| *s > 0)
+                    .map(|s| s.min(max.saturating_sub(min) + 1))?,
+            ),
             None => (part, 1),
         };
-        let (lo, hi) = if range == "*" {
+        let (lo, hi) = if range == "*" || range == "?" {
             (min, max)
         } else if let Some((a, b)) = range.split_once('-') {
             (
@@ -231,6 +242,21 @@ fn parse_field(field: &str, min: u32, max: u32, names: Option<&[&str]>) -> Optio
         return None;
     }
     Some(bits)
+}
+
+/// Whether a day-of-month / day-of-week field narrows anything.
+///
+/// Cron ORs the two day fields only when *both* are restricted. robfig — which
+/// the CronJob controller is built on — decides that per comma-part on whether
+/// the part before any `/` is `*` or `?`, so `*/2` counts as unrestricted even
+/// though it selects half the days. Matching that matters: reading `*/2` as
+/// restricted turns `0 0 */2 * MON` into an OR and shows a next-fire time
+/// earlier than the cluster will actually run.
+fn is_restricted(field: &str) -> bool {
+    !field.split(',').any(|part| {
+        let range = part.trim().split_once('/').map_or(part.trim(), |(r, _)| r);
+        range == "*" || range == "?"
+    })
 }
 
 fn parse_value(raw: &str, min: u32, max: u32, names: Option<&[&str]>) -> Option<u32> {
@@ -400,6 +426,46 @@ mod tests {
     #[test]
     fn impossible_date_gives_up() {
         assert_eq!(next("0 0 30 2 *", "2026-01-01T00:00:00"), None);
+    }
+
+    /// robfig treats a field whose range part is `*` or `?` as unrestricted
+    /// even with a step, so `*/2` must AND rather than OR. Reading it as
+    /// restricted shows a next fire earlier than the cluster will run.
+    #[test]
+    fn stepped_star_is_not_a_restriction() {
+        // 2026-09-01 is a Tuesday. With AND, the first match is the first
+        // Monday that also falls on an odd day-of-month.
+        let anded = next("0 0 */2 * mon", "2026-09-01T00:00:00").expect("parses");
+        let date = &anded[..10];
+        // Must be a Monday, not merely an odd-numbered day.
+        let parsed = NaiveDate::parse_from_str(date, "%Y-%m-%d").expect("date");
+        assert_eq!(
+            parsed.weekday(),
+            chrono::Weekday::Mon,
+            "{anded} is not a Monday — the day fields were OR'd"
+        );
+    }
+
+    /// `?` is robfig's synonym for `*` in the day fields. Rejecting it would
+    /// blank the next-run readout for a schedule the cluster accepts.
+    #[test]
+    fn question_mark_reads_as_star() {
+        assert_eq!(
+            next("0 0 ? * fri", "2026-08-27T00:00:00"),
+            next("0 0 * * fri", "2026-08-27T00:00:00"),
+        );
+    }
+
+    /// An absurd step must clamp, not overflow the bit walk. Unclamped this
+    /// panics in debug and wraps in release, which would show a wrong next
+    /// fire as fact.
+    #[test]
+    fn absurd_step_clamps_instead_of_overflowing() {
+        assert_eq!(
+            next("5/4294967295 * * * *", "2026-08-27T10:00:00"),
+            Some("2026-08-27T10:05:00".to_owned())
+        );
+        assert!(CronSchedule::parse("* * * * */4294967295").is_some());
     }
 
     #[test]

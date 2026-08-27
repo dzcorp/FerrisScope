@@ -1225,19 +1225,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       if (rows.length === 0) return;
       e.preventDefault();
       setSelection(
-        new Map(
-          rows.map((r) => [
-            r.original.__sid,
-            {
-              clusterId: r.original.__clusterId,
-              namespace:
-                typeof r.original.namespace === "string"
-                  ? r.original.namespace
-                  : null,
-              name: String(r.original.name ?? ""),
-            },
-          ]),
-        ),
+        new Map(rows.map((r) => [r.original.__sid, selectionMetaOf(r.original)])),
       );
     };
     window.addEventListener("keydown", onKey);
@@ -1293,15 +1281,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
                 else
                   setSelection(
                     new Map(
-                      filtered.map((r) => [
-                        r.__sid,
-                        {
-                          clusterId: r.__clusterId,
-                          namespace:
-                            typeof r.namespace === "string" ? r.namespace : null,
-                          name: String(r.name ?? ""),
-                        },
-                      ]),
+                      filtered.map((r) => [r.__sid, selectionMetaOf(r)]),
                     ),
                   );
               };
@@ -1907,7 +1887,7 @@ export function selectionMetaOf(row: ScopedRow): SelectionMeta {
     ...(row.suspend !== undefined
       ? { suspend: row.suspend === true || row.suspend === "true" }
       : {}),
-    ...(typeof row.phase === "string" ? { phase: row.phase } : {}),
+    ...(row.finished !== undefined ? { finished: row.finished === true } : {}),
   };
 }
 
@@ -2054,9 +2034,11 @@ export function buildRowActionContext(
         : row.suspend === true || row.suspend === "true";
     const suspended = suspendState === true;
     // Suspending a finished Job is accepted by the apiserver and ignored by
-    // the controller — offer it only while it can still do something.
-    const finished =
-      isJob && (row.phase === "Succeeded" || row.phase === "Failed");
+    // the controller — offer it only while it can still do something. Gate on
+    // the row's own `finished` flag, not on `phase`: `phase` is a display
+    // heuristic that reads "Failed" for a Job still working through its
+    // backoff retries, which is precisely a Job suspend still applies to.
+    const finished = isJob && row.finished === true;
     // Merge patch, NOT SSA. An SSA apply carries the *whole* declared intent of
     // its field manager, so applying `{spec:{suspend}}` under the `ferrisscope`
     // manager drops every other spec field that manager already owned. For an

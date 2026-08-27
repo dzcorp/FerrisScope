@@ -317,7 +317,7 @@ pub(crate) fn build_registry(
         app.clone(),
         cluster.clone(),
     )));
-    reg.register(Arc::new(batch::CronJobHistory::new(
+    reg.register(Arc::new(batch::CronJobHistoryTool::new(
         app.clone(),
         cluster.clone(),
     )));

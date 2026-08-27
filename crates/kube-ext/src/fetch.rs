@@ -2150,6 +2150,12 @@ const HISTORY_PAGE_SIZE: u32 = 200;
 /// runs, never invent them.
 const MAX_CRON_JOB_HISTORY_SCAN: usize = 20 * HISTORY_PAGE_SIZE as usize;
 
+/// Hard cap on *pages*, independent of how many objects they carry. The
+/// object-count bound alone is not enough: an apiserver page can come back
+/// empty while still handing out a continue token, which would leave the
+/// count-based check never advancing and the command spinning forever.
+const MAX_CRON_JOB_HISTORY_PAGES: usize = 40;
+
 /// The two bounds have to stay coherent: a scan cap below the page size would
 /// fetch exactly one page and stop, and a cap below the returned-row cap would
 /// make the cap unreachable.
@@ -2164,11 +2170,26 @@ const _: () = {
 /// operator-supplied and routinely shared with unrelated workloads, so a
 /// selector query would fold in Jobs this CronJob never created. Filtering on
 /// the controller owner reference is exact.
+/// Result of [`list_jobs_for_cron_job`].
+///
+/// `truncated` must reach the UI. Ownership can only be tested client-side —
+/// the apiserver has no owner-reference selector — so the whole namespace has
+/// to be walked, and any of the bounds (pages, objects, returned rows) can cut
+/// the walk short. etcd paginates by key, not by time, so an early stop can
+/// miss *every* run of a CronJob whose name sorts late. A UI reporting an
+/// empty list as "runs older than the history limits were deleted" would be
+/// stating a retention fact it cannot know.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CronJobHistory {
+    pub runs: Vec<Value>,
+    pub truncated: bool,
+}
+
 pub async fn list_jobs_for_cron_job(
     client: Client,
     namespace: &str,
     name: &str,
-) -> Result<Vec<Value>, FetchError> {
+) -> Result<CronJobHistory, FetchError> {
     let cron_api: Api<CronJob> = Api::namespaced(client.clone(), namespace);
     let uid = cron_api
         .get(name)
@@ -2181,8 +2202,9 @@ pub async fn list_jobs_for_cron_job(
     let mut owned: Vec<Job> = Vec::new();
     let mut scanned = 0usize;
     let mut cursor: Option<String> = None;
+    let mut truncated = false;
 
-    loop {
+    for page_no in 0..MAX_CRON_JOB_HISTORY_PAGES {
         let mut lp = ListParams::default().limit(HISTORY_PAGE_SIZE);
         if let Some(token) = cursor.take() {
             lp = lp.continue_token(&token);
@@ -2202,13 +2224,15 @@ pub async fn list_jobs_for_cron_job(
         if cursor.is_none() {
             break;
         }
-        if scanned >= MAX_CRON_JOB_HISTORY_SCAN {
+        if scanned >= MAX_CRON_JOB_HISTORY_SCAN || page_no + 1 == MAX_CRON_JOB_HISTORY_PAGES {
             tracing::warn!(
                 namespace,
                 cronjob = name,
                 scanned,
+                pages = page_no + 1,
                 "cronjob history: namespace scan hit its cap; older runs may be missing"
             );
+            truncated = true;
             break;
         }
     }
@@ -2220,9 +2244,15 @@ pub async fn list_jobs_for_cron_job(
             .cmp(&job_sort_key(a))
             .then_with(|| b.metadata.name.cmp(&a.metadata.name))
     });
-    owned.truncate(MAX_CRON_JOB_HISTORY);
+    if owned.len() > MAX_CRON_JOB_HISTORY {
+        truncated = true;
+        owned.truncate(MAX_CRON_JOB_HISTORY);
+    }
 
-    Ok(owned.iter().map(jobs::project_history_row).collect())
+    Ok(CronJobHistory {
+        runs: owned.iter().map(jobs::project_history_row).collect(),
+        truncated,
+    })
 }
 
 fn job_sort_key(job: &Job) -> Option<String> {

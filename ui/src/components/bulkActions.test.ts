@@ -186,8 +186,8 @@ describe("buildGenericBulkActions — suspend direction", () => {
     const labels = build(
       JOBS,
       selectionWith(
-        { name: "a", suspend: false, phase: "Running" },
-        { name: "b", suspend: false, phase: "Running" },
+        { name: "a", suspend: false, finished: false },
+        { name: "b", suspend: false, finished: false },
       ),
     ).map((a) => a.label);
     expect(labels).toContain("Suspend");
@@ -212,9 +212,9 @@ describe("buildGenericBulkActions — suspend direction", () => {
     const labels = build(
       JOBS,
       selectionWith(
-        { name: "a", suspend: false, phase: "Running" },
-        { name: "b", suspend: true, phase: "Suspended" },
-        { name: "c", suspend: true, phase: "Suspended" },
+        { name: "a", suspend: false, finished: false },
+        { name: "b", suspend: true, finished: false },
+        { name: "c", suspend: true, finished: false },
       ),
     ).map((a) => a.label);
     expect(labels).toContain("Suspend (1)");
@@ -224,8 +224,8 @@ describe("buildGenericBulkActions — suspend direction", () => {
   it("acts on only the matching subset", async () => {
     const calls = stubInvoke(() => ({ kind: "applied", resource_version: "2" }));
     const selection = selectionWith(
-      { name: "running", suspend: false, phase: "Running" },
-      { name: "paused", suspend: true, phase: "Suspended" },
+      { name: "running", suspend: false, finished: false },
+      { name: "paused", suspend: true, finished: false },
     );
     click(JOBS, selection, "Suspend (1)");
     await vi.waitFor(() => expect(calls).toHaveLength(1));
@@ -240,8 +240,8 @@ describe("buildGenericBulkActions — suspend direction", () => {
     const labels = build(
       JOBS,
       selectionWith(
-        { name: "a", suspend: false, phase: "Succeeded" },
-        { name: "b", suspend: false, phase: "Failed" },
+        { name: "a", suspend: false, finished: true },
+        { name: "b", suspend: false, finished: true },
       ),
     ).map((a) => a.label);
     expect(labels).not.toContain("Suspend");
@@ -253,7 +253,7 @@ describe("buildGenericBulkActions — suspend direction", () => {
   it("keeps suspend available for CronJobs regardless of phase", () => {
     const labels = build(
       CRONJOBS,
-      selectionWith({ name: "a", suspend: false, phase: "Succeeded" }),
+      selectionWith({ name: "a", suspend: false, finished: true }),
     ).map((a) => a.label);
     expect(labels).toContain("Suspend");
   });
@@ -272,8 +272,8 @@ describe("buildGenericBulkActions — suspend direction", () => {
     click(
       JOBS,
       selectionWith(
-        { name: "live", suspend: false, phase: "Running" },
-        { name: "done", suspend: false, phase: "Succeeded" },
+        { name: "live", suspend: false, finished: false },
+        { name: "done", suspend: false, finished: true },
       ),
       "Suspend (1)",
     );

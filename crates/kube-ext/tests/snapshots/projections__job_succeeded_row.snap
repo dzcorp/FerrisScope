@@ -5,6 +5,7 @@ expression: value
 {
   "completions": "1/1",
   "creation_timestamp": "2026-04-15T09:00:00Z",
+  "finished": true,
   "name": "migrate-1",
   "namespace": "default",
   "phase": "Succeeded",

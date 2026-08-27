@@ -179,10 +179,14 @@ function run(over: Partial<CronJobRun> = {}): CronJobRun {
   };
 }
 
-function mountCronJob(detail: CronJobDetail, runs: CronJobRun[]) {
+function mountCronJob(
+  detail: CronJobDetail,
+  runs: CronJobRun[],
+  truncated = false,
+) {
   stubInvoke({
     get_cron_job_detail_cmd: detail,
-    list_jobs_for_cron_job_cmd: runs,
+    list_jobs_for_cron_job_cmd: { runs, truncated },
   });
   return render(
     <CronJobSummary
@@ -288,3 +292,33 @@ describe("CronJobSummary — run history", () => {
   });
 });
 
+
+describe("CronJobSummary — truncated history", () => {
+  /// The scan behind the history list is bounded and etcd paginates by key,
+  /// not by time, so an early stop can miss every run of a CronJob whose name
+  /// sorts late. Reporting that as "runs aged out of the cluster" states a
+  /// retention fact the app cannot know.
+  it("does not blame retention for an empty truncated history", async () => {
+    const { container } = mountCronJob(cronDetail(), [], true);
+    await waitFor(() =>
+      expect(container.textContent).toContain("too many Jobs to scan"),
+    );
+    expect(container.textContent).not.toContain("history limits");
+  });
+
+  it("warns that older runs may be missing when the list is partial", async () => {
+    const { container } = mountCronJob(cronDetail(), [run()], true);
+    await waitFor(() =>
+      expect(container.textContent).toContain("Older runs may be missing"),
+    );
+    // The count must not read as "this is all of them".
+    expect(container.textContent).toContain("1+ shown");
+    expect(container.textContent).not.toContain("1 kept");
+  });
+
+  it("says 'kept' only when the whole namespace was walked", async () => {
+    const { container } = mountCronJob(cronDetail(), [run()], false);
+    await waitFor(() => expect(container.textContent).toContain("1 kept"));
+    expect(container.textContent).not.toContain("Older runs may be missing");
+  });
+});

@@ -152,19 +152,19 @@ impl NativeTool for JobRerun {
 
 // ─── fs_cronjob_history ──────────────────────────────────────────────────────
 
-pub(crate) struct CronJobHistory {
+pub(crate) struct CronJobHistoryTool {
     app: AppHandle,
     cluster: ChatClusterRef,
 }
 
-impl CronJobHistory {
+impl CronJobHistoryTool {
     pub(crate) fn new(app: AppHandle, cluster: ChatClusterRef) -> Self {
         Self { app, cluster }
     }
 }
 
 #[async_trait]
-impl NativeTool for CronJobHistory {
+impl NativeTool for CronJobHistoryTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "fs_cronjob_history".to_string(),
@@ -175,7 +175,9 @@ impl NativeTool for CronJobHistory {
                 `fs_resources_list` on Jobs when asked why a CronJob is failing — the list is \
                 bounded by the CronJob's own history limits, so runs older than \
                 `successfulJobsHistoryLimit` / `failedJobsHistoryLimit` are already gone from the \
-                cluster and no tool can recover them; check Events for those."
+                cluster and no tool can recover them; check Events for those. If `truncated` is \
+                true the namespace was too large to walk fully and runs may be missing for a \
+                different reason — do not report them as reaped."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -197,14 +199,18 @@ impl NativeTool for CronJobHistory {
         let a: TargetArgs = serde_json::from_value(args)
             .map_err(|e| NativeToolError::msg(format!("invalid args: {e}")))?;
         let client = client_for(&self.app, &self.cluster).await?;
-        let runs = list_jobs_for_cron_job(client, &a.namespace, &a.name)
+        let history = list_jobs_for_cron_job(client, &a.namespace, &a.name)
             .await
             .map_err(|e| NativeToolError::msg(e.to_string()))?;
         Ok(json!({
             "cronjob": a.name,
             "namespace": a.namespace,
-            "count": runs.len(),
-            "runs": runs,
+            "count": history.runs.len(),
+            // The namespace walk is bounded, so an empty or short list is not
+            // proof the runs were reaped — say which it is rather than letting
+            // the model conclude retention deleted them.
+            "truncated": history.truncated,
+            "runs": history.runs,
         }))
     }
 }

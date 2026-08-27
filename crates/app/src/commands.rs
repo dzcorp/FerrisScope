@@ -42,9 +42,9 @@ use ferrisscope_kube_ext::{
     list_pods_on_node, list_secrets_in_namespace, list_services_in_namespace, lookup,
     manual_job_name, merge_patch_resource, registry, rerun_job, rerun_job_name, restart_pod_owner,
     restart_pods_owners, restart_workload, set_node_cordon, start_forward, trigger_cron_job,
-    ApplyResult, Cascade, DrainReport, ForwardEntry, ForwardStatus, HelmInstallResult,
-    HelmUpgradeResult, MergePatchResult, ResourceKind, ResourceKindEntry, RestartPodsReport,
-    WorkloadPods,
+    ApplyResult, Cascade, CronJobHistory, DrainReport, ForwardEntry, ForwardStatus,
+    HelmInstallResult, HelmUpgradeResult, MergePatchResult, ResourceKind, ResourceKindEntry,
+    RestartPodsReport, WorkloadPods,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -2469,7 +2469,7 @@ pub(crate) async fn list_jobs_for_cron_job_cmd(
     namespace: String,
     name: String,
     state: State<'_, AppState>,
-) -> Result<Vec<Value>, String> {
+) -> Result<CronJobHistory, String> {
     let entry = state.entry(&cluster_id).await?;
     list_jobs_for_cron_job(entry.cluster.client(), &namespace, &name)
         .await

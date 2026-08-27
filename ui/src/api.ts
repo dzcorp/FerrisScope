@@ -33,7 +33,7 @@ import type {
   ContextInfo,
   Cascade,
   CronJobDetail,
-  CronJobRun,
+  CronJobHistory,
   DaemonSetDetail,
   DeploymentDetail,
   CompactMemoryResult,
@@ -602,9 +602,10 @@ export const api = {
   rerunJob: (clusterId: string, namespace: string, name: string) =>
     invoke<string>("rerun_job_cmd", { clusterId, namespace, name }),
 
-  // Jobs owned by a CronJob, newest first.
+  // Jobs owned by a CronJob, newest first, plus whether the namespace walk
+  // behind them was cut short.
   listJobsForCronJob: (clusterId: string, namespace: string, name: string) =>
-    invoke<CronJobRun[]>("list_jobs_for_cron_job_cmd", {
+    invoke<CronJobHistory>("list_jobs_for_cron_job_cmd", {
       clusterId,
       namespace,
       name,

@@ -1179,6 +1179,18 @@ export type JobDetail = {
   pod_template: PodTemplateSummary | null;
 };
 
+/// A CronJob's run history plus whether the walk that produced it was cut
+/// short. `truncated` is load-bearing: ownership can only be tested
+/// client-side, so the backend walks the whole namespace under bounds, and
+/// etcd paginates by key rather than by time — an early stop can miss every
+/// run of a CronJob whose name sorts late. Without this flag an empty list
+/// would be reported as "the runs aged out", which is a retention claim the
+/// app cannot make.
+export type CronJobHistory = {
+  runs: CronJobRun[];
+  truncated: boolean;
+};
+
 /// One row of a CronJob's run history — a Job it owns.
 export type CronJobRun = {
   uid: string | null;

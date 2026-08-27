@@ -24,7 +24,7 @@ import {
 } from "..";
 import type {
   CronJobDetail,
-  CronJobRun,
+  CronJobHistory,
   DaemonSetDetail,
   DeploymentDetail,
   JobDetail,
@@ -1442,7 +1442,7 @@ function CronJobHistorySection({
   refetchKey: number;
   onNavigate?: DetailNavigate;
 }) {
-  const state = useDetail<CronJobRun[]>(
+  const state = useDetail<CronJobHistory>(
     () => api.listJobsForCronJob(clusterId, namespace, name),
     [clusterId, namespace, name, refetchKey],
   );
@@ -1457,7 +1457,8 @@ function CronJobHistorySection({
             <span
               style={{ fontSize: FS_XS, color: t.textMuted, fontFamily: FF_MONO }}
             >
-              {state.detail.length} kept
+              {state.detail.runs.length}
+              {state.detail.truncated ? "+ shown" : " kept"}
             </span>
           ) : undefined
         }
@@ -1469,15 +1470,33 @@ function CronJobHistorySection({
         {state.kind === "error" && (
           <Mute t={t}>Couldn't load run history: {state.message}</Mute>
         )}
-        {state.kind === "ready" && state.detail.length === 0 && (
-          <Mute t={t}>
-            No Jobs owned by this CronJob. Runs older than its history limits
-            are deleted from the cluster — check Events for what happened to
-            them.
-          </Mute>
-        )}
+        {/* Two different empty states. Only one of them is a retention fact —
+            claiming the other would tell the operator their runs were reaped
+            when really we just stopped looking. */}
         {state.kind === "ready" &&
-          state.detail.map((run) => (
+          state.detail.runs.length === 0 &&
+          (state.detail.truncated ? (
+            <Mute t={t}>
+              This namespace holds too many Jobs to scan for ownership — none of
+              this CronJob's runs were found in the part that was searched. Try
+              filtering the Jobs view by name instead.
+            </Mute>
+          ) : (
+            <Mute t={t}>
+              No Jobs owned by this CronJob. Runs older than its history limits
+              are deleted from the cluster — check Events for what happened to
+              them.
+            </Mute>
+          ))}
+        {state.kind === "ready" && state.detail.truncated &&
+          state.detail.runs.length > 0 && (
+            <Mute t={t}>
+              Older runs may be missing — the namespace was too large to scan
+              fully.
+            </Mute>
+          )}
+        {state.kind === "ready" &&
+          state.detail.runs.map((run) => (
             <DetailRow key={run.uid ?? run.name} t={t} label={run.phase}>
               <div
                 style={{

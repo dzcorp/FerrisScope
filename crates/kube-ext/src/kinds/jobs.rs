@@ -65,10 +65,18 @@ impl KindSpec for JobSpec {
         let failed = status.and_then(|s| s.failed).unwrap_or(0);
 
         let suspend = spec.and_then(|s| s.suspend).unwrap_or(false);
+        // Terminal by condition, not by counters. `status.failed` counts burned
+        // pods, not the Job's verdict: a Job with backoffLimit 4 that lost one
+        // pod and has another running is still going, and reading it as Failed
+        // both misinforms the operator and — since the UI gates Suspend on
+        // `finished` — takes away a verb that still applies.
+        let finished = status.and_then(|s| s.completion_time.as_ref()).is_some()
+            || has_true_condition(job, "Complete")
+            || has_true_condition(job, "Failed");
 
         let phase = if status.and_then(|s| s.completion_time.as_ref()).is_some() {
             "Succeeded"
-        } else if failed > 0 {
+        } else if has_true_condition(job, "Failed") {
             "Failed"
         } else if active > 0 {
             "Running"
@@ -77,6 +85,11 @@ impl KindSpec for JobSpec {
             // branch would read "Pending" — indistinguishable from one the
             // scheduler simply hasn't got to yet.
             "Suspended"
+        } else if failed > 0 {
+            // Pods burned, none running, no terminal condition yet: the
+            // controller is between backoff retries. Not terminal, but the
+            // operator needs to see the trouble.
+            "Failed"
         } else {
             "Pending"
         };
@@ -84,9 +97,12 @@ impl KindSpec for JobSpec {
         json!({
             "namespace": meta.namespace.clone().unwrap_or_default(),
             "name": meta.name.clone().unwrap_or_default(),
-            // No column of its own — the row carries it so the detail panel's
-            // Suspend/Resume toggle tracks the watcher instead of refetching.
+            // No columns of their own — the row carries them so the detail
+            // panel's and bulk bar's Suspend/Resume toggles track the watcher
+            // instead of refetching. `finished` is separate from `phase`
+            // because `phase` is a display heuristic and this is a gate.
             "suspend": suspend,
+            "finished": finished,
             // `active + succeeded + failed`, matching `kubectl describe job`'s
             // "Pods Statuses" line. Not a live count: succeeded pods stay
             // counted after the apiserver garbage-collects them, and the
@@ -344,6 +360,82 @@ mod tests {
         assert_eq!(row["suspend"], true);
     }
 
+    /// `status.failed` counts burned pods, not the Job's verdict. A Job that
+    /// lost a pod and has another running is Running, and NOT finished — the
+    /// UI gates Suspend on `finished`, so getting this wrong removes a verb
+    /// that still applies.
+    #[test]
+    fn retrying_job_is_running_and_not_finished() {
+        let job: Job = serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": { "name": "retrying" },
+            "spec": { "completions": 1, "backoffLimit": 4 },
+            "status": { "failed": 1, "active": 1 }
+        }))
+        .expect("valid Job fixture");
+
+        let row = JobSpec::project(&job);
+        assert_eq!(row["phase"], "Running");
+        assert_eq!(row["finished"], false);
+    }
+
+    /// Same for a suspended Job with a prior failure — it is suspended, not
+    /// failed, and resuming it is exactly what the operator wants next.
+    #[test]
+    fn suspended_job_with_prior_failure_is_not_finished() {
+        let job: Job = serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": { "name": "paused" },
+            "spec": { "suspend": true, "backoffLimit": 4 },
+            "status": { "failed": 2 }
+        }))
+        .expect("valid Job fixture");
+
+        let row = JobSpec::project(&job);
+        assert_eq!(row["phase"], "Suspended");
+        assert_eq!(row["finished"], false);
+    }
+
+    /// The terminal Failed condition — backoff exhausted — is finished.
+    #[test]
+    fn job_failed_by_condition_is_finished() {
+        let job: Job = serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": { "name": "doomed" },
+            "spec": { "backoffLimit": 0 },
+            "status": {
+                "failed": 1,
+                "conditions": [{ "type": "Failed", "status": "True", "reason": "BackoffLimitExceeded" }]
+            }
+        }))
+        .expect("valid Job fixture");
+
+        let row = JobSpec::project(&job);
+        assert_eq!(row["phase"], "Failed");
+        assert_eq!(row["finished"], true);
+    }
+
+    /// A Job between backoff retries has no active pods and no terminal
+    /// condition. It still shows trouble, but it is not finished.
+    #[test]
+    fn job_between_retries_shows_failed_but_is_not_finished() {
+        let job: Job = serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": { "name": "backoff" },
+            "spec": { "completions": 1, "backoffLimit": 4 },
+            "status": { "failed": 2 }
+        }))
+        .expect("valid Job fixture");
+
+        let row = JobSpec::project(&job);
+        assert_eq!(row["phase"], "Failed");
+        assert_eq!(row["finished"], false);
+    }
+
     /// Suspension must not mask a terminal outcome: a Job suspended after it
     /// finished still succeeded.
     #[test]
@@ -356,7 +448,9 @@ mod tests {
             "status": { "succeeded": 1, "completionTime": "2026-08-27T10:00:00Z" }
         }))
         .expect("valid Job fixture");
-        assert_eq!(JobSpec::project(&job)["phase"], "Succeeded");
+        let row = JobSpec::project(&job);
+        assert_eq!(row["phase"], "Succeeded");
+        assert_eq!(row["finished"], true);
     }
 
     /// Indexed Jobs are opaque without these — `3/5 completed` says nothing
