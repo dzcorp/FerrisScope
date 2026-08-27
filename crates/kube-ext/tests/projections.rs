@@ -340,7 +340,14 @@ fn cronjob_row_and_detail_carry_schedule() {
     snap("cronjob_row", &row);
     let detail = ferrisscope_kube_ext::kinds::cron_jobs::project_detail(&cj);
     assert_eq!(detail["concurrency_policy"], "Forbid");
-    snap("cronjob_detail", &detail);
+    // `next_run` is computed against the wall clock, so it changes on every
+    // run by construction and can't be snapshotted. Its behaviour is covered
+    // by the unit tests next to the projection; here we only pin that the
+    // field is present and populated for a schedule we can parse.
+    assert!(detail["next_run"].is_string());
+    let mut stable = detail;
+    stable["next_run"] = serde_json::Value::String("[computed]".to_owned());
+    snap("cronjob_detail", &stable);
 }
 
 // ── Storage ────────────────────────────────────────────────────────────────

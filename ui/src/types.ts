@@ -1125,6 +1125,26 @@ export type DaemonSetDetail = {
   pod_template: PodTemplateSummary | null;
 };
 
+/// Deletion propagation, mirroring `kubectl delete --cascade`. "background"
+/// is the backend default; the apiserver's own per-resource default is NOT
+/// used, because for batch/v1 it is "orphan" and strands a Job's pods.
+export type Cascade = "background" | "foreground" | "orphan";
+
+export type JobPodFailurePolicyRule = {
+  action: string;
+  on_exit_codes: {
+    container_name: string | null;
+    operator: string;
+    values: number[];
+  } | null;
+  on_pod_conditions: { type: string; status: string }[] | null;
+};
+
+export type JobSuccessPolicyRule = {
+  succeeded_count: number | null;
+  succeeded_indexes: string | null;
+};
+
 export type JobDetail = {
   meta: WorkloadMeta;
   selector: LabelSelectorSummary | null;
@@ -1137,17 +1157,56 @@ export type JobDetail = {
   completion_mode: string | null;
   suspend: boolean;
   manual_selector: boolean;
+  backoff_limit_per_index: number | null;
+  max_failed_indexes: number | null;
+  pod_replacement_policy: string | null;
+  managed_by: string | null;
+  pod_failure_policy: { rules: JobPodFailurePolicyRule[] } | null;
+  success_policy: { rules: JobSuccessPolicyRule[] } | null;
   status: {
     active: number;
     succeeded: number;
     failed: number;
     ready: number | null;
     terminating: number | null;
+    // Compressed index ranges ("0-4,7") for Indexed jobs; null otherwise.
+    completed_indexes: string | null;
+    failed_indexes: string | null;
   };
   start_time: string | null;
   completion_time: string | null;
   conditions: WorkloadCondition[];
   pod_template: PodTemplateSummary | null;
+};
+
+/// A CronJob's run history plus whether the walk that produced it was cut
+/// short. `truncated` is load-bearing: ownership can only be tested
+/// client-side, so the backend walks the whole namespace under bounds, and
+/// etcd paginates by key rather than by time — an early stop can miss every
+/// run of a CronJob whose name sorts late. Without this flag an empty list
+/// would be reported as "the runs aged out", which is a retention claim the
+/// app cannot make.
+export type CronJobHistory = {
+  runs: CronJobRun[];
+  truncated: boolean;
+};
+
+/// One row of a CronJob's run history — a Job it owns.
+export type CronJobRun = {
+  uid: string | null;
+  name: string;
+  namespace: string | null;
+  phase: string;
+  succeeded: number;
+  failed: number;
+  active: number;
+  completions_desired: number | null;
+  start_time: string | null;
+  completion_time: string | null;
+  duration_seconds: number | null;
+  creation_timestamp: string | null;
+  // Triggered by hand rather than by the schedule.
+  manual: boolean;
 };
 
 export type CronJobActiveRef = {
@@ -1173,6 +1232,9 @@ export type CronJobDetail = {
   starting_deadline_seconds: number | null;
   successful_jobs_history_limit: number | null;
   failed_jobs_history_limit: number | null;
+  // Computed by the backend from `schedule` + `time_zone`; null when the
+  // expression or zone is one we won't guess at.
+  next_run: string | null;
   last_schedule_time: string | null;
   last_successful_time: string | null;
   active: CronJobActiveRef[];

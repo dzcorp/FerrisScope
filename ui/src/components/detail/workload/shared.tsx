@@ -1379,27 +1379,41 @@ export function ReplicasEditor({
   t,
   ready,
   desired,
+  field = "replicas",
+  label = "replicas",
+  min = 0,
 }: {
   t: Tokens;
   ready?: number;
   desired: number;
+  // Which `spec.<field>` this pill owns. A Job has no replicas — its
+  // equivalent live knob is `parallelism` — but the interaction, validation
+  // and save path are identical, so the pill is parameterised rather than
+  // forked.
+  field?: string;
+  label?: string;
+  // `parallelism: 0` is legal and means "pause"; `replicas: 0` means the
+  // same. Kept as a prop so a field with a real floor can raise it.
+  min?: number;
 }) {
   const [hovered, setHovered] = useState(false);
   const edit = useEditField<{ value: string }>({
-    id: "replicas",
+    id: field,
     initial: () => ({ value: String(desired) }),
     serialize: (b) => {
       const n = Number.parseInt(b.value, 10);
-      return { spec: { replicas: Number.isFinite(n) && n >= 0 ? n : desired } };
+      return {
+        spec: { [field]: Number.isFinite(n) && n >= min ? n : desired },
+      };
     },
     dirtyCount: (b) => (b.value !== String(desired) ? 1 : 0),
     validate: (b) => {
       const n = Number.parseInt(b.value, 10);
       return b.value === "" ||
         !Number.isFinite(n) ||
-        n < 0 ||
+        n < min ||
         String(n) !== b.value.trim()
-        ? "replicas must be a non-negative integer"
+        ? `${label} must be an integer >= ${min}`
         : null;
     },
   });
@@ -1409,7 +1423,7 @@ export function ReplicasEditor({
     edit.editing &&
     (edit.buffer.value === "" ||
       !Number.isFinite(parsed) ||
-      parsed < 0 ||
+      parsed < min ||
       String(parsed) !== edit.buffer.value.trim());
 
   const hasReady = ready !== undefined;
@@ -1418,7 +1432,7 @@ export function ReplicasEditor({
   const handleDecrement = (e: React.MouseEvent) => {
     e.stopPropagation();
     const current = Number.isFinite(parsed) ? parsed : desired;
-    edit.setBuffer({ value: String(Math.max(0, current - 1)) });
+    edit.setBuffer({ value: String(Math.max(min, current - 1)) });
   };
 
   const handleIncrement = (e: React.MouseEvent) => {
@@ -1456,9 +1470,9 @@ export function ReplicasEditor({
           <button
             type="button"
             onClick={handleDecrement}
-            disabled={edit.saving || parsed <= 0}
-            style={stepperBtnStyle(t, parsed <= 0)}
-            title="Decrement replicas"
+            disabled={edit.saving || parsed <= min}
+            style={stepperBtnStyle(t, parsed <= min)}
+            title={`Decrement ${label}`}
           >
             -
           </button>
@@ -1503,7 +1517,7 @@ export function ReplicasEditor({
             onClick={handleIncrement}
             disabled={edit.saving}
             style={stepperBtnStyle(t, false)}
-            title="Increment replicas"
+            title={`Increment ${label}`}
           >
             +
           </button>
@@ -1557,7 +1571,7 @@ export function ReplicasEditor({
             {hasReady ? `${ready} / ${desired}` : desired}
           </span>
           <span style={{ fontSize: FS_XS, color: t.textMuted }}>
-            replicas
+            {label}
           </span>
 
           <span
@@ -1576,7 +1590,7 @@ export function ReplicasEditor({
 
           {isDirty && (
             <span
-              title="Pending unsaved replicas change"
+              title={`Pending unsaved ${label} change`}
               style={{
                 width: 6,
                 height: 6,

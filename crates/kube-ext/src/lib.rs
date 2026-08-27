@@ -5,6 +5,7 @@
 //! command pair can serve every browseable kind.
 
 pub mod bootstrap;
+pub mod cron_schedule;
 pub mod fetch;
 pub mod kinds;
 pub mod log_pods;
@@ -29,13 +30,14 @@ pub use fetch::{
     get_service_account_detail, get_service_detail, get_stateful_set_detail,
     get_storage_class_detail, get_validating_webhook_configuration_detail, get_well_known_detail,
     helm_available, helm_install_chart, helm_repo_update, helm_uninstall, helm_upgrade,
-    list_config_maps_in_namespace, list_namespace_names, list_object_events,
-    list_persistent_volume_claims_in_namespace, list_pods_for_workload, list_pods_on_node,
-    list_secrets_in_namespace, list_services_in_namespace, merge_patch_resource, restart_pod_owner,
-    restart_pods_owners, restart_workload, set_node_cordon, ApplyConflict, ApplyOk, ApplyResult,
-    DocApplyResult, DrainFailure, DrainReport, DrainSkipped, FetchError, HelmInstallResult,
-    HelmUpdateAvailable, HelmUpgradeResult, MergePatchResult, RestartFailure, RestartPodsReport,
-    RestartedWorkload, WorkloadPods, FIELD_MANAGER, HELM_CLUSTER_SOURCE,
+    list_config_maps_in_namespace, list_jobs_for_cron_job, list_namespace_names,
+    list_object_events, list_persistent_volume_claims_in_namespace, list_pods_for_workload,
+    list_pods_on_node, list_secrets_in_namespace, list_services_in_namespace, manual_job_name,
+    merge_patch_resource, rerun_job, rerun_job_name, restart_pod_owner, restart_pods_owners,
+    restart_workload, set_node_cordon, trigger_cron_job, ApplyConflict, ApplyOk, ApplyResult,
+    Cascade, CronJobHistory, DocApplyResult, DrainFailure, DrainReport, DrainSkipped, FetchError,
+    HelmInstallResult, HelmUpdateAvailable, HelmUpgradeResult, MergePatchResult, RestartFailure,
+    RestartPodsReport, RestartedWorkload, WorkloadPods, FIELD_MANAGER, HELM_CLUSTER_SOURCE,
 };
 pub use log_pods::{
     resolve_log_pods, start_log_pod_watch, LogContainer, LogContainerKind, LogPodEvent,

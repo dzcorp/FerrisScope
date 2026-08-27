@@ -37,12 +37,14 @@ use ferrisscope_kube_ext::{
     get_service_account_detail, get_service_detail, get_stateful_set_detail,
     get_storage_class_detail, get_validating_webhook_configuration_detail, get_well_known_detail,
     helm_install_chart, helm_repo_update, helm_uninstall, helm_upgrade,
-    list_config_maps_in_namespace, list_namespace_names, list_object_events,
-    list_persistent_volume_claims_in_namespace, list_pods_for_workload, list_pods_on_node,
-    list_secrets_in_namespace, list_services_in_namespace, lookup, merge_patch_resource, registry,
-    restart_pod_owner, restart_pods_owners, restart_workload, set_node_cordon, start_forward,
-    ApplyResult, DrainReport, ForwardEntry, ForwardStatus, HelmInstallResult, HelmUpgradeResult,
-    MergePatchResult, ResourceKind, ResourceKindEntry, RestartPodsReport, WorkloadPods,
+    list_config_maps_in_namespace, list_jobs_for_cron_job, list_namespace_names,
+    list_object_events, list_persistent_volume_claims_in_namespace, list_pods_for_workload,
+    list_pods_on_node, list_secrets_in_namespace, list_services_in_namespace, lookup,
+    manual_job_name, merge_patch_resource, registry, rerun_job, rerun_job_name, restart_pod_owner,
+    restart_pods_owners, restart_workload, set_node_cordon, start_forward, trigger_cron_job,
+    ApplyResult, Cascade, CronJobHistory, DrainReport, ForwardEntry, ForwardStatus,
+    HelmInstallResult, HelmUpgradeResult, MergePatchResult, ResourceKind, ResourceKindEntry,
+    RestartPodsReport, WorkloadPods,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -2392,6 +2394,7 @@ pub(crate) async fn delete_resource_cmd(
     namespace: Option<String>,
     name: String,
     grace_period_seconds: Option<u32>,
+    cascade: Option<Cascade>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     if kind_id == "helm_charts" {
@@ -2419,9 +2422,58 @@ pub(crate) async fn delete_resource_cmd(
         namespace.as_deref(),
         &name,
         grace_period_seconds,
+        cascade,
     )
     .await
     .map_err(|e| e.to_string())
+}
+
+/// `kubectl create job <name> --from=cronjob/<cronjob>`. The Job name is
+/// derived here rather than taken from the caller so every surface (detail
+/// panel, row menu, agent tool) produces the same `<cronjob>-manual-<epoch>`
+/// shape, and so a name can never arrive unvalidated from the frontend.
+#[tauri::command]
+pub(crate) async fn trigger_cron_job_cmd(
+    cluster_id: String,
+    namespace: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let entry = state.entry(&cluster_id).await?;
+    let job_name = manual_job_name(&name, chrono::Utc::now());
+    trigger_cron_job(entry.cluster.client(), &namespace, &name, &job_name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Re-run a Job by cloning it under a fresh name. A Job spec is immutable, so
+/// there is no in-place equivalent and kubectl has no verb for this.
+#[tauri::command]
+pub(crate) async fn rerun_job_cmd(
+    cluster_id: String,
+    namespace: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let entry = state.entry(&cluster_id).await?;
+    let new_name = rerun_job_name(&name, chrono::Utc::now());
+    rerun_job(entry.cluster.client(), &namespace, &name, &new_name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Run history for a CronJob: the Jobs it owns, newest first.
+#[tauri::command]
+pub(crate) async fn list_jobs_for_cron_job_cmd(
+    cluster_id: String,
+    namespace: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<CronJobHistory, String> {
+    let entry = state.entry(&cluster_id).await?;
+    list_jobs_for_cron_job(entry.cluster.client(), &namespace, &name)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---- Node operations ------------------------------------------------------
@@ -3909,6 +3961,7 @@ fn spawn_delete_cleanup_pod(client: kube::Client, cleanup: PodCleanup) {
             Some(&cleanup.namespace),
             &cleanup.name,
             Some(0),
+            None,
         )
         .await
         {

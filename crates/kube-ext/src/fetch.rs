@@ -30,7 +30,7 @@ use k8s_openapi::jiff;
 use kube::{
     api::{
         Api, ApiResource, DeleteParams, DynamicObject, EvictParams, GroupVersionKind, ListParams,
-        Patch, PatchParams,
+        ObjectMeta, Patch, PatchParams, PostParams,
     },
     discovery, Client,
 };
@@ -67,6 +67,8 @@ pub enum FetchError {
     NoSelector(String),
     #[error("{0} doesn't support rollout restart — use Delete to recreate")]
     UnsupportedRestart(String),
+    #[error("{0} has no usable job template")]
+    NoJobTemplate(String),
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
@@ -1878,12 +1880,50 @@ async fn patch_workload_template(
 /// Delete a single resource via the dynamic API. `grace_period_seconds = Some(0)`
 /// triggers a force delete (no graceful termination); `None` uses the kind's
 /// default grace period.
+/// How the apiserver should treat a deleted object's dependents.
+///
+/// Mirrors `kubectl delete --cascade`. It exists as our own enum rather than
+/// re-exporting `kube::api::PropagationPolicy` so it can cross the Tauri
+/// bridge as a plain snake_case string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Cascade {
+    /// Delete the owner immediately; the garbage collector removes dependents
+    /// in the background. What `kubectl delete` does.
+    #[default]
+    Background,
+    /// Keep the owner (marked deleting) until every dependent is gone.
+    Foreground,
+    /// Leave dependents running, stripped of their owner reference.
+    Orphan,
+}
+
+impl From<Cascade> for kube::api::PropagationPolicy {
+    fn from(c: Cascade) -> Self {
+        match c {
+            Cascade::Background => Self::Background,
+            Cascade::Foreground => Self::Foreground,
+            Cascade::Orphan => Self::Orphan,
+        }
+    }
+}
+
+/// Delete one object.
+///
+/// `cascade` defaults to [`Cascade::Background`] — the propagation policy is
+/// always sent explicitly, never left to the apiserver's per-resource default.
+/// That default is a trap: `batch/v1` Job and CronJob still answer
+/// `OrphanDependents` for backwards compatibility, so an empty `DeleteOptions`
+/// deletes the Job and leaves its pods running with their owner reference
+/// stripped — invisible, unreferenced, still consuming the cluster. kubectl
+/// dodges this by always sending `--cascade=background`; so do we.
 pub async fn delete_resource(
     client: Client,
     kind_id: &str,
     namespace: Option<&str>,
     name: &str,
     grace_period_seconds: Option<u32>,
+    cascade: Option<Cascade>,
 ) -> Result<(), FetchError> {
     let entry =
         registry::lookup(kind_id).ok_or_else(|| FetchError::UnknownKind(kind_id.to_owned()))?;
@@ -1901,10 +1941,326 @@ pub async fn delete_resource(
 
     let dp = DeleteParams {
         grace_period_seconds,
+        propagation_policy: Some(cascade.unwrap_or_default().into()),
         ..Default::default()
     };
     api.delete(name, &dp).await?;
     Ok(())
+}
+
+// ── Job / CronJob operations ───────────────────────────────────────────────
+
+/// Labels the Job controller stamps onto a Job's pod template and selector.
+/// They key the controller's ownership of the pods, so a Job cloned for a
+/// re-run must not carry them — the clone would adopt the original's pods.
+const CONTROLLER_LABELS: [&str; 4] = [
+    "controller-uid",
+    "job-name",
+    "batch.kubernetes.io/controller-uid",
+    "batch.kubernetes.io/job-name",
+];
+
+/// Longest name the apiserver accepts for a Job (DNS-1123 subdomain rules
+/// apply, but the Job controller also needs room for the pod-name suffix it
+/// appends).
+const MAX_JOB_NAME_LEN: usize = 52;
+
+/// Build `<base>-<suffix>`, truncating `base` so the result stays within
+/// [`MAX_JOB_NAME_LEN`] and never ends on a separator (a trailing `-` is not a
+/// valid DNS-1123 name).
+fn derived_name(base: &str, suffix: &str) -> String {
+    let budget = MAX_JOB_NAME_LEN.saturating_sub(suffix.len() + 1);
+    let stem = base
+        .chars()
+        .take(budget)
+        .collect::<String>()
+        .trim_end_matches(['-', '.'])
+        .to_owned();
+    if stem.is_empty() {
+        suffix.to_owned()
+    } else {
+        format!("{stem}-{suffix}")
+    }
+}
+
+/// Name for a manual run of `cronjob`, mirroring the `<name>-<timestamp>`
+/// shape the CronJob controller itself uses for scheduled runs.
+#[must_use]
+pub fn manual_job_name(cronjob: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    derived_name(cronjob, &format!("manual-{}", now.timestamp()))
+}
+
+/// Name for a re-run of `job`. The suffix keeps re-runs of re-runs from
+/// colliding, since the base name is reused verbatim.
+#[must_use]
+pub fn rerun_job_name(job: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    derived_name(job, &format!("rerun-{}", now.timestamp()))
+}
+
+/// Create a Job from a CronJob's `jobTemplate` — `kubectl create job X
+/// --from=cronjob/Y`.
+///
+/// The owner reference is the point of the exercise: with `controller: true`
+/// the CronJob's `successfulJobsHistoryLimit` / `failedJobsHistoryLimit` reap
+/// the manual run like any scheduled one, and deleting the CronJob takes it
+/// along. Without it the Job would outlive its parent forever.
+///
+/// Suspended CronJobs are still triggerable — that is precisely when an
+/// operator wants a one-off run — and it is what kubectl allows.
+pub async fn trigger_cron_job(
+    client: Client,
+    namespace: &str,
+    name: &str,
+    job_name: &str,
+) -> Result<String, FetchError> {
+    let cron_api: Api<CronJob> = Api::namespaced(client.clone(), namespace);
+    let cj = cron_api.get(name).await?;
+
+    let job_spec = cj
+        .spec
+        .job_template
+        .spec
+        .clone()
+        .ok_or_else(|| FetchError::NoJobTemplate(name.to_owned()))?;
+    let uid = cj
+        .metadata
+        .uid
+        .clone()
+        .ok_or_else(|| FetchError::NoJobTemplate(name.to_owned()))?;
+
+    let template_meta = cj.spec.job_template.metadata.unwrap_or_default();
+    let mut annotations = template_meta.annotations.unwrap_or_default();
+    // The marker kubectl sets; the CronJob controller and anything reading
+    // job provenance keys off it to tell manual runs from scheduled ones.
+    annotations.insert(
+        "cronjob.kubernetes.io/instantiate".to_owned(),
+        "manual".to_owned(),
+    );
+
+    let job = Job {
+        metadata: ObjectMeta {
+            name: Some(job_name.to_owned()),
+            namespace: Some(namespace.to_owned()),
+            annotations: Some(annotations),
+            labels: template_meta.labels,
+            owner_references: Some(vec![
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                    api_version: "batch/v1".to_owned(),
+                    kind: "CronJob".to_owned(),
+                    name: name.to_owned(),
+                    uid,
+                    controller: Some(true),
+                    block_owner_deletion: None,
+                },
+            ]),
+            ..Default::default()
+        },
+        spec: Some(job_spec),
+        status: None,
+    };
+
+    let jobs_api: Api<Job> = Api::namespaced(client, namespace);
+    let created = jobs_api.create(&PostParams::default(), &job).await?;
+    Ok(created.metadata.name.unwrap_or_else(|| job_name.to_owned()))
+}
+
+/// Re-run a finished Job by creating a fresh copy of it.
+///
+/// A Job's spec is immutable once created, so "run it again" can only mean
+/// "create another one". Three things have to be stripped or the apiserver
+/// rejects the copy, or worse, accepts it and lets the clone fight the
+/// original over the same pods:
+///
+/// * `spec.selector` and `spec.manualSelector` — generated by the controller
+///   from the original's uid.
+/// * The `controller-uid` / `job-name` labels on the pod template, for the
+///   same reason.
+/// * `spec.suspend` — a re-run is a request to run, not to stage.
+///
+/// Owner references are deliberately *kept*: a Job owned by a CronJob stays
+/// owned by it, so history limits keep reaping it.
+pub async fn rerun_job(
+    client: Client,
+    namespace: &str,
+    name: &str,
+    new_name: &str,
+) -> Result<String, FetchError> {
+    let api: Api<Job> = Api::namespaced(client, namespace);
+    let source = api.get(name).await?;
+
+    let mut spec = source
+        .spec
+        .clone()
+        .ok_or_else(|| FetchError::NoJobTemplate(name.to_owned()))?;
+    spec.selector = None;
+    spec.manual_selector = None;
+    spec.suspend = None;
+    if let Some(labels) = spec
+        .template
+        .metadata
+        .as_mut()
+        .and_then(|m| m.labels.as_mut())
+    {
+        for key in CONTROLLER_LABELS {
+            labels.remove(key);
+        }
+    }
+
+    let mut annotations = source.metadata.annotations.clone().unwrap_or_default();
+    // Points at what this was cloned from; the last-applied blob would
+    // describe the *original* object and mislead a later `kubectl apply`.
+    annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
+    annotations.insert("ferrisscope.dev/rerun-of".to_owned(), name.to_owned());
+
+    let mut labels = source.metadata.labels.clone().unwrap_or_default();
+    for key in CONTROLLER_LABELS {
+        labels.remove(key);
+    }
+
+    let job = Job {
+        metadata: ObjectMeta {
+            name: Some(new_name.to_owned()),
+            namespace: Some(namespace.to_owned()),
+            annotations: Some(annotations),
+            labels: Some(labels),
+            owner_references: source.metadata.owner_references.clone(),
+            ..Default::default()
+        },
+        spec: Some(spec),
+        status: None,
+    };
+
+    let created = api.create(&PostParams::default(), &job).await?;
+    Ok(created.metadata.name.unwrap_or_else(|| new_name.to_owned()))
+}
+
+/// Newest-first cap on the job history we return for a CronJob. History
+/// limits default to 3 succeeded + 1 failed, but operators raise them; this
+/// keeps a pathological limit from shipping hundreds of rows over the bridge.
+const MAX_CRON_JOB_HISTORY: usize = 50;
+
+/// Page size for the namespace scan behind the history list.
+const HISTORY_PAGE_SIZE: u32 = 200;
+
+/// Hardest bound on that scan. Ownership can only be tested client-side (the
+/// apiserver has no owner-reference selector), so the whole namespace has to
+/// be walked — and a CI namespace can hold tens of thousands of Jobs. Stop
+/// after this many objects rather than deserialise all of them; the loop
+/// works newest-key-last through etcd order, so an early stop can only miss
+/// runs, never invent them.
+const MAX_CRON_JOB_HISTORY_SCAN: usize = 20 * HISTORY_PAGE_SIZE as usize;
+
+/// Hard cap on *pages*, independent of how many objects they carry. The
+/// object-count bound alone is not enough: an apiserver page can come back
+/// empty while still handing out a continue token, which would leave the
+/// count-based check never advancing and the command spinning forever.
+const MAX_CRON_JOB_HISTORY_PAGES: usize = 40;
+
+/// The two bounds have to stay coherent: a scan cap below the page size would
+/// fetch exactly one page and stop, and a cap below the returned-row cap would
+/// make the cap unreachable.
+const _: () = {
+    assert!(MAX_CRON_JOB_HISTORY_SCAN >= HISTORY_PAGE_SIZE as usize);
+    assert!(MAX_CRON_JOB_HISTORY_SCAN >= MAX_CRON_JOB_HISTORY);
+};
+
+/// Jobs owned by `name`, newest first — the CronJob's run history.
+///
+/// Ownership, not label match: the CronJob's `jobTemplate.metadata.labels` are
+/// operator-supplied and routinely shared with unrelated workloads, so a
+/// selector query would fold in Jobs this CronJob never created. Filtering on
+/// the controller owner reference is exact.
+/// Result of [`list_jobs_for_cron_job`].
+///
+/// `truncated` must reach the UI. Ownership can only be tested client-side —
+/// the apiserver has no owner-reference selector — so the whole namespace has
+/// to be walked, and any of the bounds (pages, objects, returned rows) can cut
+/// the walk short. etcd paginates by key, not by time, so an early stop can
+/// miss *every* run of a CronJob whose name sorts late. A UI reporting an
+/// empty list as "runs older than the history limits were deleted" would be
+/// stating a retention fact it cannot know.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CronJobHistory {
+    pub runs: Vec<Value>,
+    pub truncated: bool,
+}
+
+pub async fn list_jobs_for_cron_job(
+    client: Client,
+    namespace: &str,
+    name: &str,
+) -> Result<CronJobHistory, FetchError> {
+    let cron_api: Api<CronJob> = Api::namespaced(client.clone(), namespace);
+    let uid = cron_api
+        .get(name)
+        .await?
+        .metadata
+        .uid
+        .ok_or_else(|| FetchError::NoJobTemplate(name.to_owned()))?;
+
+    let jobs_api: Api<Job> = Api::namespaced(client, namespace);
+    let mut owned: Vec<Job> = Vec::new();
+    let mut scanned = 0usize;
+    let mut cursor: Option<String> = None;
+    let mut truncated = false;
+
+    for page_no in 0..MAX_CRON_JOB_HISTORY_PAGES {
+        let mut lp = ListParams::default().limit(HISTORY_PAGE_SIZE);
+        if let Some(token) = cursor.take() {
+            lp = lp.continue_token(&token);
+        }
+        let page = jobs_api.list(&lp).await?;
+        scanned += page.items.len();
+        owned.extend(page.items.into_iter().filter(|j| {
+            j.metadata
+                .owner_references
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|o| o.uid == uid && o.controller.unwrap_or(false))
+        }));
+
+        cursor = page.metadata.continue_.filter(|c| !c.is_empty());
+        if cursor.is_none() {
+            break;
+        }
+        if scanned >= MAX_CRON_JOB_HISTORY_SCAN || page_no + 1 == MAX_CRON_JOB_HISTORY_PAGES {
+            tracing::warn!(
+                namespace,
+                cronjob = name,
+                scanned,
+                pages = page_no + 1,
+                "cronjob history: namespace scan hit its cap; older runs may be missing"
+            );
+            truncated = true;
+            break;
+        }
+    }
+
+    // Sort key is start time, falling back to creation: a Job the controller
+    // has not started yet still has to sort above one that ran yesterday.
+    owned.sort_by(|a, b| {
+        job_sort_key(b)
+            .cmp(&job_sort_key(a))
+            .then_with(|| b.metadata.name.cmp(&a.metadata.name))
+    });
+    if owned.len() > MAX_CRON_JOB_HISTORY {
+        truncated = true;
+        owned.truncate(MAX_CRON_JOB_HISTORY);
+    }
+
+    Ok(CronJobHistory {
+        runs: owned.iter().map(jobs::project_history_row).collect(),
+        truncated,
+    })
+}
+
+fn job_sort_key(job: &Job) -> Option<String> {
+    job.status
+        .as_ref()
+        .and_then(|s| s.start_time.as_ref())
+        .or(job.metadata.creation_timestamp.as_ref())
+        .map(|t| t.0.to_string())
 }
 
 // ── Server-Side Apply ──────────────────────────────────────────────────────
@@ -2729,4 +3085,133 @@ pub async fn apply_yaml(
     }
 
     results
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        "2026-08-27T10:00:00Z"
+            .parse()
+            .expect("valid fixture instant")
+    }
+
+    #[test]
+    fn derived_names_carry_the_source_name() {
+        assert_eq!(
+            manual_job_name("nightly-report", now()),
+            format!("nightly-report-manual-{}", now().timestamp())
+        );
+        assert_eq!(
+            rerun_job_name("migrate", now()),
+            format!("migrate-rerun-{}", now().timestamp())
+        );
+    }
+
+    /// A long CronJob name must not push the derived name past what the
+    /// apiserver accepts — the Job would be rejected at create time, after the
+    /// operator already clicked Trigger.
+    #[test]
+    fn derived_names_stay_within_the_length_budget() {
+        let long = "a".repeat(200);
+        for name in [manual_job_name(&long, now()), rerun_job_name(&long, now())] {
+            assert!(
+                name.len() <= MAX_JOB_NAME_LEN,
+                "{name} is {} chars",
+                name.len()
+            );
+        }
+    }
+
+    /// Truncation must not leave a trailing separator — `foo--manual-1` is
+    /// fine but `foo-` as a stem would produce a double dash, and a name
+    /// ending in `-` is not a valid DNS-1123 label.
+    #[test]
+    fn truncation_never_leaves_a_trailing_separator() {
+        // Budget lands exactly on the dash of "release-" for this suffix.
+        let base = format!("{}-", "r".repeat(60));
+        let name = derived_name(&base, "manual-1756288800");
+        assert!(!name.contains("--"), "{name}");
+        assert!(name.starts_with("rrr"), "{name}");
+    }
+
+    /// A name made entirely of separators leaves no stem; the result still has
+    /// to be a usable name rather than an empty string or a bare dash.
+    #[test]
+    fn degenerate_base_falls_back_to_the_suffix() {
+        assert_eq!(derived_name("---", "manual-7"), "manual-7");
+    }
+
+    /// The whole point of the `Cascade` type: `None` must resolve to
+    /// Background, never to "let the apiserver decide" (which orphans Job
+    /// pods).
+    #[test]
+    fn cascade_defaults_to_background() {
+        assert_eq!(Cascade::default(), Cascade::Background);
+        assert!(matches!(
+            kube::api::PropagationPolicy::from(Cascade::default()),
+            kube::api::PropagationPolicy::Background
+        ));
+    }
+
+    #[test]
+    fn cascade_round_trips_as_snake_case() {
+        assert_eq!(
+            serde_json::to_value(Cascade::Foreground).expect("serializable"),
+            json!("foreground")
+        );
+        assert_eq!(
+            serde_json::from_value::<Cascade>(json!("orphan")).expect("deserializable"),
+            Cascade::Orphan
+        );
+    }
+
+    fn job_with_owner(name: &str, uid: &str, controller: bool, start: &str) -> Job {
+        serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": name,
+                "namespace": "default",
+                "ownerReferences": [{
+                    "apiVersion": "batch/v1",
+                    "kind": "CronJob",
+                    "name": "nightly",
+                    "uid": uid,
+                    "controller": controller,
+                }],
+            },
+            "spec": { "completions": 1 },
+            "status": { "startTime": start, "succeeded": 1, "completionTime": start },
+        }))
+        .expect("valid Job fixture")
+    }
+
+    /// History sorts newest-first on start time. A stable order matters more
+    /// than it looks: the UI shows a fixed-height list, so a wrong sort hides
+    /// the run the operator came to look at.
+    #[test]
+    fn history_sort_key_orders_newest_first() {
+        let old = job_with_owner("a", "u", true, "2026-08-01T00:00:00Z");
+        let new = job_with_owner("b", "u", true, "2026-08-27T00:00:00Z");
+        let mut jobs = [&old, &new];
+        jobs.sort_by_key(|j| std::cmp::Reverse(job_sort_key(j)));
+        assert_eq!(jobs[0].metadata.name.as_deref(), Some("b"));
+    }
+
+    /// A Job with no status at all still has to sort — the CronJob controller
+    /// creates the object before it sets `startTime`, so a freshly triggered
+    /// run passes through this path.
+    #[test]
+    fn history_sort_key_falls_back_to_creation_timestamp() {
+        let job: Job = serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": { "name": "fresh", "creationTimestamp": "2026-08-27T09:00:00Z" },
+            "spec": {},
+        }))
+        .expect("valid Job fixture");
+        assert!(job_sort_key(&job).is_some());
+    }
 }

@@ -10,6 +10,7 @@ import {
   selectUpdateAvailable,
   selectActiveClusterIds,
   selectClusterDegraded,
+  selectSelectionDegraded,
   buildPrefsPayload,
   selectClustersToDisconnect,
   type DockTab,
@@ -1634,6 +1635,29 @@ describe("cluster degraded state", () => {
         "c1",
       ),
     ).toBe(false);
+  });
+
+  /// A bulk action spans whatever clusters the selection spans, so one dead
+  /// apiserver is enough to make the whole batch partially doomed. Gating on
+  /// the *active* cluster instead would leave the bar enabled while half the
+  /// selection is unreachable.
+  it("selectSelectionDegraded is true when any selected cluster is degraded", () => {
+    const sel = (...ids: string[]) =>
+      new Map(
+        ids.map((id, i) => [
+          `${id}/n/x${i}`,
+          { clusterId: id, namespace: "n", name: `x${i}` },
+        ]),
+      );
+    const state = {
+      clusterHealth: { bad: "unavailable" as const },
+      clusterReconnecting: {},
+    };
+
+    expect(selectSelectionDegraded(state, sel("good", "other"))).toBe(false);
+    expect(selectSelectionDegraded(state, sel("good", "bad"))).toBe(true);
+    // Empty selection has no degraded cluster to find.
+    expect(selectSelectionDegraded(state, sel())).toBe(false);
   });
 
   it("setClusterReconnecting toggles the flag and prunes on false", () => {

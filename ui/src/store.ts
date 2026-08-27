@@ -186,6 +186,18 @@ export type SelectionMeta = {
   clusterId: string;
   namespace: string | null;
   name: string;
+  /// Row state a bulk action has to branch on, snapshotted at select time.
+  /// Optional because most kinds project neither, and a bulk action that
+  /// needs one must tolerate its absence rather than assume a default.
+  ///
+  /// `suspend` lets the bar offer only the direction that would do something
+  /// — Suspend for running rows, Resume for suspended ones. `finished` lets it
+  /// skip rows the verb cannot affect at all (a Job past its terminal
+  /// condition). Deliberately not `phase`: `phase` is a display heuristic that
+  /// reads "Failed" for a Job still working through its backoff retries, which
+  /// is exactly a Job that suspend still applies to.
+  suspend?: boolean;
+  finished?: boolean;
 };
 
 /// One detail-history / pending-detail entry. `clusterId` is null when the
@@ -1946,6 +1958,23 @@ export function selectClusterDegraded(
     s.clusterHealth[clusterId] === "unavailable" ||
     s.clusterReconnecting[clusterId] === true
   );
+}
+
+/// True when *any* cluster represented in `selection` is degraded. A bulk
+/// action spans whatever clusters the selection spans, so one dead apiserver
+/// is enough to make the whole batch partially doomed — gate on that rather
+/// than on the active cluster.
+export function selectSelectionDegraded(
+  s: {
+    clusterHealth: Record<string, ClusterHealthStatus>;
+    clusterReconnecting: Record<string, boolean>;
+  },
+  selection: Map<string, SelectionMeta>,
+): boolean {
+  for (const m of selection.values()) {
+    if (selectClusterDegraded(s, m.clusterId)) return true;
+  }
+  return false;
 }
 
 /// Hook form of `selectActiveClusterIds` with a referentially-stable result:

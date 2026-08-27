@@ -5,6 +5,7 @@ expression: value
 {
   "active_deadline_seconds": null,
   "backoff_limit": 6,
+  "backoff_limit_per_index": null,
   "completion_mode": null,
   "completion_time": "2026-04-15T09:00:30Z",
   "completions_desired": 1,
@@ -17,7 +18,9 @@ expression: value
       "type": "Complete"
     }
   ],
+  "managed_by": null,
   "manual_selector": false,
+  "max_failed_indexes": null,
   "meta": {
     "annotations": [],
     "controlled_by": null,
@@ -31,6 +34,8 @@ expression: value
   },
   "parallelism": 1,
   "phase": "Succeeded",
+  "pod_failure_policy": null,
+  "pod_replacement_policy": null,
   "pod_template": {
     "annotations": [],
     "containers": [
@@ -78,11 +83,14 @@ expression: value
   "start_time": "2026-04-15T09:00:00Z",
   "status": {
     "active": 0,
+    "completed_indexes": null,
     "failed": 0,
+    "failed_indexes": null,
     "ready": null,
     "succeeded": 1,
     "terminating": null
   },
+  "success_policy": null,
   "suspend": false,
   "ttl_seconds_after_finished": null
 }

@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use ferrisscope_agent::native::{NativeTool, NativeToolError};
 use ferrisscope_agent::types::ToolSchema;
 use ferrisscope_agent::ToolCategory;
-use ferrisscope_kube_ext::{apply_yaml, FIELD_MANAGER};
+use ferrisscope_kube_ext::{apply_yaml, Cascade, FIELD_MANAGER};
 use http::Request;
 use kube::api::{Api, DeleteParams, DynamicObject, GroupVersionKind, ListParams};
 use kube::discovery;
@@ -82,6 +82,8 @@ struct DeleteArgs {
     name: String,
     #[serde(default)]
     grace_period_seconds: Option<u32>,
+    #[serde(default)]
+    cascade: Option<Cascade>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -377,7 +379,13 @@ impl NativeTool for ResourcesDelete {
                     "kind": { "type": "string" },
                     "namespace": { "type": "string" },
                     "name": { "type": "string" },
-                    "grace_period_seconds": { "type": "integer", "minimum": 0 }
+                    "grace_period_seconds": { "type": "integer", "minimum": 0 },
+                    "cascade": {
+                        "type": "string",
+                        "enum": ["background", "foreground", "orphan"],
+                        "default": "background",
+                        "description": "What happens to dependents. `background` (default, and what kubectl does) deletes them asynchronously; `foreground` keeps the owner until they're gone; `orphan` leaves them running without an owner. Only pass `orphan` when the caller explicitly wants the children kept."
+                    }
                 },
                 "required": ["api_version", "kind", "name"],
                 "additionalProperties": false
@@ -408,8 +416,11 @@ impl NativeTool for ResourcesDelete {
             discovery::Scope::Cluster => Api::all_with(client, &ar),
         };
 
+        // Always explicit: the apiserver's per-resource default is `orphan`
+        // for batch/v1, so an unset policy silently strands a Job's pods.
         let dp = DeleteParams {
             grace_period_seconds: a.grace_period_seconds,
+            propagation_policy: Some(a.cascade.unwrap_or_default().into()),
             ..Default::default()
         };
         // `delete` returns the object (Left) when termination is accepted but

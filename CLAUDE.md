@@ -163,6 +163,25 @@ Pass `editTarget={{ clusterId, kindId, namespace, name }}` and `onSaved` to `<Me
 - **Immutable-marked objects** (ConfigMap / Secret with `immutable: true`) — show `InlineWarn` and let the apiserver reject; don't pre-block client-side.
 - **Anything that needs a different field manager.** If you think you do, push back to the user — diverging managers loses the ownership benefits SSA gives us.
 
+## Deleting objects
+
+`delete_resource()` **always sends an explicit propagation policy** — `Cascade::Background` unless the caller names another. Never let it fall through to the apiserver's per-resource default.
+
+That default is a trap. `batch/v1` Job and CronJob answer `OrphanDependents` for backwards compatibility, so an empty `DeleteOptions` deletes the Job and leaves its pods running with the owner reference stripped: unreferenced, invisible in every workload view, still consuming the cluster. kubectl never hits it because `--cascade` defaults to `background` and is always transmitted. Anything in this repo that builds a `DeleteParams` — `fetch::delete_resource`, `agent_native/resources.rs`, a future bulk path — carries the same obligation. `crates/kube-ext/tests/integration_batch.rs` pins the behaviour against a real apiserver.
+
+`Cascade::Orphan` stays reachable (the Detail panel's Delete ▾ menu, `fs_resources_delete`'s `cascade` arg) because keeping a failed run's pods for their logs is legitimate — but it is always an explicit operator choice, never a default.
+
+## Batch workloads (Job / CronJob)
+
+Suspend/resume is a **merge patch** of `{ spec: { suspend } }` via `merge_patch_resource`, not an SSA apply — no dedicated command, no dedicated native tool. SSA is wrong here for the same reason it is wrong for rollout-restart: an apply carries the whole declared intent of its field manager, so applying only `spec.suspend` under `ferrisscope` drops every other spec field that manager already owned. On an object this app created (`apply_yaml` uses the same manager) that strips `spec.schedule` and the pod template, and the apiserver rejects the result with a 422. Anything that toggles a single spec field on an object we might also have created belongs on merge patch.
+
+The two verbs that *do* need backend code create an object from another one and can't be expressed as a patch:
+
+- **`trigger_cron_job`** — `kubectl create job --from=cronjob/x`. Copies `spec.jobTemplate.spec` and stamps `cronjob.kubernetes.io/instantiate: manual` plus a **controller owner reference** to the CronJob. That owner ref is load-bearing: without it the manual run escapes the CronJob's history limits and outlives its parent.
+- **`rerun_job`** — a Job's spec is immutable, so "run it again" is a clone. Strip `spec.selector`, `spec.manualSelector`, `spec.suspend`, and the `controller-uid` / `job-name` labels off the pod template, or the clone fights the original over the same pods. Owner references are *kept* so a CronJob-owned Job stays reaped by its history limits.
+
+`kinds::cron_jobs::project_detail` computes `next_run` via `cron_schedule` (hand-rolled 5-field parser — the crates default to seconds-first expressions that mis-parse every real CronJob). It is wall-clock dependent, so it can't be snapshotted; `tests/projections.rs` substitutes a placeholder and the behaviour is covered by unit tests next to the parser. A schedule or IANA zone we can't evaluate projects `null` — the UI shows a dash rather than a plausible wrong time.
+
 ## Well-known CRD overrides
 
 Some CRDs (Gateway API today; Argo / Flux / Cert-Manager / Istio / Tekton later) ship as `DynamicObject` watches but deserve first-class treatment in the rail without dragging in a Rust crate per ecosystem. The overrides layer in `crates/kube-ext/src/well_known.rs` handles this. Watcher path stays generic; what changes is projection + display metadata.

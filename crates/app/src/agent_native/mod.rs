@@ -17,6 +17,7 @@ use tauri::AppHandle;
 use tokio::sync::RwLock;
 
 pub(crate) mod apply;
+pub(crate) mod batch;
 pub(crate) mod can_i;
 pub(crate) mod config_view;
 pub(crate) mod diagnose;
@@ -309,6 +310,18 @@ pub(crate) fn build_registry(
         app.clone(),
         cluster.clone(),
     )));
+
+    // Batch workloads. Only the verbs the generic resource tools can't express
+    // — suspend/resume is a plain `fs_apply_resource` patch and stays there.
+    reg.register(Arc::new(batch::CronJobTrigger::new(
+        app.clone(),
+        cluster.clone(),
+    )));
+    reg.register(Arc::new(batch::CronJobHistoryTool::new(
+        app.clone(),
+        cluster.clone(),
+    )));
+    reg.register(Arc::new(batch::JobRerun::new(app.clone(), cluster.clone())));
     reg.register(Arc::new(resources::ResourcesApply::new(
         app.clone(),
         cluster.clone(),

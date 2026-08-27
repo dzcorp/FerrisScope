@@ -241,6 +241,28 @@ export const Icons = {
     14,
     <rect x="6" y="6" width="12" height="12" rx="2" />,
   ),
+  // Suspend a Job / CronJob. Paired with `play` for the resume side, so the
+  // two read as one toggle: same optical weight, same 12×12 footprint.
+  pause: filled(
+    14,
+    <>
+      <rect x="6" y="5" width="4" height="14" rx="1.5" />
+      <rect x="14" y="5" width="4" height="14" rx="1.5" />
+    </>,
+  ),
+  // Resume the other half of the pause toggle.
+  play: filled(
+    14,
+    <path d="M7 4.5l13 7.5-13 7.5z" />,
+  ),
+  // "Run this now, out of schedule" — a CronJob trigger. Deliberately NOT a
+  // play triangle: it sits next to the suspend toggle, which shows a play
+  // triangle whenever the object is suspended, and two identical glyphs in
+  // one button group are unreadable.
+  bolt: filled(
+    14,
+    <path d="M13 2L4 13.5h6L9.5 22 20 10h-6.5z" />,
+  ),
   pencil: filled(
     14,
     <path d="M3 17l11-11 4 4-11 11H3v-4zM16 4l2-2 4 4-2 2z" />,

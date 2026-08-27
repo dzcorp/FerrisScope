@@ -33,6 +33,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, onResourceDelta } from "../api";
 import {
   selectClusterDegraded,
+  selectSelectionDegraded,
+  type SelectionMeta,
   useAppStore,
   useClusterLabels,
   useResolvedTheme,
@@ -60,7 +62,13 @@ import {
 import { LogPanel } from "./LogPanel";
 import { DetailPanel, type DetailTarget } from "./DetailPanel";
 import { ContextMenu, type MenuPosition } from "./ContextMenu";
-import { actionsForRow } from "./rowActions";
+import {
+  actionsForRow,
+  actionsForSelection,
+  menuScopeFor,
+  selectionMenuHeader,
+} from "./rowActions";
+import { bulkActionsFor } from "./bulkActions";
 import { makeTerminalTab } from "./Dock";
 import { confirm, toast } from "../lib/dialog";
 import { latinLetter } from "../lib/keyboard";
@@ -332,6 +340,11 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   const [menu, setMenu] = useState<{
     pos: MenuPosition;
     row: ScopedRow;
+    // Which rows the menu acts on. "selection" when the right-click landed
+    // inside a multi-row selection; "row" otherwise. `row` is still carried
+    // in the selection case so the menu can be positioned and closed the
+    // same way.
+    scope: "row" | "selection";
   } | null>(null);
 
   // Namespace filter is global (cluster-bar driven, persisted on the store).
@@ -1163,14 +1176,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   ) => {
     e.stopPropagation();
     const sid = row.original.__sid;
-    const meta = {
-      clusterId: row.original.__clusterId,
-      namespace:
-        typeof row.original.namespace === "string"
-          ? row.original.namespace
-          : null,
-      name: String(row.original.name ?? ""),
-    };
+    const meta = selectionMetaOf(row.original);
     if (e.shiftKey && anchorRef.current) {
       const ids = sortedRows.map((r) => r.original.__sid);
       const a = ids.indexOf(anchorRef.current);
@@ -1184,14 +1190,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         for (let i = lo; i <= hi; i++) {
           const r = sortedRows[i];
           if (!r) continue;
-          next.set(r.original.__sid, {
-            clusterId: r.original.__clusterId,
-            namespace:
-              typeof r.original.namespace === "string"
-                ? r.original.namespace
-                : null,
-            name: String(r.original.name ?? ""),
-          });
+          next.set(r.original.__sid, selectionMetaOf(r.original));
         }
         setSelection(next);
         return;
@@ -1226,19 +1225,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       if (rows.length === 0) return;
       e.preventDefault();
       setSelection(
-        new Map(
-          rows.map((r) => [
-            r.original.__sid,
-            {
-              clusterId: r.original.__clusterId,
-              namespace:
-                typeof r.original.namespace === "string"
-                  ? r.original.namespace
-                  : null,
-              name: String(r.original.name ?? ""),
-            },
-          ]),
-        ),
+        new Map(rows.map((r) => [r.original.__sid, selectionMetaOf(r.original)])),
       );
     };
     window.addEventListener("keydown", onKey);
@@ -1294,15 +1281,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
                 else
                   setSelection(
                     new Map(
-                      filtered.map((r) => [
-                        r.__sid,
-                        {
-                          clusterId: r.__clusterId,
-                          namespace:
-                            typeof r.namespace === "string" ? r.namespace : null,
-                          name: String(r.name ?? ""),
-                        },
-                      ]),
+                      filtered.map((r) => [r.__sid, selectionMetaOf(r)]),
                     ),
                   );
               };
@@ -1522,7 +1501,9 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
             const row = rowsRef.current.get(sid);
             if (!row) return;
             e.preventDefault();
-            setMenu({ pos: { x: e.clientX, y: e.clientY }, row });
+            const { scope, clear } = menuScopeFor(selection, sid);
+            if (clear) clearSelection();
+            setMenu({ pos: { x: e.clientX, y: e.clientY }, row, scope });
           }}
         >
           {load.kind === "error" ? (
@@ -1815,7 +1796,31 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         />
       )}
 
-      {menu && (
+      {menu?.scope === "selection" && (
+        <ContextMenu
+          mode={mode}
+          position={menu.pos}
+          onClose={() => setMenu(null)}
+          rowName={selectionMenuHeader(kind, selection.size)}
+          items={actionsForSelection({
+            kind,
+            count: selection.size,
+            bulk: bulkActionsFor(
+              kind,
+              selection,
+              confirmDestructive,
+              clearSelection,
+              clusterLabel,
+              selectSelectionDegraded(
+                { clusterHealth, clusterReconnecting },
+                selection,
+              ),
+            ),
+          })}
+        />
+      )}
+
+      {menu?.scope === "row" && (
         <ContextMenu
           mode={mode}
           position={menu.pos}
@@ -1868,7 +1873,27 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
 // table doesn't have to drill `clusterId` + `confirmDestructive` through
 // every callsite. Pod-only and node-only branches are inlined per kind to
 // keep the action surface deliberately scoped.
-function buildRowActionContext(
+/// Snapshot of the row state a bulk action may need to branch on. Taken at
+/// select time rather than looked up later: the row can be gone from the
+/// table by the time the operator picks an action, and a stale-but-present
+/// flag beats an absent one for deciding which direction to offer.
+export function selectionMetaOf(row: ScopedRow): SelectionMeta {
+  return {
+    clusterId: row.__clusterId,
+    namespace: typeof row.namespace === "string" ? row.namespace : null,
+    name: String(row.name ?? ""),
+    // CronJob rows project `suspend` as a string (it backs a text column);
+    // Job rows project a bool. Both normalise here so no consumer repeats it.
+    ...(row.suspend !== undefined
+      ? { suspend: row.suspend === true || row.suspend === "true" }
+      : {}),
+    ...(row.finished !== undefined ? { finished: row.finished === true } : {}),
+  };
+}
+
+// Exported for tests: the row menu's callbacks are where the transport for
+// each mutating action is decided, and that choice is regression-prone.
+export function buildRowActionContext(
   kind: ResourceKind,
   row: ResourceRow,
   clusterId: string,
@@ -1995,6 +2020,137 @@ function buildRowActionContext(
         }
       })();
     };
+  } else if (kind.id === "jobs" || kind.id === "cronjobs") {
+    const isJob = kind.id === "jobs";
+    const kindLabel = kind.kind.toLowerCase();
+    // The CronJob row projects `suspend` as a string (it backs a text
+    // column); the Job row projects a bool. Both mean the same thing here.
+    // `undefined` is a third state, not a synonym for false — see the note in
+    // DetailPanel. Without a known state the menu would offer the wrong verb,
+    // so it offers none.
+    const suspendState: boolean | undefined =
+      row.suspend === undefined
+        ? undefined
+        : row.suspend === true || row.suspend === "true";
+    const suspended = suspendState === true;
+    // Suspending a finished Job is accepted by the apiserver and ignored by
+    // the controller — offer it only while it can still do something. Gate on
+    // the row's own `finished` flag, not on `phase`: `phase` is a display
+    // heuristic that reads "Failed" for a Job still working through its
+    // backoff retries, which is precisely a Job suspend still applies to.
+    const finished = isJob && row.finished === true;
+    // Merge patch, NOT SSA. An SSA apply carries the *whole* declared intent of
+    // its field manager, so applying `{spec:{suspend}}` under the `ferrisscope`
+    // manager drops every other spec field that manager already owned. For an
+    // object this app created (the YAML apply path uses the same manager) that
+    // means schedule / containers / restartPolicy vanish and the apiserver
+    // rejects the result with a 422. Same reasoning as `restart_workload`.
+    const runSuspend = () => {
+      void (async () => {
+        if (!ns) {
+          toast.bad(`${kind.kind} has no namespace.`);
+          return;
+        }
+        if (confirmDestructive && !suspended) {
+          const ok = await confirm({
+            title: `Suspend ${kindLabel} ${qualified}?`,
+            body: isJob
+              ? "The Job controller deletes this Job's running pods; their work is lost unless it is idempotent. Resuming creates fresh pods."
+              : "No new Jobs will be created. Runs already in flight keep going, and missed schedules are not backfilled on resume.",
+            confirmLabel: "Suspend",
+            tone: "danger",
+          });
+          if (!ok) return;
+        }
+        try {
+          await api.mergePatchResource(
+            clusterId,
+            kind.id,
+            ns,
+            name,
+            { spec: { suspend: !suspended } },
+            null,
+          );
+          toast.ok(
+            suspended
+              ? `Resumed ${kindLabel} ${qualified}.`
+              : `Suspended ${kindLabel} ${qualified}.`,
+            { meta: rowMeta() },
+          );
+        } catch (e) {
+          toast.bad(`Suspend failed: ${String(e)}`, {
+            meta: rowMeta(String(e)),
+          });
+        }
+      })();
+    };
+    if (!finished && suspendState !== undefined) {
+      ctx.suspendTo = { target: !suspended, run: runSuspend };
+    }
+    if (isJob) {
+      ctx.rerun = () => {
+        void (async () => {
+          if (!ns) {
+            toast.bad("Job has no namespace.");
+            return;
+          }
+          if (confirmDestructive) {
+            const ok = await confirm({
+              title: `Run ${qualified} again?`,
+              body: "A Job's spec is immutable, so this creates a copy under a new name. The original is left in place — delete it separately if it should not stay.",
+              confirmLabel: "Re-run",
+            });
+            if (!ok) return;
+          }
+          try {
+            const created = await api.rerunJob(clusterId, ns, name);
+            toast.ok(`Created job ${ns}/${created}.`, {
+              meta: { kind: "Job", namespace: ns, name: created },
+            });
+          } catch (e) {
+            toast.bad(`Re-run failed: ${String(e)}`, {
+              meta: rowMeta(String(e)),
+            });
+          }
+        })();
+      };
+    } else {
+      ctx.trigger = () => {
+        void (async () => {
+          if (!ns) {
+            toast.bad("CronJob has no namespace.");
+            return;
+          }
+          if (confirmDestructive) {
+            const ok = await confirm({
+              title: `Run ${qualified} now?`,
+              body: "Creates a Job from the CronJob's template, owned by it so its history limits still apply. The schedule and the suspend flag are unchanged.",
+              confirmLabel: "Run now",
+            });
+            if (!ok) return;
+          }
+          try {
+            const created = await api.triggerCronJob(clusterId, ns, name);
+            toast.ok(`Created job ${ns}/${created}.`, {
+              meta: { kind: "Job", namespace: ns, name: created },
+            });
+          } catch (e) {
+            toast.bad(`Trigger failed: ${String(e)}`, {
+              meta: rowMeta(String(e)),
+            });
+          }
+        })();
+      };
+    }
+    ctx.delete = genericDelete(
+      kind,
+      clusterId,
+      ns,
+      name,
+      qualified,
+      confirmDestructive,
+      rowMeta,
+    );
   } else if (kind.id === "nodes") {
     ctx.openExec = () => {
       openNodeDebugTab(clusterId, contextLabel, name, addDockTab);
@@ -2091,33 +2247,53 @@ function buildRowActionContext(
       })();
     };
   } else {
-    // Generic delete for every other kind. The dynamic API in
-    // `api.deleteResource` covers them via `kind.id` — no per-kind plumbing.
-    const kindLabel = kind.kind.toLowerCase();
-    ctx.delete = () => {
-      void (async () => {
-        if (confirmDestructive) {
-          const ok = await confirm({
-            title: `Delete ${kindLabel} ${qualified}?`,
-            body: kind.namespaced
-              ? "Object will be removed from the cluster. Controllers may recreate it; cascading deletes may follow per the apiserver's default propagation policy."
-              : "Object will be removed from the cluster. Cascading deletes may follow per the apiserver's default propagation policy.",
-            confirmLabel: "Delete",
-            tone: "danger",
-          });
-          if (!ok) return;
-        }
-        try {
-          await api.deleteResource(clusterId, kind.id, ns, name, null);
-          toast.ok(`Deleted ${kindLabel} ${qualified}.`, { meta: rowMeta() });
-        } catch (e) {
-          toast.bad(`Delete failed: ${String(e)}`, { meta: rowMeta(String(e)) });
-        }
-      })();
-    };
+    ctx.delete = genericDelete(
+      kind,
+      clusterId,
+      ns,
+      name,
+      qualified,
+      confirmDestructive,
+      rowMeta,
+    );
   }
 
   return ctx;
+}
+
+/// Delete for any kind without bespoke teardown semantics. The dynamic API in
+/// `api.deleteResource` covers them via `kind.id` — no per-kind plumbing —
+/// and the backend always sends background propagation, so dependents come
+/// down with the owner rather than being orphaned.
+function genericDelete(
+  kind: ResourceKind,
+  clusterId: string,
+  ns: string | null,
+  name: string,
+  qualified: string,
+  confirmDestructive: boolean,
+  rowMeta: (reason?: string) => Record<string, unknown>,
+): () => void {
+  const kindLabel = kind.kind.toLowerCase();
+  return () => {
+    void (async () => {
+      if (confirmDestructive) {
+        const ok = await confirm({
+          title: `Delete ${kindLabel} ${qualified}?`,
+          body: "Object will be removed from the cluster along with its dependents. Controllers may recreate it. To keep the dependents, open the object and use Delete → keep dependents.",
+          confirmLabel: "Delete",
+          tone: "danger",
+        });
+        if (!ok) return;
+      }
+      try {
+        await api.deleteResource(clusterId, kind.id, ns, name, null);
+        toast.ok(`Deleted ${kindLabel} ${qualified}.`, { meta: rowMeta() });
+      } catch (e) {
+        toast.bad(`Delete failed: ${String(e)}`, { meta: rowMeta(String(e)) });
+      }
+    })();
+  };
 }
 
 // `kubectl debug node/<name>` runs a debug pod with the node's PID namespace
