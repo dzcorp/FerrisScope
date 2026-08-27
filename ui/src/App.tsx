@@ -74,6 +74,7 @@ import {
 import { IS_MAC } from "./lib/keyboard";
 import { goToFleet } from "./lib/clusterTabs";
 import { hotkeyIntent, intentPreventsDefault } from "./lib/hotkeys";
+import { isClusterUnavailableError } from "./lib/unavailable";
 import { applyThemeCssVars } from "./lib/themeDom";
 import { Icons } from "./components/ui";
 
@@ -654,9 +655,17 @@ export default function App() {
           // had filtered to (deleted while another scope was active).
           reconcileFilter();
           refresh();
-        } catch {
+        } catch (e) {
           // Best-effort per member: if namespaces aren't available there
-          // the modal still works with the other members' union.
+          // the modal still works with the other members' union. One error
+          // is not best-effort though — a wedged cluster refuses every
+          // subscribe, and this one fires on entering the cluster, so it's
+          // the earliest chance to raise the Reconnect banner.
+          if (isClusterUnavailableError(e)) {
+            useAppStore
+              .getState()
+              .applyClusterHealth(cid, "unavailable", String(e));
+          }
         }
       })();
     }

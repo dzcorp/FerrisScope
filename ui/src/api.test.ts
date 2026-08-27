@@ -510,6 +510,27 @@ describe("resource kinds / search / index", () => {
       namespaces: null,
     });
   });
+
+  it("getClusterHealth → 'get_cluster_health' and returns the event verbatim", async () => {
+    const evt = { status: "unavailable", reason: "connection reset" };
+    const cap = captureNext(evt);
+    const got = await api.getClusterHealth("ctx");
+    expect(cap.calls[0]?.cmd).toBe("get_cluster_health");
+    expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx" });
+    // The reason string is rendered verbatim in the Reconnect banner, so a
+    // wrapper that reshaped it would silently degrade the diagnosis.
+    expect(got).toEqual(evt);
+  });
+
+  it("getClusterHealth passes a healthy answer's null reason through", async () => {
+    // Both halves of `reason: string | null` reach the store: the null one
+    // clears the banner's text, so a wrapper coercing it to "" or dropping
+    // the key would leave a stale reason rendered under a healthy cluster.
+    const cap = captureNext({ status: "healthy", reason: null });
+    const got = await api.getClusterHealth("ctx");
+    expect(cap.calls[0]?.cmd).toBe("get_cluster_health");
+    expect(got).toEqual({ status: "healthy", reason: null });
+  });
 });
 
 describe("node operations", () => {

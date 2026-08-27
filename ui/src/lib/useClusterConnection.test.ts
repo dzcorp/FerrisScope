@@ -10,12 +10,14 @@ let healthHandler: ((evt: ClusterHealthEvent) => void) | null = null;
 const connectContext = vi.fn();
 const cancelConnect = vi.fn().mockResolvedValue(undefined);
 const reconnectCluster = vi.fn().mockResolvedValue(undefined);
+const getClusterHealth = vi.fn();
 
 vi.mock("../api", () => ({
   api: {
     connectContext: (...a: unknown[]) => connectContext(...a),
     cancelConnect: (...a: unknown[]) => cancelConnect(...a),
     reconnectCluster: (...a: unknown[]) => reconnectCluster(...a),
+    getClusterHealth: (...a: unknown[]) => getClusterHealth(...a),
   },
   onClusterHealth: vi.fn((_id: string, h: (e: ClusterHealthEvent) => void) => {
     healthHandler = h;
@@ -60,6 +62,7 @@ function fireHealth(evt: ClusterHealthEvent) {
 }
 
 const UNAVAIL: ClusterHealthEvent = { status: "unavailable", reason: "timeout" };
+const HEALTHY: ClusterHealthEvent = { status: "healthy", reason: null };
 const MAX = 10;
 // Mirror of the hook's capped exponential backoff: 2,4,8,16,30,30,…
 const backoff = (idx: number) => Math.min(2000 * 2 ** idx, 30_000);
@@ -71,6 +74,7 @@ describe("useClusterConnection auto-reconnect", () => {
     connectContext.mockReset().mockResolvedValue({ server_version: "v1" });
     cancelConnect.mockClear();
     reconnectCluster.mockClear().mockResolvedValue(undefined);
+    getClusterHealth.mockReset().mockResolvedValue(HEALTHY);
     useAppStore.setState({
       ...initial,
       clusterHealth: {},
@@ -90,6 +94,102 @@ describe("useClusterConnection auto-reconnect", () => {
     expect(result.current.state.status).toBe("ok");
     expect(result.current.autoReconnect).toBeNull();
     expect(reconnectCluster).not.toHaveBeenCalled();
+  });
+
+  it("recovers an unavailable that was emitted while nothing was listening", async () => {
+    // Regression: the probe broadcasts `unavailable` exactly once and the
+    // forwarder then exits, so a cluster that wedged while its tab sat in the
+    // background had NO listener — coming back showed a green bar over a table
+    // whose every subscribe failed, with no Reconnect button. The mount-time
+    // pull is what closes that hole.
+    getClusterHealth.mockResolvedValue(UNAVAIL);
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+
+    expect(getClusterHealth).toHaveBeenCalledWith(CTX.id);
+    expect(useAppStore.getState().clusterHealth[CTX.id]).toBe("unavailable");
+    expect(useAppStore.getState().clusterHealthReason[CTX.id]).toBe("timeout");
+    // …and it drives the same recovery a live event would.
+    expect(result.current.autoReconnect).toEqual({ attempt: 1, max: MAX });
+  });
+
+  it("the health pull clears a stale unavailable left over from an earlier wedge", async () => {
+    // `connect_context` evicts a wedged entry and rebuilds it, so a healthy
+    // answer here is authoritative: without applying it the banner would stay
+    // up over a cluster that is already serving again.
+    useAppStore.setState({
+      clusterHealth: { [CTX.id]: "unavailable" },
+      clusterHealthReason: { [CTX.id]: "timeout" },
+    });
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+
+    expect(useAppStore.getState().clusterHealth[CTX.id]).toBe("healthy");
+    expect(result.current.autoReconnect).toBeNull();
+    expect(reconnectCluster).not.toHaveBeenCalled();
+  });
+
+  it("a refused command flipping health starts the same retry session as an event", async () => {
+    // ResourceTable / the namespaces subscribe mark the cluster unavailable
+    // when the backend refuses them ("unavailable — reconnect first"). That
+    // write must drive recovery exactly like a live probe event would —
+    // otherwise the wedge detected by the only signal that still arrives
+    // would sit behind a manual button.
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+    expect(result.current.autoReconnect).toBeNull();
+
+    act(() => {
+      useAppStore
+        .getState()
+        .applyClusterHealth(
+          CTX.id,
+          "unavailable",
+          `cluster ${CTX.id} is unavailable — reconnect first`,
+        );
+    });
+    expect(result.current.autoReconnect).toEqual({ attempt: 1, max: MAX });
+
+    await flush(2000);
+    expect(reconnectCluster).toHaveBeenCalledTimes(1);
+  });
+
+  it("polls health while connected, so a lost event still surfaces the wedge", async () => {
+    // Worst case for the push channel: the cluster wedges while the operator
+    // sits on an already-loaded table. Nothing re-subscribes, the one-shot
+    // event was missed — only the poll can notice, and it must arrive without
+    // any interaction.
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+    expect(getClusterHealth).toHaveBeenCalledTimes(1); // the mount pull
+
+    getClusterHealth.mockResolvedValue(UNAVAIL);
+    await flush(15_000);
+
+    expect(getClusterHealth).toHaveBeenCalledTimes(2);
+    expect(useAppStore.getState().clusterHealth[CTX.id]).toBe("unavailable");
+    expect(result.current.autoReconnect).toEqual({ attempt: 1, max: MAX });
+  });
+
+  it("stops polling once the panel unmounts", async () => {
+    const { unmount } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+    const afterMount = getClusterHealth.mock.calls.length;
+    unmount();
+    await flush(60_000);
+    expect(getClusterHealth).toHaveBeenCalledTimes(afterMount);
+  });
+
+  it("a failed health pull leaves the connection alone", async () => {
+    // The pull is a diagnostic, not a gate — an IPC hiccup must not fabricate
+    // an outage or blank the view.
+    getClusterHealth.mockRejectedValue(new Error("ipc closed"));
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+
+    expect(result.current.state.status).toBe("ok");
+    expect(useAppStore.getState().clusterHealth[CTX.id]).toBeUndefined();
+    expect(result.current.autoReconnect).toBeNull();
   });
 
   it("on unavailable, schedules the first retry at exactly 2000ms", async () => {
@@ -253,6 +353,7 @@ describe("useClusterConnection permanent-failure gating", () => {
     connectContext.mockReset().mockResolvedValue({ server_version: "v1" });
     cancelConnect.mockClear();
     reconnectCluster.mockClear().mockResolvedValue(undefined);
+    getClusterHealth.mockReset().mockResolvedValue(HEALTHY);
     useAppStore.setState({
       ...initial,
       clusterHealth: {},

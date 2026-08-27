@@ -196,6 +196,13 @@ export const api = {
   // reusing it would just keep failing.
   reconnectCluster: (clusterId: string) =>
     invoke<void>("reconnect_cluster", { clusterId }),
+  // Pull the cluster's current health. The `cluster-health://` event fires
+  // exactly once per wedge and is lost on anyone not listening at that
+  // moment (a background tab has no mounted panel), so every panel mount
+  // asks. Non-creating on the backend: an unconnected cluster answers
+  // healthy instead of paying an auth round trip.
+  getClusterHealth: (clusterId: string) =>
+    invoke<ClusterHealthEvent>("get_cluster_health", { clusterId }),
   // Header-palette full-text search across the cluster's index. Returns up
   // to `limit` hits (FTS5 bm25 ranked) or an empty array if the cluster
   // hasn't been connected yet (or its index failed to open).

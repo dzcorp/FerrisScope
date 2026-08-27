@@ -955,6 +955,9 @@ const WARN = new Set([
   "degraded",
   "Updating",
   "Progressing",
+  // Cluster-level, not object-level: a connection being rebuilt after the
+  // health probe declared the apiserver gone.
+  "Reconnecting",
 ]);
 const INFO = new Set([
   "ContainerCreating",
@@ -995,6 +998,7 @@ const TRANSIENT = new Set([
   "Waiting",
   "PodScheduled",
   "ContainerStarting",
+  "Reconnecting",
 ]);
 
 export function statusBucket(status: string): StatusBucket {

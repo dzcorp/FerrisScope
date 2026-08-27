@@ -168,6 +168,7 @@ fn main() {
             commands::unsubscribe_resource,
             commands::drop_cluster_watchers,
             commands::reconnect_cluster,
+            commands::get_cluster_health,
             commands::forget_cluster_search_index,
             commands::search_cluster_index,
             commands::get_resource_yaml_cmd,
