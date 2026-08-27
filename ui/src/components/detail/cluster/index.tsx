@@ -2,15 +2,9 @@
 // Event). Same shape as the workload summaries: fetch on mount + on
 // detailVersion bumps, compose shared primitives, dispatch from DetailPanel.
 
-import { logErr } from "../../../lib/log";
-import { confirm, toast } from "../../../lib/dialog";
-import { useEffect, useRef, useState } from "react";
-import {
-  selectClusterDegraded,
-  useAppStore,
-  useResolvedTheme,
-} from "../../../store";
-import { api, onResourceDelta } from "../../../api";
+import { useState } from "react";
+import { useResolvedTheme } from "../../../store";
+import { api } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
@@ -27,16 +21,15 @@ import {
   formatQuantity,
   type DetailNavigate,
   useDetail,
-  type LoadState,
 } from "..";
 import type {
   EventDetail,
   NamespaceDetail,
   NodeDetail,
-  ResourceRow,
   WorkloadCondition,
 } from "../../../types";
 import { ConditionsSection, MetaSection } from "../workload/shared";
+import { PodListSection } from "../podList";
 
 function Frame({ t, children }: { t: Tokens; children: React.ReactNode }) {
   return (
@@ -345,12 +338,21 @@ export function NodeSummary(props: {
         </>
       )}
 
-      <PodsOnNodeSection
+      {/* Node column omitted — every pod here is on this node by definition.
+          Evict is enabled so a drain can be driven straight from the panel. */}
+      <PodListSection
         t={t}
         mode={props.mode}
         clusterId={props.clusterId}
-        node={props.name}
-        detailVersion={props.detailVersion}
+        fetchPods={() =>
+          api.listPodsOnNode(props.clusterId, props.name).then((rows) => ({ rows }))
+        }
+        acceptsDelta={(row) => row.node === props.name}
+        subjectKey={props.name}
+        refetchKey={props.detailVersion}
+        emptyLabel="No pods scheduled on this node."
+        showNamespace
+        enableEvict
         onNavigate={props.onNavigate}
       />
 
@@ -537,309 +539,6 @@ function NodeConditionRow({
           {ageFromIso(cond.last_transition_time)} ago
         </span>
       )}
-    </DetailRow>
-  );
-}
-
-// Pods scheduled on the node. Fetched on mount + on `detailVersion` bumps so
-// the watcher's pod-table deltas (Ready / Restarts changes) refresh this list
-// alongside the node's own detail. Click → navigate to the pod detail.
-//
-// Reuses the row-shape projection the pod table consumes (same projection
-// function on the backend) so the columns shown here match what's in Pods.
-function PodsOnNodeSection(props: {
-  t: Tokens;
-  mode: ThemeMode;
-  clusterId: string;
-  node: string;
-  detailVersion: number;
-  onNavigate?: DetailNavigate;
-}) {
-  const { t, mode } = props;
-  const [state, setState] = useState<LoadState<ResourceRow[]>>({
-    kind: "loading",
-  });
-  // Per-effect map identity. Listener bails when it sees a different map,
-  // mirroring the ResourceTable race fix — so a stale listener from a prior
-  // node panel can never bleed into the current one.
-  const mapRef = useRef<Map<string, ResourceRow>>(new Map());
-
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    const localMap = new Map<string, ResourceRow>();
-    mapRef.current = localMap;
-    // Intentionally do NOT setState({ loading }) here — on a refetch we keep
-    // showing the previous pod rows until the new snapshot lands. Otherwise
-    // the section briefly empties (collapsing the panel's content height)
-    // and the surrounding scroll container snaps back to the top during
-    // every cordon/drain bump.
-
-    const publish = () => {
-      if (cancelled || mapRef.current !== localMap) return;
-      setState({ kind: "ready", detail: Array.from(localMap.values()) });
-    };
-
-    (async () => {
-      try {
-        // Live pod deltas across the whole cluster, filtered to this node.
-        // We need real-time updates so a drain visibly drains — without this
-        // the panel only refreshed on the node watcher's bumps, which don't
-        // fire for pod state changes.
-        const unl = await onResourceDelta(props.clusterId, "pods", null, (delta) => {
-          if (cancelled || mapRef.current !== localMap) return;
-          if (delta.kind === "upsert") {
-            const node =
-              typeof delta.row.node === "string" ? delta.row.node : null;
-            if (node === props.node) {
-              localMap.set(delta.row.uid, delta.row);
-              publish();
-            } else if (localMap.has(delta.row.uid)) {
-              // The pod moved off this node (rare for normal pods, but a
-              // controller could re-create one elsewhere). Drop it.
-              localMap.delete(delta.row.uid);
-              publish();
-            }
-          } else if (delta.kind === "delete") {
-            if (localMap.has(delta.uid)) {
-              localMap.delete(delta.uid);
-              publish();
-            }
-          }
-          // init_done — nothing to do; this view doesn't gate UI on it.
-        });
-        if (cancelled) {
-          unl();
-          return;
-        }
-        unlisten = unl;
-
-        // Start the cluster's pods watcher (ref-counted; cheap if already up
-        // because the operator has Pods open elsewhere). The snapshot path
-        // would also work but `listPodsOnNode` is server-filtered and avoids
-        // shipping every pod in the cluster just to drop most of them here.
-        const [, initial] = await Promise.all([
-          api.subscribeResource(props.clusterId, "pods", null),
-          api.listPodsOnNode(props.clusterId, props.node),
-        ]);
-        if (cancelled) return;
-
-        // Merge: initial fetch under any deltas already received (deltas win).
-        const merged = new Map<string, ResourceRow>();
-        for (const row of initial) merged.set(row.uid, row);
-        for (const [uid, row] of localMap) merged.set(uid, row);
-        localMap.clear();
-        for (const [uid, row] of merged) localMap.set(uid, row);
-        publish();
-      } catch (e) {
-        if (!cancelled) setState({ kind: "error", message: String(e) });
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-      api.unsubscribeResource(props.clusterId, "pods").catch(logErr("cluster-detail"));
-    };
-    // `detailVersion` is intentionally NOT a dep: the pod watcher's deltas
-    // already keep this list in sync, and re-running the effect on every
-    // node-detail bump would tear down + re-subscribe the listener (and
-    // briefly drop pods) on each cordon/drain refresh.
-  }, [props.clusterId, props.node]);
-
-  const rows =
-    state.kind === "ready"
-      ? [...state.detail].sort((a, b) => {
-          const an = `${a.namespace ?? ""}/${a.name ?? ""}`;
-          const bn = `${b.namespace ?? ""}/${b.name ?? ""}`;
-          return an.localeCompare(bn);
-        })
-      : [];
-
-  return (
-    <>
-      <Section
-        t={t}
-        title="Pods"
-        right={
-          state.kind === "ready" ? (
-            <span
-              style={{
-                fontSize: FS_XS,
-                color: t.textMuted,
-                fontFamily: FF_MONO,
-              }}
-            >
-              {state.detail.length} total
-            </span>
-          ) : null
-        }
-      />
-      <div style={{ marginBottom: 22 }}>
-        {state.kind === "loading" && (
-          <LoadingLine t={t} label="Loading pods…" inline />
-        )}
-        {state.kind === "error" && (
-          <div style={{ padding: "6px 0" }}>
-            <ErrorBlock
-              t={t}
-              message={state.message}
-              kindLabel="pods"
-              inline
-            />
-          </div>
-        )}
-        {state.kind === "ready" && rows.length === 0 && (
-          <Mute t={t}>No pods scheduled on this node.</Mute>
-        )}
-        {state.kind === "ready" &&
-          rows.map((row) => (
-            <PodOnNodeRow
-              key={row.uid}
-              t={t}
-              mode={mode}
-              clusterId={props.clusterId}
-              row={row}
-              onNavigate={props.onNavigate}
-            />
-          ))}
-      </div>
-    </>
-  );
-}
-
-function PodOnNodeRow({
-  t,
-  mode,
-  clusterId,
-  row,
-  onNavigate,
-}: {
-  t: Tokens;
-  mode: ThemeMode;
-  clusterId: string;
-  row: ResourceRow;
-  onNavigate?: DetailNavigate;
-}) {
-  const name = String(row.name ?? "");
-  const ns = typeof row.namespace === "string" ? row.namespace : null;
-  // Match the row menu / bulk bar: skip the prompt when the user has turned
-  // off destructive confirmations globally, and disable the button while the
-  // cluster is unavailable / mid auto-reconnect.
-  const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
-  const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
-  const phase = typeof row.phase === "string" ? row.phase : "Unknown";
-  const ready = typeof row.ready === "string" ? row.ready : "";
-  const restarts =
-    typeof row.restarts === "number"
-      ? row.restarts
-      : Number(row.restarts) || 0;
-  const created =
-    typeof row.creation_timestamp === "string" ? row.creation_timestamp : null;
-
-  // Graceful, PDB-aware eviction of this pod off the node being inspected.
-  // The list is fed by live pod deltas, so a successful evict removes the row
-  // on its own (Terminating → delete) — no manual refetch here.
-  const doEvict = () => {
-    void (async () => {
-      if (!ns) {
-        toast.bad("Pod has no namespace — can't evict.");
-        return;
-      }
-      if (confirmDestructive) {
-        const ok = await confirm({
-          title: `Evict pod ${ns}/${name}?`,
-          body: "Graceful, PDB-aware eviction off this node. Blocked if it would breach a PodDisruptionBudget. A controller-owned pod is rescheduled elsewhere; a bare pod is gone.",
-          confirmLabel: "Evict",
-          tone: "danger",
-        });
-        if (!ok) return;
-      }
-      try {
-        await api.evictPod(clusterId, ns, name);
-        toast.ok(`Evicted pod ${ns}/${name}.`);
-      } catch (e) {
-        // 429 → apiserver's disruption-budget message, surfaced verbatim.
-        toast.bad(`Evict failed: ${String(e)}`);
-      }
-    })();
-  };
-
-  return (
-    <DetailRow t={t} label={ns ?? "—"}>
-      <LinkValue
-        t={t}
-        onClick={() => onNavigate?.("Pod", ns, name)}
-        copyText={ns ? `${ns}/${name}` : name}
-        enabled={!!onNavigate}
-      >
-        {name}
-      </LinkValue>
-      <StatusPill status={phase} t={t} mode={mode} dense />
-      {ready && (
-        <span
-          style={{
-            fontFamily: FF_MONO,
-            fontSize: FS_SM,
-            fontVariantNumeric: "tabular-nums",
-            color: t.textDim,
-          }}
-        >
-          {ready}
-        </span>
-      )}
-      {restarts > 0 && (
-        <span
-          style={{
-            fontFamily: FF_MONO,
-            fontSize: FS_SM,
-            color: restarts > 5 ? t.warn : t.textMuted,
-          }}
-        >
-          ↻{restarts}
-        </span>
-      )}
-      {created && (
-        <span
-          style={{
-            fontSize: FS_SM,
-            color: t.textMuted,
-            fontFamily: FF_MONO,
-            marginLeft: "auto",
-          }}
-        >
-          {ageFromIso(created)}
-        </span>
-      )}
-      <button
-        type="button"
-        disabled={degraded}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (degraded) return;
-          doEvict();
-        }}
-        title={
-          degraded
-            ? "Cluster unavailable — can't evict right now"
-            : "Evict pod (graceful, PDB-aware)"
-        }
-        style={{
-          marginLeft: created ? 8 : "auto",
-          fontFamily: FF_MONO,
-          fontSize: FS_XS,
-          color: degraded ? t.textMuted : t.bad,
-          background: "transparent",
-          border: `1px solid ${t.border}`,
-          borderRadius: R_SM,
-          padding: "1px 8px",
-          cursor: degraded ? "not-allowed" : "pointer",
-          opacity: degraded ? 0.5 : 1,
-          lineHeight: 1.6,
-        }}
-      >
-        Evict
-      </button>
     </DetailRow>
   );
 }

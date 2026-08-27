@@ -1644,3 +1644,28 @@ describe("cluster degraded state", () => {
     expect("c1" in useAppStore.getState().clusterReconnecting).toBe(false);
   });
 });
+
+// ResourceTable owns the detail / per-row-log drawers, so App's Esc router
+// cannot see them directly. Without this published flag one Esc closed the
+// detail panel AND wiped the selection it was opened from.
+describe("rowDrawerOpen", () => {
+  it("publishes and clears drawer open-ness", () => {
+    const st = useAppStore.getState();
+    expect(useAppStore.getState().rowDrawerOpen).toBe(false);
+    st.setRowDrawerOpen(true);
+    expect(useAppStore.getState().rowDrawerOpen).toBe(true);
+    st.setRowDrawerOpen(false);
+    expect(useAppStore.getState().rowDrawerOpen).toBe(false);
+  });
+
+  // Every ResourceTable render calls this; a fresh object each time would
+  // re-render every subscriber.
+  it("is a no-op when the value is unchanged", () => {
+    const st = useAppStore.getState();
+    st.setRowDrawerOpen(true);
+    const before = useAppStore.getState();
+    st.setRowDrawerOpen(true);
+    expect(useAppStore.getState()).toBe(before);
+    st.setRowDrawerOpen(false);
+  });
+});

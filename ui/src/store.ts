@@ -296,6 +296,11 @@ type AppState = {
   paletteOpen: boolean;
   nsModalOpen: boolean;
   settingsOpen: boolean;
+  /// A drawer owned by `ResourceTable` (row detail panel, per-row logs) is
+  /// open. App mounts the compare/observe/inspect drawers itself but cannot
+  /// see these two, and it needs to know: they close themselves on Esc, so
+  /// App must not ALSO consume that Esc and wipe the selection underneath.
+  rowDrawerOpen: boolean;
   /// Pending deep-link target for the next time the Settings panel is
   /// open / re-opened. Consumed by the panel on mount, then cleared via
   /// `consumeSettingsTarget()` so re-opening the panel without a new
@@ -534,6 +539,7 @@ type AppState = {
 
   setSelectedNamespaces: (ns: Set<string>) => void;
 
+  setRowDrawerOpen: (v: boolean) => void;
   openPalette: () => void;
   closePalette: () => void;
   setTableFilter: (q: string) => void;
@@ -857,6 +863,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   paletteOpen: false,
   nsModalOpen: false,
   settingsOpen: false,
+  rowDrawerOpen: false,
   settingsTarget: null,
   addMenuOpen: false,
 
@@ -1199,6 +1206,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       selection: new Map<string, SelectionMeta>(),
     }),
 
+  setRowDrawerOpen: (v: boolean) =>
+    set((st) => (st.rowDrawerOpen === v ? st : { rowDrawerOpen: v })),
   openPalette: () => set({ paletteOpen: true }),
   closePalette: () => set({ paletteOpen: false }),
   setTableFilter: (q) => set({ tableFilter: q }),

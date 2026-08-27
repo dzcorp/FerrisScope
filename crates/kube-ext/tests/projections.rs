@@ -175,6 +175,9 @@ fn job_succeeded_row_and_detail() {
     let row = ferrisscope_kube_ext::kinds::jobs::JobSpec::project(&j);
     assert_eq!(row["completions"], "1/1");
     assert_eq!(row["phase"], "Succeeded");
+    // Pods created = active + succeeded + failed; the one succeeded pod still
+    // counts even though the apiserver may already have collected it.
+    assert_eq!(row["pods"], 1);
     snap("job_succeeded_row", &row);
 
     let detail = ferrisscope_kube_ext::kinds::jobs::project_detail(&j);

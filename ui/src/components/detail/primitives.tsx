@@ -22,10 +22,15 @@ import { Chip, Icons, Tooltip } from "../ui";
 // Kubernetes Kind name (e.g. "StatefulSet") + (namespace, name) to a
 // detail-panel switch. The parent (ResourceTable) resolves the kind name
 // against the registry and falls back silently if the kind isn't browseable.
+// `clusterId` is optional and defaults to the panel's own cluster. It exists
+// for surfaces that union objects from SEVERAL clusters in one list — the
+// Inspect drawer's Pods tab groups per cluster, so the row's cluster, not the
+// drawer's first subject, is the right scope to open it in.
 export type DetailNavigate = (
   kindName: string,
   namespace: string | null,
   name: string,
+  clusterId?: string,
 ) => void;
 
 // ── DetailRow ──────────────────────────────────────────────────────────────
@@ -41,33 +46,40 @@ export function DetailRow({
   // ReactNode so callers can decorate the label (e.g. add a doc-tooltip icon
   // next to the field name). String labels still render exactly as before
   // since the wrapper applies the canonical mono/uppercase styling.
-  label: ReactNode;
+  //
+  // `null` drops the label column entirely and gives the value the full
+  // width — for repeating rows whose label would be the same word over and
+  // over (a workload's pods all share its namespace).
+  label?: ReactNode;
   children: ReactNode;
 }) {
+  const labelled = label != null;
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "180px 1fr",
+        gridTemplateColumns: labelled ? "180px 1fr" : "1fr",
         gap: 16,
         alignItems: "baseline",
         padding: "8px 0",
         borderBottom: `1px solid ${t.borderSoft}`,
       }}
     >
-      <div
-        style={{
-          fontSize: FS_XS,
-          fontWeight: 700,
-          color: t.textMuted,
-          textTransform: "uppercase",
-          letterSpacing: 0.6,
-          fontFamily: FF_MONO,
-          marginTop: 2,
-        }}
-      >
-        {label}
-      </div>
+      {labelled && (
+        <div
+          style={{
+            fontSize: FS_XS,
+            fontWeight: 700,
+            color: t.textMuted,
+            textTransform: "uppercase",
+            letterSpacing: 0.6,
+            fontFamily: FF_MONO,
+            marginTop: 2,
+          }}
+        >
+          {label}
+        </div>
+      )}
       <div
         style={{
           minWidth: 0,
@@ -448,12 +460,22 @@ export function LinkValue({
   onClick,
   copyText,
   enabled,
+  tone = "accent",
+  truncate = false,
   children,
 }: {
   t: Tokens;
   onClick: () => void;
   copyText: string;
   enabled: boolean;
+  /// `muted` keeps the click target but drops the accent colour, so a
+  /// secondary reference (the node a pod landed on) doesn't compete with the
+  /// object's own name. Matches how the table renders its namespace / node
+  /// cells: ordinary text, pointer cursor as the only affordance.
+  tone?: "accent" | "muted";
+  /// Ellipsize instead of wrapping. For long values in a fixed-width row —
+  /// the full string is still in the tooltip and on copy.
+  truncate?: boolean;
   children: ReactNode;
 }) {
   const [ref, flash] = useCopyFlash();
@@ -479,15 +501,24 @@ export function LinkValue({
         className="fs-copyable"
         onClick={handleClick}
         style={{
-          display: "inline-flex",
-          alignItems: "center",
+          display: truncate ? "block" : "inline-flex",
+          // Only meaningful in the inline-flex layout; `block` ignores it.
+          ...(truncate ? null : { alignItems: "center" as const }),
           fontFamily: FF_MONO,
           fontSize: FS_MD,
-          color: enabled ? t.accent : t.text,
+          color: tone === "muted" ? t.textMuted : enabled ? t.accent : t.text,
           textDecoration: "none",
           padding: "1px 4px",
           margin: "-1px -4px",
           cursor: enabled ? "pointer" : "copy",
+          ...(truncate
+            ? {
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap" as const,
+              }
+            : null),
         }}
       >
         {children}

@@ -15,6 +15,7 @@ import {
   DetailRow,
   EditSessionProvider,
   GlobalSaveBar,
+  LinkValue,
   Mute,
   ageFromIso,
   type DetailNavigate,
@@ -37,6 +38,8 @@ import {
   ReplicasEditor,
   SelectorRow,
 } from "./shared";
+import { PodListSection } from "../podList";
+import { acceptsPodDelta } from "../../../lib/podSelector";
 
 function Frame({
   t,
@@ -219,6 +222,23 @@ export function DeploymentSummary(props: {
         </div>
 
         <ConditionsSection t={t} conditions={d.conditions} />
+
+        <PodListSection
+          t={t}
+          mode={props.mode}
+          clusterId={props.clusterId}
+          fetchPods={() =>
+            api.listPodsForWorkload(props.clusterId, "deployments", ns, props.name)
+          }
+          acceptsDelta={(row, known) =>
+            acceptsPodDelta(row, ns, d.selector, known)
+          }
+          subjectKey={`deployments/${ns}/${props.name}`}
+          refetchKey={props.detailVersion}
+          emptyLabel="No pods match this Deployment's selector."
+          showNode
+          onNavigate={props.onNavigate}
+        />
         {d.pod_template && (
           <PodTemplateSection
             t={t}
@@ -344,6 +364,23 @@ export function ReplicaSetSummary(props: {
         </div>
 
         <ConditionsSection t={t} conditions={d.conditions} />
+
+        <PodListSection
+          t={t}
+          mode={props.mode}
+          clusterId={props.clusterId}
+          fetchPods={() =>
+            api.listPodsForWorkload(props.clusterId, "replicasets", ns, props.name)
+          }
+          acceptsDelta={(row, known) =>
+            acceptsPodDelta(row, ns, d.selector, known)
+          }
+          subjectKey={`replicasets/${ns}/${props.name}`}
+          refetchKey={props.detailVersion}
+          emptyLabel="No pods match this ReplicaSet's selector."
+          showNode
+          onNavigate={props.onNavigate}
+        />
         {d.pod_template && (
           <PodTemplateSection
             t={t}
@@ -548,6 +585,23 @@ export function StatefulSetSummary(props: {
         )}
 
         <ConditionsSection t={t} conditions={d.conditions} />
+
+        <PodListSection
+          t={t}
+          mode={props.mode}
+          clusterId={props.clusterId}
+          fetchPods={() =>
+            api.listPodsForWorkload(props.clusterId, "statefulsets", ns, props.name)
+          }
+          acceptsDelta={(row, known) =>
+            acceptsPodDelta(row, ns, d.selector, known)
+          }
+          subjectKey={`statefulsets/${ns}/${props.name}`}
+          refetchKey={props.detailVersion}
+          emptyLabel="No pods match this StatefulSet's selector."
+          showNode
+          onNavigate={props.onNavigate}
+        />
         {d.pod_template && (
           <PodTemplateSection
             t={t}
@@ -690,6 +744,23 @@ export function DaemonSetSummary(props: {
         </div>
 
         <ConditionsSection t={t} conditions={d.conditions} />
+
+        <PodListSection
+          t={t}
+          mode={props.mode}
+          clusterId={props.clusterId}
+          fetchPods={() =>
+            api.listPodsForWorkload(props.clusterId, "daemonsets", ns, props.name)
+          }
+          acceptsDelta={(row, known) =>
+            acceptsPodDelta(row, ns, d.selector, known)
+          }
+          subjectKey={`daemonsets/${ns}/${props.name}`}
+          refetchKey={props.detailVersion}
+          emptyLabel="No pods match this DaemonSet's selector."
+          showNode
+          onNavigate={props.onNavigate}
+        />
         {d.pod_template && (
           <PodTemplateSection
             t={t}
@@ -857,6 +928,23 @@ export function JobSummary(props: {
         </div>
 
         <ConditionsSection t={t} conditions={d.conditions} />
+
+        <PodListSection
+          t={t}
+          mode={props.mode}
+          clusterId={props.clusterId}
+          fetchPods={() =>
+            api.listPodsForWorkload(props.clusterId, "jobs", ns, props.name)
+          }
+          acceptsDelta={(row, known) =>
+            acceptsPodDelta(row, ns, d.selector, known)
+          }
+          subjectKey={`jobs/${ns}/${props.name}`}
+          refetchKey={props.detailVersion}
+          emptyLabel="No pods match this Job's selector."
+          showNode
+          onNavigate={props.onNavigate}
+        />
         {d.pod_template && (
           <PodTemplateSection
             t={t}
@@ -1055,26 +1143,36 @@ export function CronJobSummary(props: {
             }
           />
           <div style={{ marginBottom: 22 }}>
-            {d.active.map((ref, i) => (
-              <DetailRow key={i} t={t} label={ref.kind ?? "Job"}>
-                {ref.name ? (
-                  <Copyable text={ref.name}>
-                    <span
-                      style={{ fontFamily: FF_MONO, fontSize: FS_MD }}
+            {d.active.map((ref, i) => {
+              // Bound out of the JSX: narrowing on a property access is lost
+              // inside the onClick closure.
+              const jobName = ref.name;
+              const jobNs = ref.namespace ?? ns;
+              return (
+                <DetailRow key={i} t={t} label={ref.kind ?? "Job"}>
+                  {/* A CronJob has no pod selector of its own — its pods hang
+                      off these Jobs, so linking through is how the operator
+                      reaches them. LinkValue, not a bare Copyable. */}
+                  {jobName ? (
+                    <LinkValue
+                      t={t}
+                      onClick={() => props.onNavigate?.("Job", jobNs, jobName)}
+                      copyText={jobName}
+                      enabled={!!props.onNavigate}
                     >
-                      {ref.name}
+                      {jobName}
+                    </LinkValue>
+                  ) : (
+                    <Mute t={t}>—</Mute>
+                  )}
+                  {ref.namespace && (
+                    <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+                      {ref.namespace}
                     </span>
-                  </Copyable>
-                ) : (
-                  <Mute t={t}>—</Mute>
-                )}
-                {ref.namespace && (
-                  <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-                    {ref.namespace}
-                  </span>
-                )}
-              </DetailRow>
-            ))}
+                  )}
+                </DetailRow>
+              );
+            })}
           </div>
         </>
       )}

@@ -25,7 +25,7 @@ import {
   type ThemeMode,
   type Tokens,
 } from "../theme";
-import { ErrorBlock, Icons, LoadingLine, Tooltip } from "./ui";
+import { Btn, ErrorBlock, IconBtn, Icons, LoadingLine } from "./ui";
 
 export type CompareSide = {
   clusterId: string;
@@ -214,45 +214,17 @@ export function ComparePanel({ mode, target, onClose }: Props) {
               <SideChip t={t} side={right} />
             </div>
           </div>
-          <Tooltip label="Swap sides">
-            <button
-              type="button"
-              aria-label="Swap sides"
-              onClick={() => setSwapped((v) => !v)}
-              style={{
-                border: `1px solid ${t.border}`,
-                background: t.surface,
-                color: t.textDim,
-                height: 28,
-                padding: "0 10px",
-                borderRadius: R_MD,
-                fontSize: FS_SM,
-                fontFamily: "inherit",
-                cursor: "pointer",
-                outline: "none",
-                flexShrink: 0,
-              }}
-            >
-              ⇄ Swap
-            </button>
-          </Tooltip>
-          <button
-            type="button"
-            aria-label="Close compare"
-            onClick={onClose}
-            style={{
-              border: "none",
-              background: "transparent",
-              cursor: "pointer",
-              color: t.textMuted,
-              padding: 4,
-              borderRadius: R_MD,
-              display: "flex",
-              flexShrink: 0,
-            }}
+          <Btn
+            t={t}
+            size="sm"
+            title="Swap sides"
+            onClick={() => setSwapped((v) => !v)}
           >
+            ⇄ Swap
+          </Btn>
+          <IconBtn t={t} size="lg" title="Close (Esc)" onClick={onClose}>
             {Icons.close}
-          </button>
+          </IconBtn>
         </header>
 
         <div style={{ flex: 1, minHeight: 0 }}>
@@ -287,23 +259,9 @@ export function ComparePanel({ mode, target, onClose }: Props) {
                 </div>
               ))}
               <div>
-                <button
-                  type="button"
-                  onClick={() => setAttempt((n) => n + 1)}
-                  style={{
-                    border: `1px solid ${t.border}`,
-                    background: t.surface,
-                    color: t.text,
-                    height: 28,
-                    padding: "0 12px",
-                    borderRadius: R_MD,
-                    fontSize: FS_SM,
-                    fontFamily: "inherit",
-                    cursor: "pointer",
-                  }}
-                >
-                  Retry
-                </button>
+                <Btn t={t} size="sm" onClick={() => setAttempt((n) => n + 1)}>
+                Retry
+              </Btn>
               </div>
             </div>
           ) : loading ? (

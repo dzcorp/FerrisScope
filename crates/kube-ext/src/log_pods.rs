@@ -165,38 +165,42 @@ async fn resolve_one(client: Client, t: &LogPodTarget) -> Result<Vec<ResolvedLog
         let pod = api.get(&t.name).await?;
         return Ok(vec![resolved_from_pod(&pod)]);
     }
-    let selector = workload_selector(client.clone(), t).await?;
+    let selector = workload_selector(client.clone(), &t.kind_id, &t.namespace, &t.name).await?;
     list_by_selector(client, t, selector.as_ref()).await
 }
 
 /// GET a workload and return its pod `LabelSelector`. Shared by the one-shot
-/// [`resolve_one`] and the live [`start_log_pod_watch`]. `None` only when the
-/// workload carries no selector (just the optional `Job.spec.selector`).
-/// `UnknownKind` for anything that isn't a pod-owning workload.
-async fn workload_selector(
+/// [`resolve_one`], the live [`start_log_pod_watch`], and
+/// `fetch::list_pods_for_workload`. `None` only when the workload carries no
+/// selector (just the optional `Job.spec.selector`). `UnknownKind` for
+/// anything that isn't a pod-owning workload — notably `cronjobs`, whose pods
+/// are reached through its child Jobs rather than a selector of its own.
+pub(crate) async fn workload_selector(
     client: Client,
-    t: &LogPodTarget,
+    kind_id: &str,
+    namespace: &str,
+    name: &str,
 ) -> Result<Option<LabelSelector>, FetchError> {
-    match t.kind_id.as_str() {
+    match kind_id {
         "deployments" => {
-            let api: Api<Deployment> = Api::namespaced(client, &t.namespace);
-            Ok(api.get(&t.name).await?.spec.map(|s| s.selector))
+            let api: Api<Deployment> = Api::namespaced(client, namespace);
+            Ok(api.get(name).await?.spec.map(|s| s.selector))
         }
         "statefulsets" => {
-            let api: Api<StatefulSet> = Api::namespaced(client, &t.namespace);
-            Ok(api.get(&t.name).await?.spec.map(|s| s.selector))
+            let api: Api<StatefulSet> = Api::namespaced(client, namespace);
+            Ok(api.get(name).await?.spec.map(|s| s.selector))
         }
         "daemonsets" => {
-            let api: Api<DaemonSet> = Api::namespaced(client, &t.namespace);
-            Ok(api.get(&t.name).await?.spec.map(|s| s.selector))
+            let api: Api<DaemonSet> = Api::namespaced(client, namespace);
+            Ok(api.get(name).await?.spec.map(|s| s.selector))
         }
         "replicasets" => {
-            let api: Api<ReplicaSet> = Api::namespaced(client, &t.namespace);
-            Ok(api.get(&t.name).await?.spec.map(|s| s.selector))
+            let api: Api<ReplicaSet> = Api::namespaced(client, namespace);
+            Ok(api.get(name).await?.spec.map(|s| s.selector))
         }
         "jobs" => {
-            let api: Api<Job> = Api::namespaced(client, &t.namespace);
-            Ok(api.get(&t.name).await?.spec.and_then(|s| s.selector))
+            let api: Api<Job> = Api::namespaced(client, namespace);
+            Ok(api.get(name).await?.spec.and_then(|s| s.selector))
         }
         other => Err(FetchError::UnknownKind(other.to_owned())),
     }
@@ -208,9 +212,8 @@ async fn list_by_selector(
     selector: Option<&LabelSelector>,
 ) -> Result<Vec<ResolvedLogPod>, FetchError> {
     let Some(query) = selector.and_then(selector_query) else {
-        // A selector built only from matchExpressions can't be expressed as
-        // an equality list query — surface it rather than over-matching the
-        // whole namespace.
+        // No usable selector — empty, or carrying an operator we don't
+        // recognise. Surface it rather than over-matching the namespace.
         return Err(FetchError::NoSelector(t.name.clone()));
     };
     let pods: Api<Pod> = Api::namespaced(client, &t.namespace);
@@ -221,11 +224,13 @@ async fn list_by_selector(
 
 /// Serialize a `LabelSelector` into the apiserver's label-selector query string,
 /// covering BOTH `matchLabels` (equality) and `matchExpressions` (set-based:
-/// `In` / `NotIn` / `Exists` / `DoesNotExist`). Returns `None` only for a wholly
+/// `In` / `NotIn` / `Exists` / `DoesNotExist`). Returns `None` for a wholly
 /// empty selector (no labels, no expressions) — which would match the entire
-/// namespace, never what a workload means. matchLabels iterate in `BTreeMap`
-/// key order so the query is deterministic.
-fn selector_query(sel: &LabelSelector) -> Option<String> {
+/// namespace, never what a workload means — and for a selector carrying an
+/// operator we don't recognise, since silently dropping that term would widen
+/// the match. matchLabels iterate in `BTreeMap` key order so the query is
+/// deterministic.
+pub(crate) fn selector_query(sel: &LabelSelector) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(labels) = sel.match_labels.as_ref() {
         for (k, v) in labels {
@@ -240,9 +245,13 @@ fn selector_query(sel: &LabelSelector) -> Option<String> {
                 "NotIn" => parts.push(format!("{} notin ({})", e.key, values.join(","))),
                 "Exists" => parts.push(e.key.clone()),
                 "DoesNotExist" => parts.push(format!("!{}", e.key)),
-                // Unknown operator: skip rather than emit a query the apiserver
-                // would 400 on. Projections/selectors must be total.
-                _ => {}
+                // An unrecognised operator cannot be dropped: omitting a
+                // restricting term (NotIn / DoesNotExist) WIDENS the query, so
+                // we would match pods the workload doesn't own — and callers
+                // port-forward to, and offer actions on, whatever comes back.
+                // Refuse the whole selector instead; callers surface
+                // `NoSelector`.
+                _ => return None,
             }
         }
     }
@@ -476,7 +485,13 @@ pub async fn start_log_pod_watch(
     client: Client,
     target: &LogPodTarget,
 ) -> Result<Arc<LogPodWatch>, FetchError> {
-    let selector = workload_selector(client.clone(), target).await?;
+    let selector = workload_selector(
+        client.clone(),
+        &target.kind_id,
+        &target.namespace,
+        &target.name,
+    )
+    .await?;
     let Some(query) = selector.as_ref().and_then(selector_query) else {
         return Err(FetchError::NoSelector(target.name.clone()));
     };

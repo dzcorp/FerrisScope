@@ -531,6 +531,18 @@ describe("node operations", () => {
     expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx", node: "worker-1" });
   });
 
+  it("listPodsForWorkload passes the registry kind id alongside ns + name", async () => {
+    const cap = captureNext([]);
+    await api.listPodsForWorkload("ctx", "deployments", "default", "web");
+    expect(cap.calls[0]?.cmd).toBe("list_pods_for_workload_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      clusterId: "ctx",
+      kindId: "deployments",
+      namespace: "default",
+      name: "web",
+    });
+  });
+
   it("evictPod → evict_pod_cmd with namespace + name", async () => {
     const cap = captureNext(undefined);
     await api.evictPod("ctx", "default", "api-0");

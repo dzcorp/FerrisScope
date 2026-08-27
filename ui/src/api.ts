@@ -94,6 +94,7 @@ import type {
   ResourceKind,
   ResourceQuotaDetail,
   ResourceRow,
+  WorkloadPods,
   RestartPodsReport,
   SearchHit,
   RoleBindingDetail,
@@ -631,6 +632,21 @@ export const api = {
   // per-pod report so the UI can surface PDB blocks etc.
   drainNode: (clusterId: string, name: string, force: boolean) =>
     invoke<DrainReport>("drain_node_cmd", { clusterId, name, force }),
+
+  // Pods matching a workload's label selector, resolved server-side. Same row
+  // shape as the pod table watcher.
+  listPodsForWorkload: (
+    clusterId: string,
+    kindId: string,
+    namespace: string,
+    name: string,
+  ) =>
+    invoke<WorkloadPods>("list_pods_for_workload_cmd", {
+      clusterId,
+      kindId,
+      namespace,
+      name,
+    }),
 
   // Pods scheduled on a given node. Same row shape as the pod table watcher.
   listPodsOnNode: (clusterId: string, node: string) =>

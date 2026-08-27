@@ -23,3 +23,5 @@ ui/.vite/
 .env
 .env.local
 .claude/
+# Test coverage reports
+coverage/

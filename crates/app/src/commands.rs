@@ -38,11 +38,11 @@ use ferrisscope_kube_ext::{
     get_storage_class_detail, get_validating_webhook_configuration_detail, get_well_known_detail,
     helm_install_chart, helm_repo_update, helm_uninstall, helm_upgrade,
     list_config_maps_in_namespace, list_namespace_names, list_object_events,
-    list_persistent_volume_claims_in_namespace, list_pods_on_node, list_secrets_in_namespace,
-    list_services_in_namespace, lookup, merge_patch_resource, registry, restart_pod_owner,
-    restart_pods_owners, restart_workload, set_node_cordon, start_forward, ApplyResult,
-    DrainReport, ForwardEntry, ForwardStatus, HelmInstallResult, HelmUpgradeResult,
-    MergePatchResult, ResourceKind, ResourceKindEntry, RestartPodsReport,
+    list_persistent_volume_claims_in_namespace, list_pods_for_workload, list_pods_on_node,
+    list_secrets_in_namespace, list_services_in_namespace, lookup, merge_patch_resource, registry,
+    restart_pod_owner, restart_pods_owners, restart_workload, set_node_cordon, start_forward,
+    ApplyResult, DrainReport, ForwardEntry, ForwardStatus, HelmInstallResult, HelmUpgradeResult,
+    MergePatchResult, ResourceKind, ResourceKindEntry, RestartPodsReport, WorkloadPods,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -2364,6 +2364,24 @@ pub(crate) async fn list_pods_on_node_cmd(
 ) -> Result<Vec<Value>, String> {
     let entry = state.entry(&cluster_id).await?;
     list_pods_on_node(entry.cluster.client(), &node)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Pods MATCHED by a workload's label selector, resolved server-side. A label
+/// selector is not ownership — see `list_pods_for_workload`.
+/// Same row shape as the pod table watcher, so the detail panel renders it
+/// with the shared pod row component.
+#[tauri::command]
+pub(crate) async fn list_pods_for_workload_cmd(
+    cluster_id: String,
+    kind_id: String,
+    namespace: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<WorkloadPods, String> {
+    let entry = state.entry(&cluster_id).await?;
+    list_pods_for_workload(entry.cluster.client(), &kind_id, &namespace, &name)
         .await
         .map_err(|e| e.to_string())
 }

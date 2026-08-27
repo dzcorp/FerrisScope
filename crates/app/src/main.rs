@@ -225,6 +225,7 @@ fn main() {
             commands::delete_resource_cmd,
             commands::cordon_node_cmd,
             commands::drain_node_cmd,
+            commands::list_pods_for_workload_cmd,
             commands::list_pods_on_node_cmd,
             commands::evict_pod_cmd,
             commands::restart_pod_cmd,

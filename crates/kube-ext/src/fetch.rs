@@ -63,7 +63,7 @@ pub enum FetchError {
     Yaml(#[from] serde_yaml::Error),
     #[error("{0} has no controller — use Delete to remove it")]
     NoController(String),
-    #[error("{0} has no equality-based label selector — can't list its pods")]
+    #[error("{0} has no usable pod selector — can't list its pods")]
     NoSelector(String),
     #[error("{0} doesn't support rollout restart — use Delete to recreate")]
     UnsupportedRestart(String),
@@ -2403,6 +2403,97 @@ pub async fn list_pods_on_node(client: Client, node: &str) -> Result<Vec<Value>,
         })
         .collect();
     Ok(rows)
+}
+
+/// Result of [`list_pods_for_workload`]: the rows plus whether the apiserver
+/// had more to give. `truncated` must reach the UI — see the note on
+/// `list_pods_for_workload` for why a silently short list is worse than an
+/// obviously short one.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkloadPods {
+    pub rows: Vec<Value>,
+    pub truncated: bool,
+}
+
+/// Row-shaped projection of the pods a workload's label selector matches,
+/// using the same resolution the log surface uses
+/// (`log_pods::workload_selector`), so the two never disagree.
+///
+/// A label selector is *not* ownership — a bare pod, or a second controller
+/// sharing `app=x` in the namespace, matches too. That is what `kubectl get
+/// pods -l` shows and what the log and port-forward surfaces already act on;
+/// callers must not present the result as "owned by" without checking
+/// ownerReferences.
+///
+/// Selection is server-side: the apiserver applies the selector, we never ship
+/// a namespace of pods just to drop most of them. For a Deployment this
+/// deliberately spans *every* ReplicaSet it owns, including a rollout's
+/// outgoing one — those surge pods are its pods.
+///
+/// Capped at [`log_pods::MAX_RESOLVED_PODS`]; a DaemonSet on a large cluster
+/// would otherwise deserialise thousands of Pods and ship them all over the
+/// IPC bridge. Overflow truncates rather than failing — the caller sees a
+/// usable prefix — but it is REPORTED, never silent. A truncated list is not
+/// merely incomplete on screen: the frontend seeds its delta filter from these
+/// uids, so under a selector it cannot evaluate client-side (matchExpressions)
+/// every pod past the cap is refused from the live stream too, and would stay
+/// invisible with no signal at all.
+///
+/// `kind_id` must be a selector-owning workload; `cronjobs` is rejected with
+/// `UnknownKind` because a CronJob reaches its pods through its child Jobs.
+pub async fn list_pods_for_workload(
+    client: Client,
+    kind_id: &str,
+    namespace: &str,
+    name: &str,
+) -> Result<WorkloadPods, FetchError> {
+    let selector = crate::log_pods::workload_selector(client.clone(), kind_id, namespace, name)
+        .await?
+        .ok_or_else(|| FetchError::NoSelector(name.to_owned()))?;
+    let query = crate::log_pods::selector_query(&selector)
+        // An empty selector would match the whole namespace — surface it
+        // rather than showing the operator pods the workload doesn't own.
+        .ok_or_else(|| FetchError::NoSelector(name.to_owned()))?;
+
+    let pods: Api<Pod> = Api::namespaced(client, namespace);
+    let lp = ListParams::default()
+        .labels(&query)
+        // Bound server-side so the apiserver stops rather than us deserialising
+        // thousands of Pods and discarding them.
+        .limit(u32::try_from(crate::log_pods::MAX_RESOLVED_PODS).unwrap_or(u32::MAX));
+    let list = pods.list(&lp).await?;
+    let rows: Vec<Value> = list
+        .items
+        .iter()
+        .map(|pod| {
+            let mut row = <crate::kinds::pods::PodSpec as crate::registry::KindSpec>::project(pod);
+            // Same reason as `list_pods_on_node`: the watcher's delta path
+            // injects `uid` via `with_uid`, this list path bypasses it, and
+            // without a uid the frontend's dedup map collapses every row onto
+            // `undefined` so only the last pod survives.
+            if let (Some(map), Some(uid)) = (row.as_object_mut(), pod.metadata.uid.as_ref()) {
+                map.insert("uid".to_owned(), Value::String(uid.clone()));
+            }
+            row
+        })
+        .collect();
+    // `continue_` is the apiserver's own "there is more" token; a full page
+    // without one is exactly `MAX_RESOLVED_PODS` pods and nothing omitted.
+    let truncated = list
+        .metadata
+        .continue_
+        .as_deref()
+        .is_some_and(|c| !c.is_empty());
+    if truncated {
+        tracing::warn!(
+            kind_id,
+            namespace,
+            name,
+            cap = crate::log_pods::MAX_RESOLVED_PODS,
+            "workload pod list truncated"
+        );
+    }
+    Ok(WorkloadPods { rows, truncated })
 }
 
 /// Evict a single pod via the policy/v1 Eviction subresource. Unlike a plain
