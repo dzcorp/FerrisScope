@@ -31,7 +31,9 @@ import type {
   ConfigMapDetail,
   ConfigMapKeysSummary,
   ContextInfo,
+  Cascade,
   CronJobDetail,
+  CronJobRun,
   DaemonSetDetail,
   DeploymentDetail,
   CompactMemoryResult,
@@ -570,12 +572,16 @@ export const api = {
 
   // Delete a single resource. `gracePeriodSeconds = 0` is a force delete;
   // `null` uses the kind's default grace period.
+  //
+  // `cascade` defaults to "background" on the backend when omitted — never
+  // pass `null` expecting the apiserver default, which orphans a Job's pods.
   deleteResource: (
     clusterId: string,
     kindId: string,
     namespace: string | null,
     name: string,
     gracePeriodSeconds: number | null,
+    cascade?: Cascade,
   ) =>
     invoke<void>("delete_resource_cmd", {
       clusterId,
@@ -583,6 +589,25 @@ export const api = {
       namespace,
       name,
       gracePeriodSeconds,
+      cascade: cascade ?? null,
+    }),
+
+  // `kubectl create job <name> --from=cronjob/<name>`. The Job name is
+  // derived backend-side; the created name comes back.
+  triggerCronJob: (clusterId: string, namespace: string, name: string) =>
+    invoke<string>("trigger_cron_job_cmd", { clusterId, namespace, name }),
+
+  // Clone a Job under a fresh name — a Job spec is immutable, so this is the
+  // only "run it again". Returns the created Job's name.
+  rerunJob: (clusterId: string, namespace: string, name: string) =>
+    invoke<string>("rerun_job_cmd", { clusterId, namespace, name }),
+
+  // Jobs owned by a CronJob, newest first.
+  listJobsForCronJob: (clusterId: string, namespace: string, name: string) =>
+    invoke<CronJobRun[]>("list_jobs_for_cron_job_cmd", {
+      clusterId,
+      namespace,
+      name,
     }),
 
   // Server-Side Apply with field manager `ferrisscope`. `fields` is the

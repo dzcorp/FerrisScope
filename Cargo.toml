@@ -132,6 +132,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 eventsource-stream = "0.2"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+# CronJob `spec.timeZone` is an IANA name — without a tz database the next-fire
+# time we show for a zoned schedule would be wrong, which is worse than absent.
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 
 # Internal
 ferrisscope-core = { path = "crates/core" }

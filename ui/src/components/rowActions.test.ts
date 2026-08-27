@@ -155,3 +155,87 @@ describe("actionsForRow — read-only gating", () => {
     }
   });
 });
+
+describe("actionsForRow — batch workloads", () => {
+  it("cronjobs: Run now leads, suspend label reflects current state", () => {
+    const kind = kindOf("cronjobs", "CronJob");
+    // The CronJob row projects `suspend` as a string — it backs a text
+    // column — so the caller normalises it, not this module.
+    const ctx = ctxFor(kind);
+    ctx.trigger = vi.fn();
+    ctx.suspendTo = { target: true, run: vi.fn() };
+    expect(labels(ctx).slice(0, 3)).toEqual([
+      "View details",
+      "Run now",
+      "Suspend cron job",
+    ]);
+
+    ctx.suspendTo = { target: false, run: vi.fn() };
+    expect(labels(ctx)).toContain("Resume cron job");
+  });
+
+  it("cronjobs: delete is present and last, and reads as a CronJob delete", () => {
+    const kind = kindOf("cronjobs", "CronJob");
+    const ctx = ctxFor(kind);
+    ctx.delete = vi.fn();
+    const all = labels(ctx);
+    expect(all.at(-1)).toBe("Delete cronjob");
+  });
+
+  it("jobs: Re-run and Suspend sit with the other job actions", () => {
+    const kind = kindOf("jobs", "Job");
+    const ctx = ctxFor(kind);
+    ctx.rerun = vi.fn();
+    ctx.suspendTo = { target: true, run: vi.fn() };
+    expect(labels(ctx).slice(0, 4)).toEqual([
+      "View details",
+      "View logs",
+      "Re-run job",
+      "Suspend job",
+    ]);
+  });
+
+  it("omits batch actions when the caller supplies no callback", () => {
+    // A kind whose callbacks the caller didn't wire must not render dead
+    // menu entries.
+    const jobs = labels(ctxFor(kindOf("jobs", "Job")));
+    expect(jobs).not.toContain("Re-run job");
+    expect(jobs).not.toContain("Suspend job");
+
+    const cron = labels(ctxFor(kindOf("cronjobs", "CronJob")));
+    expect(cron).not.toContain("Run now");
+  });
+
+  /// A finished Job can't be suspended — the apiserver accepts the patch and
+  /// the controller ignores it, so an enabled menu entry would look like it
+  /// worked. The caller drops the callback; this pins that the menu follows.
+  it("omits Suspend for a Job that already finished", () => {
+    const kind = kindOf("jobs", "Job");
+    for (const phase of ["Succeeded", "Failed"]) {
+      const ctx = ctxFor(kind, { phase });
+      ctx.rerun = vi.fn();
+      // suspendTo intentionally unset — mirrors what buildRowActionContext does.
+      const all = labels(ctx);
+      expect(all).not.toContain("Suspend job");
+      // Re-running a finished Job is exactly what you want, though.
+      expect(all).toContain("Re-run job");
+    }
+  });
+
+  it("disables every mutating batch action when readOnly", () => {
+    const kind = kindOf("cronjobs", "CronJob");
+    const ctx = ctxFor(kind);
+    ctx.trigger = vi.fn();
+    ctx.suspendTo = { target: true, run: vi.fn() };
+    const items = actionsForRow(ctx, { readOnly: true });
+    for (const label of ["Run now", "Suspend cron job"]) {
+      const item = items.find((i) => i.kind === "item" && i.label === label);
+      expect(item?.kind === "item" && item.disabled).toBe(true);
+    }
+    // …while navigation stays live.
+    const details = items.find(
+      (i) => i.kind === "item" && i.label === "View details",
+    );
+    expect(details?.kind === "item" && details.disabled).toBeFalsy();
+  });
+});

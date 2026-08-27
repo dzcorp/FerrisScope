@@ -260,6 +260,7 @@ describe("deleteResource", () => {
       namespace: "default",
       name: "stuck",
       gracePeriodSeconds: 0,
+      cascade: null,
     });
   });
 
@@ -273,6 +274,59 @@ describe("deleteResource", () => {
     const cap = captureNext(undefined);
     await api.deleteResource("ctx", "nodes", null, "worker-1", null);
     expect(cap.calls[0]?.args?.namespace).toBeNull();
+  });
+
+  // An omitted cascade must reach the backend as an explicit null so it
+  // applies its own Background default. Sending nothing at all would let the
+  // apiserver's per-resource default win, which for batch/v1 is "orphan" —
+  // the bug the Cascade plumbing exists to close.
+  it("omitted cascade is sent as null, not dropped", async () => {
+    const cap = captureNext(undefined);
+    await api.deleteResource("ctx", "jobs", "default", "j", null);
+    expect(cap.calls[0]?.args).toHaveProperty("cascade", null);
+  });
+
+  it("explicit cascade is forwarded verbatim", async () => {
+    const cap = captureNext(undefined);
+    await api.deleteResource("ctx", "jobs", "default", "j", null, "orphan");
+    expect(cap.calls[0]?.args?.cascade).toBe("orphan");
+  });
+});
+
+describe("batch workload commands", () => {
+  it("triggerCronJob → trigger_cron_job_cmd", async () => {
+    const cap = captureNext("nightly-manual-1");
+    const created = await api.triggerCronJob("ctx", "default", "nightly");
+    expect(cap.calls[0]?.cmd).toBe("trigger_cron_job_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      clusterId: "ctx",
+      namespace: "default",
+      name: "nightly",
+    });
+    expect(created).toBe("nightly-manual-1");
+  });
+
+  it("rerunJob → rerun_job_cmd", async () => {
+    const cap = captureNext("migrate-rerun-1");
+    const created = await api.rerunJob("ctx", "default", "migrate");
+    expect(cap.calls[0]?.cmd).toBe("rerun_job_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      clusterId: "ctx",
+      namespace: "default",
+      name: "migrate",
+    });
+    expect(created).toBe("migrate-rerun-1");
+  });
+
+  it("listJobsForCronJob → list_jobs_for_cron_job_cmd", async () => {
+    const cap = captureNext([]);
+    await api.listJobsForCronJob("ctx", "default", "nightly");
+    expect(cap.calls[0]?.cmd).toBe("list_jobs_for_cron_job_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      clusterId: "ctx",
+      namespace: "default",
+      name: "nightly",
+    });
   });
 });
 

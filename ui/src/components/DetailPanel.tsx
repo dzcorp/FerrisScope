@@ -4,6 +4,7 @@ import { parseYaml, stripYaml, type Json } from "../lib/yamlEdit";
 import { selectClusterDegraded, useAppStore, useResolvedTheme } from "../store";
 import { execContainers, rowLogContainers } from "../lib/podContainers";
 import type {
+  Cascade,
   ContainerDetail,
   ContainerLastState,
   ContainerProbe,
@@ -349,6 +350,8 @@ export function DetailPanel({
   const t = useResolvedTheme().tokens;
   const isPod = kind.id === "pods";
   const isNode = kind.id === "nodes";
+  const isJob = kind.id === "jobs";
+  const isCronJob = kind.id === "cronjobs";
   const isPvc = kind.id === "persistentvolumeclaims";
   const isNamespace = kind.id === "namespaces";
   // Workload controller-kind lookup is a module-level constant
@@ -431,6 +434,8 @@ export function DetailPanel({
   const [deleting, setDeleting] = useState(false);
   const [cordoning, setCordoning] = useState(false);
   const [draining, setDraining] = useState(false);
+  const [suspending, setSuspending] = useState(false);
+  const [triggering, setTriggering] = useState(false);
 
   // Live cordon state for the title-bar Cordon/Uncordon toggle. Sourced from
   // the row payload (`phase === "SchedulingDisabled"`) — matches the table
@@ -494,7 +499,7 @@ export function DetailPanel({
     }
   };
 
-  const runDelete = async (force: boolean) => {
+  const runDelete = async (force: boolean, cascade?: Cascade) => {
     // Helm releases route through `helm uninstall` on the backend (see
     // delete_resource_cmd) — surface that in the UX so the operator
     // knows hooks fire and rendered workloads come down. Force has no
@@ -509,9 +514,11 @@ export function DetailPanel({
             : `Delete ${kind.kind} ${target.name}?`,
         body: isHelmRelease
           ? "Runs `helm uninstall`: deletes the release secret AND every Kubernetes object the release rendered. Pre-/post-delete hooks fire. Irreversible."
-          : force
-            ? "No grace period — the resource is removed immediately."
-            : undefined,
+          : cascade === "orphan"
+            ? `Dependents are left running with their owner reference stripped. Nothing will manage or clean them up — for a ${kind.kind} that means its pods keep consuming the cluster, unreferenced.`
+            : force
+              ? "No grace period — the resource is removed immediately."
+              : undefined,
         confirmLabel: isHelmRelease ? "Uninstall" : force ? "Force delete" : "Delete",
         tone: "danger",
       });
@@ -525,6 +532,7 @@ export function DetailPanel({
         target.namespace,
         target.name,
         force ? 0 : null,
+        cascade,
       );
       toast.ok(
         isHelmRelease
@@ -570,6 +578,136 @@ export function DetailPanel({
       toast.bad(String(e));
     } finally {
       setRestarting(false);
+    }
+  };
+
+  // Live suspend state for the Job / CronJob toggle. Read off the row payload
+  // so the button tracks the watcher rather than the detail fetch — the same
+  // reason `nodeCordoned` does. The CronJob row projects it as a string (it
+  // backs a text column); the Job row projects a bool.
+  const suspended =
+    row != null && (row.suspend === true || row.suspend === "true");
+  // A Job that already finished can't be suspended — the apiserver accepts
+  // the patch and the controller ignores it, so the button would look like it
+  // worked. CronJobs never reach a terminal phase, so this only gates Jobs.
+  const jobFinished =
+    isJob && (row?.phase === "Succeeded" || row?.phase === "Failed");
+
+  const runSuspend = async (next: boolean) => {
+    if (!target.namespace) {
+      toast.bad(`${kind.kind} has no namespace`);
+      return;
+    }
+    if (confirmDestructive && next) {
+      const ok = await confirm({
+        title: `Suspend ${kind.kind} ${target.name}?`,
+        body: isJob
+          ? "The Job controller deletes this Job's running pods; their work is lost unless it is idempotent. Resuming creates fresh pods."
+          : "No new Jobs will be created. Runs already in flight keep going, and missed schedules are not backfilled on resume.",
+        confirmLabel: "Suspend",
+        tone: "danger",
+      });
+      if (!ok) return;
+    }
+    setSuspending(true);
+    try {
+      const res = await api.applyResource(
+        clusterId,
+        kind.id,
+        target.namespace,
+        target.name,
+        { spec: { suspend: next } },
+        false,
+      );
+      if (res.kind === "conflict") {
+        // Another field manager owns `spec.suspend` — usually a GitOps
+        // controller, which would revert us on its next sync. Say who, and
+        // make taking over an explicit choice rather than a silent force.
+        const who = res.managers.length ? res.managers.join(", ") : "another manager";
+        const ok = await confirm({
+          title: `${who} owns spec.suspend`,
+          body: `${res.message}\n\nForcing takes ownership of the field. If a GitOps controller manages this object it will revert the change on its next sync — fix it at the source instead.`,
+          confirmLabel: "Force takeover",
+          tone: "danger",
+        });
+        if (!ok) return;
+        await api.applyResource(
+          clusterId,
+          kind.id,
+          target.namespace,
+          target.name,
+          { spec: { suspend: next } },
+          true,
+        );
+      }
+      toast.ok(
+        next
+          ? `Suspended ${kind.kind} ${target.name}.`
+          : `Resumed ${kind.kind} ${target.name}.`,
+      );
+      setDetailVersion((v) => v + 1);
+    } catch (e) {
+      toast.bad(String(e));
+    } finally {
+      setSuspending(false);
+    }
+  };
+
+  const runTrigger = async () => {
+    if (!target.namespace) {
+      toast.bad("CronJob has no namespace");
+      return;
+    }
+    if (confirmDestructive) {
+      const ok = await confirm({
+        title: `Run ${target.name} now?`,
+        body: "Creates a Job from the CronJob's template, owned by it so its history limits still apply. The schedule and the suspend flag are unchanged.",
+        confirmLabel: "Run now",
+      });
+      if (!ok) return;
+    }
+    setTriggering(true);
+    try {
+      const created = await api.triggerCronJob(
+        clusterId,
+        target.namespace,
+        target.name,
+      );
+      toast.ok(`Created job ${created}.`);
+      setDetailVersion((v) => v + 1);
+    } catch (e) {
+      toast.bad(String(e));
+    } finally {
+      setTriggering(false);
+    }
+  };
+
+  const runRerun = async () => {
+    if (!target.namespace) {
+      toast.bad("Job has no namespace");
+      return;
+    }
+    if (confirmDestructive) {
+      const ok = await confirm({
+        title: `Run ${target.name} again?`,
+        body: "A Job's spec is immutable, so this creates a copy under a new name. The original is left in place — delete it separately if it should not stay.",
+        confirmLabel: "Re-run",
+      });
+      if (!ok) return;
+    }
+    setTriggering(true);
+    try {
+      const created = await api.rerunJob(
+        clusterId,
+        target.namespace,
+        target.name,
+      );
+      toast.ok(`Created job ${created}.`);
+      setDetailVersion((v) => v + 1);
+    } catch (e) {
+      toast.bad(String(e));
+    } finally {
+      setTriggering(false);
     }
   };
 
@@ -1060,6 +1198,47 @@ export function DetailPanel({
                     margin: "0 6px",
                   }}
                 />
+              )}
+              {isCronJob && (
+                <IconBtn
+                  t={t}
+                  size="lg"
+                  title={`Run now — create a Job from this CronJob's template`}
+                  disabled={triggering || !target.namespace || degraded}
+                  onClick={runTrigger}
+                >
+                  {Icons.play}
+                </IconBtn>
+              )}
+              {isJob && (
+                <IconBtn
+                  t={t}
+                  size="lg"
+                  title="Re-run — create a copy of this Job under a new name"
+                  disabled={triggering || !target.namespace || degraded}
+                  onClick={runRerun}
+                >
+                  {Icons.refresh}
+                </IconBtn>
+              )}
+              {(isJob || isCronJob) && (
+                <IconBtn
+                  t={t}
+                  size="lg"
+                  title={
+                    jobFinished
+                      ? "Job has already finished — nothing to suspend"
+                      : suspended
+                        ? `Resume ${kind.kind.toLowerCase()}`
+                        : `Suspend ${kind.kind.toLowerCase()}`
+                  }
+                  disabled={
+                    suspending || !target.namespace || degraded || jobFinished
+                  }
+                  onClick={() => runSuspend(!suspended)}
+                >
+                  {suspended ? Icons.play : Icons.pause}
+                </IconBtn>
               )}
               {isRestartableWorkload && (
                 <IconBtn
@@ -3441,14 +3620,14 @@ function WorkloadSummaryDispatch({
 
 // Build the menu items for a given title-bar action button. Each picker is
 // shaped the same way (header → choices) so the user learns the pattern once.
-function buildActionMenuItems(
+export function buildActionMenuItems(
   menuKind: "shell" | "delete",
   kindLabel: string,
   kindId: string,
   name: string,
   containers: string[],
   onOpenExec: ((container?: string | null) => void) | undefined,
-  runDelete: (force: boolean) => void,
+  runDelete: (force: boolean, cascade?: Cascade) => void,
 ): MenuItem[] {
   if (menuKind === "shell") {
     if (!onOpenExec || containers.length === 0) {
@@ -3472,7 +3651,7 @@ function buildActionMenuItems(
       },
     ];
   }
-  return [
+  const items: MenuItem[] = [
     {
       kind: "item",
       label: `Delete ${kindLabel.toLowerCase()} ${name}`,
@@ -3486,4 +3665,37 @@ function buildActionMenuItems(
       danger: true,
     },
   ];
+  // Cascade only means something for a kind that owns dependents, and only
+  // batch kinds have an apiserver default that differs from what we send —
+  // so this is where operators actually need the escape hatch surfaced.
+  if (OWNS_DEPENDENTS_KINDS.has(kindId)) {
+    items.push({ kind: "separator" });
+    items.push({
+      kind: "item",
+      label: "Delete, keep dependents (orphan)",
+      onClick: () => runDelete(false, "orphan"),
+      danger: true,
+    });
+    items.push({
+      kind: "item",
+      label: "Delete, wait for dependents (foreground)",
+      onClick: () => runDelete(false, "foreground"),
+      danger: true,
+    });
+  }
+  return items;
 }
+
+// Kinds whose delete has dependents worth choosing a policy for. Not an
+// exhaustive list of everything with children — it's the set where an
+// operator plausibly wants the children kept (a Job's pods hold the logs of a
+// failed run) or wants to block until they're gone.
+const OWNS_DEPENDENTS_KINDS = new Set([
+  "jobs",
+  "cronjobs",
+  "deployments",
+  "statefulsets",
+  "daemonsets",
+  "replicasets",
+  "replicationcontrollers",
+]);

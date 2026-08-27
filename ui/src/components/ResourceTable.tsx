@@ -1995,6 +1995,134 @@ function buildRowActionContext(
         }
       })();
     };
+  } else if (kind.id === "jobs" || kind.id === "cronjobs") {
+    const isJob = kind.id === "jobs";
+    const kindLabel = kind.kind.toLowerCase();
+    // The CronJob row projects `suspend` as a string (it backs a text
+    // column); the Job row projects a bool. Both mean the same thing here.
+    const suspended = row.suspend === true || row.suspend === "true";
+    // Suspending a finished Job is accepted by the apiserver and ignored by
+    // the controller — offer it only while it can still do something.
+    const finished =
+      isJob && (row.phase === "Succeeded" || row.phase === "Failed");
+    const runSuspend = () => {
+      void (async () => {
+        if (!ns) {
+          toast.bad(`${kind.kind} has no namespace.`);
+          return;
+        }
+        if (confirmDestructive && !suspended) {
+          const ok = await confirm({
+            title: `Suspend ${kindLabel} ${qualified}?`,
+            body: isJob
+              ? "The Job controller deletes this Job's running pods; their work is lost unless it is idempotent. Resuming creates fresh pods."
+              : "No new Jobs will be created. Runs already in flight keep going, and missed schedules are not backfilled on resume.",
+            confirmLabel: "Suspend",
+            tone: "danger",
+          });
+          if (!ok) return;
+        }
+        try {
+          // Force is deliberately false: a 409 means another manager — most
+          // often a GitOps controller — owns the field and would revert us
+          // anyway. The detail panel offers the takeover prompt; the row menu
+          // just reports who is in the way.
+          const res = await api.applyResource(
+            clusterId,
+            kind.id,
+            ns,
+            name,
+            { spec: { suspend: !suspended } },
+            false,
+          );
+          if (res.kind === "conflict") {
+            const who = res.managers.length
+              ? res.managers.join(", ")
+              : "another field manager";
+            toast.bad(
+              `${who} owns spec.suspend — open the ${kindLabel} to force takeover.`,
+              { meta: rowMeta(res.message) },
+            );
+            return;
+          }
+          toast.ok(
+            suspended
+              ? `Resumed ${kindLabel} ${qualified}.`
+              : `Suspended ${kindLabel} ${qualified}.`,
+            { meta: rowMeta() },
+          );
+        } catch (e) {
+          toast.bad(`Suspend failed: ${String(e)}`, {
+            meta: rowMeta(String(e)),
+          });
+        }
+      })();
+    };
+    if (!finished) ctx.suspendTo = { target: !suspended, run: runSuspend };
+    if (isJob) {
+      ctx.rerun = () => {
+        void (async () => {
+          if (!ns) {
+            toast.bad("Job has no namespace.");
+            return;
+          }
+          if (confirmDestructive) {
+            const ok = await confirm({
+              title: `Run ${qualified} again?`,
+              body: "A Job's spec is immutable, so this creates a copy under a new name. The original is left in place — delete it separately if it should not stay.",
+              confirmLabel: "Re-run",
+            });
+            if (!ok) return;
+          }
+          try {
+            const created = await api.rerunJob(clusterId, ns, name);
+            toast.ok(`Created job ${ns}/${created}.`, {
+              meta: { kind: "Job", namespace: ns, name: created },
+            });
+          } catch (e) {
+            toast.bad(`Re-run failed: ${String(e)}`, {
+              meta: rowMeta(String(e)),
+            });
+          }
+        })();
+      };
+    } else {
+      ctx.trigger = () => {
+        void (async () => {
+          if (!ns) {
+            toast.bad("CronJob has no namespace.");
+            return;
+          }
+          if (confirmDestructive) {
+            const ok = await confirm({
+              title: `Run ${qualified} now?`,
+              body: "Creates a Job from the CronJob's template, owned by it so its history limits still apply. The schedule and the suspend flag are unchanged.",
+              confirmLabel: "Run now",
+            });
+            if (!ok) return;
+          }
+          try {
+            const created = await api.triggerCronJob(clusterId, ns, name);
+            toast.ok(`Created job ${ns}/${created}.`, {
+              meta: { kind: "Job", namespace: ns, name: created },
+            });
+          } catch (e) {
+            toast.bad(`Trigger failed: ${String(e)}`, {
+              meta: rowMeta(String(e)),
+            });
+          }
+        })();
+      };
+    }
+    ctx.delete = genericDelete(
+      kind,
+      clusterId,
+      ns,
+      name,
+      qualified,
+      confirmDestructive,
+      rowMeta,
+    );
   } else if (kind.id === "nodes") {
     ctx.openExec = () => {
       openNodeDebugTab(clusterId, contextLabel, name, addDockTab);
@@ -2091,33 +2219,53 @@ function buildRowActionContext(
       })();
     };
   } else {
-    // Generic delete for every other kind. The dynamic API in
-    // `api.deleteResource` covers them via `kind.id` — no per-kind plumbing.
-    const kindLabel = kind.kind.toLowerCase();
-    ctx.delete = () => {
-      void (async () => {
-        if (confirmDestructive) {
-          const ok = await confirm({
-            title: `Delete ${kindLabel} ${qualified}?`,
-            body: kind.namespaced
-              ? "Object will be removed from the cluster. Controllers may recreate it; cascading deletes may follow per the apiserver's default propagation policy."
-              : "Object will be removed from the cluster. Cascading deletes may follow per the apiserver's default propagation policy.",
-            confirmLabel: "Delete",
-            tone: "danger",
-          });
-          if (!ok) return;
-        }
-        try {
-          await api.deleteResource(clusterId, kind.id, ns, name, null);
-          toast.ok(`Deleted ${kindLabel} ${qualified}.`, { meta: rowMeta() });
-        } catch (e) {
-          toast.bad(`Delete failed: ${String(e)}`, { meta: rowMeta(String(e)) });
-        }
-      })();
-    };
+    ctx.delete = genericDelete(
+      kind,
+      clusterId,
+      ns,
+      name,
+      qualified,
+      confirmDestructive,
+      rowMeta,
+    );
   }
 
   return ctx;
+}
+
+/// Delete for any kind without bespoke teardown semantics. The dynamic API in
+/// `api.deleteResource` covers them via `kind.id` — no per-kind plumbing —
+/// and the backend always sends background propagation, so dependents come
+/// down with the owner rather than being orphaned.
+function genericDelete(
+  kind: ResourceKind,
+  clusterId: string,
+  ns: string | null,
+  name: string,
+  qualified: string,
+  confirmDestructive: boolean,
+  rowMeta: (reason?: string) => Record<string, unknown>,
+): () => void {
+  const kindLabel = kind.kind.toLowerCase();
+  return () => {
+    void (async () => {
+      if (confirmDestructive) {
+        const ok = await confirm({
+          title: `Delete ${kindLabel} ${qualified}?`,
+          body: "Object will be removed from the cluster along with its dependents. Controllers may recreate it. To keep the dependents, open the object and use Delete → keep dependents.",
+          confirmLabel: "Delete",
+          tone: "danger",
+        });
+        if (!ok) return;
+      }
+      try {
+        await api.deleteResource(clusterId, kind.id, ns, name, null);
+        toast.ok(`Deleted ${kindLabel} ${qualified}.`, { meta: rowMeta() });
+      } catch (e) {
+        toast.bad(`Delete failed: ${String(e)}`, { meta: rowMeta(String(e)) });
+      }
+    })();
+  };
 }
 
 // `kubectl debug node/<name>` runs a debug pod with the node's PID namespace

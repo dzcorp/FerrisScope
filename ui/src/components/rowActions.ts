@@ -22,6 +22,14 @@ export type RowActionContext = {
   // "Uncordon" when it isn't, and the same callback flips it accordingly.
   cordonTo?: { target: boolean; run: () => void };
   drain?: () => void;
+  // Job / CronJob. Same shape as `cordonTo`: carries the *target* state, so
+  // the menu label flips between Suspend and Resume off one callback.
+  suspendTo?: { target: boolean; run: () => void };
+  // CronJob: create a Job from the template now, out of schedule.
+  trigger?: () => void;
+  // Job: clone it under a new name. A Job spec is immutable, so there is no
+  // in-place re-run.
+  rerun?: () => void;
 };
 
 // Per HV2PodMenu, pod actions surface in this order with destructive items
@@ -100,6 +108,44 @@ export function actionsForRow(
     kind.id === "jobs"
   ) {
     items.push({ kind: "item", label: "View logs", onClick: openLogs });
+    if (kind.id === "jobs" && ctx.rerun)
+      items.push({
+        kind: "item",
+        label: "Re-run job",
+        onClick: ctx.rerun,
+        disabled: readOnly,
+      });
+    if (kind.id === "jobs" && ctx.suspendTo)
+      items.push({
+        kind: "item",
+        label: ctx.suspendTo.target ? "Suspend job" : "Resume job",
+        onClick: ctx.suspendTo.run,
+        disabled: readOnly,
+      });
+  } else if (kind.id === "cronjobs") {
+    // "Run now" leads: it is the reason an operator opens this menu, and it
+    // is the only non-destructive way to exercise a CronJob.
+    if (ctx.trigger)
+      items.push({
+        kind: "item",
+        label: "Run now",
+        onClick: ctx.trigger,
+        disabled: readOnly,
+      });
+    if (ctx.suspendTo)
+      items.push({
+        kind: "item",
+        label: ctx.suspendTo.target ? "Suspend cron job" : "Resume cron job",
+        onClick: ctx.suspendTo.run,
+        disabled: readOnly,
+      });
+    if (openYamlEdit)
+      items.push({
+        kind: "item",
+        label: "Edit YAML",
+        onClick: openYamlEdit,
+        disabled: readOnly,
+      });
   } else if (kind.id === "nodes") {
     if (openExec)
       items.push({

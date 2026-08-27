@@ -8,8 +8,9 @@ import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS } from "../../../theme";
 import {  } from "../../../theme";
-import { ErrorBlock, Section, StatusPill, LoadingLine } from "../../ui";
+import { Chip, ErrorBlock, Section, StatusPill, LoadingLine } from "../../ui";
 import {
+  ChipWrap,
   Mono,
   Copyable,
   DetailRow,
@@ -23,6 +24,7 @@ import {
 } from "..";
 import type {
   CronJobDetail,
+  CronJobRun,
   DaemonSetDetail,
   DeploymentDetail,
   JobDetail,
@@ -840,6 +842,15 @@ export function JobSummary(props: {
           {d.suspend && (
             <StatusPill status="Suspended" t={t} mode={props.mode} dense />
           )}
+          {/* Parallelism is the one knob a running Job takes live — the rest
+              of its spec is immutable, so this is the whole in-place edit
+              surface. `0` is legal and pauses the Job without suspending it. */}
+          <ReplicasEditor
+            t={t}
+            desired={d.parallelism ?? 1}
+            field="parallelism"
+            label="parallel"
+          />
         </div>
 
         <MetaSection
@@ -862,18 +873,39 @@ export function JobSummary(props: {
               {d.completion_mode ? ` · ${d.completion_mode}` : ""}
             </Mono>
           </DetailRow>
-          {d.parallelism != null && (
-            <DetailRow t={t} label="Parallelism">
-              <Mono>
-                {d.parallelism}
-              </Mono>
-            </DetailRow>
-          )}
           {d.backoff_limit != null && (
             <DetailRow t={t} label="Backoff Limit">
               <Mono>
                 {d.backoff_limit}
               </Mono>
+            </DetailRow>
+          )}
+          {d.backoff_limit_per_index != null && (
+            <DetailRow t={t} label="Backoff Limit / Index">
+              <Mono>
+                {d.backoff_limit_per_index}
+              </Mono>
+            </DetailRow>
+          )}
+          {d.max_failed_indexes != null && (
+            <DetailRow t={t} label="Max Failed Indexes">
+              <Mono>
+                {d.max_failed_indexes}
+              </Mono>
+            </DetailRow>
+          )}
+          {d.pod_replacement_policy && (
+            <DetailRow t={t} label="Pod Replacement">
+              <span style={{ fontSize: FS_MD }}>{d.pod_replacement_policy}</span>
+            </DetailRow>
+          )}
+          {d.managed_by && (
+            <DetailRow t={t} label="Managed By">
+              {/* An external controller (Kueue, a queueing system) owns this
+                  Job's lifecycle — edits from here will fight it. */}
+              <Copyable text={d.managed_by}>
+                <Mono>{d.managed_by}</Mono>
+              </Copyable>
             </DetailRow>
           )}
           {d.active_deadline_seconds != null && (
@@ -900,6 +932,30 @@ export function JobSummary(props: {
                 : ""}
             </Mono>
           </DetailRow>
+          {/* Indexed jobs: `3/5 completed` says nothing about which shards
+              are stuck. These ranges are the only place that shows. */}
+          {d.status.completed_indexes && (
+            <DetailRow t={t} label="Completed Indexes">
+              <Copyable text={d.status.completed_indexes}>
+                <Mono>{d.status.completed_indexes}</Mono>
+              </Copyable>
+            </DetailRow>
+          )}
+          {d.status.failed_indexes && (
+            <DetailRow t={t} label="Failed Indexes">
+              <Copyable text={d.status.failed_indexes}>
+                <span
+                  style={{
+                    fontFamily: FF_MONO,
+                    fontSize: FS_MD,
+                    color: t.bad,
+                  }}
+                >
+                  {d.status.failed_indexes}
+                </span>
+              </Copyable>
+            </DetailRow>
+          )}
           {d.start_time && (
             <DetailRow t={t} label="Started">
               <Copyable text={d.start_time}>
@@ -926,6 +982,8 @@ export function JobSummary(props: {
           )}
           <SelectorRow t={t} selector={d.selector} />
         </div>
+
+        <JobPolicySections t={t} detail={d} />
 
         <ConditionsSection t={t} conditions={d.conditions} />
 
@@ -962,6 +1020,89 @@ export function JobSummary(props: {
         <GlobalSaveBar t={t} />
       </Frame>
     </EditSessionProvider>
+  );
+}
+
+/// Pod-failure and success policies. Both are rule lists that change when a
+/// Job gives up or declares victory, so an operator debugging a Job that
+/// "failed for no reason" needs them visible — but they are rare enough that
+/// the section is absent entirely when unset.
+function JobPolicySections({ t, detail }: { t: Tokens; detail: JobDetail }) {
+  const failure = detail.pod_failure_policy?.rules ?? [];
+  const success = detail.success_policy?.rules ?? [];
+  if (failure.length === 0 && success.length === 0) return null;
+
+  return (
+    <>
+      {failure.length > 0 && (
+        <>
+          <Section
+            t={t}
+            title="Pod Failure Policy"
+            right={
+              <span
+                style={{ fontSize: FS_XS, color: t.textMuted, fontFamily: FF_MONO }}
+              >
+                {failure.length} rule{failure.length === 1 ? "" : "s"}
+              </span>
+            }
+          />
+          <div style={{ marginBottom: 22 }}>
+            {failure.map((rule, i) => (
+              <DetailRow key={i} t={t} label={rule.action}>
+                <ChipWrap>
+                  {rule.on_exit_codes && (
+                    <Copyable
+                      text={`${rule.on_exit_codes.container_name ?? "*"} exit ${rule.on_exit_codes.operator} [${rule.on_exit_codes.values.join(", ")}]`}
+                    >
+                      <Chip t={t}>
+                        {rule.on_exit_codes.container_name ?? "any container"} ·
+                        exit {rule.on_exit_codes.operator}{" "}
+                        {rule.on_exit_codes.values.join(", ")}
+                      </Chip>
+                    </Copyable>
+                  )}
+                  {(rule.on_pod_conditions ?? []).map((c, j) => (
+                    <Copyable key={j} text={`${c.type}=${c.status}`}>
+                      <Chip t={t}>
+                        {c.type}={c.status}
+                      </Chip>
+                    </Copyable>
+                  ))}
+                  {!rule.on_exit_codes &&
+                    (rule.on_pod_conditions ?? []).length === 0 && (
+                      <Mute t={t}>—</Mute>
+                    )}
+                </ChipWrap>
+              </DetailRow>
+            ))}
+          </div>
+        </>
+      )}
+      {success.length > 0 && (
+        <>
+          <Section t={t} title="Success Policy" />
+          <div style={{ marginBottom: 22 }}>
+            {success.map((rule, i) => (
+              <DetailRow key={i} t={t} label={`Rule ${i + 1}`}>
+                <Mono>
+                  {[
+                    rule.succeeded_count != null
+                      ? `succeededCount=${rule.succeeded_count}`
+                      : null,
+                    rule.succeeded_indexes
+                      ? `succeededIndexes=${rule.succeeded_indexes}`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || "—"}
+                </Mono>
+              </DetailRow>
+            ))}
+          </div>
+        </>
+      )}
+    </>
   );
 }
 
@@ -1035,6 +1176,9 @@ export function CronJobSummary(props: {
             {d.last_successful_time
               ? ` · last success ${ageFromIso(d.last_successful_time)} ago`
               : ""}
+            {d.next_run && !d.suspend
+              ? ` · next in ${untilIso(d.next_run)}`
+              : ""}
           </span>
         </div>
 
@@ -1070,6 +1214,28 @@ export function CronJobSummary(props: {
             </Mono>
           </DetailRow>
         )}
+        <DetailRow t={t} label="Next Run">
+          {d.next_run ? (
+            <Copyable text={d.next_run}>
+              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
+                in {untilIso(d.next_run)}
+                <span style={{ color: t.textMuted, marginLeft: 8 }}>
+                  ({d.next_run})
+                </span>
+                {/* The controller keeps evaluating the schedule while
+                    suspended; it just doesn't act on it. Showing the time
+                    with this caveat is more useful than hiding it. */}
+                {d.suspend && (
+                  <span style={{ color: t.warn, marginLeft: 8 }}>
+                    suspended — will not fire
+                  </span>
+                )}
+              </span>
+            </Copyable>
+          ) : (
+            <Mute t={t}>— (schedule or time zone not evaluable)</Mute>
+          )}
+        </DetailRow>
         <DetailRow t={t} label="Suspend">
           <span style={{ fontSize: FS_MD }}>{d.suspend ? "true" : "false"}</span>
         </DetailRow>
@@ -1177,6 +1343,16 @@ export function CronJobSummary(props: {
         </>
       )}
 
+      <CronJobHistorySection
+        t={t}
+        mode={props.mode}
+        clusterId={props.clusterId}
+        namespace={ns}
+        name={props.name}
+        refetchKey={props.detailVersion + refetch}
+        onNavigate={props.onNavigate}
+      />
+
       {d.job_template && (
         <>
           <Section t={t} title="Job Template" />
@@ -1241,6 +1417,105 @@ export function CronJobSummary(props: {
   );
 }
 
+/// A CronJob's run history — the Jobs it owns, newest first.
+///
+/// This is the screen an operator opens after a nightly job failed, and the
+/// most important thing it can say is that the run they are looking for is
+/// *gone*: the CronJob's own `successfulJobsHistoryLimit` /
+/// `failedJobsHistoryLimit` reap old Jobs, so an empty or short list is a
+/// retention fact, not an error. The empty state says so rather than implying
+/// the CronJob never ran.
+function CronJobHistorySection({
+  t,
+  mode,
+  clusterId,
+  namespace,
+  name,
+  refetchKey,
+  onNavigate,
+}: {
+  t: Tokens;
+  mode: ThemeMode;
+  clusterId: string;
+  namespace: string;
+  name: string;
+  refetchKey: number;
+  onNavigate?: DetailNavigate;
+}) {
+  const state = useDetail<CronJobRun[]>(
+    () => api.listJobsForCronJob(clusterId, namespace, name),
+    [clusterId, namespace, name, refetchKey],
+  );
+
+  return (
+    <>
+      <Section
+        t={t}
+        title="Run History"
+        right={
+          state.kind === "ready" ? (
+            <span
+              style={{ fontSize: FS_XS, color: t.textMuted, fontFamily: FF_MONO }}
+            >
+              {state.detail.length} kept
+            </span>
+          ) : undefined
+        }
+      />
+      <div style={{ marginBottom: 22 }}>
+        {state.kind === "loading" && (
+          <LoadingLine t={t} label="Loading run history…" />
+        )}
+        {state.kind === "error" && (
+          <Mute t={t}>Couldn't load run history: {state.message}</Mute>
+        )}
+        {state.kind === "ready" && state.detail.length === 0 && (
+          <Mute t={t}>
+            No Jobs owned by this CronJob. Runs older than its history limits
+            are deleted from the cluster — check Events for what happened to
+            them.
+          </Mute>
+        )}
+        {state.kind === "ready" &&
+          state.detail.map((run) => (
+            <DetailRow key={run.uid ?? run.name} t={t} label={run.phase}>
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+              >
+                <StatusPill status={run.phase} t={t} mode={mode} dense />
+                <LinkValue
+                  t={t}
+                  onClick={() => onNavigate?.("Job", run.namespace, run.name)}
+                  copyText={run.name}
+                  enabled={!!onNavigate}
+                >
+                  {run.name}
+                </LinkValue>
+                {run.manual && <Chip t={t}>manual</Chip>}
+                <span style={{ fontSize: FS_SM, color: t.textMuted }}>
+                  {run.succeeded}/{run.completions_desired ?? 1} succeeded
+                  {run.failed > 0 ? ` · ${run.failed} failed` : ""}
+                  {run.active > 0 ? ` · ${run.active} active` : ""}
+                  {run.duration_seconds != null
+                    ? ` · took ${formatSeconds(run.duration_seconds)}`
+                    : ""}
+                  {run.start_time
+                    ? ` · started ${ageFromIso(run.start_time)} ago`
+                    : ""}
+                </span>
+              </div>
+            </DetailRow>
+          ))}
+      </div>
+    </>
+  );
+}
+
 // ── Local helpers ──────────────────────────────────────────────────────────
 
 // Single-purpose grid for the "replicas at-a-glance" rows. Each entry is
@@ -1279,11 +1554,30 @@ function computeDuration(start: string | null, end: string | null): string | nul
   if (Number.isNaN(s)) return null;
   const e = end ? Date.parse(end) : Date.now();
   if (Number.isNaN(e)) return null;
-  let secs = Math.max(0, Math.floor((e - s) / 1000));
+  return formatSeconds((e - s) / 1000);
+}
+
+/// "in 4h 12m" for a future ISO instant. Returns "—" on a parse failure and
+/// "now" once the instant is in the past — a next-run readout that has gone
+/// stale should say so rather than render a negative duration.
+export function untilIso(iso: string): string {
+  const target = Date.parse(iso);
+  if (Number.isNaN(target)) return "—";
+  const secs = Math.floor((target - Date.now()) / 1000);
+  if (secs <= 0) return "now";
+  return formatSeconds(secs);
+}
+
+/// Coarse duration: the two largest non-zero units, biggest first.
+export function formatSeconds(total: number): string {
+  let secs = Math.max(0, Math.floor(total));
+  const d = Math.floor(secs / 86400);
+  secs -= d * 86400;
   const h = Math.floor(secs / 3600);
   secs -= h * 3600;
   const m = Math.floor(secs / 60);
   secs -= m * 60;
+  if (d > 0) return `${d}d ${h}h`;
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${secs}s`;
   return `${secs}s`;

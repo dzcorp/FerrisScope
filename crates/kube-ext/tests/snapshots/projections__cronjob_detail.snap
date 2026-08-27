@@ -26,6 +26,7 @@ expression: value
     "namespace": "ops",
     "uid": "cj-uid"
   },
+  "next_run": "[computed]",
   "pod_template": {
     "annotations": [],
     "containers": [

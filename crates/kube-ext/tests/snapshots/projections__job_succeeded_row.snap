@@ -8,5 +8,6 @@ expression: value
   "name": "migrate-1",
   "namespace": "default",
   "phase": "Succeeded",
-  "pods": 1
+  "pods": 1,
+  "suspend": false
 }
