@@ -1868,7 +1868,9 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
 // table doesn't have to drill `clusterId` + `confirmDestructive` through
 // every callsite. Pod-only and node-only branches are inlined per kind to
 // keep the action surface deliberately scoped.
-function buildRowActionContext(
+// Exported for tests: the row menu's callbacks are where the transport for
+// each mutating action is decided, and that choice is regression-prone.
+export function buildRowActionContext(
   kind: ResourceKind,
   row: ResourceRow,
   clusterId: string,
@@ -2005,6 +2007,12 @@ function buildRowActionContext(
     // the controller — offer it only while it can still do something.
     const finished =
       isJob && (row.phase === "Succeeded" || row.phase === "Failed");
+    // Merge patch, NOT SSA. An SSA apply carries the *whole* declared intent of
+    // its field manager, so applying `{spec:{suspend}}` under the `ferrisscope`
+    // manager drops every other spec field that manager already owned. For an
+    // object this app created (the YAML apply path uses the same manager) that
+    // means schedule / containers / restartPolicy vanish and the apiserver
+    // rejects the result with a 422. Same reasoning as `restart_workload`.
     const runSuspend = () => {
       void (async () => {
         if (!ns) {
@@ -2023,28 +2031,14 @@ function buildRowActionContext(
           if (!ok) return;
         }
         try {
-          // Force is deliberately false: a 409 means another manager — most
-          // often a GitOps controller — owns the field and would revert us
-          // anyway. The detail panel offers the takeover prompt; the row menu
-          // just reports who is in the way.
-          const res = await api.applyResource(
+          await api.mergePatchResource(
             clusterId,
             kind.id,
             ns,
             name,
             { spec: { suspend: !suspended } },
-            false,
+            null,
           );
-          if (res.kind === "conflict") {
-            const who = res.managers.length
-              ? res.managers.join(", ")
-              : "another field manager";
-            toast.bad(
-              `${who} owns spec.suspend — open the ${kindLabel} to force takeover.`,
-              { meta: rowMeta(res.message) },
-            );
-            return;
-          }
           toast.ok(
             suspended
               ? `Resumed ${kindLabel} ${qualified}.`

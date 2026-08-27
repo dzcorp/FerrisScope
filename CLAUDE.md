@@ -173,7 +173,9 @@ That default is a trap. `batch/v1` Job and CronJob answer `OrphanDependents` for
 
 ## Batch workloads (Job / CronJob)
 
-Suspend/resume is a plain SSA apply of `{ spec: { suspend } }` — no dedicated command, no dedicated native tool. The two verbs that *do* need backend code create an object from another one and can't be expressed as a patch:
+Suspend/resume is a **merge patch** of `{ spec: { suspend } }` via `merge_patch_resource`, not an SSA apply — no dedicated command, no dedicated native tool. SSA is wrong here for the same reason it is wrong for rollout-restart: an apply carries the whole declared intent of its field manager, so applying only `spec.suspend` under `ferrisscope` drops every other spec field that manager already owned. On an object this app created (`apply_yaml` uses the same manager) that strips `spec.schedule` and the pod template, and the apiserver rejects the result with a 422. Anything that toggles a single spec field on an object we might also have created belongs on merge patch.
+
+The two verbs that *do* need backend code create an object from another one and can't be expressed as a patch:
 
 - **`trigger_cron_job`** — `kubectl create job --from=cronjob/x`. Copies `spec.jobTemplate.spec` and stamps `cronjob.kubernetes.io/instantiate: manual` plus a **controller owner reference** to the CronJob. That owner ref is load-bearing: without it the manual run escapes the CronJob's history limits and outlives its parent.
 - **`rerun_job`** — a Job's spec is immutable, so "run it again" is a clone. Strip `spec.selector`, `spec.manualSelector`, `spec.suspend`, and the `controller-uid` / `job-name` labels off the pod template, or the clone fights the original over the same pods. Owner references are *kept* so a CronJob-owned Job stays reaped by its history limits.

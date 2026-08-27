@@ -593,6 +593,12 @@ export function DetailPanel({
   const jobFinished =
     isJob && (row?.phase === "Succeeded" || row?.phase === "Failed");
 
+  // Merge patch, NOT SSA. An SSA apply carries the *whole* declared intent of
+  // its field manager, so applying `{spec:{suspend}}` under the `ferrisscope`
+  // manager drops every other spec field that manager already owned. For an
+  // object this app created (the YAML apply path uses the same manager) that
+  // means schedule / containers / restartPolicy vanish and the apiserver
+  // rejects the result with a 422. Same reasoning as `restart_workload`.
   const runSuspend = async (next: boolean) => {
     if (!target.namespace) {
       toast.bad(`${kind.kind} has no namespace`);
@@ -611,35 +617,14 @@ export function DetailPanel({
     }
     setSuspending(true);
     try {
-      const res = await api.applyResource(
+      await api.mergePatchResource(
         clusterId,
         kind.id,
         target.namespace,
         target.name,
         { spec: { suspend: next } },
-        false,
+        null,
       );
-      if (res.kind === "conflict") {
-        // Another field manager owns `spec.suspend` — usually a GitOps
-        // controller, which would revert us on its next sync. Say who, and
-        // make taking over an explicit choice rather than a silent force.
-        const who = res.managers.length ? res.managers.join(", ") : "another manager";
-        const ok = await confirm({
-          title: `${who} owns spec.suspend`,
-          body: `${res.message}\n\nForcing takes ownership of the field. If a GitOps controller manages this object it will revert the change on its next sync — fix it at the source instead.`,
-          confirmLabel: "Force takeover",
-          tone: "danger",
-        });
-        if (!ok) return;
-        await api.applyResource(
-          clusterId,
-          kind.id,
-          target.namespace,
-          target.name,
-          { spec: { suspend: next } },
-          true,
-        );
-      }
       toast.ok(
         next
           ? `Suspended ${kind.kind} ${target.name}.`
@@ -1207,7 +1192,7 @@ export function DetailPanel({
                   disabled={triggering || !target.namespace || degraded}
                   onClick={runTrigger}
                 >
-                  {Icons.play}
+                  {Icons.bolt}
                 </IconBtn>
               )}
               {isJob && (
