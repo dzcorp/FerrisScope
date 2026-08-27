@@ -230,9 +230,15 @@ async fn triggering_a_cron_job_creates_an_owned_job() {
     let history = list_jobs_for_cron_job(client, ns, "nightly")
         .await
         .expect("list history");
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0]["name"], created.as_str());
-    assert_eq!(history[0]["manual"], true);
+    assert_eq!(history.runs.len(), 1);
+    assert_eq!(history.runs[0]["name"], created.as_str());
+    assert_eq!(history.runs[0]["manual"], true);
+    // A namespace holding one Job is nowhere near the scan bounds, so an
+    // early stop here would mean the paging loop is broken.
+    assert!(
+        !history.truncated,
+        "single-Job namespace reported truncated"
+    );
 
     let _ = cluster.kubectl(&["delete", "namespace", ns, "--wait=false"]);
 }
@@ -325,7 +331,11 @@ async fn history_excludes_unowned_look_alikes() {
     let history = list_jobs_for_cron_job(client, ns, "nightly")
         .await
         .expect("list history");
-    let names: Vec<&str> = history.iter().filter_map(|j| j["name"].as_str()).collect();
+    let names: Vec<&str> = history
+        .runs
+        .iter()
+        .filter_map(|j| j["name"].as_str())
+        .collect();
     assert_eq!(names, vec!["nightly-manual-1"], "history: {names:?}");
 
     let _ = cluster.kubectl(&["delete", "namespace", ns, "--wait=false"]);
