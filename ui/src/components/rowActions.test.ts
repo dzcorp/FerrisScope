@@ -4,7 +4,13 @@
 // kinds don't.
 
 import { describe, it, expect, vi } from "vitest";
-import { actionsForRow, type RowActionContext } from "./rowActions";
+import {
+  actionsForRow,
+  actionsForSelection,
+  menuScopeFor,
+  selectionMenuHeader,
+  type RowActionContext,
+} from "./rowActions";
 import type { ResourceKind, ResourceRow } from "../types";
 
 function kindOf(id: string, kind: string): ResourceKind {
@@ -237,5 +243,130 @@ describe("actionsForRow — batch workloads", () => {
       (i) => i.kind === "item" && i.label === "View details",
     );
     expect(details?.kind === "item" && details.disabled).toBeFalsy();
+  });
+});
+
+describe("actionsForSelection", () => {
+  const bulk = [
+    { icon: null, label: "Run now", onClick: vi.fn() },
+    { icon: null, label: "Suspend", onClick: vi.fn() },
+    { icon: null, label: "Copy names", onClick: vi.fn() },
+    {
+      icon: null,
+      label: "Delete",
+      onClick: vi.fn(),
+      danger: true,
+      separatorBefore: true,
+      disabled: false,
+    },
+  ];
+
+  /// The verbs must be the bulk builders' verbs verbatim — the whole point of
+  /// sharing them with the BulkBar is that the two surfaces can't drift.
+  it("renders the bulk actions in order, honouring separators", () => {
+    const items = actionsForSelection({
+      kind: kindOf("cronjobs", "CronJob"),
+      count: 20,
+      bulk,
+    });
+    expect(items.map((i) => (i.kind === "item" ? i.label : "—"))).toEqual([
+      "View details (one row only)",
+      "Run now",
+      "Suspend",
+      "Copy names",
+      "—",
+      "Delete",
+    ]);
+  });
+
+  /// Dropping single-row entries outright reads as a broken menu; saying why
+  /// they don't apply does not.
+  it("keeps the single-row entry visible but disabled", () => {
+    const items = actionsForSelection({
+      kind: kindOf("jobs", "Job"),
+      count: 3,
+      bulk: [],
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]?.kind === "item" && items[0].disabled).toBe(true);
+  });
+
+  it("carries danger through so destructive picks still trail in red", () => {
+    const items = actionsForSelection({
+      kind: kindOf("jobs", "Job"),
+      count: 3,
+      bulk,
+    });
+    const del = items.find((i) => i.kind === "item" && i.label === "Delete");
+    expect(del?.kind === "item" && del.danger).toBe(true);
+  });
+
+  it("disables every bulk verb when the table is read-only", () => {
+    const items = actionsForSelection({
+      kind: kindOf("jobs", "Job"),
+      count: 3,
+      bulk,
+      readOnly: true,
+    });
+    for (const item of items) {
+      if (item.kind === "item") expect(item.disabled).toBe(true);
+    }
+  });
+
+  it("fires the bulk action's own callback", () => {
+    const onClick = vi.fn();
+    const items = actionsForSelection({
+      kind: kindOf("jobs", "Job"),
+      count: 3,
+      bulk: [{ icon: null, label: "Suspend", onClick }],
+    });
+    const item = items.find((i) => i.kind === "item" && i.label === "Suspend");
+    if (item?.kind !== "item") throw new Error("Suspend not found");
+    item.onClick();
+    expect(onClick).toHaveBeenCalledOnce();
+  });
+});
+
+describe("selectionMenuHeader", () => {
+  it("pluralises off the kind's own plural, not an appended s", () => {
+    expect(selectionMenuHeader(kindOf("cronjobs", "CronJob"), 20)).toBe(
+      "20 cronjobs selected",
+    );
+    expect(selectionMenuHeader(kindOf("jobs", "Job"), 1)).toBe(
+      "1 job selected",
+    );
+  });
+});
+
+describe("menuScopeFor", () => {
+  const sel = (...sids: string[]) =>
+    new Map(sids.map((s) => [s, {} as unknown]));
+
+  it("acts on the selection when the click lands inside a multi-row one", () => {
+    expect(menuScopeFor(sel("a", "b", "c"), "b")).toEqual({
+      scope: "selection",
+      clear: false,
+    });
+  });
+
+  /// The case the whole change exists for: clicking a row outside the
+  /// selection must not leave twenty rows highlighted while the menu acts on
+  /// one — drop the selection so the two agree.
+  it("drops the selection when the click lands outside it", () => {
+    expect(menuScopeFor(sel("a", "b"), "z")).toEqual({
+      scope: "row",
+      clear: true,
+    });
+  });
+
+  /// One selected row is not a bulk operation; relabelling every entry for it
+  /// would be noise. It stays a row menu — and keeps its highlight, because
+  /// selection and menu already name the same row.
+  it("treats a single-row selection as a row menu and keeps it", () => {
+    expect(menuScopeFor(sel("a"), "a")).toEqual({ scope: "row", clear: false });
+  });
+
+  it("needs no selection at all", () => {
+    expect(menuScopeFor(sel(), "a")).toEqual({ scope: "row", clear: false });
   });
 });

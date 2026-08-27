@@ -2,6 +2,7 @@ import { logErr } from "../lib/log";
 import { execContainers, rowLogContainers } from "../lib/podContainers";
 import type { ResourceKind, ResourceRow } from "../types";
 import type { MenuItem } from "./ContextMenu";
+import type { BulkAction } from "./BulkBar";
 
 export type RowActionContext = {
   kind: ResourceKind;
@@ -271,4 +272,77 @@ export function actionsForRow(
 
 function copy(text: string) {
   navigator.clipboard.writeText(text).catch(logErr("row-actions"));
+}
+
+
+/// What a right-click on `sid` should act on, given the current selection.
+///
+/// Inside a multi-row selection the menu acts on the whole selection; outside
+/// one, the selection is dropped first so the menu's scope always matches
+/// what is highlighted. Finder and VS Code both behave this way, and the
+/// alternative — a menu silently acting on one row while twenty look selected
+/// — is how a destructive pick lands on the wrong target.
+///
+/// A single-row selection stays a row menu: there is nothing "bulk" about one
+/// row, and re-labelling every entry for it would be noise. It also keeps its
+/// highlight — selection and menu already name the same row, so there is
+/// nothing to reconcile.
+export function menuScopeFor(
+  selection: ReadonlyMap<string, unknown>,
+  sid: string,
+): { scope: "row" | "selection"; clear: boolean } {
+  if (selection.has(sid)) {
+    return selection.size > 1
+      ? { scope: "selection", clear: false }
+      : { scope: "row", clear: false };
+  }
+  return { scope: "row", clear: selection.size > 0 };
+}
+
+/// Context-menu items for a multi-row selection.
+///
+/// The verbs come from the same builders the floating BulkBar uses — one
+/// implementation, two surfaces. A second set of "bulk" semantics that drifts
+/// from the first is how an operator ends up deleting rows they thought they
+/// were only suspending.
+///
+/// Single-row-only entries are shown disabled rather than dropped: a menu
+/// that silently loses "View details" reads as a bug, while one that says
+/// "one row only" explains itself.
+export function actionsForSelection(opts: {
+  kind: ResourceKind;
+  count: number;
+  bulk: BulkAction[];
+  readOnly?: boolean;
+}): MenuItem[] {
+  const items: MenuItem[] = [
+    {
+      kind: "item",
+      label: "View details (one row only)",
+      onClick: () => {},
+      disabled: true,
+    },
+  ];
+
+  for (const action of opts.bulk) {
+    if (action.separatorBefore) items.push({ kind: "separator" });
+    items.push({
+      kind: "item",
+      label: action.label,
+      onClick: action.onClick,
+      ...(action.danger ? { danger: true } : {}),
+      // A degraded cluster disables the bulk action itself; readOnly is the
+      // table's view of the same condition, so either one is enough.
+      ...(action.disabled || opts.readOnly ? { disabled: true } : {}),
+    });
+  }
+
+  return items;
+}
+
+/// Header line for the selection menu — "20 cronjobs selected". Kept next to
+/// the builder so the two never disagree about pluralisation.
+export function selectionMenuHeader(kind: ResourceKind, count: number): string {
+  const noun = count === 1 ? kind.kind.toLowerCase() : kind.plural.toLowerCase();
+  return `${count} ${noun} selected`;
 }

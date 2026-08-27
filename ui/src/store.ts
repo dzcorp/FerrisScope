@@ -1948,6 +1948,23 @@ export function selectClusterDegraded(
   );
 }
 
+/// True when *any* cluster represented in `selection` is degraded. A bulk
+/// action spans whatever clusters the selection spans, so one dead apiserver
+/// is enough to make the whole batch partially doomed — gate on that rather
+/// than on the active cluster.
+export function selectSelectionDegraded(
+  s: {
+    clusterHealth: Record<string, ClusterHealthStatus>;
+    clusterReconnecting: Record<string, boolean>;
+  },
+  selection: Map<string, SelectionMeta>,
+): boolean {
+  for (const m of selection.values()) {
+    if (selectClusterDegraded(s, m.clusterId)) return true;
+  }
+  return false;
+}
+
 /// Hook form of `selectActiveClusterIds` with a referentially-stable result:
 /// the array identity only changes when the joined id list changes, so
 /// effects keyed on it don't re-fire on unrelated store updates.

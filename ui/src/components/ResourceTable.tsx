@@ -33,6 +33,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, onResourceDelta } from "../api";
 import {
   selectClusterDegraded,
+  selectSelectionDegraded,
   useAppStore,
   useClusterLabels,
   useResolvedTheme,
@@ -60,7 +61,13 @@ import {
 import { LogPanel } from "./LogPanel";
 import { DetailPanel, type DetailTarget } from "./DetailPanel";
 import { ContextMenu, type MenuPosition } from "./ContextMenu";
-import { actionsForRow } from "./rowActions";
+import {
+  actionsForRow,
+  actionsForSelection,
+  menuScopeFor,
+  selectionMenuHeader,
+} from "./rowActions";
+import { bulkActionsFor } from "./bulkActions";
 import { makeTerminalTab } from "./Dock";
 import { confirm, toast } from "../lib/dialog";
 import { latinLetter } from "../lib/keyboard";
@@ -332,6 +339,11 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   const [menu, setMenu] = useState<{
     pos: MenuPosition;
     row: ScopedRow;
+    // Which rows the menu acts on. "selection" when the right-click landed
+    // inside a multi-row selection; "row" otherwise. `row` is still carried
+    // in the selection case so the menu can be positioned and closed the
+    // same way.
+    scope: "row" | "selection";
   } | null>(null);
 
   // Namespace filter is global (cluster-bar driven, persisted on the store).
@@ -1522,7 +1534,9 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
             const row = rowsRef.current.get(sid);
             if (!row) return;
             e.preventDefault();
-            setMenu({ pos: { x: e.clientX, y: e.clientY }, row });
+            const { scope, clear } = menuScopeFor(selection, sid);
+            if (clear) clearSelection();
+            setMenu({ pos: { x: e.clientX, y: e.clientY }, row, scope });
           }}
         >
           {load.kind === "error" ? (
@@ -1815,7 +1829,31 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         />
       )}
 
-      {menu && (
+      {menu?.scope === "selection" && (
+        <ContextMenu
+          mode={mode}
+          position={menu.pos}
+          onClose={() => setMenu(null)}
+          rowName={selectionMenuHeader(kind, selection.size)}
+          items={actionsForSelection({
+            kind,
+            count: selection.size,
+            bulk: bulkActionsFor(
+              kind,
+              selection,
+              confirmDestructive,
+              clearSelection,
+              clusterLabel,
+              selectSelectionDegraded(
+                { clusterHealth, clusterReconnecting },
+                selection,
+              ),
+            ),
+          })}
+        />
+      )}
+
+      {menu?.scope === "row" && (
         <ContextMenu
           mode={mode}
           position={menu.pos}

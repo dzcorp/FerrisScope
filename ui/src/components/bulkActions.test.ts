@@ -8,10 +8,10 @@
 // possible outcome.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildGenericBulkActions } from "./App";
-import { resetMockInvoke, setMockInvoke } from "./test/tauri-mock";
-import type { SelectionMeta } from "./store";
-import type { ResourceKind } from "./types";
+import { buildGenericBulkActions } from "./bulkActions";
+import { resetMockInvoke, setMockInvoke } from "../test/tauri-mock";
+import type { SelectionMeta } from "../store";
+import type { ResourceKind } from "../types";
 
 afterEach(() => {
   resetMockInvoke();
@@ -150,7 +150,7 @@ describe("buildGenericBulkActions — batch kinds", () => {
       if (args?.["name"] === "b") throw new Error("forbidden");
       return { kind: "applied", resource_version: "2" };
     });
-    const { toast } = await import("./lib/dialog");
+    const { toast } = await import("../lib/dialog");
     const bad = vi.spyOn(toast, "bad").mockImplementation(() => "t1");
 
     click(CRONJOBS, selectionOf("a", "b", "c"), "Suspend");
