@@ -9,7 +9,7 @@
 // exactly the one field, which is what `kubectl patch` does.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildRowActionContext } from "./ResourceTable";
+import { buildRowActionContext, selectionMetaOf } from "./ResourceTable";
 import { resetMockInvoke, setMockInvoke } from "../test/tauri-mock";
 import type { ResourceKind, ResourceRow } from "../types";
 
@@ -166,5 +166,82 @@ describe("buildRowActionContext — trigger and re-run", () => {
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]?.cmd).toBe("delete_resource_cmd");
     expect(calls[0]?.args).toHaveProperty("cascade", null);
+  });
+});
+
+describe("buildRowActionContext — unknown suspend state", () => {
+  /// `undefined` is a third state, not a synonym for false. The row is briefly
+  /// absent or unprojected right after a cross-kind navigation, and offering
+  /// "Suspend" for an already-suspended object points the operator at a verb
+  /// that will do nothing.
+  it("offers no suspend toggle when the row never projected one", () => {
+    const ctx = contextFor(kindOf("jobs", "Job"), { phase: "Running" });
+    expect(ctx.suspendTo).toBeUndefined();
+    // The verbs that don't depend on suspend state stay available.
+    expect(ctx.rerun).toBeTypeOf("function");
+    expect(ctx.delete).toBeTypeOf("function");
+  });
+});
+
+describe("selectionMetaOf", () => {
+  /// CronJob rows project `suspend` as a string because it backs a text
+  /// column; Job rows project a bool. Normalising here is what lets every
+  /// consumer branch on one type.
+  it("normalises the CronJob row's string suspend flag", () => {
+    const row = {
+      __sid: "ctx::u",
+      __clusterId: "ctx",
+      uid: "u",
+      name: "nightly",
+      namespace: "demo",
+      suspend: "true",
+      phase: "Active",
+    } as unknown as Parameters<typeof selectionMetaOf>[0];
+    expect(selectionMetaOf(row)).toEqual({
+      clusterId: "ctx",
+      namespace: "demo",
+      name: "nightly",
+      suspend: true,
+      phase: "Active",
+    });
+  });
+
+  it("normalises the Job row's boolean suspend flag", () => {
+    const row = {
+      __sid: "ctx::u",
+      __clusterId: "ctx",
+      uid: "u",
+      name: "migrate",
+      namespace: "demo",
+      suspend: false,
+      phase: "Running",
+    } as unknown as Parameters<typeof selectionMetaOf>[0];
+    expect(selectionMetaOf(row)).toMatchObject({ suspend: false });
+  });
+
+  /// Omitted rather than defaulted: a bulk action has to be able to tell
+  /// "not suspended" from "we don't know".
+  it("omits suspend and phase entirely when the row has neither", () => {
+    const row = {
+      __sid: "ctx::u",
+      __clusterId: "ctx",
+      uid: "u",
+      name: "cm",
+      namespace: "demo",
+    } as unknown as Parameters<typeof selectionMetaOf>[0];
+    const meta = selectionMetaOf(row);
+    expect("suspend" in meta).toBe(false);
+    expect("phase" in meta).toBe(false);
+  });
+
+  /// A cluster-scoped row has no namespace; null, not the string "undefined".
+  it("carries a null namespace for cluster-scoped rows", () => {
+    const row = {
+      __sid: "ctx::u",
+      __clusterId: "ctx",
+      uid: "u",
+      name: "worker-1",
+    } as unknown as Parameters<typeof selectionMetaOf>[0];
+    expect(selectionMetaOf(row).namespace).toBeNull();
   });
 });

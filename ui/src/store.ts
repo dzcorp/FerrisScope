@@ -186,6 +186,15 @@ export type SelectionMeta = {
   clusterId: string;
   namespace: string | null;
   name: string;
+  /// Row state a bulk action has to branch on, snapshotted at select time.
+  /// Optional because most kinds project neither, and a bulk action that
+  /// needs one must tolerate its absence rather than assume a default.
+  ///
+  /// `suspend` lets the bar offer only the direction that would do something
+  /// — Suspend for running rows, Resume for suspended ones. `phase` lets it
+  /// skip rows the verb cannot affect at all (a finished Job).
+  suspend?: boolean;
+  phase?: string;
 };
 
 /// One detail-history / pending-detail entry. `clusterId` is null when the

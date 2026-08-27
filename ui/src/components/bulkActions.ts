@@ -449,14 +449,13 @@ export function buildGenericBulkActions(
 
   const actions: BulkAction[] = [];
 
-  // Batch workloads. Suspend and Resume are separate actions rather than one
-  // toggle: the selection carries only cluster/namespace/name, so there is no
-  // per-row suspend state to flip against — same shape as the node bar's
-  // Cordon / Uncordon pair.
+  // Batch workloads.
   if (kind.id === "cronjobs" || kind.id === "jobs") {
     const isCronJob = kind.id === "cronjobs";
     const nouns = { noun: kindLabel, nounPlural: plural };
+
     const confirmThen = async (
+      subset: [string, SelectionMeta][],
       title: string,
       body: string,
       confirmLabel: string,
@@ -465,15 +464,20 @@ export function buildGenericBulkActions(
       op: (m: SelectionMeta) => Promise<unknown>,
     ) => {
       if (confirmDestructive) {
+        const skipped = count - subset.length;
         const ok = await confirm({
           title,
-          body: `${body}\n\n${summary}${more}`,
+          body: `${body}${
+            skipped > 0
+              ? `\n\n${skipped} of the ${count} selected will be skipped — the verb can't affect them.`
+              : ""
+          }\n\n${summary}${more}`,
           confirmLabel,
           tone,
         });
         if (!ok) return;
       }
-      await bulkRunForEach(entries, prefix, op, { verb, ...nouns });
+      await bulkRunForEach(subset, prefix, op, { verb, ...nouns });
       clearSelection();
     };
 
@@ -483,6 +487,7 @@ export function buildGenericBulkActions(
       disabled: degraded,
       onClick: () => {
         void confirmThen(
+          entries,
           isCronJob
             ? `Run ${count} ${count === 1 ? kindLabel : plural} now?`
             : `Run ${count} ${count === 1 ? kindLabel : plural} again?`,
@@ -502,27 +507,53 @@ export function buildGenericBulkActions(
       },
     });
 
-    for (const suspend of [true, false]) {
+    // A finished Job can't be suspended or resumed — the apiserver accepts the
+    // patch and the controller ignores it. CronJobs have no terminal state, so
+    // this only narrows Jobs.
+    const settleable = isCronJob
+      ? entries
+      : entries.filter(
+          ([, m]) => m.phase !== "Succeeded" && m.phase !== "Failed",
+        );
+
+    // Only offer the direction that would change something. A row whose
+    // suspend state we never captured lands in both lists: the patch is an
+    // explicit request either way, and guessing a default is what puts the
+    // wrong verb in front of the operator.
+    const directions: { suspend: boolean; rows: [string, SelectionMeta][] }[] = [
+      { suspend: true, rows: settleable.filter(([, m]) => m.suspend !== true) },
+      { suspend: false, rows: settleable.filter(([, m]) => m.suspend !== false) },
+    ];
+
+    for (const { suspend, rows } of directions) {
+      if (rows.length === 0) continue;
+      const verb = suspend ? "Suspend" : "Resume";
+      // Name the subset when it isn't the whole selection, so the button never
+      // implies it covers rows it will skip.
+      const label = rows.length === count ? verb : `${verb} (${rows.length})`;
       actions.push({
         icon: suspend ? Icons.pause : Icons.play,
-        label: suspend ? "Suspend" : "Resume",
+        label,
         disabled: degraded,
         onClick: () => {
           void confirmThen(
-            `${suspend ? "Suspend" : "Resume"} ${count} ${count === 1 ? kindLabel : plural}?`,
+            rows,
+            `${verb} ${rows.length} ${rows.length === 1 ? kindLabel : plural}?`,
             suspend
               ? isCronJob
                 ? "No new Jobs will be created. Runs already in flight keep going, and missed schedules are not backfilled on resume."
-                : "The Job controller deletes each Job's running pods; their work is lost unless it is idempotent."
-              : "Already-running selections are unaffected; suspended ones start again.",
-            suspend ? "Suspend" : "Resume",
+                : "The Job controller deletes each Job's running pods; their work is lost unless it is idempotent. On resume the Job starts fresh pods and its activeDeadlineSeconds timer restarts."
+              : isCronJob
+                ? "Scheduling resumes from the next matching time. Missed runs are not backfilled."
+                : "Each Job creates fresh pods and continues toward its completion count. Its activeDeadlineSeconds timer restarts.",
+            verb,
             suspend ? "danger" : "neutral",
             suspend ? "Suspended" : "Resumed",
             async (m) => {
               if (!m.namespace) throw new Error("no namespace");
-              // Merge patch, not SSA — see the note on the single-object
-              // path in DetailPanel: a partial SSA apply drops every other
-              // spec field this app's field manager owns.
+              // Merge patch, not SSA — a partial SSA apply drops every other
+              // spec field this app's field manager owns. See the note on the
+              // single-object path in DetailPanel.
               return api.mergePatchResource(
                 m.clusterId,
                 kind.id,

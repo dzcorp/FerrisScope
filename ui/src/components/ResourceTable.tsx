@@ -34,6 +34,7 @@ import { api, onResourceDelta } from "../api";
 import {
   selectClusterDegraded,
   selectSelectionDegraded,
+  type SelectionMeta,
   useAppStore,
   useClusterLabels,
   useResolvedTheme,
@@ -1175,14 +1176,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   ) => {
     e.stopPropagation();
     const sid = row.original.__sid;
-    const meta = {
-      clusterId: row.original.__clusterId,
-      namespace:
-        typeof row.original.namespace === "string"
-          ? row.original.namespace
-          : null,
-      name: String(row.original.name ?? ""),
-    };
+    const meta = selectionMetaOf(row.original);
     if (e.shiftKey && anchorRef.current) {
       const ids = sortedRows.map((r) => r.original.__sid);
       const a = ids.indexOf(anchorRef.current);
@@ -1196,14 +1190,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         for (let i = lo; i <= hi; i++) {
           const r = sortedRows[i];
           if (!r) continue;
-          next.set(r.original.__sid, {
-            clusterId: r.original.__clusterId,
-            namespace:
-              typeof r.original.namespace === "string"
-                ? r.original.namespace
-                : null,
-            name: String(r.original.name ?? ""),
-          });
+          next.set(r.original.__sid, selectionMetaOf(r.original));
         }
         setSelection(next);
         return;
@@ -1906,6 +1893,24 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
 // table doesn't have to drill `clusterId` + `confirmDestructive` through
 // every callsite. Pod-only and node-only branches are inlined per kind to
 // keep the action surface deliberately scoped.
+/// Snapshot of the row state a bulk action may need to branch on. Taken at
+/// select time rather than looked up later: the row can be gone from the
+/// table by the time the operator picks an action, and a stale-but-present
+/// flag beats an absent one for deciding which direction to offer.
+export function selectionMetaOf(row: ScopedRow): SelectionMeta {
+  return {
+    clusterId: row.__clusterId,
+    namespace: typeof row.namespace === "string" ? row.namespace : null,
+    name: String(row.name ?? ""),
+    // CronJob rows project `suspend` as a string (it backs a text column);
+    // Job rows project a bool. Both normalise here so no consumer repeats it.
+    ...(row.suspend !== undefined
+      ? { suspend: row.suspend === true || row.suspend === "true" }
+      : {}),
+    ...(typeof row.phase === "string" ? { phase: row.phase } : {}),
+  };
+}
+
 // Exported for tests: the row menu's callbacks are where the transport for
 // each mutating action is decided, and that choice is regression-prone.
 export function buildRowActionContext(
@@ -2040,7 +2045,14 @@ export function buildRowActionContext(
     const kindLabel = kind.kind.toLowerCase();
     // The CronJob row projects `suspend` as a string (it backs a text
     // column); the Job row projects a bool. Both mean the same thing here.
-    const suspended = row.suspend === true || row.suspend === "true";
+    // `undefined` is a third state, not a synonym for false — see the note in
+    // DetailPanel. Without a known state the menu would offer the wrong verb,
+    // so it offers none.
+    const suspendState: boolean | undefined =
+      row.suspend === undefined
+        ? undefined
+        : row.suspend === true || row.suspend === "true";
+    const suspended = suspendState === true;
     // Suspending a finished Job is accepted by the apiserver and ignored by
     // the controller — offer it only while it can still do something.
     const finished =
@@ -2090,7 +2102,9 @@ export function buildRowActionContext(
         }
       })();
     };
-    if (!finished) ctx.suspendTo = { target: !suspended, run: runSuspend };
+    if (!finished && suspendState !== undefined) {
+      ctx.suspendTo = { target: !suspended, run: runSuspend };
+    }
     if (isJob) {
       ctx.rerun = () => {
         void (async () => {

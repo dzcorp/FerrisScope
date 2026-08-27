@@ -585,8 +585,17 @@ export function DetailPanel({
   // so the button tracks the watcher rather than the detail fetch — the same
   // reason `nodeCordoned` does. The CronJob row projects it as a string (it
   // backs a text column); the Job row projects a bool.
-  const suspended =
-    row != null && (row.suspend === true || row.suspend === "true");
+  //
+  // `undefined` is a third state, not a synonym for false: the row is briefly
+  // absent when the panel is opened by cross-kind navigation, before that
+  // kind's rows have loaded. Rendering "Suspend" there would point the button
+  // at the wrong verb for an already-suspended object, so it renders disabled
+  // until the state is known.
+  const suspendState: boolean | undefined =
+    row?.suspend === undefined
+      ? undefined
+      : row.suspend === true || row.suspend === "true";
+  const suspended = suspendState === true;
   // A Job that already finished can't be suspended — the apiserver accepts
   // the patch and the controller ignores it, so the button would look like it
   // worked. CronJobs never reach a terminal phase, so this only gates Jobs.
@@ -1213,12 +1222,18 @@ export function DetailPanel({
                   title={
                     jobFinished
                       ? "Job has already finished — nothing to suspend"
-                      : suspended
-                        ? `Resume ${kind.kind.toLowerCase()}`
-                        : `Suspend ${kind.kind.toLowerCase()}`
+                      : suspendState === undefined
+                        ? "Loading suspend state…"
+                        : suspended
+                          ? `Resume ${kind.kind.toLowerCase()}`
+                          : `Suspend ${kind.kind.toLowerCase()}`
                   }
                   disabled={
-                    suspending || !target.namespace || degraded || jobFinished
+                    suspending ||
+                    !target.namespace ||
+                    degraded ||
+                    jobFinished ||
+                    suspendState === undefined
                   }
                   onClick={() => runSuspend(!suspended)}
                 >
