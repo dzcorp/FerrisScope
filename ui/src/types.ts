@@ -2171,11 +2171,21 @@ export type HpaMetricTarget = {
   value: string | null;
 };
 
+export type HpaMetricCurrent = {
+  average_utilization: number | null;
+  average_value: string | null;
+  value: string | null;
+};
+
 export type HpaMetric = {
   type: string;
-  name?: string;
-  target?: HpaMetricTarget;
-  metric_name?: string;
+  name: string;
+  target: HpaMetricTarget;
+  current: HpaMetricCurrent | null;
+  target_display: string;
+  current_display: string | null;
+  /** current / target; > 1 means the HPA is pushing to scale up. */
+  ratio: number | null;
 };
 
 export type HpaCondition = {
@@ -2196,6 +2206,14 @@ export type HorizontalPodAutoscalerDetail = {
   last_scale_time: string | null;
   metrics: HpaMetric[];
   conditions: HpaCondition[];
+  /** Rust-derived headline: Active / Scaling / Limited / Inactive / Failed / Unknown. */
+  scaling: HpaScaling;
+};
+
+export type HpaScaling = {
+  status: string;
+  reason: string | null;
+  message: string | null;
 };
 
 // ── PodDisruptionBudget ────────────────────────────────────────────────────

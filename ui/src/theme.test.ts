@@ -25,6 +25,10 @@ describe("GitOps statuses", () => {
     for (const s of ["Healthy", "Synced", "Ready"]) expect(statusBucket(s)).toBe("good");
     for (const s of ["OutOfSync", "Missing", "Reconciling", "Updating"]) expect(statusBucket(s)).toBe("warn");
     for (const s of ["Degraded", "Stalled", "NotReady"]) expect(statusBucket(s)).toBe("bad");
+    // HPA scaling states.
+    expect(statusBucket("Limited")).toBe("warn");
+    expect(statusBucket("Scaling")).toBe("info");
+    expect(statusBucket("Inactive")).toBe("bad");
     for (const s of ["Suspended", "Static"]) {
       expect(statusBucket(s)).toBe("info");
       expect(statusIsTransient(s)).toBe(false);
