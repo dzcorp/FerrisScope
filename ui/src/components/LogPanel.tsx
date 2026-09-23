@@ -132,6 +132,7 @@ export function useObservedPods(targets: ObserveTarget[]): {
     .map((t) => [t.clusterId, t.kindId, t.namespace, t.name].join("\u0000"))
     .join("\u0001");
   const targetsRef = useRef(targets);
+  const rearmRef = useRef<((clusterId: string) => void) | null>(null);
   const clusterLabels = useClusterLabels();
   // Read through a ref, like `targets`: a display-name change must not
   // restart every resolve (and every log stream hanging off it).
@@ -181,7 +182,7 @@ export function useObservedPods(targets: ObserveTarget[]): {
     // `pruneAfterInit`.
     const watchConfirmed = new Set<string>();
     const warnings: string[] = [...capWarnings];
-    const handles: { watchId: string; close: () => void }[] = [];
+    const handles: { clusterId: string; watchId: string; close: () => void }[] = [];
 
     const flushReady = () => {
       if (cancelled) return;
@@ -258,56 +259,69 @@ export function useObservedPods(targets: ObserveTarget[]): {
         );
         flushReady();
       }
-      await Promise.all(
-        watchTargets.slice(0, MAX_POD_WATCHES).map(async (t) => {
-          if (cancelled) return;
-          try {
-            const handle = await api.watchLogPods(
-              t.clusterId,
-              { kind_id: t.kindId, namespace: t.namespace, name: t.name },
-              (evt) => {
-                if (cancelled) return;
-                if (evt.kind === "init_done") {
-                  // Watch's initial list is complete — drop any one-shot-seeded
-                  // pod it didn't confirm (deleted in the resolve→watch window).
-                  if (
-                    pruneAfterInit(
-                      podMap,
-                      t.clusterId,
-                      t.namespace,
-                      watchConfirmed,
-                    )
+      const armed = watchTargets.slice(0, MAX_POD_WATCHES);
+      const arm = async (t: (typeof armed)[number]) => {
+        if (cancelled) return;
+        try {
+          const handle = await api.watchLogPods(
+            t.clusterId,
+            { kind_id: t.kindId, namespace: t.namespace, name: t.name },
+            (evt) => {
+              if (cancelled) return;
+              if (evt.kind === "init_done") {
+                // Watch's initial list is complete — drop any one-shot-seeded
+                // pod it didn't confirm (deleted in the resolve→watch window).
+                if (
+                  pruneAfterInit(
+                    podMap,
+                    t.clusterId,
+                    t.namespace,
+                    watchConfirmed,
                   )
-                    flushReady();
-                  return;
-                }
-                if (evt.kind === "added")
-                  watchConfirmed.add(
-                    podKey(t.clusterId, evt.pod.namespace, evt.pod.name),
-                  );
-                else
-                  watchConfirmed.delete(
-                    podKey(t.clusterId, evt.namespace, evt.name),
-                  );
-                if (applyPodDelta(podMap, t.clusterId, evt)) flushReady();
-              },
-            );
-            // Unmounted while this open was in flight — tear it straight back
-            // down rather than leaking it past the cleanup that already ran.
-            if (cancelled) {
-              handle.close();
-              void api.unwatchLogPods(handle.watchId);
-              return;
-            }
-            handles.push(handle);
-          } catch (e) {
-            logErr("logs")(e);
+                )
+                  flushReady();
+                return;
+              }
+              if (evt.kind === "added")
+                watchConfirmed.add(
+                  podKey(t.clusterId, evt.pod.namespace, evt.pod.name),
+                );
+              else
+                watchConfirmed.delete(
+                  podKey(t.clusterId, evt.namespace, evt.name),
+                );
+              if (applyPodDelta(podMap, t.clusterId, evt)) flushReady();
+            },
+          );
+          // Unmounted while this open was in flight — tear it straight back
+          // down rather than leaking it past the cleanup that already ran.
+          if (cancelled) {
+            handle.close();
+            void api.unwatchLogPods(handle.watchId);
+            return;
           }
-        }),
-      );
+          handles.push({ clusterId: t.clusterId, ...handle });
+        } catch (e) {
+          logErr("logs")(e);
+        }
+      };
+      await Promise.all(armed.map(arm));
+      // A reconnect drops the backend watches; re-arm that cluster's in place
+      // so the pod set keeps tracking without re-resolving the whole panel.
+      rearmRef.current = (clusterId) => {
+        for (let i = handles.length - 1; i >= 0; i--) {
+          const h = handles[i]!;
+          if (h.clusterId !== clusterId) continue;
+          h.close();
+          void api.unwatchLogPods(h.watchId);
+          handles.splice(i, 1);
+        }
+        for (const t of armed) if (t.clusterId === clusterId) void arm(t);
+      };
     })();
     return () => {
       cancelled = true;
+      rearmRef.current = null;
       for (const h of handles) {
         h.close();
         void api.unwatchLogPods(h.watchId);
@@ -315,6 +329,27 @@ export function useObservedPods(targets: ObserveTarget[]): {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, attempt]);
+  const clusterIdsKey = [...new Set(targets.map((t) => t.clusterId))].join("\u0000");
+  const epochKey = useAppStore((s) =>
+    clusterIdsKey
+      .split("\u0000")
+      .map((id) => `${id}\u0001${s.clusterEpoch[id] ?? 0}`)
+      .join("\u0000"),
+  );
+  const seenEpochsRef = useRef<Map<string, string> | null>(null);
+  useEffect(() => {
+    const now = new Map(
+      epochKey
+        .split("\u0000")
+        .map((pair) => pair.split("\u0001") as [string, string]),
+    );
+    const prev = seenEpochsRef.current;
+    seenEpochsRef.current = now;
+    if (!prev) return;
+    for (const [id, epoch] of now) {
+      if (prev.has(id) && prev.get(id) !== epoch) rearmRef.current?.(id);
+    }
+  }, [epochKey]);
   const retry = useCallback(() => setAttempt((a) => a + 1), []);
   return { state, retry };
 }

@@ -11,6 +11,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
+import { selectClusterDegraded, useAppStore } from "../../store";
 import { LogRing } from "../../lib/logRing";
 import {
   clusterAccent,
@@ -22,7 +23,7 @@ import {
 } from "../../theme";
 import { ErrorBlock, Select } from "../ui";
 import { ansiToReact, stripAnsi } from "../../lib/ansi";
-import { splitTimestamp } from "../../lib/logFormat";
+import { rawTimestamp, splitTimestamp } from "../../lib/logFormat";
 import { findLogMatches, splitHighlight } from "../../lib/logSearch";
 import { chordLabel, latinLetter } from "../../lib/keyboard";
 import { toast } from "../../lib/dialog";
@@ -55,6 +56,9 @@ const DEFAULT_MAX_LINES: number = LINE_CAPS[0];
 // Single-line row height seed for the virtualizer. Wrapped rows get
 // re-measured via `measureElement`.
 const LOG_ROW_HEIGHT = Math.round(11.5 * 1.65);
+// Backstop retry for streams interrupted while their cluster stayed healthy
+// (e.g. a node's kubelet unreachable); a reconnect retries them immediately.
+const INTERRUPTED_RETRY_MS = 30_000;
 
 // Status union lives in lib/logSources (pure, testable aggregation); kept
 // re-exported here so the chrome components keep their import path.
@@ -136,6 +140,10 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
     new Map(),
   );
   const startingRef = useRef<Set<string>>(new Set());
+  // Streams the backend stopped because the cluster connection dropped, and
+  // the raw timestamp of each source's last line so a reopen skips the overlap.
+  const interruptedRef = useRef<Set<string>>(new Set());
+  const lastTsRef = useRef<Map<string, string>>(new Map());
   const wantedRef = useRef<Set<string>>(new Set());
   const rafRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
@@ -265,7 +273,10 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
   // open so a source reconciled away mid-start is torn down immediately, and a
   // running stream's handler bails the moment its key leaves `wantedRef`.
   const startOneStream = useCallback(
-    (src: LogViewSource, multi: boolean) => {
+    (src: LogViewSource, multi: boolean, interruptedResume = false) => {
+      const resumeAfter = interruptedResume
+        ? (lastTsRef.current.get(src.key) ?? null)
+        : null;
       // System-line prefix so per-source lifecycle markers stay attributable in
       // an aggregated view; redundant for a lone source.
       const sysLabel = multi && src.label ? `[${src.label}] ` : "";
@@ -292,7 +303,31 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
                   updateStatus(src.key, { kind: "streaming" });
                 }
               };
+              if (evt.kind === "interrupted") {
+                interruptedRef.current.add(src.key);
+                const h = runningRef.current.get(src.key);
+                if (h) {
+                  h.close();
+                  api.stopLogStream(h.streamId).catch(logErr("logs"));
+                  runningRef.current.delete(src.key);
+                }
+                pushSystem(
+                  src.key,
+                  `— ${sysLabel}connection lost (${evt.reason}); resumes when the cluster is back`,
+                );
+                scheduleFlush();
+                updateStatus(src.key, {
+                  kind: "waiting",
+                  reason: "connection lost — waiting for the cluster",
+                });
+                return;
+              }
+              const noteTs = (raw: string) => {
+                const ts = rawTimestamp(raw);
+                if (ts) lastTsRef.current.set(src.key, ts);
+              };
               if (evt.kind === "batch") {
+                noteTs(evt.lines[evt.lines.length - 1] ?? "");
                 for (const raw of evt.lines) {
                   const { ts, text } = splitTimestamp(raw);
                   ringRef.current.push({
@@ -313,6 +348,7 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
                 return;
               }
               if (evt.kind === "line") {
+                noteTs(evt.text);
                 const { ts, text } = splitTimestamp(evt.text);
                 ringRef.current.push({
                   id: ++lineSeq.current,
@@ -338,6 +374,7 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
                 updateStatus(src.key, { kind: "ended", reason: evt.reason });
               }
             },
+            resumeAfter,
           );
           startingRef.current.delete(src.key);
           // Reconciled away (or unmounted) while the open was in flight.
@@ -350,6 +387,10 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
             streamId: handle.streamId,
             close: handle.close,
           });
+          if (interruptedResume) {
+            pushSystem(src.key, `— ${sysLabel}reconnected`);
+            scheduleFlush();
+          }
           const cur = statusesRef.current.get(src.key);
           if (cur && cur.kind === "starting") {
             updateStatus(src.key, { kind: "streaming" });
@@ -357,6 +398,15 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
         } catch (e) {
           startingRef.current.delete(src.key);
           if (!mountedRef.current || !wantedRef.current.has(src.key)) return;
+          if (interruptedResume) {
+            // Cluster still coming back — stay interrupted for the next retry.
+            interruptedRef.current.add(src.key);
+            updateStatus(src.key, {
+              kind: "waiting",
+              reason: "connection lost — waiting for the cluster",
+            });
+            return;
+          }
           updateStatus(src.key, { kind: "error", message: String(e) });
           // In an aggregated view a single failed stream must be visible in the
           // body, not just averaged into the status pill.
@@ -399,8 +449,9 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
       }
     }
     for (const key of toStart) {
-      // Skip a key whose open is still in flight from a prior reconcile.
-      if (startingRef.current.has(key)) continue;
+      // Skip a key whose open is still in flight from a prior reconcile, or
+      // one waiting to resume after an interruption.
+      if (startingRef.current.has(key) || interruptedRef.current.has(key)) continue;
       const src = desired.get(key);
       if (!src) continue;
       statusesRef.current.set(key, { kind: "starting" });
@@ -416,6 +467,36 @@ export function LogView({ t, chromeT = t, sources, onStateChange }: Props) {
         : { kind: "starting" },
     );
   }, [sourcesEffectKey, startOneStream]);
+
+  // Reopen interrupted streams. A reconnect bumps the cluster's epoch, which
+  // retries at once; the timer covers streams whose cluster never went down.
+  const resumeInterrupted = useCallback(() => {
+    const interrupted = interruptedRef.current;
+    if (interrupted.size === 0) return;
+    const store = useAppStore.getState();
+    const multi = wantedRef.current.size > 1;
+    for (const src of sourcesRef.current) {
+      if (!interrupted.has(src.key) || !wantedRef.current.has(src.key)) continue;
+      if (startingRef.current.has(src.key)) continue;
+      if (selectClusterDegraded(store, src.clusterId)) continue;
+      interrupted.delete(src.key);
+      statusesRef.current.set(src.key, { kind: "starting" });
+      startOneStream(src, multi, true);
+    }
+    for (const key of [...interrupted]) {
+      if (!wantedRef.current.has(key)) interrupted.delete(key);
+    }
+  }, [startOneStream]);
+  const epochKey = useAppStore((s) =>
+    sources.map((src) => s.clusterEpoch[src.clusterId] ?? 0).join(","),
+  );
+  useEffect(() => {
+    resumeInterrupted();
+  }, [epochKey, resumeInterrupted]);
+  useEffect(() => {
+    const timer = window.setInterval(resumeInterrupted, INTERRUPTED_RETRY_MS);
+    return () => window.clearInterval(timer);
+  }, [resumeInterrupted]);
 
   // Stop every stream on unmount (panel close / tab switch).
   useEffect(() => {

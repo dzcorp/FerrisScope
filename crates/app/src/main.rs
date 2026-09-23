@@ -445,6 +445,7 @@ fn main() {
             // task for the whole app; idempotent against indices coming
             // and going as the operator connects / disconnects clusters.
             commands::spawn_search_index_gc(app.handle().clone());
+            commands::spawn_resume_detector(app.handle().clone());
 
             // Port-forward bring-up: mount the status forwarder once, then
             // restore every pinned forward from `portforwards.json`. Failures

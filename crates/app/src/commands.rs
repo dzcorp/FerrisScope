@@ -42,7 +42,7 @@ use ferrisscope_kube_ext::{
     list_pods_on_node, list_secrets_in_namespace, list_services_in_namespace, lookup,
     manual_job_name, merge_patch_resource, registry, rerun_job, rerun_job_name, restart_pod_owner,
     restart_pods_owners, restart_workload, set_node_cordon, start_forward, trigger_cron_job,
-    ApplyResult, Cascade, CronJobHistory, DrainReport, ForwardEntry, ForwardStatus,
+    ApplyResult, Cascade, ClientSource, CronJobHistory, DrainReport, ForwardEntry, ForwardStatus,
     HelmInstallResult, HelmRollbackResult, HelmUpgradeResult, MergePatchResult, ResourceKind,
     ResourceKindEntry, RestartPodsReport, WorkloadPods,
 };
@@ -1458,6 +1458,68 @@ pub(crate) async fn search_cluster_index(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemResumed {
+    slept_ms: u64,
+}
+
+/// Watch for system suspend/resume. After a suspend every watch socket, pooled
+/// connection and auth token may be dead while the timers guarding them never
+/// fired, so each connected cluster is torn down as unavailable and the UI is
+/// told to reconnect with a fresh client.
+pub(crate) fn spawn_resume_detector(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let spawned = ferrisscope_core::resume::spawn(move |slept| {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move { on_system_resumed(&app, slept).await });
+        });
+        if spawned.is_none() {
+            tracing::warn!("suspend detection unavailable on this platform");
+        }
+    });
+}
+
+async fn on_system_resumed(app: &AppHandle, slept: Duration) {
+    let state = app.state::<AppState>();
+    let reason = resume_reason(slept);
+    let mut clusters = 0usize;
+    for (cluster_id, _) in state.entries_snapshot().await {
+        state.drop_cluster_logs(&cluster_id).await;
+        tear_down_unhealthy(state.inner(), &cluster_id).await;
+        let evt = ClusterHealthEvent {
+            status: ClusterHealthStatus::Unavailable,
+            reason: Some(reason.clone()),
+        };
+        let name = format!("cluster-health://{}", sanitize_event_segment(&cluster_id));
+        if let Err(e) = app.emit(&name, &evt) {
+            tracing::warn!(error = %e, %cluster_id, "failed to emit cluster health");
+        }
+        clusters += 1;
+    }
+    tracing::info!(
+        slept_secs = slept.as_secs(),
+        clusters,
+        "system resumed: clusters marked for reconnect"
+    );
+    let payload = SystemResumed {
+        slept_ms: u64::try_from(slept.as_millis()).unwrap_or(u64::MAX),
+    };
+    if let Err(e) = app.emit("system://resumed", payload) {
+        tracing::warn!(error = %e, "failed to emit system resume");
+    }
+}
+
+fn resume_reason(slept: Duration) -> String {
+    let mins = slept.as_secs() / 60;
+    let span = match mins {
+        0 => format!("{}s", slept.as_secs()),
+        1..=119 => format!("{mins}m"),
+        _ => format!("{}h {}m", mins / 60, mins % 60),
+    };
+    format!("Reconnecting after the system slept for {span}")
+}
+
 /// Spawn the background GC loop that prunes the per-cluster search
 /// indices on a fixed schedule. Single task for the whole app — it
 /// snapshots the registered indices each tick so newly-connected
@@ -2671,10 +2733,13 @@ pub(crate) async fn start_log_stream(
     // First-open live tail: `Some(n)` = last n lines, `None` = whole available
     // history. Ignored on the `previous` path (always dumped in full).
     tail_lines: Option<i64>,
+    // Timestamp of the last line already shown when reopening an interrupted
+    // stream; skips the overlap instead of re-tailing.
+    resume_after: Option<String>,
     on_event: tauri::ipc::Channel<LogEvent>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let entry = state.entry(&cluster_id).await?;
+    let entry = available_entry(&state, &cluster_id).await?;
     let stream = LogStream::start(
         entry.cluster.client(),
         &namespace,
@@ -2682,6 +2747,7 @@ pub(crate) async fn start_log_stream(
         container.as_deref(),
         previous,
         tail_lines,
+        resume_after,
     )
     .map_err(|e| e.to_string())?;
 
@@ -2761,6 +2827,7 @@ fn spawn_log_forwarder(
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     tracing::debug!(?stream_id, "log forwarder exiting (broadcast closed)");
+                    let _ = channel.send(stream_torn_down());
                     return;
                 }
             };
@@ -2785,9 +2852,7 @@ fn spawn_log_forwarder(
                         }
                         Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
                             // Flush what we have, then exit after the loop.
-                            trailing = Some(LogEvent::Ended {
-                                reason: "stream closed".to_owned(),
-                            });
+                            trailing = Some(stream_torn_down());
                             break;
                         }
                     }
@@ -2807,7 +2872,7 @@ fn spawn_log_forwarder(
                     return;
                 }
                 if let Some(t) = trailing {
-                    let is_end = matches!(&t, LogEvent::Ended { .. });
+                    let is_end = is_final_log_event(&t);
                     if channel.send(t).is_err() {
                         return;
                     }
@@ -2817,7 +2882,7 @@ fn spawn_log_forwarder(
                 }
             } else {
                 // Non-Line first event: ship as-is.
-                let is_end = matches!(&first, LogEvent::Ended { .. });
+                let is_end = is_final_log_event(&first);
                 if let Err(e) = channel.send(first) {
                     tracing::warn!(
                         error = %e,
@@ -2834,6 +2899,33 @@ fn spawn_log_forwarder(
     });
 }
 
+/// Entry for a long-lived stream. A wedged entry's client is exactly what the
+/// stream must not bind to; the caller retries once the cluster reconnects.
+async fn available_entry(
+    state: &AppState,
+    cluster_id: &str,
+) -> Result<Arc<crate::state::ClusterEntry>, String> {
+    let entry = state.entry(cluster_id).await?;
+    if entry.unavailable.load(Ordering::SeqCst) {
+        return Err(format!(
+            "cluster {cluster_id} is unavailable — reconnect first"
+        ));
+    }
+    Ok(entry)
+}
+
+/// The reader task was aborted without a final event: the stream was dropped
+/// by a cluster reconnect or resume teardown, never by the container ending.
+fn stream_torn_down() -> LogEvent {
+    LogEvent::Interrupted {
+        reason: "cluster connection reset".to_owned(),
+    }
+}
+
+fn is_final_log_event(evt: &LogEvent) -> bool {
+    matches!(evt, LogEvent::Ended { .. } | LogEvent::Interrupted { .. })
+}
+
 /// Start a live watch over a workload's pods for the logs panel. Returns a
 /// watch id; pod add/remove deltas (and an initial `InitDone`) arrive on
 /// `on_event`. Single-pod targets are not watched here — the frontend resolves
@@ -2846,7 +2938,7 @@ pub(crate) async fn watch_log_pods(
     on_event: tauri::ipc::Channel<ferrisscope_kube_ext::LogPodEvent>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let entry = state.entry(&cluster_id).await?;
+    let entry = available_entry(&state, &cluster_id).await?;
     // Use a watcher-pool client: this is a long-lived watch, not a one-shot
     // call, so it should share the pool that carries the resource reflectors
     // (and now inherits their TCP keepalive).
@@ -4298,6 +4390,34 @@ fn spawn_metrics_forwarder(
 // resolves to a connectable context is stopped and (if pinned) removed from
 // disk. See `cleanup_orphaned_forwards`.
 
+/// Port-forward client lookup that follows reconnects. A wedged entry (failed
+/// probe, or torn down on system resume) is replaced on the spot so pinned
+/// forwards recover even when no panel is open to drive the reconnect.
+pub(crate) fn live_client_source(app: AppHandle, cluster_id: String) -> ClientSource {
+    Arc::new(move || {
+        let app = app.clone();
+        let cluster_id = cluster_id.clone();
+        Box::pin(async move { current_client(app.state::<AppState>().inner(), &cluster_id).await })
+    })
+}
+
+async fn current_client(state: &AppState, cluster_id: &str) -> Result<kube::Client, String> {
+    let entry = state.entry(cluster_id).await?;
+    if !entry.unavailable.load(Ordering::SeqCst) {
+        return Ok(entry.cluster.client());
+    }
+    if state.remove_cluster_if_same(cluster_id, &entry).await {
+        drop_entry_watchers(&entry).await;
+    }
+    let fresh = state.entry(cluster_id).await?;
+    if fresh.unavailable.load(Ordering::SeqCst) {
+        return Err(format!(
+            "cluster {cluster_id} is unavailable — reconnect first"
+        ));
+    }
+    Ok(fresh.cluster.client())
+}
+
 #[tauri::command]
 pub(crate) async fn pf_start(
     cluster_id: String,
@@ -4317,7 +4437,7 @@ pub(crate) async fn pf_start(
             return Ok(ferrisscope_kube_ext::forward_snapshot(existing).await);
         }
     }
-    let entry_arc = state.entry(&cluster_id).await?;
+    state.entry(&cluster_id).await?;
     let spec = ForwardSpec {
         id: id.clone(),
         cluster_id: cluster_id.clone(),
@@ -4331,7 +4451,7 @@ pub(crate) async fn pf_start(
         local_ip: None,
     };
     let handle = start_forward(
-        entry_arc.cluster.client(),
+        live_client_source(app.clone(), cluster_id.clone()),
         spec,
         None, // Simple forward: bind in-process.
         state.portforwards.status_tx.clone(),
@@ -4348,9 +4468,6 @@ pub(crate) async fn pf_start(
     if pinned {
         persist_forwards(&state).await;
     }
-    // Status forwarder is mounted once at startup (see `spawn_pf_status_forwarder`),
-    // so we don't need to spawn one per start.
-    let _ = app;
     Ok(snapshot)
 }
 
@@ -4619,9 +4736,9 @@ pub(crate) async fn restore_persisted_forwards(state: &State<'_, AppState>, app:
             .await
             .insert(id.clone(), true);
         match state.entry(&spec.cluster_id).await {
-            Ok(entry) => {
+            Ok(_) => {
                 match start_forward(
-                    entry.cluster.client(),
+                    live_client_source(app.clone(), spec.cluster_id.clone()),
                     spec.clone(),
                     // Persisted forwards are Simple-tier (global sessions are
                     // re-established via gf_*, not restored here) → bind in-process.
@@ -4898,11 +5015,34 @@ fn emit_prom_changed(app: &AppHandle, cluster_id: &str, entry: Option<&PromCache
 
 #[cfg(test)]
 mod tests {
+
     use super::{
         health_event_for, health_status_triggers_teardown, healthy_event, resource_event_name,
         sanitize_event_segment,
     };
     use ferrisscope_core::health::{ClusterHealthEvent, ClusterHealthStatus};
+
+    #[test]
+    fn resume_reason_humanises_the_sleep() {
+        use super::resume_reason;
+        use std::time::Duration;
+        assert!(resume_reason(Duration::from_secs(42)).ends_with("42s"));
+        assert!(resume_reason(Duration::from_mins(45)).ends_with("45m"));
+        assert!(resume_reason(Duration::from_mins(185)).ends_with("3h 5m"));
+    }
+
+    #[test]
+    fn torn_down_log_streams_end_as_interrupted() {
+        use super::{is_final_log_event, stream_torn_down, LogEvent};
+        assert!(matches!(stream_torn_down(), LogEvent::Interrupted { .. }));
+        assert!(is_final_log_event(&stream_torn_down()));
+        assert!(is_final_log_event(&LogEvent::Ended {
+            reason: String::new()
+        }));
+        assert!(!is_final_log_event(&LogEvent::Waiting {
+            reason: String::new()
+        }));
+    }
 
     fn snap(status: ClusterHealthStatus, reason: Option<&str>) -> ClusterHealthEvent {
         ClusterHealthEvent {

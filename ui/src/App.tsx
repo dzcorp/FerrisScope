@@ -10,7 +10,7 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { api, onPortForwardStatus, onResourceDelta } from "./api";
+import { api, onPortForwardStatus, onResourceDelta, onSystemResumed } from "./api";
 import {
   buildPrefsPayload,
   selectActiveClusterIds,
@@ -429,9 +429,20 @@ export default function App() {
       .then((entries) => hydrateForwards(entries))
       .catch(reportErr("app", "Couldn't restore port-forwards"));
 
+    let unlistenResume: (() => void) | null = null;
+    let disposed = false;
+    onSystemResumed(() => useAppStore.getState().bumpResumeEpoch())
+      .then((fn) => {
+        if (disposed) fn();
+        else unlistenResume = fn;
+      })
+      .catch(logErr("app"));
+
     return () => {
+      disposed = true;
       unlisten.then((fn) => fn());
       if (unlistenPf) unlistenPf();
+      if (unlistenResume) unlistenResume();
     };
   }, [hydrateTableViews, hydratePrefs, hydrateForwards, applyForwardStatus]);
 

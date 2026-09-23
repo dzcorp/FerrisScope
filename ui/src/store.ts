@@ -425,6 +425,9 @@ type AppState = {
   // notably the Rail's CRD discovery — re-run and clear stale errors after a
   // reconnect fixes the underlying auth/reachability problem. Never persisted.
   clusterEpoch: Record<string, number>;
+  // Bumped each time the machine wakes from sleep. Connection hooks restart
+  // their reconnect budget on it. Never persisted.
+  resumeEpoch: number;
 
   // Active port-forwards keyed by id. Initially hydrated by api.pfList() at
   // App boot; mutated on every `portforward://status` event. Detail-panel
@@ -594,6 +597,7 @@ type AppState = {
     reason: string | null,
   ) => void;
   clearClusterHealth: (clusterId: string) => void;
+  bumpResumeEpoch: () => void;
   setClusterReconnecting: (clusterId: string, value: boolean) => void;
 
   hydrateForwards: (entries: ForwardEntry[]) => void;
@@ -907,6 +911,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   clusterHealthReason: {},
   clusterReconnecting: {},
   clusterEpoch: {},
+  resumeEpoch: 0,
 
   forwards: {},
   forwardsOpen: false,
@@ -1388,6 +1393,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         },
       };
     }),
+  bumpResumeEpoch: () => set((s) => ({ resumeEpoch: s.resumeEpoch + 1 })),
   setClusterReconnecting: (clusterId, value) =>
     set((s) => {
       if ((s.clusterReconnecting[clusterId] ?? false) === value) return s;

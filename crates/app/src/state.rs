@@ -66,6 +66,72 @@ fn select_unpinned_cluster_forwards<'a>(
         .collect()
 }
 
+/// At most one in-flight computation per key, without holding any lock across
+/// it: concurrent callers for the same key share one result, other keys run
+/// independently. The key is forgotten once the computation settles, so an
+/// error is not cached.
+pub(crate) struct SingleFlight<V> {
+    flights: std::sync::Mutex<HashMap<String, Arc<Flight<V>>>>,
+}
+
+struct Flight<V> {
+    cell: tokio::sync::OnceCell<V>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl<V> Default for SingleFlight<V> {
+    fn default() -> Self {
+        Self {
+            flights: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<V: Clone> SingleFlight<V> {
+    fn flights(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Flight<V>>>> {
+        self.flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Join the in-flight computation for `key`, or start one with `f`. `f`
+    /// receives the flight's cancellation flag (see [`Self::cancel`]).
+    pub(crate) async fn run<F, Fut>(&self, key: &str, f: F) -> V
+    where
+        F: FnOnce(Arc<AtomicBool>) -> Fut,
+        Fut: std::future::Future<Output = V>,
+    {
+        let flight = self
+            .flights()
+            .entry(key.to_owned())
+            .or_insert_with(|| {
+                Arc::new(Flight {
+                    cell: tokio::sync::OnceCell::new(),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                })
+            })
+            .clone();
+        let value = flight
+            .cell
+            .get_or_init(|| f(flight.cancelled.clone()))
+            .await
+            .clone();
+        let mut flights = self.flights();
+        if flights.get(key).is_some_and(|f| Arc::ptr_eq(f, &flight)) {
+            flights.remove(key);
+        }
+        value
+    }
+
+    /// Forget the in-flight computation for `key` and raise its cancellation
+    /// flag. Callers already joined still receive its result.
+    pub(crate) fn cancel(&self, key: &str) {
+        if let Some(flight) = self.flights().remove(key) {
+            flight.cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 pub(crate) struct ClusterEntry {
     pub(crate) cluster: Arc<Cluster>,
     /// One refcounted slot per resource kind id (see `ferrisscope_kube_ext::registry`).
@@ -146,6 +212,23 @@ pub(crate) struct ClusterEntry {
 }
 
 impl ClusterEntry {
+    fn new(cluster: Cluster) -> Arc<Self> {
+        let cluster = Arc::new(cluster);
+        let health = ClusterHealth::start(cluster.client());
+        Arc::new(Self {
+            cluster,
+            kinds: Mutex::new(HashMap::new()),
+            metrics: Mutex::new(MetricsSlot::default()),
+            health,
+            unavailable: AtomicBool::new(false),
+            connect_probes_done: AtomicBool::new(false),
+            health_wired: AtomicBool::new(false),
+            namespaces_pinned: AtomicBool::new(false),
+            health_forwarder: std::sync::Mutex::new(None),
+            metrics_forwarder: std::sync::Mutex::new(None),
+        })
+    }
+
     /// Atomically claim the right to run the connect-time probes for this
     /// cluster. Returns `true` exactly once per `ClusterEntry` lifetime
     /// (across any number of concurrent callers). Subsequent calls return
@@ -221,6 +304,9 @@ impl KindSlot {
 #[derive(Default)]
 pub(crate) struct AppState {
     inner: Mutex<HashMap<ClusterId, Arc<ClusterEntry>>>,
+    /// Lazy connects run outside `inner` so a slow cluster can't stall
+    /// lookups of the others.
+    connecting: SingleFlight<Result<Arc<ClusterEntry>, String>>,
     /// Active log streams keyed by app-assigned id. Dropping the Arc aborts the
     /// reader. The `ClusterId` is carried so a cluster disconnect / reconnect
     /// can abort the streams it owns (`drop_cluster_logs`) — otherwise the
@@ -340,10 +426,43 @@ impl AppState {
     }
 
     pub(crate) async fn entry(&self, id: &str) -> Result<Arc<ClusterEntry>, String> {
+        if let Some(existing) = self.get_existing(id).await {
+            return Ok(existing);
+        }
+        self.connecting
+            .run(id, |cancelled| async move {
+                let cluster = self.connect_cluster(id).await?;
+                self.cache_lazy(id, cluster, &cancelled).await
+            })
+            .await
+    }
+
+    /// Insert a lazily-connected cluster unless something else got there
+    /// first: an entry cached meanwhile (e.g. by `insert_connected`) wins, and
+    /// a `remove_cluster` during the connect means the operator left, so
+    /// caching it would resurrect the cluster.
+    async fn cache_lazy(
+        &self,
+        id: &str,
+        cluster: Cluster,
+        cancelled: &AtomicBool,
+    ) -> Result<Arc<ClusterEntry>, String> {
         let mut map = self.inner.lock().await;
         if let Some(existing) = map.get(id) {
             return Ok(existing.clone());
         }
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(format!("{id}: disconnected while connecting"));
+        }
+        if let Some(port) = cluster.tunnel_local_port() {
+            crate::ssh_scratch::publish_tunnel_port(id, port);
+        }
+        let entry = ClusterEntry::new(cluster);
+        map.insert(id.to_owned(), entry.clone());
+        Ok(entry)
+    }
+
+    async fn connect_cluster(&self, id: &str) -> Result<Cluster, String> {
         let context_name = kubeconfig::context_name_from_id(id);
         let started = std::time::Instant::now();
 
@@ -373,22 +492,7 @@ impl AppState {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "AppState.entry: connected on demand"
         );
-        let cluster = Arc::new(cluster);
-        let health = ClusterHealth::start(cluster.client());
-        let entry = Arc::new(ClusterEntry {
-            cluster,
-            kinds: Mutex::new(HashMap::new()),
-            metrics: Mutex::new(MetricsSlot::default()),
-            health,
-            unavailable: AtomicBool::new(false),
-            connect_probes_done: AtomicBool::new(false),
-            health_wired: AtomicBool::new(false),
-            namespaces_pinned: AtomicBool::new(false),
-            health_forwarder: std::sync::Mutex::new(None),
-            metrics_forwarder: std::sync::Mutex::new(None),
-        });
-        map.insert(id.to_owned(), entry.clone());
-        Ok(entry)
+        Ok(cluster)
     }
 
     /// Cache an already-connected cluster under `id`. Used by `connect_context`
@@ -428,20 +532,10 @@ impl AppState {
             Some(wedged) => Some(wedged.clone()),
             None => None,
         };
-        let cluster = Arc::new(cluster);
-        let health = ClusterHealth::start(cluster.client());
-        let entry = Arc::new(ClusterEntry {
-            cluster,
-            kinds: Mutex::new(HashMap::new()),
-            metrics: Mutex::new(MetricsSlot::default()),
-            health,
-            unavailable: AtomicBool::new(false),
-            connect_probes_done: AtomicBool::new(false),
-            health_wired: AtomicBool::new(false),
-            namespaces_pinned: AtomicBool::new(false),
-            health_forwarder: std::sync::Mutex::new(None),
-            metrics_forwarder: std::sync::Mutex::new(None),
-        });
+        if let Some(port) = cluster.tunnel_local_port() {
+            crate::ssh_scratch::publish_tunnel_port(&id, port);
+        }
+        let entry = ClusterEntry::new(cluster);
         map.insert(id, entry.clone());
         (entry, displaced)
     }
@@ -491,7 +585,21 @@ impl AppState {
     /// so the connected `Cluster` (and its kube `Client` HTTP/2 pool) is
     /// fully released instead of lingering for the rest of the session.
     pub(crate) async fn remove_cluster(&self, id: &str) -> Option<Arc<ClusterEntry>> {
-        self.inner.lock().await.remove(id)
+        let mut map = self.inner.lock().await;
+        // Under the map lock so `cache_lazy` sees the flag before it can insert.
+        self.connecting.cancel(id);
+        map.remove(id)
+    }
+
+    /// Remove `id` only while it still maps to `entry`, so a replacement
+    /// inserted concurrently by `connect_context` is never evicted.
+    pub(crate) async fn remove_cluster_if_same(&self, id: &str, entry: &Arc<ClusterEntry>) -> bool {
+        let mut map = self.inner.lock().await;
+        if map.get(id).is_some_and(|cur| Arc::ptr_eq(cur, entry)) {
+            map.remove(id);
+            return true;
+        }
+        false
     }
 
     /// Snapshot of currently-cached cluster entries — id + the Arc.
@@ -639,5 +747,111 @@ mod tests {
             "c-absent",
         );
         assert!(none.is_empty());
+    }
+
+    use super::{AppState, SingleFlight};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn single_flight_shares_one_run_per_key() {
+        let flights = SingleFlight::<u32>::default();
+        let runs = AtomicUsize::new(0);
+        let (tx, rx) = oneshot::channel::<()>();
+        let work = |_| async {
+            runs.fetch_add(1, Ordering::SeqCst);
+            let _ = rx.await;
+            7
+        };
+        let (a, b, ()) = tokio::join!(
+            flights.run("a", work),
+            flights.run("a", |_| async { unreachable!("second caller must join") }),
+            async {
+                tokio::task::yield_now().await;
+                let _ = tx.send(());
+            },
+        );
+        assert_eq!((a, b), (7, 7));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn single_flight_forgets_settled_key() {
+        let flights = SingleFlight::<Result<u32, String>>::default();
+        let first = flights.run("a", |_| async { Err("boom".to_owned()) }).await;
+        let second = flights.run("a", |_| async { Ok(1) }).await;
+        assert!(first.is_err());
+        assert_eq!(second, Ok(1));
+    }
+
+    #[tokio::test]
+    async fn single_flight_cancel_raises_flag_for_running_flight() {
+        let flights = SingleFlight::<bool>::default();
+        let (tx, rx) = oneshot::channel::<()>();
+        let (seen, ()) = tokio::join!(
+            flights.run("a", |cancelled| async move {
+                let _ = rx.await;
+                cancelled.load(Ordering::SeqCst)
+            }),
+            async {
+                tokio::task::yield_now().await;
+                flights.cancel("a");
+                let _ = tx.send(());
+            },
+        );
+        assert!(seen);
+    }
+
+    #[tokio::test]
+    async fn slow_connect_does_not_block_other_clusters() {
+        let state = Arc::new(AppState::default());
+        let (started_tx, started_rx) = oneshot::channel::<()>();
+        let slow = tokio::spawn({
+            let state = state.clone();
+            async move {
+                state
+                    .connecting
+                    .run("a", |_| async move {
+                        let _ = started_tx.send(());
+                        std::future::pending::<Result<Arc<super::ClusterEntry>, String>>().await
+                    })
+                    .await
+            }
+        });
+        started_rx.await.unwrap();
+
+        let others = async {
+            assert!(state.get_existing("b").await.is_none());
+            assert!(state.remove_cluster("b").await.is_none());
+            assert_eq!(state.cluster_count().await, 0);
+        };
+        tokio::time::timeout(Duration::from_secs(5), others)
+            .await
+            .expect("cluster map must not be held across a connect");
+        slow.abort();
+    }
+
+    #[tokio::test]
+    async fn remove_cluster_cancels_in_flight_connect() {
+        let state = AppState::default();
+        let (tx, rx) = oneshot::channel::<()>();
+        let (result, ()) = tokio::join!(
+            state.connecting.run("a", |cancelled| async move {
+                let _ = rx.await;
+                if cancelled.load(Ordering::SeqCst) {
+                    Err("cancelled".to_owned())
+                } else {
+                    Err("not cancelled".to_owned())
+                }
+            }),
+            async {
+                tokio::task::yield_now().await;
+                assert!(state.remove_cluster("a").await.is_none());
+                let _ = tx.send(());
+            },
+        );
+        assert_eq!(result.err().as_deref(), Some("cancelled"));
     }
 }

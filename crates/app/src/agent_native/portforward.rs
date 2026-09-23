@@ -163,7 +163,7 @@ impl NativeTool for PortForwardOpen {
                 return Ok(open_result(&snap, true));
             }
         }
-        let entry = state
+        state
             .entry(&cluster_id)
             .await
             .map_err(NativeToolError::msg)?;
@@ -179,7 +179,7 @@ impl NativeTool for PortForwardOpen {
             local_ip: None,
         };
         let handle = start_forward(
-            entry.cluster.client(),
+            crate::commands::live_client_source(self.app.clone(), cluster_id.clone()),
             spec,
             None, // Simple forward: bind in-process.
             state.portforwards.status_tx.clone(),

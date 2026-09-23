@@ -814,6 +814,15 @@ describe("cluster health", () => {
   });
 });
 
+describe("resumeEpoch", () => {
+  it("bumpResumeEpoch advances the wake counter", () => {
+    const before = useAppStore.getState().resumeEpoch;
+    useAppStore.getState().bumpResumeEpoch();
+    useAppStore.getState().bumpResumeEpoch();
+    expect(useAppStore.getState().resumeEpoch).toBe(before + 2);
+  });
+});
+
 describe("tableViews", () => {
   it("setTableView stores a populated view and deletes one with empty sorting + sizing", () => {
     useAppStore.getState().setTableView("ctx", "pods", {

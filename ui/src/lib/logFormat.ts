@@ -10,6 +10,13 @@
 const RFC3339_RE =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) /;
 
+/// The raw RFC3339 prefix exactly as the apiserver sent it, for resuming a
+/// stream after the last line shown. `null` for an un-timestamped line.
+export function rawTimestamp(line: string): string | null {
+  const head = line.length > 40 ? line.slice(0, 40) : line;
+  return RFC3339_RE.exec(head)?.[1] ?? null;
+}
+
 export function splitTimestamp(line: string): {
   ts: string | null;
   text: string;

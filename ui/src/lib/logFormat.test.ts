@@ -4,7 +4,7 @@
 // to regress when refactoring the regex.
 
 import { describe, it, expect } from "vitest";
-import { splitTimestamp } from "./logFormat";
+import { rawTimestamp, splitTimestamp } from "./logFormat";
 
 describe("splitTimestamp", () => {
   it("splits a standard RFC3339Nano prefix into a local HH:MM:SS.mmm time", () => {
@@ -48,5 +48,16 @@ describe("splitTimestamp", () => {
     const r = splitTimestamp(long);
     expect(r.ts).toBeNull();
     expect(r.text).toBe(long);
+  });
+});
+
+describe("rawTimestamp", () => {
+  it("returns the apiserver prefix verbatim", () => {
+    expect(rawTimestamp("2026-05-14T10:30:00.123456789Z hello")).toBe(
+      "2026-05-14T10:30:00.123456789Z",
+    );
+  });
+  it("is null for an un-timestamped line", () => {
+    expect(rawTimestamp("plain line")).toBeNull();
   });
 });
