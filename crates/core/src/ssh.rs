@@ -58,6 +58,25 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 /// tunnel between user clicks; short enough that a half-dead host gives up.
 const INACTIVITY_TIMEOUT: Duration = Duration::from_mins(5);
 
+/// SSH keepalive cadence. With [`KEEPALIVE_MAX`] unanswered probes a session
+/// that died across suspend / network change errors in ~1 min, well inside
+/// [`INACTIVITY_TIMEOUT`].
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const KEEPALIVE_MAX: usize = 3;
+
+/// Budget for opening one `direct-tcpip` channel. Without it a tunnel
+/// connection over a dead session waits until keepalive tears the session down.
+const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn client_config() -> client::Config {
+    client::Config {
+        inactivity_timeout: Some(INACTIVITY_TIMEOUT),
+        keepalive_interval: Some(KEEPALIVE_INTERVAL),
+        keepalive_max: KEEPALIVE_MAX,
+        ..client::Config::default()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecResult {
     pub exit_status: Option<u32>,
@@ -192,11 +211,7 @@ impl SshSession {
             captured: captured.clone(),
         };
 
-        let client_config = client::Config {
-            inactivity_timeout: Some(INACTIVITY_TIMEOUT),
-            ..client::Config::default()
-        };
-        let client_config = Arc::new(client_config);
+        let client_config = Arc::new(client_config());
 
         let connect_fut = client::connect(client_config, (cfg.host.as_str(), cfg.port), verifier);
         let mut handle = match tokio::time::timeout(CONNECT_TIMEOUT, connect_fut).await {
@@ -318,18 +333,23 @@ impl SshSession {
                 let host_clone = target_host.clone();
                 let session_clone = session.clone();
                 tokio::spawn(async move {
-                    let chan = match session_clone
-                        .handle
-                        .channel_open_direct_tcpip(
-                            host_clone.clone(),
-                            u32::from(target_port),
-                            "127.0.0.1",
-                            u32::from(peer.port()),
-                        )
-                        .await
-                    {
-                        Ok(c) => c,
-                        Err(e) => {
+                    let open = session_clone.handle.channel_open_direct_tcpip(
+                        host_clone.clone(),
+                        u32::from(target_port),
+                        "127.0.0.1",
+                        u32::from(peer.port()),
+                    );
+                    let chan = match tokio::time::timeout(CHANNEL_OPEN_TIMEOUT, open).await {
+                        Ok(Ok(c)) => c,
+                        Err(_) => {
+                            tracing::warn!(
+                                target = %format!("{host_clone}:{target_port}"),
+                                "ssh tunnel: channel open timed out"
+                            );
+                            let _ = local.shutdown().await;
+                            return;
+                        }
+                        Ok(Err(e)) => {
                             tracing::warn!(
                                 target = %format!("{host_clone}:{target_port}"),
                                 error = %e,
@@ -643,4 +663,24 @@ pub fn write_keychain_secret(account: &str, value: &str) -> Result<()> {
     entry
         .set_password(value)
         .map_err(|e| Error::Ssh(format!("keychain write: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_config_enables_keepalive() {
+        let cfg = client_config();
+        assert_eq!(cfg.keepalive_interval, Some(KEEPALIVE_INTERVAL));
+        assert_eq!(cfg.keepalive_max, KEEPALIVE_MAX);
+        assert_eq!(cfg.inactivity_timeout, Some(INACTIVITY_TIMEOUT));
+    }
+
+    #[test]
+    fn keepalive_detects_dead_session_before_inactivity_timeout() {
+        let window = KEEPALIVE_INTERVAL * u32::try_from(KEEPALIVE_MAX + 1).unwrap();
+        assert!(window < INACTIVITY_TIMEOUT);
+        assert!(CHANNEL_OPEN_TIMEOUT < INACTIVITY_TIMEOUT);
+    }
 }

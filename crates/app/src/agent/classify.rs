@@ -435,6 +435,14 @@ mod tests {
     }
 
     #[test]
+    fn transient_classifier_stalled_stream_retries() {
+        let e = ProviderError::stream_stalled(std::time::Duration::from_mins(2));
+        assert!(is_transient_error(&e).is_some());
+        assert!(classify_usage_limit(&e).is_none());
+        assert!(!is_context_overflow_error(&e));
+    }
+
+    #[test]
     fn redact_secrets_scrubs_keys_and_tokens() {
         // OpenAI / Anthropic key prefixes.
         let r = redact_secrets("auth failed for sk-ant-abcd1234efgh5678 on /v1/messages");

@@ -15,14 +15,14 @@
 //! the agent loop and the UI don't have to care about Anthropic specifics.
 
 use super::{
-    dropped_images_note, merge_top_level, ChatProvider, CompletionEvent, CompletionFinal,
-    CompletionRequest, EventSink, FinishReason, ModelInfo, ProviderError, Usage,
+    dropped_images_note, merge_top_level, sse_events, ChatProvider, CompletionEvent,
+    CompletionFinal, CompletionRequest, EventSink, FinishReason, ModelInfo, ProviderError, Usage,
+    STREAM_IDLE_TIMEOUT,
 };
 use crate::config::{Credential, ProviderKind};
 use crate::provider::meta::{self, ProviderMeta};
 use crate::types::{ChatMessage, MessageRole, ToolCall};
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -311,11 +311,11 @@ impl ChatProvider for AnthropicProvider {
             return Err(ProviderError::from_http_status(status, body));
         }
 
-        let mut stream = resp.bytes_stream().eventsource();
+        let mut stream = sse_events(resp.bytes_stream(), STREAM_IDLE_TIMEOUT);
         let mut state = SseState::default();
 
         while let Some(ev) = stream.next().await {
-            let ev = ev.map_err(|e| ProviderError::Decode(e.to_string()))?;
+            let ev = ev?;
             if ev.data.trim().is_empty() {
                 continue;
             }

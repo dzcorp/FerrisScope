@@ -25,14 +25,14 @@
 //! Subsequent 401s surface as `ProviderError::Auth`.
 
 use super::{
-    dropped_images_note, merge_top_level, ChatProvider, CompletionEvent, CompletionFinal,
-    CompletionRequest, EventSink, FinishReason, ModelInfo, ProviderError, Usage,
+    dropped_images_note, merge_top_level, sse_events, ChatProvider, CompletionEvent,
+    CompletionFinal, CompletionRequest, EventSink, FinishReason, ModelInfo, ProviderError, Usage,
+    STREAM_IDLE_TIMEOUT,
 };
 use crate::config::Credential;
 use crate::provider::meta;
 use crate::types::{ChatMessage, MessageRole, ToolCall};
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -355,11 +355,11 @@ impl ChatProvider for OpenAICodexProvider {
             return Err(ProviderError::from_http_status(status, body_text));
         }
 
-        let mut stream = response.bytes_stream().eventsource();
+        let mut stream = sse_events(response.bytes_stream(), STREAM_IDLE_TIMEOUT);
         let mut state = ResponsesState::default();
 
         while let Some(ev) = stream.next().await {
-            let ev = ev.map_err(|e| ProviderError::Decode(e.to_string()))?;
+            let ev = ev?;
             if ev.data.trim().is_empty() {
                 continue;
             }

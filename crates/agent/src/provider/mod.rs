@@ -8,7 +8,10 @@ pub mod openai_compat;
 
 use crate::types::{ChatMessage, ToolCall, ToolSchema};
 use async_trait::async_trait;
+use eventsource_stream::{Event, EventStreamError, Eventsource};
+use futures::stream::{BoxStream, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -56,6 +59,15 @@ impl ProviderError {
             status: None,
             body: msg.into(),
         }
+    }
+
+    /// A streaming response that went silent for `idle`. Worded to hit the
+    /// retry classifier's timeout phrase.
+    pub fn stream_stalled(idle: Duration) -> Self {
+        Self::transport(format!(
+            "response stream stalled: timed out after {}s without data",
+            idle.as_secs()
+        ))
     }
 }
 
@@ -191,6 +203,54 @@ pub(crate) fn dropped_images_note(text: &str, count: usize) -> String {
     }
 }
 
+/// Longest gap tolerated between body chunks of a streaming response. A
+/// stream that dies mid-response (suspend, network change) otherwise hangs
+/// until the 10-minute request timeout. Measured on raw bytes, so SSE comment
+/// keepalives count; generous because reasoning models can pause for a while.
+pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_mins(2);
+
+/// Parse an SSE body into events, failing with a retryable transport error
+/// (see `classify::is_transient_error`) when no bytes arrive for `idle`.
+pub(crate) fn sse_events<S, B, E>(
+    body: S,
+    idle: Duration,
+) -> BoxStream<'static, Result<Event, ProviderError>>
+where
+    S: Stream<Item = Result<B, E>> + Send + Unpin + 'static,
+    B: AsRef<[u8]> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    with_idle_timeout(body, idle)
+        .eventsource()
+        .map(|ev| {
+            ev.map_err(|e| match e {
+                EventStreamError::Transport(pe) => pe,
+                other => ProviderError::Decode(other.to_string()),
+            })
+        })
+        .boxed()
+}
+
+fn with_idle_timeout<S, B, E>(
+    body: S,
+    idle: Duration,
+) -> impl Stream<Item = Result<B, ProviderError>> + Send
+where
+    S: Stream<Item = Result<B, E>> + Send + Unpin,
+    B: Send,
+    E: std::fmt::Display,
+{
+    futures::stream::unfold(Some(body), move |state| async move {
+        let mut body = state?;
+        match tokio::time::timeout(idle, body.next()).await {
+            Ok(Some(Ok(chunk))) => Some((Ok(chunk), Some(body))),
+            Ok(Some(Err(e))) => Some((Err(ProviderError::transport(e.to_string())), Some(body))),
+            Ok(None) => None,
+            Err(_) => Some((Err(ProviderError::stream_stalled(idle)), None)),
+        }
+    })
+}
+
 #[async_trait]
 pub trait ChatProvider: Send + Sync {
     fn name(&self) -> &'static str;
@@ -202,4 +262,53 @@ pub trait ChatProvider: Send + Sync {
         req: CompletionRequest,
         sink: EventSink,
     ) -> Result<CompletionFinal, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Chunk = Result<&'static [u8], std::io::Error>;
+
+    #[tokio::test(start_paused = true)]
+    async fn sse_events_errors_when_stream_stalls() {
+        let body = futures::stream::iter([Ok::<_, std::io::Error>(&b"data: a\n\n"[..])])
+            .chain(futures::stream::pending::<Chunk>());
+        let mut events = sse_events(body, Duration::from_secs(90));
+
+        assert_eq!(events.next().await.unwrap().unwrap().data, "a");
+        let start = tokio::time::Instant::now();
+        let err = events.next().await.unwrap().unwrap_err();
+        assert_eq!(start.elapsed(), Duration::from_secs(90));
+        assert!(matches!(err, ProviderError::Http { status: None, .. }));
+        assert!(err.to_string().contains("timed out"));
+        assert!(events.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sse_events_tolerates_gaps_below_idle() {
+        let body = futures::stream::iter([&b"data: a\n\n"[..], b": keepalive\n\n", b"data: b\n\n"])
+            .then(|chunk| async move {
+                tokio::time::sleep(Duration::from_secs(80)).await;
+                Ok::<_, std::io::Error>(chunk)
+            })
+            .boxed();
+        let got: Vec<String> = sse_events(body, Duration::from_secs(90))
+            .map(|ev| ev.unwrap().data)
+            .collect()
+            .await;
+        assert_eq!(got, ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn sse_events_maps_body_errors_to_transport() {
+        let body =
+            futures::stream::iter([Err::<&[u8], _>(std::io::Error::other("connection reset"))]);
+        let err = sse_events(body, Duration::from_secs(90))
+            .next()
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, ProviderError::Http { status: None, .. }));
+    }
 }
