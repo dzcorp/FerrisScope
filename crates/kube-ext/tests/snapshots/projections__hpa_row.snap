@@ -9,5 +9,6 @@ expression: value
   "min_replicas": 2,
   "name": "web",
   "namespace": "default",
-  "reference": "Deployment/web"
+  "reference": "Deployment/web",
+  "targets": "cpu: 65%/80%"
 }

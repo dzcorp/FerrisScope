@@ -978,8 +978,12 @@ const WARN = new Set([
   // Cluster-level, not object-level: a connection being rebuilt after the
   // health probe declared the apiserver gone.
   "Reconnecting",
+  // HPA pinned at min/max replicas.
+  "Limited",
 ]);
 const INFO = new Set([
+  // HPA mid-rescale (current != desired).
+  "Scaling",
   "ContainerCreating",
   "PodInitializing",
   "Init",
@@ -1005,6 +1009,8 @@ const BAD = new Set([
   "Degraded",
   "Stalled",
   "Unhealthy",
+  // HPA can't compute a recommendation (metrics unavailable).
+  "Inactive",
   "Unavailable",
   "DeadlineExceeded",
   "ContainerCannotRun",
@@ -1023,6 +1029,7 @@ const TRANSIENT = new Set([
   "Updating",
   "Progressing",
   "Reconciling",
+  "Scaling",
   "Waiting",
   "PodScheduled",
   "ContainerStarting",

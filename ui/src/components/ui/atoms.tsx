@@ -348,16 +348,23 @@ export function BarGauge({
   track,
   width = 60,
   height = 4,
+  marker,
+  markerColor,
 }: {
   value: number;
   color: string;
   track: string;
-  width?: number;
+  width?: number | string;
   height?: number;
+  /** Reference tick in [0, 1], e.g. a target the value is measured against. */
+  marker?: number;
+  markerColor?: string;
 }) {
+  const clamp = (v: number) => Math.max(0, Math.min(1, v));
   return (
     <div
       style={{
+        position: "relative",
         width,
         height,
         borderRadius: height / 2,
@@ -368,12 +375,25 @@ export function BarGauge({
     >
       <div
         style={{
-          width: `${Math.max(0, Math.min(1, value)) * 100}%`,
+          width: `${clamp(value) * 100}%`,
           height: "100%",
           background: color,
           transition: "width .3s",
         }}
       />
+      {marker != null && (
+        <div
+          data-testid="bar-gauge-marker"
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            left: `calc(${clamp(marker) * 100}% - 1px)`,
+            width: 2,
+            background: markerColor ?? color,
+          }}
+        />
+      )}
     </div>
   );
 }

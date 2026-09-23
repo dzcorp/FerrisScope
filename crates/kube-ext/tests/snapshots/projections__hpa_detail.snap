@@ -1,6 +1,5 @@
 ---
 source: crates/kube-ext/tests/projections.rs
-assertion_line: 39
 expression: value
 ---
 {
@@ -30,13 +29,21 @@ expression: value
   },
   "metrics": [
     {
+      "current": {
+        "average_utilization": 65,
+        "average_value": null,
+        "value": null
+      },
+      "current_display": "65%",
       "name": "cpu",
+      "ratio": 0.813,
       "target": {
         "average_utilization": 80,
         "average_value": null,
         "type": "Utilization",
         "value": null
       },
+      "target_display": "80%",
       "type": "Resource"
     }
   ],
@@ -45,5 +52,10 @@ expression: value
     "api_version": "apps/v1",
     "kind": "Deployment",
     "name": "web"
+  },
+  "scaling": {
+    "message": null,
+    "reason": null,
+    "status": "Unknown"
   }
 }

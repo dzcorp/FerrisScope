@@ -6,7 +6,6 @@ import { useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
 import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM } from "../../../theme";
-import {  } from "../../../theme";
 import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
   Copyable,
@@ -14,7 +13,6 @@ import {
   EditSessionProvider,
   GlobalSaveBar,
   KeyValueChips,
-  LinkValue,
   Mute,
   ageFromIso,
   type DetailNavigate,
@@ -23,7 +21,6 @@ import {
 import { MetaSection } from "../workload/shared";
 import type {
   AdmissionWebhook,
-  HorizontalPodAutoscalerDetail,
   LeaseDetail,
   MutatingWebhookConfigurationDetail,
   PodDisruptionBudgetDetail,
@@ -64,171 +61,7 @@ function NamespaceGuard({
   return <>{children}</>;
 }
 
-// ── HorizontalPodAutoscaler ────────────────────────────────────────────────
-
-export function HorizontalPodAutoscalerSummary(props: {
-  mode: ThemeMode;
-  clusterId: string;
-  namespace: string | null;
-  name: string;
-  detailVersion: number;
-  onNavigate?: DetailNavigate;
-}) {
-  const t = useResolvedTheme().tokens;
-  const [refetch, setRefetch] = useState(0);
-  const ns = props.namespace;
-  const state = useDetail<HorizontalPodAutoscalerDetail>(
-    () => api.getHorizontalPodAutoscalerDetail(props.clusterId, ns ?? "", props.name),
-    [props.clusterId, ns, props.name, props.detailVersion, refetch],
-  );
-
-  return (
-    <NamespaceGuard t={t} ns={ns} label="HorizontalPodAutoscaler">
-      {state.kind === "loading" ? (
-        <Frame t={t}>
-          <LoadingLine t={t} label="Loading hpa…"/>
-        </Frame>
-      ) : state.kind === "error" ? (
-        <ErrorBlock t={t} message={state.message} kindLabel="hpa" />
-      ) : (
-        <EditSessionProvider
-          target={{
-            clusterId: props.clusterId,
-            kindId: "horizontalpodautoscalers",
-            namespace: ns,
-            name: props.name,
-          }}
-          onSaved={() => setRefetch((r) => r + 1)}
-        >
-          <Frame t={t}>
-            <MetaSection
-              t={t}
-              meta={state.detail.meta}
-              onNavigate={props.onNavigate}
-              editTarget={{
-                clusterId: props.clusterId,
-                kindId: "horizontalpodautoscalers",
-                namespace: ns,
-                name: props.name,
-              }}
-            />
-            <Section t={t} title="Scale Target" />
-            <div style={{ marginBottom: 22 }}>
-              {state.detail.scale_target_ref ? (
-                <>
-                  <DetailRow t={t} label="Kind">
-                    <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                      {state.detail.scale_target_ref.kind}
-                    </span>
-                  </DetailRow>
-                  <DetailRow t={t} label="Name">
-                    <LinkValue
-                      t={t}
-                      onClick={() =>
-                        props.onNavigate?.(
-                          state.detail.scale_target_ref!.kind,
-                          ns,
-                          state.detail.scale_target_ref!.name,
-                        )
-                      }
-                      copyText={state.detail.scale_target_ref.name}
-                      enabled={!!props.onNavigate}
-                    >
-                      {state.detail.scale_target_ref.name}
-                    </LinkValue>
-                  </DetailRow>
-                  {state.detail.scale_target_ref.api_version && (
-                    <DetailRow t={t} label="API Version">
-                      <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                        {state.detail.scale_target_ref.api_version}
-                      </span>
-                    </DetailRow>
-                  )}
-                </>
-              ) : (
-                <Mute t={t}>—</Mute>
-              )}
-            </div>
-
-            <Section t={t} title="Replicas" />
-            <div style={{ marginBottom: 22 }}>
-              <DetailRow t={t} label="Min">
-                <span style={{ fontSize: FS_MD }}>
-                  {state.detail.min_replicas ?? <Mute t={t}>—</Mute>}
-                </span>
-              </DetailRow>
-              <DetailRow t={t} label="Max">
-                <span style={{ fontSize: FS_MD }}>{state.detail.max_replicas}</span>
-              </DetailRow>
-              <DetailRow t={t} label="Current">
-                <span style={{ fontSize: FS_MD }}>
-                  {state.detail.current_replicas ?? <Mute t={t}>—</Mute>}
-                </span>
-              </DetailRow>
-              <DetailRow t={t} label="Desired">
-                <span style={{ fontSize: FS_MD }}>
-                  {state.detail.desired_replicas ?? <Mute t={t}>—</Mute>}
-                </span>
-              </DetailRow>
-              {state.detail.last_scale_time && (
-                <DetailRow t={t} label="Last Scaled">
-                  <Copyable text={state.detail.last_scale_time}>
-                    <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                      {ageFromIso(state.detail.last_scale_time)} ago
-                    </span>
-                  </Copyable>
-                </DetailRow>
-              )}
-            </div>
-
-            {state.detail.metrics.length > 0 && (
-              <>
-                <Section
-                  t={t}
-                  title="Metrics"
-                  right={`${state.detail.metrics.length} total`}
-                />
-                <div style={{ marginBottom: 22 }}>
-                  {state.detail.metrics.map((m, i) => (
-                    <DetailRow key={i} t={t} label={m.type}>
-                      <span style={{ fontSize: FS_MD, fontFamily: FF_MONO }}>
-                        {m.name ?? m.metric_name ?? "—"}
-                        {m.target?.average_utilization != null
-                          ? ` @ ${m.target.average_utilization}%`
-                          : m.target?.average_value
-                            ? ` @ avg ${m.target.average_value}`
-                            : m.target?.value
-                              ? ` @ ${m.target.value}`
-                              : ""}
-                      </span>
-                    </DetailRow>
-                  ))}
-                </div>
-              </>
-            )}
-
-            {state.detail.conditions.length > 0 && (
-              <>
-                <Section t={t} title="Conditions" />
-                <div style={{ marginBottom: 22 }}>
-                  {state.detail.conditions.map((c, i) => (
-                    <DetailRow key={i} t={t} label={c.type}>
-                      <span style={{ fontSize: FS_MD }}>
-                        {c.status}
-                        {c.reason ? ` — ${c.reason}` : ""}
-                      </span>
-                    </DetailRow>
-                  ))}
-                </div>
-              </>
-            )}
-            <GlobalSaveBar t={t} />
-          </Frame>
-        </EditSessionProvider>
-      )}
-    </NamespaceGuard>
-  );
-}
+export { HorizontalPodAutoscalerSummary, HpaMetricCard, HpaOverview } from "./hpa";
 
 // ── PodDisruptionBudget ────────────────────────────────────────────────────
 

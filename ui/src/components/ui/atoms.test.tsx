@@ -144,6 +144,16 @@ describe("Gauge + BarGauge — clamp value to [0, 1]", () => {
     expect(inner.style.width).toBe("100%");
   });
 
+  it("BarGauge draws a clamped marker tick only when asked", () => {
+    const { container, rerender } = render(
+      <BarGauge value={0.5} color={t.good} track={t.borderSoft} />,
+    );
+    expect(container.querySelector("[data-testid='bar-gauge-marker']")).toBeNull();
+    rerender(<BarGauge value={0.5} marker={1.4} color={t.good} track={t.borderSoft} />);
+    const tick = container.querySelector("[data-testid='bar-gauge-marker']") as HTMLElement;
+    expect(tick.style.left).toBe("calc(100% - 1px)");
+  });
+
   it("BarGauge with a negative value clamps to 0%", () => {
     const { container } = render(
       <BarGauge value={-0.3} color={t.good} track={t.borderSoft} />,
