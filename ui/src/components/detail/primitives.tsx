@@ -13,30 +13,19 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { FF_MONO, type Tokens, R_SM, R_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { DETAIL_LAYOUT, FF_MONO, type Tokens, R_SM, R_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { MOD_KEY } from "../../lib/keyboard";
 import { Chip, Icons, Tooltip } from "../ui";
 
-// ── Cross-kind navigation ──────────────────────────────────────────────────
-// Hook handed down from DetailPanel → summary component → LinkValue. Maps a
-// Kubernetes Kind name (e.g. "StatefulSet") + (namespace, name) to a
-// detail-panel switch. The parent (ResourceTable) resolves the kind name
-// against the registry and falls back silently if the kind isn't browseable.
-// `clusterId` is optional and defaults to the panel's own cluster. It exists
-// for surfaces that union objects from SEVERAL clusters in one list — the
-// Inspect drawer's Pods tab groups per cluster, so the row's cluster, not the
-// drawer's first subject, is the right scope to open it in.
+// Group disambiguates CRDs from synthetic kinds with the same name.
 export type DetailNavigate = (
   kindName: string,
   namespace: string | null,
   name: string,
   clusterId?: string,
+  group?: string,
 ) => void;
 
-// ── DetailRow ──────────────────────────────────────────────────────────────
-// Label/value row, label-side fixed at 180px, value-side flex-wraps. The
-// canonical building block — every named field in any kind's detail panel
-// goes through one of these.
 export function DetailRow({
   t,
   label,
@@ -58,7 +47,7 @@ export function DetailRow({
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: labelled ? "180px 1fr" : "1fr",
+        gridTemplateColumns: labelled ? DETAIL_LAYOUT.columns : "1fr",
         gap: 16,
         alignItems: "baseline",
         padding: "8px 0",
@@ -951,7 +940,7 @@ function SubEntryRow({
   };
   const inner = (
     <div style={innerStyle}>
-      <span style={{ color: t.textMuted, flexShrink: 0 }}>{labelText}</span>
+      <span style={{ color: t.textMuted, flexShrink: 0, maxWidth: "50%", overflowWrap: "anywhere" }}>{labelText}</span>
       {entry.value != null && (
         <>
           <span style={{ color: t.textMuted }}>

@@ -79,7 +79,7 @@ Every kind's detail panel composes the same kind-agnostic primitives in `ui/src/
 
 | Primitive | Use for |
 |---|---|
-| `<DetailRow t label>` | Label/value row, fixed 180px label, value-side flex-wraps. The atomic building block — every named field. |
+| `<DetailRow t label>` | Label/value row, label capped at 180px and shrinking in narrow panels, value-side flex-wraps. The atomic building block — every named field. |
 | `<SubGrid t entries\|groups copyKeyJoin>` | Indented sub-rows under a parent `DetailRow`. `groups` for multi-section (Resources → Requests + Limits); `entries` for flat lists (env vars, mounts, last-state fields). |
 | `<Copyable text>` | Click-to-copy wrapper with `.fs-copy-flash` pulse. Every value the operator might want to grab. |
 | `<LinkValue t onClick copyText enabled>` | Cross-kind navigation. Click → opens that object's detail; ⌘/Ctrl-click → copies. Owner refs, node names, service-account refs, image-pull-secret refs, volume sources. |
@@ -182,6 +182,16 @@ The two verbs that *do* need backend code create an object from another one and 
 
 `kinds::cron_jobs::project_detail` computes `next_run` via `cron_schedule` (hand-rolled 5-field parser — the crates default to seconds-first expressions that mis-parse every real CronJob). It is wall-clock dependent, so it can't be snapshotted; `tests/projections.rs` substitutes a placeholder and the behaviour is covered by unit tests next to the parser. A schedule or IANA zone we can't evaluate projects `null` — the UI shows a dash rather than a plausible wrong time.
 
+## Helm releases (native)
+
+`helm_releases` / `helm_charts` are synthetic kinds backed by `helm.sh/release.v1` Secrets. The generic YAML / apply / merge-patch / delete paths reject them — every mutation goes through the `helm` CLI (`crates/kube-ext/src/helm.rs`: validation, argv builders, `run_helm`).
+
+- **Argv:** flags first, then `--`, then validated positionals (release ≤53, namespace DNS-1123 label). Never splice unvalidated names into argv.
+- **Upgrade** always passes `--reset-values`: the values buffer is the complete intent. Every mutating call passes `--timeout` below the kill deadline so helm is never killed mid-hook (that leaves a `pending-*` release).
+- **Rollback** is `helm_rollback_cmd` / `fs_helm_rollback`; pending/uninstalling releases block upgrade and rollback in the UI.
+- **Watcher** keeps a small projected row per revision secret (`ReleaseIndex`), decodes headers only, and caps decompression (64 MiB).
+- **UI** mirrors GitOps: `useHelmRelease` lives in `DetailPanel`, verbs are header IconBtns + per-row history Rollback, results are toasts, dialogs use the `Dialog` atom, managed resources reuse `ResourceList` with live status.
+
 ## Well-known CRD overrides
 
 Some CRDs (Gateway API today; Argo / Flux / Cert-Manager / Istio / Tekton later) ship as `DynamicObject` watches but deserve first-class treatment in the rail without dragging in a Rust crate per ecosystem. The overrides layer in `crates/kube-ext/src/well_known.rs` handles this. Watcher path stays generic; what changes is projection + display metadata.
@@ -220,7 +230,23 @@ If not, leave it on the generic dynamic path — Custom Resources is the right h
 - **Don't promote a CRD to a built-in category if its install footprint is rare.** Custom Resources is the right home for the long tail.
 - **Version is per-cluster.** Override entries declare `(group, kind)` only — `version` and `plural` come from CRD discovery and are embedded in the runtime id. Don't hard-code a version in projection logic.
 
-Currently overridden: Gateway API (`gateway.networking.k8s.io`) — promoted to **Network**: GatewayClass, Gateway, HTTPRoute, GRPCRoute, ReferenceGrant. See `crates/kube-ext/src/well_known/gateway_api.rs` + `ui/src/components/detail/gateway/index.tsx`.
+Currently overridden: Gateway API (`gateway.networking.k8s.io`) in **Network**, plus Argo CD (Application, ApplicationSet, AppProject) and Flux (Kustomization, HelmRelease, GitRepository, OCIRepository, HelmRepository, Bucket, HelmChart) in **Apps**. Backend modules live in `crates/kube-ext/src/well_known/`.
+
+GitOps details use a shared Rust-projected `GitOpsDetail` contract (`gitops.rs`): headline `cards` (status tiles), typed `resources` (Argo `status.resources`, ApplicationSet apps, Flux inventory; `null` = kind has none), typed `conditions` with a Rust-computed `negative` polarity, generic `sections`, and `actions` keyed by a stable `id`. Status derivation, section contents, and action patches stay in Rust. `useGitOps` lives in `DetailPanel` so the title-bar `GitOpsActions` (IconBtns, same slot as CronJob Run-now / Suspend) and the Summary share one fetch and one resourceVersion; feedback is toasts, confirmation follows `confirmDestructive`. Primary verbs live in the header; per-row verbs (sync one resource, roll back a deployment) sit on the row they act on.
+
+Two action paths, both carrying the fetched resourceVersion and never SSA or an automatic stale-write override:
+- **Fixed actions** (refresh, reconcile, suspend/resume, terminate) ship their merge patch in `actions[].patch`.
+- **Parameterised operations** go through `gitops_run_cmd` with a typed `GitOpsRequest` (`well_known/gitops_ops.rs`): Argo sync (revision per source, prune, dry run, force, apply-only, sync options, retry, selective resources), rollback, auto-sync toggles, cascade delete; Flux reconcile with source / force / reset. Rust re-reads the object, refuses when it moved past the given resourceVersion, and builds the patch — the frontend never assembles one. Add new operations here, not as frontend patches.
+
+Argo semantics mirror the API server: sync pins target revision(s) and copies `syncOptions`/`retry` into the operation (the controller never reads them from spec); it is refused while `operation` is set or the op is Running/Terminating, because a merge patch would merge into the pending op. Rollback is refused while auto-sync is on. Cascade delete edits the `resources-finalizer.argocd.argoproj.io[/foreground|/background]` finalizer before deleting. Terminate sets `status.operationState.phase` (Application has no status subresource). Flux request tokens are opaque; force/reset must equal `requestedAt`, and with-source waits for the source's `lastHandledReconcileAt`. Flux inventory ids follow cli-utils encoding (empty namespace/group, RBAC `:` as `__`) — use `inventory_id`, not a plain split.
+
+Dialogs (`SyncDialog`, `RollbackDialog`) are built on the `Dialog` atom (`ui/src/components/ui/Dialog.tsx`); the controller owns which one is open so the header and resource rows share it.
+
+GitOps references carry an API group and a `local` flag. Resolve against the source cluster's discovered kinds, not the first kind-name match: Flux HelmRelease/HelmChart collide with the synthetic Helm views. Remote inventories and Argo AppProjects whose installation namespace is unknown stay copy-only. `tests/integration_gitops.rs` installs pinned upstream CRDs in an isolated kind cluster, without controllers; `examples/gitopsbench.rs` measures projections and guards against putting large inventories in row deltas.
+
+### Live status of referenced objects
+
+`resolve_object_statuses_cmd` (`crates/kube-ext/src/object_status.rs`) returns `{status, ready, found, error}` for a list of `{group, kind, namespace, name}` refs. It reads already-running reflectors without subscribing (no refcount bump, no new watch — the lazy-reflector rule holds) and falls back to capped one-shot LISTs. `error` set means unknown, never Missing — a 403 must not render as a deleted object. Use it (via `useLiveStatus`) for any "health of N objects this thing manages" surface instead of subscribing to kinds from a detail panel.
 
 ## Agent tools (native + optional MCP)
 

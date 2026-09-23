@@ -20,6 +20,33 @@ import {
   UI_SCALE_MIN,
 } from "./theme";
 
+describe("GitOps statuses", () => {
+  it("keeps sync, health, suspended, and stale states distinct", () => {
+    for (const s of ["Healthy", "Synced", "Ready"]) expect(statusBucket(s)).toBe("good");
+    for (const s of ["OutOfSync", "Missing", "Reconciling", "Updating"]) expect(statusBucket(s)).toBe("warn");
+    for (const s of ["Degraded", "Stalled", "NotReady"]) expect(statusBucket(s)).toBe("bad");
+    for (const s of ["Suspended", "Static"]) {
+      expect(statusBucket(s)).toBe("info");
+      expect(statusIsTransient(s)).toBe(false);
+    }
+    expect(statusIsTransient("Reconciling")).toBe(true);
+    expect(statusBucket("Unknown")).toBe("unknown");
+  });
+});
+
+describe("Helm release statuses", () => {
+  it("buckets Helm's lowercase vocabulary", () => {
+    expect(statusBucket("deployed")).toBe("good");
+    expect(statusBucket("failed")).toBe("bad");
+    for (const s of ["superseded", "uninstalled"]) expect(statusBucket(s)).toBe("info");
+    for (const s of ["pending-install", "pending-upgrade", "pending-rollback", "uninstalling"]) {
+      expect(statusBucket(s)).toBe("warn");
+      expect(statusIsTransient(s)).toBe(true);
+    }
+    expect(statusBucket("unknown")).toBe("unknown");
+  });
+});
+
 describe("vibrantSurface / vibrancyAlpha", () => {
   it("uses the darker, more translucent alpha in dark mode", () => {
     expect(vibrancyAlpha("dark")).toBe(MAC_VIBRANCY_ALPHA_DARK);

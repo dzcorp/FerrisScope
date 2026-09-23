@@ -17,8 +17,9 @@ import {
   LinkValue,
   Mono,
   Mute,
+  SubGrid,
 } from "./primitives";
-import { tokens, FF_MONO, FS_MD, FS_SM } from "../../theme";
+import { tokens, FF_MONO, FS_MD, FS_SM, DETAIL_LAYOUT } from "../../theme";
 
 const t = tokens("dark");
 
@@ -49,6 +50,10 @@ beforeEach(() => {
 });
 
 describe("DetailRow", () => {
+  it("allows labels to shrink in narrow panels without forcing value overflow", () => {
+    const { container } = render(<DetailRow t={t} label="Repository"><Mono>https://example.com/long-repository</Mono></DetailRow>);
+    expect((container.firstElementChild as HTMLElement).style.gridTemplateColumns).toBe(DETAIL_LAYOUT.columns);
+  });
   it("renders the label and the value-side children", () => {
     render(
       <DetailRow t={t} label="Image">
@@ -73,6 +78,15 @@ describe("DetailRow", () => {
       </DetailRow>,
     );
     expect(screen.getByText("(annotated)")).toBeInTheDocument();
+  });
+});
+
+describe("SubGrid narrow layouts", () => {
+  it("constrains long nested keys so values keep room", () => {
+    const key = "/a-very-long-policy-key/another-long-nested-key";
+    render(<SubGrid t={t} entries={[{ key, value: "enabled" }]} />);
+    expect(screen.getByText(key)).toHaveStyle({ maxWidth: "50%", overflowWrap: "anywhere" });
+    expect(screen.getByText("enabled")).toBeInTheDocument();
   });
 });
 

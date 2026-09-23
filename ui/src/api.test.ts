@@ -249,6 +249,28 @@ describe("mergePatchResource (kubectl edit)", () => {
   });
 });
 
+describe("gitopsRun", () => {
+  it("ships the typed request with the generation the operator saw", async () => {
+    const cap = captureNext({ kind: "applied", resource_version: "8" });
+    const request = {
+      type: "rollback" as const,
+      id: 3,
+      prune: false,
+      dry_run: true,
+    };
+    await api.gitopsRun("ctx", "wkcrd:argocd_applications|argoproj.io|v1alpha1|applications|Application|ns", "argocd", "app", request, 7);
+    expect(cap.calls[0]?.cmd).toBe("gitops_run_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      clusterId: "ctx",
+      kindId: "wkcrd:argocd_applications|argoproj.io|v1alpha1|applications|Application|ns",
+      namespace: "argocd",
+      name: "app",
+      request,
+      generation: 7,
+    });
+  });
+});
+
 describe("deleteResource", () => {
   it("force-delete sends gracePeriodSeconds: 0", async () => {
     const cap = captureNext(undefined);
@@ -484,6 +506,18 @@ describe("custom resources + well-known detail", () => {
       namespace: "default",
       name: "r",
     });
+  });
+
+  it("resolveObjectStatuses ships refs verbatim under { clusterId, refs }", async () => {
+    const cap = captureNext({ items: [], truncated: false });
+    const refs = [
+      { group: "apps", kind: "Deployment", namespace: "prod", name: "web" },
+      { group: "", kind: "Namespace", namespace: null, name: "prod" },
+    ];
+    const res = await api.resolveObjectStatuses("ctx", refs);
+    expect(cap.calls[0]?.cmd).toBe("resolve_object_statuses_cmd");
+    expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx", refs });
+    expect(res).toEqual({ items: [], truncated: false });
   });
 });
 
@@ -775,6 +809,31 @@ describe("helm", () => {
     await api.helmRepoUpdate();
     expect(cap.calls[0]?.cmd).toBe("helm_repo_update_cmd");
     expect(cap.calls[0]?.args).toBeUndefined();
+  });
+
+  it("helmRollback forwards an explicit revision", async () => {
+    const cap = captureNext({ kind: "rolled_back", revision: 5 });
+    await api.helmRollback("ctx", "default", "rel", 3);
+    expect(cap.calls[0]?.cmd).toBe("helm_rollback_cmd");
+    expect(cap.calls[0]?.args).toEqual({
+      clusterId: "ctx",
+      namespace: "default",
+      name: "rel",
+      revision: 3,
+    });
+  });
+
+  it("helmRollback defaults revision to null (previous revision)", async () => {
+    const cap = captureNext({ kind: "rolled_back", revision: 5 });
+    await api.helmRollback("ctx", "default", "rel");
+    expect(cap.calls[0]?.args?.revision).toBeNull();
+  });
+
+  it("helmStorageProbe carries the cluster id", async () => {
+    const cap = captureNext(false);
+    await api.helmStorageProbe("ctx");
+    expect(cap.calls[0]?.cmd).toBe("helm_storage_probe_cmd");
+    expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx" });
   });
 });
 

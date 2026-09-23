@@ -137,7 +137,19 @@ import {
   ReferenceGrantSummary,
   RouteSummary,
 } from "./detail/gateway";
-import { HelmReleaseSummary } from "./detail/helm";
+import {
+  HelmActions,
+  HelmReleaseSummary,
+  useHelmRelease,
+  type HelmController,
+} from "./detail/helm";
+import {
+  GitOpsActions,
+  GitOpsSummary,
+  argoDeleteItems,
+  useGitOps,
+  type GitOpsController,
+} from "./detail/gitops";
 import { HelmChartSummary } from "./detail/helm/chart";
 import { DETAIL_POLL_MS, shouldPollDetail } from "./detail/detailPoll";
 import { NamespaceForwardButton } from "./forwards/NamespaceForwardButton";
@@ -194,7 +206,21 @@ function wellKnownShort(id: string): string | null {
   return sep === -1 ? rest : rest.slice(0, sep);
 }
 
+const GITOPS_SUMMARY_SHORTS = new Set([
+  "argocd_applications",
+  "argocd_applicationsets",
+  "argocd_appprojects",
+  "flux_kustomizations",
+  "flux_helmreleases",
+  "flux_gitrepositories",
+  "flux_ocirepositories",
+  "flux_helmrepositories",
+  "flux_buckets",
+  "flux_helmcharts",
+]);
+
 const WELL_KNOWN_SUMMARY_SHORTS = new Set([
+  ...GITOPS_SUMMARY_SHORTS,
   "gatewayclasses",
   "gateways",
   "httproutes",
@@ -375,9 +401,10 @@ export function DetailPanel({
   // meaningless here. The Summary already shows the rendered manifest +
   // values in a Monaco viewer, so nothing is lost.
   const hasYaml = kind.id !== "helm_releases" && kind.id !== "helm_charts";
-  // Events tab lists Events whose involvedObject == this target. An Event
-  // detail itself can't be the involvedObject of other Events — hide the tab.
-  const hasEvents = kind.id !== "events";
+  // Events match involvedObject uid: Events can't reference themselves, and
+  // Helm views carry a synthetic uid no Event ever points at.
+  const hasEvents =
+    kind.id !== "events" && kind.id !== "helm_releases" && kind.id !== "helm_charts";
   const hasRelated = RELATED_KINDS.has(kind.id);
   const [tab, setTab] = useState<Tab>(
     hasSummary ? "summary" : hasYaml ? "yaml" : "summary",
@@ -413,6 +440,26 @@ export function DetailPanel({
   // every mutating action + exec/forward in the title bar and forces the YAML
   // tab read-only, while reads/navigation/copy stay live.
   const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
+  const gitopsShort = wellKnownShort(kind.id);
+  const gitops = useGitOps(
+    {
+      clusterId,
+      kindId: kind.id,
+      namespace: target.namespace,
+      name: target.name,
+      detailVersion,
+    },
+    gitopsShort !== null && GITOPS_SUMMARY_SHORTS.has(gitopsShort),
+  );
+  const helm = useHelmRelease(
+    {
+      clusterId,
+      namespace: target.namespace,
+      name: target.name,
+      detailVersion,
+    },
+    kind.id === "helm_releases",
+  );
   const canBack = detailIndex > 0;
   const canForward = detailIndex >= 0 && detailIndex < detailHistory.length - 1;
   const prevEntry = canBack ? detailHistory[detailIndex - 1] : null;
@@ -1252,6 +1299,16 @@ export function DetailPanel({
                   {Icons.refresh}
                 </IconBtn>
               )}
+              {gitops && (
+                <GitOpsActions
+                  t={t}
+                  mode={mode}
+                  ctl={gitops}
+                  name={target.name}
+                  clusterId={clusterId}
+                />
+              )}
+              {helm && <HelmActions t={t} mode={mode} ctl={helm} />}
               {isNamespace && (
                 <NamespaceForwardButton
                   t={t}
@@ -1260,20 +1317,25 @@ export function DetailPanel({
                   disabled={degraded}
                 />
               )}
-              <IconBtn
-                ref={deleteBtnRef}
-                t={t}
-                size="lg"
-                title="Delete…"
-                danger
-                disabled={deleting || degraded}
-                active={actionMenu?.kind === "delete"}
-                onClick={() =>
-                  openActionMenu("delete", deleteBtnRef.current)
-                }
-              >
-                {Icons.trash}
-              </IconBtn>
+              {/* A chart row is a repo entry, not a cluster object. */}
+              {kind.id !== "helm_charts" && (
+                <IconBtn
+                  ref={deleteBtnRef}
+                  t={t}
+                  size="lg"
+                  title={
+                    kind.id === "helm_releases" ? "Uninstall…" : "Delete…"
+                  }
+                  danger
+                  disabled={deleting || degraded}
+                  active={actionMenu?.kind === "delete"}
+                  onClick={() =>
+                    openActionMenu("delete", deleteBtnRef.current)
+                  }
+                >
+                  {Icons.trash}
+                </IconBtn>
+              )}
               <span
                 aria-hidden
                 style={{
@@ -1304,15 +1366,21 @@ export function DetailPanel({
                 ? `${kind.kind} · ${target.namespace}/${target.name}`
                 : `${kind.kind} · ${target.name}`
             }
-            items={buildActionMenuItems(
-              actionMenu.kind,
-              kind.kind,
-              kind.id,
-              target.name,
-              podShellContainers,
-              onOpenExec,
-              runDelete,
-            )}
+            items={
+              gitops &&
+              actionMenu.kind === "delete" &&
+              gitopsShort === "argocd_applications"
+                ? argoDeleteItems(gitops, target.name)
+                : buildActionMenuItems(
+                    actionMenu.kind,
+                    kind.kind,
+                    kind.id,
+                    target.name,
+                    podShellContainers,
+                    onOpenExec,
+                    runDelete,
+                  )
+            }
           />
         )}
 
@@ -1422,6 +1490,8 @@ export function DetailPanel({
                 uid={target.uid}
                 detailVersion={detailVersion}
                 onNavigate={onNavigate}
+                gitops={gitops}
+                helm={helm}
               />
             )
           ) : tab === "yaml" ? (
@@ -3334,6 +3404,8 @@ function WorkloadSummaryDispatch({
   uid,
   detailVersion,
   onNavigate,
+  gitops,
+  helm,
 }: {
   mode: ThemeMode;
   clusterId: string;
@@ -3346,6 +3418,8 @@ function WorkloadSummaryDispatch({
   uid: string;
   detailVersion: number;
   onNavigate?: DetailNavigate;
+  gitops?: GitOpsController | null;
+  helm?: HelmController | null;
 }) {
   const props = {
     mode,
@@ -3360,6 +3434,15 @@ function WorkloadSummaryDispatch({
   // affect the UI.
   const wkShort = wellKnownShort(kindId);
   if (wkShort) {
+    if (GITOPS_SUMMARY_SHORTS.has(wkShort)) {
+      return gitops ? (
+        <GitOpsSummary
+          ctl={gitops}
+          clusterId={clusterId}
+          onNavigate={onNavigate}
+        />
+      ) : null;
+    }
     switch (wkShort) {
       case "gatewayclasses":
         return (
@@ -3586,14 +3669,14 @@ function WorkloadSummaryDispatch({
         />
       );
     case "helm_releases":
-      return <HelmReleaseSummary {...props} />;
+      return helm ? (
+        <HelmReleaseSummary ctl={helm} clusterId={clusterId} onNavigate={onNavigate} />
+      ) : null;
     case "helm_charts":
       return (
         <HelmChartSummary
-          mode={mode}
           clusterId={clusterId}
           uid={uid}
-          name={name}
           detailVersion={detailVersion}
           onNavigate={onNavigate}
         />
