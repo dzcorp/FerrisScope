@@ -11,6 +11,7 @@ import { MOD_KEY } from "../lib/keyboard";
 import { api } from "../api";
 import { mergeSearchHits } from "../lib/multiCluster";
 import { goToFleet } from "../lib/clusterTabs";
+import { resourceKindLabel } from "../lib/resourceKinds";
 import type { SearchHit } from "../types";
 
 type Item = {
@@ -185,9 +186,9 @@ export function CommandPalette({ mode, onClose }: Props) {
               {resolveKindIcon(k.kind, k.group, k.category)}
             </span>
           ),
-          label: k.kind,
+          label: resourceKindLabel(k),
           sub: `${k.category} · ${k.group ? `${k.group}/${k.version}` : k.version}`,
-          keywords: `${k.kind} ${k.plural} ${k.id} ${k.category}`.toLowerCase(),
+          keywords: `${resourceKindLabel(k)} ${k.plural} ${k.id} ${k.category}`.toLowerCase(),
           action: () => selectKind(k.id),
         });
       });

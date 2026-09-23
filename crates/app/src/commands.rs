@@ -36,15 +36,15 @@ use ferrisscope_kube_ext::{
     get_resource_yaml, get_role_binding_detail, get_role_detail, get_secret_detail,
     get_service_account_detail, get_service_detail, get_stateful_set_detail,
     get_storage_class_detail, get_validating_webhook_configuration_detail, get_well_known_detail,
-    helm_install_chart, helm_repo_update, helm_uninstall, helm_upgrade,
-    list_config_maps_in_namespace, list_jobs_for_cron_job, list_namespace_names,
+    helm_install_chart, helm_repo_update, helm_rollback, helm_storage_probe, helm_uninstall,
+    helm_upgrade, list_config_maps_in_namespace, list_jobs_for_cron_job, list_namespace_names,
     list_object_events, list_persistent_volume_claims_in_namespace, list_pods_for_workload,
     list_pods_on_node, list_secrets_in_namespace, list_services_in_namespace, lookup,
     manual_job_name, merge_patch_resource, registry, rerun_job, rerun_job_name, restart_pod_owner,
     restart_pods_owners, restart_workload, set_node_cordon, start_forward, trigger_cron_job,
     ApplyResult, Cascade, CronJobHistory, DrainReport, ForwardEntry, ForwardStatus,
-    HelmInstallResult, HelmUpgradeResult, MergePatchResult, ResourceKind, ResourceKindEntry,
-    RestartPodsReport, WorkloadPods,
+    HelmInstallResult, HelmRollbackResult, HelmUpgradeResult, MergePatchResult, ResourceKind,
+    ResourceKindEntry, RestartPodsReport, WorkloadPods,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -1049,6 +1049,37 @@ pub(crate) async fn list_custom_resource_kinds(
         .map(ResourceKindEntry::from_dynamic_crd)
         .map(|e| e.meta)
         .collect())
+}
+
+/// Live status for a batch of managed-object refs, in input order. Reads warm
+/// watcher caches without touching their refcounts, then falls back to
+/// bounded one-shot LISTs. Never starts a watch.
+#[tauri::command]
+pub(crate) async fn resolve_object_statuses_cmd(
+    cluster_id: String,
+    refs: Vec<ferrisscope_kube_ext::ObjectRef>,
+    state: State<'_, AppState>,
+) -> Result<ferrisscope_kube_ext::ObjectStatuses, String> {
+    let entry = state.entry(&cluster_id).await?;
+    if entry.unavailable.load(Ordering::SeqCst) {
+        return Err(format!(
+            "cluster {cluster_id} is unavailable — reconnect first"
+        ));
+    }
+    let slots: Vec<ferrisscope_kube_ext::CachedSlot> = entry
+        .kinds
+        .lock()
+        .await
+        .iter()
+        .filter_map(|((kind_id, scope), slot)| {
+            Some(ferrisscope_kube_ext::CachedSlot {
+                kind_id: kind_id.clone(),
+                scope: scope.clone(),
+                watcher: slot.watcher.clone()?,
+            })
+        })
+        .collect();
+    Ok(ferrisscope_kube_ext::resolve_object_statuses(entry.cluster.client(), refs, slots).await)
 }
 
 /// Subscribe to live deltas for `(cluster_id, kind_id)`.
@@ -2162,9 +2193,9 @@ pub(crate) async fn install_helm_chart_cmd(
     values_yaml: String,
     state: State<'_, AppState>,
 ) -> Result<HelmInstallResult, String> {
+    let entry = state.entry(&cluster_id).await?;
     let (kubeconfig_path, context_name, scratch) =
         resolve_kubeconfig(&state, &cluster_id, "helm").await?;
-    let entry = state.entry(&cluster_id).await?;
     let result = helm_install_chart(
         entry.cluster.client(),
         &context_name,
@@ -2207,9 +2238,9 @@ pub(crate) async fn upgrade_helm_release_cmd(
     chart_version: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<HelmUpgradeResult, String> {
+    let entry = state.entry(&cluster_id).await?;
     let (kubeconfig_path, context_name, scratch) =
         resolve_kubeconfig(&state, &cluster_id, "helm").await?;
-    let entry = state.entry(&cluster_id).await?;
     let override_pair = match (&chart_source, &chart_version) {
         (Some(s), Some(v)) => Some((s.as_str(), v.as_str())),
         _ => None,
@@ -2236,6 +2267,46 @@ pub(crate) async fn upgrade_helm_release_cmd(
 #[tauri::command]
 pub(crate) async fn helm_repo_update_cmd() -> Result<u64, String> {
     helm_repo_update().await.map_err(|e| e.to_string())
+}
+
+/// `helm rollback <release> [revision]`; `revision = None` rolls back to
+/// the previous revision. Same kubeconfig resolution as upgrade.
+#[tauri::command]
+pub(crate) async fn helm_rollback_cmd(
+    cluster_id: String,
+    namespace: String,
+    name: String,
+    revision: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<HelmRollbackResult, String> {
+    let entry = state.entry(&cluster_id).await?;
+    let (kubeconfig_path, context_name, scratch) =
+        resolve_kubeconfig(&state, &cluster_id, "helm").await?;
+    let result = helm_rollback(
+        entry.cluster.client(),
+        &context_name,
+        Some(&kubeconfig_path),
+        &namespace,
+        &name,
+        revision,
+    )
+    .await
+    .map_err(|e| e.to_string());
+    cleanup_scratch_paths(&scratch);
+    result
+}
+
+/// True when the cluster has releases stored by helm's ConfigMap driver,
+/// which the Secret-backed release views can't show.
+#[tauri::command]
+pub(crate) async fn helm_storage_probe_cmd(
+    cluster_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let entry = state.entry(&cluster_id).await?;
+    helm_storage_probe(entry.cluster.client())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 detail_cmd! { get_resource_quota_detail_cmd => get_resource_quota_detail, namespaced }
@@ -2369,6 +2440,31 @@ pub(crate) async fn merge_patch_resource_cmd(
         &name,
         patch,
         resource_version.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Parameterised Argo CD / Flux operation; the patch is built in Rust from
+/// the live object (`well_known::gitops_ops`).
+#[tauri::command]
+pub(crate) async fn gitops_run_cmd(
+    cluster_id: String,
+    kind_id: String,
+    namespace: Option<String>,
+    name: String,
+    request: ferrisscope_kube_ext::well_known::gitops_ops::GitOpsRequest,
+    generation: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<MergePatchResult, String> {
+    let entry = state.entry(&cluster_id).await?;
+    ferrisscope_kube_ext::well_known::gitops_ops::run(
+        entry.cluster.client(),
+        &kind_id,
+        namespace.as_deref(),
+        &name,
+        request,
+        generation,
     )
     .await
     .map_err(|e| e.to_string())
@@ -3762,8 +3858,16 @@ async fn resolve_kubeconfig(
     cluster_id: &str,
     prefix: &str,
 ) -> Result<(PathBuf, String, Vec<PathBuf>), String> {
+    resolve_kubeconfig_for(state.inner(), cluster_id, prefix).await
+}
+
+/// [`resolve_kubeconfig`] for callers holding `&AppState` (agent tools).
+pub(crate) async fn resolve_kubeconfig_for(
+    app_state: &AppState,
+    cluster_id: &str,
+    prefix: &str,
+) -> Result<(PathBuf, String, Vec<PathBuf>), String> {
     let context_name = kubeconfig::context_name_from_id(cluster_id).to_owned();
-    let app_state: &AppState = state.inner();
 
     // SSH path: the source file is just a synthetic "user@host:port" label;
     // we have to mint a real file pointing at the tunnel.
@@ -3776,7 +3880,14 @@ async fn resolve_kubeconfig(
 
     // Non-SSH: the source file (or the implicit default) IS the file.
     let path = {
-        let s = state.sources.lock().await;
+        let s = app_state.sources.lock().await;
+        // A failed SSH scratch must not fall through to the default
+        // kubeconfig: a same-named context there is a different cluster.
+        if kubeconfig::ssh_for(cluster_id, &s).is_some() {
+            return Err(format!(
+                "couldn't prepare a tunnelled kubeconfig for SSH cluster {context_name}; see logs"
+            ));
+        }
         kubeconfig::source_path_for(cluster_id, &s)
     }
     .or_else(kubeconfig::default_kubeconfig_path)
@@ -3787,7 +3898,7 @@ async fn resolve_kubeconfig(
 /// Best-effort delete each scratch path. Logged failures only — these files
 /// are tiny and live in the cache dir; a stale one is annoying but not
 /// data-loss. For cluster-resident state see the per-call cleanup paths.
-fn cleanup_scratch_paths(paths: &[PathBuf]) {
+pub(crate) fn cleanup_scratch_paths(paths: &[PathBuf]) {
     for p in paths {
         if let Err(e) = std::fs::remove_file(p) {
             // ENOENT just means "already gone" (a parallel cleanup beat us

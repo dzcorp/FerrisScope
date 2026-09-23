@@ -164,6 +164,31 @@ export const Icons = {
     14,
     <path d="M12 4V1L7 5l5 4V6a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z" />,
   ),
+  // Counter-clockwise arrow around a clock hand: return to an earlier revision.
+  rollback: filled(
+    14,
+    <>
+      <path d="M12 4V1L7 5l5 4V6a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z" />
+      <path d="M11 8h2v4h3v2h-5z" />
+    </>,
+  ),
+  // Up arrow onto a bar: move to a newer version.
+  upgrade: filled(
+    14,
+    <>
+      <path d="M12 3l7 7h-4v6H9v-6H5z" />
+      <rect x="5" y="18" width="14" height="3" rx="1" />
+    </>,
+  ),
+  // Argo CD / Flux "apply desired state now" — two opposed arrows, distinct
+  // from the single-arrow `refresh` (re-read / compare only).
+  sync: filled(
+    14,
+    <>
+      <path d="M12 4a8 8 0 0 0-7.4 5h3.3A5 5 0 0 1 12 7a5 5 0 0 1 3.5 1.5L13 11h7V4l-2.4 2.4A8 8 0 0 0 12 4z" />
+      <path d="M12 20a8 8 0 0 0 7.4-5h-3.3A5 5 0 0 1 12 17a5 5 0 0 1-3.5-1.5L11 13H4v7l2.4-2.4A8 8 0 0 0 12 20z" />
+    </>,
+  ),
   shell: filled(
     14,
     <path

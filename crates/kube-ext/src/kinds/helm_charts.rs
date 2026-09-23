@@ -16,8 +16,8 @@
 
 use serde_json::{json, Value};
 
-use crate::fetch::HelmRepoChart;
-use crate::kinds::helm_releases::Release;
+use crate::helm::HelmRepoChart;
+use crate::kinds::helm_releases::ChartRef;
 use crate::registry::{Category, ColumnDef, ColumnKind, ResourceKind};
 
 /// Stable id used by the watcher to broadcast one row per logical chart.
@@ -77,15 +77,14 @@ pub fn meta() -> ResourceKind {
     }
 }
 
-/// Project a chart row from a sample release plus the count of releases
-/// using this `(name, version)`. Source is always `"cluster"` for these.
-pub fn project_cluster_row(sample: &Release, used_by: usize) -> Value {
+/// In-cluster chart row; `used_by` = releases whose latest revision uses it.
+pub fn project_cluster_row(chart: &ChartRef, used_by: usize) -> Value {
     json!({
-        "name": sample.chart_meta_str("name").unwrap_or_else(|| "—".to_owned()),
-        "version": sample.chart_meta_str("version").unwrap_or_else(|| "—".to_owned()),
-        "app_version": sample.chart_meta_str("appVersion"),
+        "name": chart.name.clone(),
+        "version": chart.version.clone(),
+        "app_version": chart.app_version.clone(),
         "repo": "in-cluster",
-        "description": sample.chart_meta_str("description"),
+        "description": chart.description.clone(),
         "used_by": used_by,
     })
 }

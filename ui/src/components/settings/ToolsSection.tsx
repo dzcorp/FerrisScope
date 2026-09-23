@@ -121,7 +121,7 @@ function ToolRow({
   };
 
   return (
-    <Field t={t} label={label} hint={hint}>
+    <Field t={t} label={label} hint={hint} anchor={toolDisplayName}>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <div
           style={{

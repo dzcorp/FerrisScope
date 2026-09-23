@@ -40,6 +40,7 @@ import type {
   DevMemoryStats,
   DocApplyResult,
   MergePatchResult,
+  GitOpsRequest,
   DrainReport,
   EndpointSliceDetail,
   EndpointsDetail,
@@ -97,6 +98,8 @@ import type {
   ResourceQuotaDetail,
   ResourceRow,
   WorkloadPods,
+  ObjectStatusRef,
+  ObjectStatuses,
   RestartPodsReport,
   SearchHit,
   RoleBindingDetail,
@@ -104,6 +107,7 @@ import type {
   HelmChartDetail,
   HelmInstallResult,
   HelmReleaseDetail,
+  HelmRollbackResult,
   HelmUpgradeResult,
   PvcSummary,
   SecretDetail,
@@ -389,6 +393,23 @@ export const api = {
       chartVersion: chartVersion ?? null,
     }),
   helmRepoUpdate: () => invoke<number>("helm_repo_update_cmd"),
+  // `revision` null/omitted rolls back to the previous revision.
+  helmRollback: (
+    clusterId: string,
+    namespace: string,
+    name: string,
+    revision?: number | null,
+  ) =>
+    invoke<HelmRollbackResult>("helm_rollback_cmd", {
+      clusterId,
+      namespace,
+      name,
+      revision: revision ?? null,
+    }),
+  // True when releases exist in helm's ConfigMap storage driver (not shown
+  // by the Secret-backed release views).
+  helmStorageProbe: (clusterId: string) =>
+    invoke<boolean>("helm_storage_probe_cmd", { clusterId }),
   getHelmChartDetail: (
     clusterId: string,
     source: string,
@@ -569,6 +590,10 @@ export const api = {
       namespace,
       name,
     }),
+  // Live status for up to 5000 managed objects, same order as `refs`.
+  // Reads warm caches, falls back to bounded LISTs; never starts a watch.
+  resolveObjectStatuses: (clusterId: string, refs: ObjectStatusRef[]) =>
+    invoke<ObjectStatuses>("resolve_object_statuses_cmd", { clusterId, refs }),
 
   // Delete a single resource. `gracePeriodSeconds = 0` is a force delete;
   // `null` uses the kind's default grace period.
@@ -653,6 +678,24 @@ export const api = {
       name,
       patch,
       resourceVersion,
+    }),
+
+  gitopsRun: (
+    clusterId: string,
+    kindId: string,
+    namespace: string | null,
+    name: string,
+    request: GitOpsRequest,
+    // Spec generation the operator saw; status churn alone isn't stale.
+    generation: number | null,
+  ) =>
+    invoke<MergePatchResult>("gitops_run_cmd", {
+      clusterId,
+      kindId,
+      namespace,
+      name,
+      request,
+      generation,
     }),
 
   // Cordon (cordon=true) or uncordon (false) a node. Patches

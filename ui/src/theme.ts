@@ -38,6 +38,15 @@ export const FS_MD = "var(--fs-fs-md, 12.5px)";
 export const FS_LG = "var(--fs-fs-lg, 14px)";
 export const FS_XL = "var(--fs-fs-xl, 16px)";
 
+export const DETAIL_LAYOUT = {
+  padding: "18px 22px 22px",
+  sectionGap: 22,
+  itemGap: 10,
+  cardPadding: "12px 14px",
+  cardMinWidth: 180,
+  columns: "minmax(0, min(180px, 35%)) minmax(0, 1fr)",
+} as const;
+
 // CSS-var-backed border-radius scale. Components reach for `R_MD` instead
 // of inline `borderRadius: 6` so the active theme's `sizing.radius` flows
 // through (VS Code's sharp 2px corners, Readable's chunky 12px corners).
@@ -947,6 +956,10 @@ const GOOD = new Set([
   "Available",
   "Bound",
   "healthy",
+  "Healthy",
+  "Synced",
+  // Helm release statuses (lowercase, hyphenated).
+  "deployed",
 ]);
 const WARN = new Set([
   "Pending",
@@ -955,6 +968,13 @@ const WARN = new Set([
   "degraded",
   "Updating",
   "Progressing",
+  "OutOfSync",
+  "Missing",
+  "Reconciling",
+  "pending-install",
+  "pending-upgrade",
+  "pending-rollback",
+  "uninstalling",
   // Cluster-level, not object-level: a connection being rebuilt after the
   // health probe declared the apiserver gone.
   "Reconnecting",
@@ -965,6 +985,10 @@ const INFO = new Set([
   "Init",
   "Succeeded",
   "Completed",
+  "Suspended",
+  "Static",
+  "superseded",
+  "uninstalled",
 ]);
 const BAD = new Set([
   "CrashLoopBackOff",
@@ -978,11 +1002,14 @@ const BAD = new Set([
   "OOMKilled",
   "Evicted",
   "NotReady",
+  "Degraded",
+  "Stalled",
   "Unhealthy",
   "Unavailable",
   "DeadlineExceeded",
   "ContainerCannotRun",
   "Terminated",
+  "failed",
 ]);
 // Transient: render with a pulsing dot until the state resolves. Per the
 // design's `statusIsTransient`, plus the container-level waiting reasons we
@@ -995,10 +1022,15 @@ const TRANSIENT = new Set([
   "Terminating",
   "Updating",
   "Progressing",
+  "Reconciling",
   "Waiting",
   "PodScheduled",
   "ContainerStarting",
   "Reconnecting",
+  "pending-install",
+  "pending-upgrade",
+  "pending-rollback",
+  "uninstalling",
 ]);
 
 export function statusBucket(status: string): StatusBucket {

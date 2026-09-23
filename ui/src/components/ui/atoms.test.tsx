@@ -89,24 +89,39 @@ describe("Checkbox", () => {
     const { getByRole, rerender } = render(
       <Checkbox t={t} checked={false} onChange={onChange} />,
     );
-    await userEvent.click(getByRole("button"));
+    await userEvent.click(getByRole("checkbox"));
     expect(onChange).toHaveBeenCalledWith(true);
 
     rerender(<Checkbox t={t} checked onChange={onChange} />);
-    await userEvent.click(getByRole("button"));
+    await userEvent.click(getByRole("checkbox"));
     expect(onChange).toHaveBeenLastCalledWith(false);
 
     rerender(<Checkbox t={t} indeterminate onChange={onChange} />);
     // Indeterminate clicks treat the next value as `true`.
-    await userEvent.click(getByRole("button"));
+    await userEvent.click(getByRole("checkbox"));
     expect(onChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("exposes checkbox semantics, label, and disabled state", async () => {
+    const onChange = vi.fn();
+    const { getByRole, rerender } = render(
+      <Checkbox t={t} checked label="Prune" onChange={onChange} />,
+    );
+    const box = getByRole("checkbox", { name: "Prune" });
+    expect(box).toHaveAttribute("aria-checked", "true");
+    rerender(<Checkbox t={t} indeterminate label="Prune" onChange={onChange} />);
+    expect(box).toHaveAttribute("aria-checked", "mixed");
+    rerender(<Checkbox t={t} disabled label="Prune" onChange={onChange} />);
+    expect(box).toBeDisabled();
+    await userEvent.click(box);
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("size prop is honoured (sets element size in px)", () => {
     const { getByRole } = render(
       <Checkbox t={t} checked size={20} onChange={() => {}} />,
     );
-    const btn = getByRole("button") as HTMLButtonElement;
+    const btn = getByRole("checkbox") as HTMLButtonElement;
     expect(btn.style.width).toMatch(/^20px$|^20$/);
   });
 });
@@ -145,11 +160,11 @@ describe("Toggle", () => {
     const { getByRole, rerender } = render(
       <Toggle t={t} checked={false} onChange={onChange} label="On?" />,
     );
-    await userEvent.click(getByRole("button"));
+    await userEvent.click(getByRole("switch"));
     expect(onChange).toHaveBeenCalledWith(true);
 
     rerender(<Toggle t={t} checked onChange={onChange} label="On?" />);
-    await userEvent.click(getByRole("button"));
+    await userEvent.click(getByRole("switch"));
     expect(onChange).toHaveBeenLastCalledWith(false);
   });
 
@@ -157,7 +172,16 @@ describe("Toggle", () => {
     const { getByRole } = render(
       <Toggle t={t} checked size="sm" onChange={() => {}} title="hint" />,
     );
-    expect(getByRole("button").title).toBe("hint");
+    expect(getByRole("switch").title).toBe("hint");
+  });
+  it("exposes switch state and honours disabled", async () => {
+    const onChange = vi.fn();
+    const { getByRole } = render(<Toggle t={t} checked disabled onChange={onChange} label="Auto" />);
+    const sw = getByRole("switch", { name: "Auto" });
+    expect(sw).toHaveAttribute("aria-checked", "true");
+    expect(sw).toBeDisabled();
+    await userEvent.click(sw);
+    expect(onChange).not.toHaveBeenCalled();
   });
 });
 
@@ -182,6 +206,15 @@ describe("TextInput", () => {
     expect(input.style.borderColor).not.toBe("");
     fireEvent.blur(input);
     expect(input.style.borderColor).not.toBe("");
+  });
+
+  it("exposes disabled, invalid, and an accessible name", () => {
+    const { getByRole } = render(
+      <TextInput t={t} value="x" onChange={() => {}} disabled invalid ariaLabel="Release name" />,
+    );
+    const input = getByRole("textbox", { name: "Release name" }) as HTMLInputElement;
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute("aria-invalid", "true");
   });
 });
 

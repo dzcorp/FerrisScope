@@ -27,6 +27,8 @@ type BtnProps = {
   type?: "button" | "submit";
   style?: CSSProperties;
   fullWidth?: boolean;
+  /** Toggle-button state (filter chips); renders as aria-pressed. */
+  pressed?: boolean;
 };
 
 // Push button for primary/secondary/ghost/danger variants. Hit target ≥ 28px
@@ -46,6 +48,7 @@ export function Btn({
   type = "button",
   style,
   fullWidth,
+  pressed,
 }: BtnProps) {
   const [hover, setHover] = useState(false);
   const [active, setActive] = useState(false);
@@ -87,12 +90,16 @@ export function Btn({
     },
   };
 
-  const v = variants[variant];
+  const v =
+    pressed === true
+      ? { ...variants.secondary, fg: t.accent, border: t.accent }
+      : variants[variant];
 
   const btn = (
     <button
       type={type}
       disabled={disabled}
+      aria-pressed={pressed}
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {

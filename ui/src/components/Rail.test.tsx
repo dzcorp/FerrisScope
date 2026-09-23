@@ -7,7 +7,8 @@
 // additional renders.
 
 import { describe, it, expect, afterEach } from "vitest";
-import { render, cleanup, act, fireEvent } from "@testing-library/react";
+import { render, cleanup, act, fireEvent, screen } from "@testing-library/react";
+import type { ResourceKind } from "../types";
 import { Profiler, type ProfilerOnRenderCallback } from "react";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
 import { useAppStore } from "../store";
@@ -59,6 +60,21 @@ describe("Rail store subscription", () => {
 });
 
 describe("Rail CRD discovery across active clusters", () => {
+  it("places discovered GitOps kinds under Apps without conflating Flux and Helm", async () => {
+    const helm: ResourceKind = { id: "helm_releases", kind: "HelmRelease", group: "", version: "v1", plural: "secrets", namespaced: true, category: "Apps", columns: [] };
+    const flux: ResourceKind = { ...helm, id: "wkcrd:flux_helmreleases|helm.toolkit.fluxcd.io|v2|helmreleases|HelmRelease|ns", group: "helm.toolkit.fluxcd.io", version: "v2", plural: "helmreleases" };
+    setMockInvoke((cmd) => {
+      if (cmd === "list_resource_kinds") return [helm];
+      if (cmd === "list_custom_resource_kinds") return [flux];
+      return undefined;
+    });
+    act(() => useAppStore.setState({ selectedContext: "default::a", selectedVirtualContextId: null, scopeExtras: [], railMode: "pinned", contexts: [{ id: "default::a", name: "a", cluster: "a", user: null, namespace: null, is_current: true, group: "Default", source_id: "default", source_path: null }] }));
+    await act(async () => { render(<Rail mode="dark" />); });
+    expect(screen.getByText("Apps")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "HelmRelease" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Flux HelmRelease" }));
+    expect(useAppStore.getState().selectedKindId).toBe(flux.id);
+  });
   const crd = (id: string, kind: string) => ({
     id,
     group: "example.io",

@@ -1,766 +1,362 @@
-// Helm chart catalog detail. Reads from `get_helm_chart_detail_cmd`,
-// which walks every helm release secret in the cluster, finds one whose
-// chart matches `(chart_name, chart_version)`, and projects the chart
-// metadata + default values + the list of releases using this chart.
-//
-// Install path: chart files are extracted from one of the existing
-// release secrets (we already do this for helm upgrade), so the install
-// works without any helm-repo configuration. The chart catalog is "what's
-// already deployed somewhere in this cluster" — a repo-side browser is a
-// separate, future feature.
-//
-// `(chart_name, chart_version)` come out of the row's synthetic uid
-// (`helm:chart:<name>:<version>`). DetailPanel threads `uid` through the
-// dispatch so we can recover both halves here.
-
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import {
-  selectClusterDegraded,
-  useAppStore,
-  useResolvedTheme,
-} from "../../../store";
-import Editor from "@monaco-editor/react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { selectClusterDegraded, useAppStore, useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FF_MONO, type ThemeMode, type Tokens, R_MD, FS_MD, FS_SM, FS_XS } from "../../../theme";
-import {  } from "../../../theme";
-import { ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
+import { confirm, toast } from "../../../lib/dialog";
 import {
-  Mono,
-  ChipWrap,
-  Copyable,
-  DetailRow,
-  LinkValue,
-  Mute,
-  ageFromIso,
-  type DetailNavigate,
-} from "..";
-import { installClipboardShortcuts } from "../../../lib/monacoClipboard";
-import type { HelmChartDetail, HelmChartUsedBy } from "../../../types";
+  namespaceError,
+  parseChartUid,
+  releaseNameError,
+  suggestReleaseName,
+  valuesYamlError,
+  type ChartUid,
+} from "../../../lib/helm";
+import { DETAIL_LAYOUT, FS_SM, FS_XS, type ThemeMode, type Tokens } from "../../../theme";
+import type { GitOpsCard, HelmChartDetail, HelmChartUsedBy } from "../../../types";
+import { Btn, ErrorBlock, LoadingLine, Section, StatusPill, TextInput } from "../../ui";
+import { Copyable, DetailRow, ExpandableList, LinkValue, Mono, Mute, ageFromIso, type DetailNavigate } from "..";
+import { StatusCards, useNavigable } from "../gitops";
+import { Cell, DataRow, DataTable } from "../gitops/table";
+import { useDetail } from "../useDetail";
+import { ExternalLinks, FailureBlock, Frame, HelmMissingNotice, Keywords, Notice, YamlEditor, sectionGap } from "./shared";
+import type { HelmFailure } from "./useHelmRelease";
 
-type LoadState =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: HelmChartDetail }
-  | { kind: "error"; message: string };
+type Props = {
+  clusterId: string;
+  uid: string;
+  detailVersion: number;
+  onNavigate?: DetailNavigate;
+};
 
-function useDetail(
-  fetcher: () => Promise<HelmChartDetail>,
-  deps: ReadonlyArray<unknown>,
-): LoadState {
-  const [state, setState] = useState<LoadState>({ kind: "loading" });
-  const reqId = useRef(0);
-  useEffect(() => {
-    const id = ++reqId.current;
-    fetcher()
-      .then((detail) => {
-        if (reqId.current === id) setState({ kind: "ready", detail });
-      })
-      .catch((e: unknown) => {
-        if (reqId.current === id)
-          setState({ kind: "error", message: String(e) });
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-  return state;
+export function HelmChartSummary(props: Props) {
+  const t = useResolvedTheme().tokens;
+  const parsed = useMemo(() => parseChartUid(props.uid), [props.uid]);
+  if (!parsed)
+    return (
+      <Frame t={t}>
+        <ErrorBlock t={t} message={`Cannot parse chart uid: ${props.uid}`} kindLabel="helm chart" />
+      </Frame>
+    );
+  // Keyed so the install form resets when a different chart opens.
+  return <ChartView key={`${props.clusterId}\u0000${props.uid}`} {...props} chart={parsed} />;
 }
 
-function Frame({ t, children }: { t: Tokens; children: ReactNode }) {
+function ChartView({ clusterId, chart, detailVersion, onNavigate }: Props & { chart: ChartUid }) {
+  const { tokens: t, mode } = useResolvedTheme();
+  const [refetch, setRefetch] = useState(0);
+  const state = useDetail(
+    () => api.getHelmChartDetail(clusterId, chart.source, chart.name, chart.version),
+    [clusterId, chart.source, chart.name, chart.version, detailVersion, refetch],
+  );
+  if (state.kind === "loading")
+    return (
+      <Frame t={t}>
+        <LoadingLine t={t} label="Loading chart…" />
+      </Frame>
+    );
+  if (state.kind === "error")
+    return (
+      <Frame t={t}>
+        <ErrorBlock t={t} message={state.message} kindLabel="helm chart" />
+        <Btn t={t} onClick={() => setRefetch((n) => n + 1)}>
+          Retry
+        </Btn>
+      </Frame>
+    );
+  const d = state.detail;
+  const cards: GitOpsCard[] = [
+    { label: "Chart", status: null, value: d.chart_name, caption: d.description, at: null },
+    {
+      label: "Version",
+      status: null,
+      value: d.chart_version,
+      caption: d.app_version ? `app ${d.app_version}` : null,
+      at: null,
+    },
+    {
+      label: "Source",
+      status: null,
+      value: d.source === "cluster" ? "in-cluster" : d.source,
+      caption: d.source === "cluster" ? "Extracted from an existing release" : "Local helm repo",
+      at: null,
+    },
+    {
+      label: "Used by",
+      status: null,
+      value: `${d.used_by.length} release${d.used_by.length === 1 ? "" : "s"}`,
+      caption: null,
+      at: null,
+    },
+  ];
   return (
-    <div
-      style={{
-        height: "100%",
-        overflow: "auto",
-        padding: "18px 22px 22px",
-        background: t.bg,
-        color: t.text,
-      }}
-    >
+    <Frame t={t}>
+      {!d.helm_available && <HelmMissingNotice t={t} what="installs" />}
+      <StatusCards t={t} mode={mode} cards={cards} />
+      <section aria-label="Chart" style={sectionGap}>
+        <Section t={t} title="Chart" />
+        <DetailRow t={t} label="Description">
+          {d.description ? (
+            <Copyable text={d.description}>
+              <span>{d.description}</span>
+            </Copyable>
+          ) : (
+            <Mute t={t}>—</Mute>
+          )}
+        </DetailRow>
+        {d.home && (
+          <DetailRow t={t} label="Home">
+            <ExternalLinks t={t} urls={[d.home]} />
+          </DetailRow>
+        )}
+        {d.sources.length > 0 && (
+          <DetailRow t={t} label="Sources">
+            <ExternalLinks t={t} urls={[...new Set(d.sources)]} />
+          </DetailRow>
+        )}
+        {d.keywords.length > 0 && (
+          <DetailRow t={t} label="Keywords">
+            <Keywords t={t} keywords={[...new Set(d.keywords)]} />
+          </DetailRow>
+        )}
+      </section>
+      <UsedBy t={t} mode={mode} d={d} clusterId={clusterId} onNavigate={onNavigate} />
+      <Install t={t} d={d} clusterId={clusterId} onInstalled={() => setRefetch((n) => n + 1)} />
+    </Frame>
+  );
+}
+
+const USED_COLS = "minmax(0, 1.4fr) minmax(0, 1fr) 48px minmax(90px, 0.8fr) minmax(0, 0.7fr)";
+
+function UsedBy({
+  t,
+  mode,
+  d,
+  clusterId,
+  onNavigate,
+}: {
+  t: Tokens;
+  mode: ThemeMode;
+  d: HelmChartDetail;
+  clusterId: string;
+  onNavigate?: DetailNavigate;
+}) {
+  return (
+    <section aria-label="Used by" style={sectionGap}>
+      <Section t={t} title="Used by" right={<Mute t={t}>{d.used_by.length}</Mute>} />
+      {d.used_by.length === 0 ? (
+        <Mute t={t}>No releases use this chart version.</Mute>
+      ) : (
+        <DataTable t={t} label="Used by" columns={USED_COLS} header={["Release", "Namespace", "Rev", "Status", "Updated"]}>
+          <ExpandableList
+            t={t}
+            items={d.used_by}
+            render={(items) =>
+              items.map((r) => (
+                <UsedByRow
+                  key={`${r.namespace}/${r.name}`}
+                  t={t}
+                  mode={mode}
+                  r={r}
+                  clusterId={clusterId}
+                  onNavigate={onNavigate}
+                />
+              ))
+            }
+          />
+        </DataTable>
+      )}
+    </section>
+  );
+}
+
+function UsedByRow({
+  t,
+  mode,
+  r,
+  clusterId,
+  onNavigate,
+}: {
+  t: Tokens;
+  mode: ThemeMode;
+  r: HelmChartUsedBy;
+  clusterId: string;
+  onNavigate?: DetailNavigate;
+}) {
+  const ref = useMemo(
+    () => ({ kind: "HelmRelease", group: "", namespace: r.namespace, name: r.name, local: true }),
+    [r.namespace, r.name],
+  );
+  const navigable = useNavigable(ref, clusterId, onNavigate);
+  return (
+    <DataRow t={t} columns={USED_COLS}>
+      <Cell>
+        <LinkValue
+          t={t}
+          copyText={`${r.namespace}/${r.name}`}
+          enabled={navigable}
+          truncate
+          onClick={() => onNavigate?.("HelmRelease", r.namespace, r.name, clusterId, "")}
+        >
+          <Mono>{r.name}</Mono>
+        </LinkValue>
+      </Cell>
+      <Cell>
+        <Copyable text={r.namespace}>
+          <Mono size={FS_SM}>{r.namespace}</Mono>
+        </Copyable>
+      </Cell>
+      <Cell>
+        <Mono size={FS_SM}>{r.revision}</Mono>
+      </Cell>
+      <Cell>{r.status ? <StatusPill t={t} mode={mode} status={r.status} dense /> : "—"}</Cell>
+      <Cell title={r.updated ?? undefined}>
+        <span style={{ color: t.textMuted }}>{r.updated ? `${ageFromIso(r.updated)} ago` : "—"}</span>
+      </Cell>
+    </DataRow>
+  );
+}
+
+function FieldError({ t, children }: { t: Tokens; children: string }) {
+  return (
+    <div role="alert" style={{ fontSize: FS_XS, color: t.bad, marginTop: 4 }}>
       {children}
     </div>
   );
 }
 
-// Synthetic uid format from helm_charts::synthetic_uid:
-//   `helm:chart:<source>:<chart_name>:<chart_version>`
-// We split on the first two `:` after the prefix (source, name); the
-// remainder is the version (which may contain dashes / dots / pre-release
-// markers but no colons in practice).
-function parseChartUid(
-  uid: string,
-): { source: string; name: string; version: string } | null {
-  if (!uid.startsWith("helm:chart:")) return null;
-  const rest = uid.slice("helm:chart:".length);
-  const sourceEnd = rest.indexOf(":");
-  if (sourceEnd === -1) return null;
-  const source = rest.slice(0, sourceEnd);
-  const after = rest.slice(sourceEnd + 1);
-  const nameEnd = after.indexOf(":");
-  if (nameEnd === -1) return null;
-  const name = after.slice(0, nameEnd);
-  const version = after.slice(nameEnd + 1);
-  if (!source || !name || !version) return null;
-  return { source, name, version };
-}
-
-type InstallStatus =
-  | { kind: "idle" }
-  | { kind: "saving" }
-  | {
-      kind: "success";
-      revision: number;
-      namespace: string;
-      release_name: string;
-      status: string | null;
-      elapsed_ms: number;
-    }
-  | { kind: "error"; message: string; helm_stderr?: string };
-
-export function HelmChartSummary(props: {
-  mode: ThemeMode;
+function Install({
+  t,
+  d,
+  clusterId,
+  onInstalled,
+}: {
+  t: Tokens;
+  d: HelmChartDetail;
   clusterId: string;
-  uid: string;
-  // `name` is the chart name (the row's `name` column); kept for API
-  // consistency with the other summaries even though we recover both
-  // name + version from the uid.
-  name: string;
-  detailVersion: number;
-  onNavigate?: DetailNavigate;
+  onInstalled: () => void;
 }) {
-  const t = useResolvedTheme().tokens;
-  const parsed = useMemo(() => parseChartUid(props.uid), [props.uid]);
-
-  // Hooks must run unconditionally — ALL state hooks above the early
-  // returns so the hook order stays stable across loading / error / ready.
-  const [refetch, setRefetch] = useState(0);
-  const state = useDetail(
-    () =>
-      api.getHelmChartDetail(
-        props.clusterId,
-        parsed?.source ?? "cluster",
-        parsed?.name ?? props.name,
-        parsed?.version ?? "",
-      ),
-    [
-      props.clusterId,
-      parsed?.source,
-      props.name,
-      parsed?.version,
-      props.detailVersion,
-      refetch,
-    ],
-  );
-
-  // Install form state. Lives at the summary level so refetch (after a
-  // successful install) doesn't reset the operator's draft if they then
-  // tweak values for a second install.
+  const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
+  const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
+  const [name, setName] = useState(() => suggestReleaseName(d.chart_name));
   const [namespace, setNamespace] = useState("default");
-  const [releaseName, setReleaseName] = useState("");
-  const [valuesBuffer, setValuesBuffer] = useState("");
-  const [seededValues, setSeededValues] = useState<string | null>(null);
-  const [installStatus, setInstallStatus] = useState<InstallStatus>({
-    kind: "idle",
-  });
+  const [values, setValues] = useState(d.default_values_yaml);
+  const seeded = useRef(d.default_values_yaml);
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState<HelmFailure | null>(null);
 
-  // Cluster degraded (unavailable / mid auto-reconnect): block install (a
-  // doomed helm write) while leaving the chart browseable. MUST stay above the
-  // early returns below — calling it after the loading/error guards changed the
-  // hook count between the loading and ready renders, which threw "Rendered
-  // more hooks than during the previous render" and (no error boundary exists)
-  // whited out the whole window the instant the chart finished loading.
-  const degraded = useAppStore((s) =>
-    selectClusterDegraded(s, props.clusterId),
-  );
-
-  // Seed defaults from the loaded chart on first ready (or when the
-  // chart changes). Re-seed values only when the operator hasn't typed
-  // anything custom — match by string equality with the prior seed.
+  // Follow refreshed chart defaults only while the operator hasn't edited them.
   useEffect(() => {
-    if (state.kind !== "ready") return;
-    const d = state.detail;
-    if (!releaseName) setReleaseName(suggestReleaseName(d.chart_name));
-    if (seededValues == null || valuesBuffer === seededValues) {
-      setValuesBuffer(d.default_values_yaml);
-      setSeededValues(d.default_values_yaml);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state]);
+    setValues((v) => (v === seeded.current ? d.default_values_yaml : v));
+    seeded.current = d.default_values_yaml;
+  }, [d.default_values_yaml]);
 
-  if (!parsed) {
-    return (
-      <ErrorBlock t={t} message={`Cannot parse chart uid: ${props.uid}`} />
-    );
-  }
-  if (state.kind === "loading")
-    return (
-      <Frame t={t}>
-        <LoadingLine t={t} label="Loading chart…"/>
-      </Frame>
-    );
-  if (state.kind === "error")
-    return <ErrorBlock t={t} message={state.message} kindLabel="helm chart" />;
+  const nameErr = releaseNameError(name.trim());
+  const nsErr = namespaceError(namespace.trim());
+  const valuesErr = valuesYamlError(values);
+  const collision = d.used_by.find((r) => r.name === name.trim() && r.namespace === namespace.trim());
+  const locked = !d.helm_available || degraded || saving;
+  const canInstall = !locked && !nameErr && !nsErr && !valuesErr;
+  const why = !d.helm_available ? "helm CLI not found" : degraded ? "Cluster unavailable" : null;
 
-  const d = state.detail;
-  const canInstall =
-    d.helm_available &&
-    !degraded &&
-    namespace.trim().length > 0 &&
-    releaseName.trim().length > 0 &&
-    installStatus.kind !== "saving";
-
-  const onInstall = async () => {
-    setInstallStatus({ kind: "saving" });
+  const install = async () => {
+    if (!canInstall) return;
+    const rel = name.trim();
+    const ns = namespace.trim();
+    setSaving(true);
     try {
-      const result = await api.installHelmChart(
-        props.clusterId,
-        d.source,
-        namespace.trim(),
-        releaseName.trim(),
-        d.chart_name,
-        d.chart_version,
-        valuesBuffer,
-      );
-      if (result.kind === "installed") {
-        setInstallStatus({
-          kind: "success",
-          revision: result.revision,
-          namespace: result.namespace,
-          release_name: result.release_name,
-          status: result.status,
-          elapsed_ms: result.elapsed_ms,
-        });
-        // Bump our local refetch so used_by reflects the new release.
-        setRefetch((n) => n + 1);
-      } else if (result.kind === "failed") {
-        setInstallStatus({
-          kind: "error",
-          message: result.message,
-          helm_stderr: result.helm_stderr,
-        });
+      if (
+        confirmDestructive &&
+        !(await confirm({
+          title: `Install ${rel} into ${ns}?`,
+          body: `Runs helm install for ${d.chart_name} ${d.chart_version} with the values below. The namespace is created if missing. Install hooks run.`,
+          confirmLabel: "Install",
+        }))
+      )
+        return;
+      if (selectClusterDegraded(useAppStore.getState(), clusterId)) return;
+      setFailure(null);
+      const r = await api.installHelmChart(clusterId, d.source, ns, rel, d.chart_name, d.chart_version, values);
+      if (r.kind === "installed") {
+        toast.ok(
+          `Installed ${r.release_name} in ${r.namespace} · revision ${r.revision}${r.status ? ` · ${r.status}` : ""}.`,
+        );
+        onInstalled();
+      } else if (r.kind === "failed") {
+        setFailure({ title: "Install failed", message: r.message, stderr: r.helm_stderr });
+        toast.bad(`Install of ${rel} failed.\n${r.message}`);
       } else {
-        setInstallStatus({
-          kind: "error",
-          message: "helm CLI not found on PATH",
-        });
+        toast.bad("Install failed: helm CLI not found.", { route: { section: "tools", anchor: "helm" } });
       }
     } catch (e) {
-      setInstallStatus({ kind: "error", message: String(e) });
+      toast.bad(`Install failed: ${String(e)}`);
+    } finally {
+      setSaving(false);
     }
   };
 
   return (
-    <Frame t={t}>
-      {/* Top status strip — chart name + version, and a hint about how
-          many releases are using it. */}
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 18,
-        }}
-      >
-        <strong style={{ fontFamily: FF_MONO, fontSize: FS_MD }}>
-          {d.chart_name}
-        </strong>
-        <span
-          style={{
-            fontSize: FS_XS,
-            fontFamily: FF_MONO,
-            padding: "2px 8px",
-            borderRadius: R_MD,
-            background: t.chip,
-            color: t.textMuted,
-          }}
-          title={
-            d.source === "cluster"
-              ? "in-cluster · derived from existing helm release"
-              : `repo · ${d.source}`
-          }
-        >
-          {d.source === "cluster" ? "in-cluster" : d.source}
-        </span>
-        <span style={{ fontSize: FS_SM, color: t.textMuted }}>
-          v{d.chart_version}
-          {d.app_version ? ` · app ${d.app_version}` : ""}
-          {d.used_by.length > 0
-            ? ` · used by ${d.used_by.length} release${d.used_by.length === 1 ? "" : "s"}`
-            : ""}
-        </span>
-      </div>
-
-      {/* Chart metadata. */}
-      <Section t={t} title="Chart" />
-      <div style={{ marginBottom: 22 }}>
-        <DetailRow t={t} label="Name">
-          <Copyable text={d.chart_name}>
-            <Mono>{d.chart_name}</Mono>
-          </Copyable>
-        </DetailRow>
-        <DetailRow t={t} label="Version">
-          <Copyable text={d.chart_version}>
-            <Mono>{d.chart_version}</Mono>
-          </Copyable>
-        </DetailRow>
-        <DetailRow t={t} label="App version">
-          {d.app_version ? (
-            <Copyable text={d.app_version}>
-              <Mono>{d.app_version}</Mono>
-            </Copyable>
-          ) : (
-            <Mute t={t}>—</Mute>
-          )}
-        </DetailRow>
-        <DetailRow t={t} label="Description">
-          {d.description ? (
-            <Copyable text={d.description}>
-              <span style={{ fontSize: FS_MD }}>{d.description}</span>
-            </Copyable>
-          ) : (
-            <Mute t={t}>—</Mute>
-          )}
-        </DetailRow>
-        <DetailRow t={t} label="Home">
-          {d.home ? (
-            <Copyable text={d.home}>
-              <span style={{ fontFamily: FF_MONO, fontSize: FS_MD, wordBreak: "break-all" }}>
-                {d.home}
-              </span>
-            </Copyable>
-          ) : (
-            <Mute t={t}>—</Mute>
-          )}
-        </DetailRow>
-        {d.sources.length > 0 ? (
-          <DetailRow t={t} label="Sources">
-            <ChipWrap>
-              {d.sources.map((s, i) => (
-                <Copyable key={`${s}-${i}`} text={s}>
-                  <span
-                    style={{
-                      fontFamily: FF_MONO,
-                      fontSize: FS_SM,
-                      padding: "2px 8px",
-                      borderRadius: R_MD,
-                      background: t.chip,
-                      color: t.text,
-                      wordBreak: "break-all",
-                    }}
-                  >
-                    {s}
-                  </span>
-                </Copyable>
-              ))}
-            </ChipWrap>
-          </DetailRow>
-        ) : null}
-        {d.keywords.length > 0 ? (
-          <DetailRow t={t} label="Keywords">
-            <ChipWrap>
-              {d.keywords.map((k, i) => (
-                <span
-                  key={`${k}-${i}`}
-                  style={{
-                    fontFamily: FF_MONO,
-                    fontSize: FS_SM,
-                    padding: "2px 8px",
-                    borderRadius: R_MD,
-                    background: t.chip,
-                    color: t.textMuted,
-                  }}
-                >
-                  {k}
-                </span>
-              ))}
-            </ChipWrap>
-          </DetailRow>
-        ) : null}
-      </div>
-
-      {/* Used by — releases currently running this chart. Operators
-          looking for "what does this chart look like configured" can jump
-          straight to one of these. */}
-      <Section
-        t={t}
-        title="Used by"
-        right={
-          <span style={{ fontSize: FS_XS, color: t.textMuted }}>
-            {d.used_by.length} release{d.used_by.length === 1 ? "" : "s"}
-          </span>
-        }
-      />
-      {d.used_by.length === 0 ? (
-        <div style={{ marginBottom: 22 }}>
-          <Mute t={t}>— no releases (chart still appears here while present in cluster state)</Mute>
-        </div>
-      ) : (
-        <div style={{ marginBottom: 22 }}>
-          {d.used_by.map((r) => (
-            <UsedByRow key={`${r.namespace}/${r.name}`} t={t} entry={r} onNavigate={props.onNavigate} />
-          ))}
-        </div>
+    <section aria-label="Install" style={sectionGap}>
+      <Section t={t} title="Install" right={<Mute t={t}>helm install --create-namespace</Mute>} />
+      {failure && (
+        <FailureBlock t={t} failure={failure} kindLabel="helm chart" onDismiss={() => setFailure(null)} />
       )}
-
-      {/* Install — release name + namespace + values editor + Install. */}
-      <Section
-        t={t}
-        title="Install"
-        right={
-          d.helm_available ? (
-            <span style={{ fontSize: FS_XS, color: t.textMuted }}>
-              `helm install` against this chart
-            </span>
-          ) : (
-            <span
-              title="Install helm CLI to enable install"
-              style={{ fontSize: FS_XS, color: t.textMuted }}
-            >
-              read-only · helm CLI not found
-            </span>
-          )
-        }
-      />
-      <div style={{ marginBottom: 14 }}>
-        <DetailRow t={t} label="Release name">
-          <input
-            type="text"
-            value={releaseName}
-            onChange={(e) => setReleaseName(e.target.value)}
-            disabled={!d.helm_available || installStatus.kind === "saving"}
-            placeholder={d.chart_name}
-            style={inputStyle(t)}
+      <DetailRow t={t} label="Release name">
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <TextInput
+            t={t}
+            mono
+            ariaLabel="Release name"
+            value={name}
+            onChange={setName}
+            placeholder={suggestReleaseName(d.chart_name)}
+            disabled={locked}
+            invalid={!!nameErr}
           />
-        </DetailRow>
-        <DetailRow t={t} label="Namespace">
-          <input
-            type="text"
+          {nameErr && <FieldError t={t}>{nameErr}</FieldError>}
+        </div>
+      </DetailRow>
+      <DetailRow t={t} label="Namespace">
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <TextInput
+            t={t}
+            mono
+            ariaLabel="Namespace"
             value={namespace}
-            onChange={(e) => setNamespace(e.target.value)}
-            disabled={!d.helm_available || installStatus.kind === "saving"}
+            onChange={setNamespace}
             placeholder="default"
-            style={inputStyle(t)}
+            disabled={locked}
+            invalid={!!nsErr}
           />
-          <span style={{ fontSize: FS_XS, color: t.textMuted, marginLeft: 8 }}>
-            created if missing (`--create-namespace`)
-          </span>
-        </DetailRow>
+          {nsErr && <FieldError t={t}>{nsErr}</FieldError>}
+        </div>
+      </DetailRow>
+      {collision && (
+        <Notice t={t} tone="warn">
+          Release {collision.name} already exists in {collision.namespace}; helm install will refuse to reuse the name.
+          Open that release to upgrade it instead.
+        </Notice>
+      )}
+      {valuesErr && (
+        <Notice t={t} tone="bad">
+          {valuesErr}
+        </Notice>
+      )}
+      <div style={{ marginBottom: DETAIL_LAYOUT.itemGap }}>
+        <YamlEditor t={t} label="Install values" value={values} onChange={setValues} readOnly={locked} height={360} />
       </div>
-
-      {installStatus.kind === "success" ? (
-        <SuccessBanner
+      <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {why && !saving && <span style={{ flex: 1, fontSize: FS_SM, color: t.textMuted }}>{why}</span>}
+        <Btn
           t={t}
-          message={`Installed ${installStatus.release_name} in ${installStatus.namespace} · revision ${installStatus.revision}${
-            installStatus.status ? ` · ${installStatus.status}` : ""
-          } · ${installStatus.elapsed_ms}ms`}
-          onDismiss={() => setInstallStatus({ kind: "idle" })}
-        />
-      ) : null}
-      {installStatus.kind === "error" ? (
-        <ErrorBanner
-          t={t}
-          message={installStatus.message}
-          stderr={installStatus.helm_stderr}
-          onDismiss={() => setInstallStatus({ kind: "idle" })}
-        />
-      ) : null}
-
-      <div style={{ marginBottom: 14 }}>
-        <ValuesEditor
-          t={t}
-          mode={props.mode}
-          value={valuesBuffer}
-          onChange={setValuesBuffer}
-          height={360}
-          disabled={
-            !d.helm_available || installStatus.kind === "saving" || degraded
-          }
-        />
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-        <button
-          type="button"
-          onClick={() => {
-            setValuesBuffer(d.default_values_yaml);
-            setSeededValues(d.default_values_yaml);
-          }}
-          disabled={installStatus.kind === "saving"}
-          style={{
-            fontSize: FS_SM,
-            fontFamily: FF_MONO,
-            padding: "5px 12px",
-            borderRadius: R_MD,
-            border: `1px solid ${t.border}`,
-            background: "transparent",
-            color: t.textDim,
-            cursor: "pointer",
-          }}
+          variant="ghost"
+          disabled={saving || values === d.default_values_yaml}
+          onClick={() => setValues(d.default_values_yaml)}
         >
           Reset values
-        </button>
-        <button
-          type="button"
-          onClick={onInstall}
-          disabled={!canInstall}
-          style={{
-            fontSize: FS_SM,
-            fontFamily: FF_MONO,
-            padding: "5px 14px",
-            borderRadius: R_MD,
-            border: `1px solid ${canInstall ? t.accent : t.border}`,
-            background: canInstall ? t.accent : t.chip,
-            color: canInstall ? "#fff" : t.textMuted,
-            cursor: canInstall ? "pointer" : "not-allowed",
-          }}
-        >
-          {installStatus.kind === "saving" ? "Installing…" : "Install"}
-        </button>
+        </Btn>
+        <Btn t={t} variant="primary" disabled={!canInstall} onClick={() => void install()}>
+          {saving ? "Installing…" : "Install"}
+        </Btn>
       </div>
-    </Frame>
+    </section>
   );
-}
-
-function inputStyle(t: Tokens): React.CSSProperties {
-  return {
-    fontFamily: FF_MONO,
-    fontSize: FS_MD,
-    padding: "4px 8px",
-    borderRadius: R_MD,
-    border: `1px solid ${t.border}`,
-    background: t.surface,
-    color: t.text,
-    minWidth: 240,
-  };
-}
-
-function UsedByRow({
-  t,
-  entry,
-  onNavigate,
-}: {
-  t: Tokens;
-  entry: HelmChartUsedBy;
-  onNavigate?: DetailNavigate;
-}) {
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "180px 110px 110px 1fr",
-        gap: 12,
-        padding: "6px 0",
-        fontSize: FS_MD,
-        fontFamily: FF_MONO,
-        borderTop: `1px solid ${t.borderSoft}`,
-      }}
-    >
-      <LinkValue
-        t={t}
-        onClick={() => onNavigate?.("HelmRelease", entry.namespace, entry.name)}
-        copyText={`${entry.namespace}/${entry.name}`}
-        enabled={!!onNavigate}
-      >
-        {entry.name}
-      </LinkValue>
-      <Copyable text={entry.namespace}>
-        <span>{entry.namespace}</span>
-      </Copyable>
-      <span>
-        rev {entry.revision}
-        {entry.status ? (
-          <>
-            {" · "}
-            <StatusPill status={entry.status} t={t} mode="light" dense compact />
-          </>
-        ) : null}
-      </span>
-      <span style={{ color: t.textMuted }} title={entry.updated ?? undefined}>
-        {entry.updated ? `${ageFromIso(entry.updated)} ago` : "—"}
-      </span>
-    </div>
-  );
-}
-
-// Editable Monaco for values input. Same wiring as the EditableYaml in
-// the helm release panel — accent border, clipboard shortcuts, scroll
-// bubble-out — but always editable here (no view/edit toggle since the
-// operator's primary action is "install with edits").
-function ValuesEditor({
-  t,
-  mode,
-  value,
-  onChange,
-  height,
-  disabled,
-}: {
-  t: Tokens;
-  mode: ThemeMode;
-  value: string;
-  onChange: (v: string) => void;
-  height: number;
-  disabled?: boolean;
-}) {
-  const monoFont = useResolvedTheme().typography.fontMono;
-  return (
-    <div
-      style={{
-        border: `1px solid ${disabled ? t.border : t.accent}`,
-        borderRadius: R_MD,
-        overflow: "hidden",
-      }}
-    >
-      <Editor
-        height={height}
-        language="yaml"
-        theme={mode === "dark" ? "vs-dark" : "light"}
-        value={value}
-        onChange={(next) => onChange(next ?? "")}
-        onMount={installClipboardShortcuts}
-        options={{
-          readOnly: !!disabled,
-          minimap: { enabled: false },
-          // Monaco wants a literal font + numeric size.
-          fontSize: 12.5,
-          fontFamily: monoFont,
-          wordWrap: "on",
-          scrollBeyondLastLine: false,
-          renderLineHighlight: "line",
-          folding: true,
-          lineNumbers: "on",
-          scrollbar: {
-            alwaysConsumeMouseWheel: false,
-          },
-        }}
-      />
-    </div>
-  );
-}
-
-function SuccessBanner({
-  t,
-  message,
-  onDismiss,
-}: {
-  t: Tokens;
-  message: string;
-  onDismiss: () => void;
-}) {
-  return (
-    <div
-      style={{
-        padding: "8px 12px",
-        marginBottom: 12,
-        background: "rgba(34,197,94,0.10)",
-        border: `1px solid rgba(34,197,94,0.45)`,
-        color: t.text,
-        fontSize: FS_SM,
-        borderRadius: R_MD,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 12,
-      }}
-    >
-      <span>{message}</span>
-      <button
-        type="button"
-        onClick={onDismiss}
-        style={{
-          fontSize: FS_XS,
-          fontFamily: FF_MONO,
-          background: "transparent",
-          border: "none",
-          color: t.textMuted,
-          cursor: "pointer",
-        }}
-      >
-        Dismiss
-      </button>
-    </div>
-  );
-}
-
-function ErrorBanner({
-  t,
-  message,
-  stderr,
-  onDismiss,
-}: {
-  t: Tokens;
-  message: string;
-  stderr?: string;
-  onDismiss: () => void;
-}) {
-  return (
-    <div
-      style={{
-        padding: "8px 12px",
-        marginBottom: 12,
-        background: "rgba(244,63,94,0.10)",
-        border: `1px solid rgba(244,63,94,0.45)`,
-        color: t.text,
-        fontSize: FS_SM,
-        borderRadius: R_MD,
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
-        }}
-      >
-        <ErrorBlock
-          t={t}
-          message={message}
-          kindLabel="helm chart"
-          verb="save"
-          inline
-        />
-        <button
-          type="button"
-          onClick={onDismiss}
-          style={{
-            fontSize: FS_XS,
-            fontFamily: FF_MONO,
-            background: "transparent",
-            border: "none",
-            color: t.textMuted,
-            cursor: "pointer",
-          }}
-        >
-          Dismiss
-        </button>
-      </div>
-      {stderr ? (
-        <pre
-          style={{
-            margin: "6px 0 0",
-            padding: "8px 10px",
-            background: t.surface,
-            border: `1px solid ${t.borderSoft}`,
-            borderRadius: R_MD,
-            fontFamily: FF_MONO,
-            fontSize: FS_SM,
-            color: t.text,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            maxHeight: 200,
-            overflow: "auto",
-          }}
-        >
-          {stderr}
-        </pre>
-      ) : null}
-    </div>
-  );
-}
-
-// Suggest a sensible default release name from the chart name. Mirrors
-// `helm install` UX where operators usually pass the chart short-name
-// as the release name. Strip any leading `<repo>/` if the chart name
-// happens to be qualified.
-function suggestReleaseName(chartName: string): string {
-  const slash = chartName.lastIndexOf("/");
-  return slash >= 0 ? chartName.slice(slash + 1) : chartName;
 }

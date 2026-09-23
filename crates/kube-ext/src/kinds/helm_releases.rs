@@ -3,38 +3,38 @@
 //! `(namespace, name)`); previous revisions surface in the detail panel as
 //! a History section.
 //!
-//! Wire format (Helm 3): the secret carries `data.release` =
-//! `base64(gzip(base64(json)))` — a release object is double-encoded. We
-//! decode both layers, parse the relevant fields, and project a flat row.
-//! Anything we don't recognise on the JSON side falls through to `Null` so
-//! shape drift between Helm releases doesn't crash the watcher.
-//!
-//! See <https://github.com/helm/helm/blob/main/pkg/storage/driver/secrets.go>
-//! for the storage driver shape.
+//! Wire format: `data.release` = base64(gzip(json)) under the Secret's own
+//! base64 (which kube-rs strips). Mirrors helm's
+//! `pkg/storage/driver/util.go::decodeRelease`, including plain (non-gzip)
+//! payloads. Unknown JSON falls through to `Null` so shape drift between
+//! Helm versions doesn't crash the watcher.
 //!
 //! Upgrade path: SSA on the secret itself is wrong (templates wouldn't
-//! re-render). Instead we extract the chart embedded in the release secret
-//! to a temp dir and shell out to the `helm` CLI — see
-//! [`extract_chart_to_dir`] and [`crate::fetch::helm_upgrade`].
+//! re-render). We extract the embedded chart to a temp dir and shell out to
+//! the `helm` CLI — see [`extract_chart_to_dir`] and
+//! [`crate::fetch::helm_upgrade`].
 
 use base64::Engine;
 use flate2::read::GzDecoder;
 use k8s_openapi::api::core::v1::Secret;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path};
 
+use crate::helm::{ChartIdentity, HelmUpdateAvailable};
 use crate::registry::{Category, ColumnDef, ColumnKind, ResourceKind};
 
-/// Helm release secret type — used both for the watcher field selector and
-/// to skip non-helm secrets if they slip through.
 pub const HELM_SECRET_TYPE: &str = "helm.sh/release.v1";
 
-/// Stable id used by the watcher to broadcast one row per logical release.
-/// Synthetic — Helm secrets each have their own real `metadata.uid`, but the
-/// frontend dedupes on the row uid and we want one row per `(ns, name)`.
+/// Decompressed JSON ceiling. Real releases are a few MiB at most (the
+/// Secret itself is capped at 1 MiB compressed); this stops a gzip bomb.
+pub const MAX_RELEASE_JSON_BYTES: u64 = 64 * 1024 * 1024;
+const GZIP_MAGIC: [u8; 3] = [0x1f, 0x8b, 0x08];
+
+/// One row per `(ns, name)` — the frontend dedupes on the row uid.
 pub fn synthetic_uid(namespace: &str, name: &str) -> String {
     format!("helm:{namespace}:{name}")
 }
@@ -43,9 +43,8 @@ pub fn synthetic_uid(namespace: &str, name: &str) -> String {
 pub fn meta() -> ResourceKind {
     ResourceKind {
         id: "helm_releases",
-        // Synthetic — kept consistent with what the apiserver would say
-        // about the underlying objects (Secrets, core/v1) so the YAML tab
-        // and other generic paths can resolve the right resource.
+        // Mirrors the backing Secrets. Generic object paths refuse this id
+        // (see `fetch::reject_synthetic_kind`) so it never touches a Secret.
         group: "",
         version: "v1",
         kind: "HelmRelease",
@@ -92,12 +91,8 @@ pub fn meta() -> ResourceKind {
     }
 }
 
-/// Parsed shape of the JSON payload we lift out of `data.release`. Helm's
-/// release struct has many more fields — only the ones the table + detail
-/// panel render are pulled in. The chart sub-tree is kept as raw `Value`
-/// for round-trip fidelity (so `extract_chart_to_dir` can re-emit a
-/// `Chart.yaml` that doesn't silently drop fields like `type: library` or
-/// `dependencies`).
+/// Full release payload. `chart` stays raw `Value` so
+/// [`extract_chart_to_dir`] can re-emit it without dropping fields.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Release {
     pub name: String,
@@ -105,20 +100,12 @@ pub struct Release {
     pub version: i64,
     #[serde(default)]
     pub info: ReleaseInfo,
-    /// Full chart object (metadata + templates + files + values + schema).
-    /// Raw because we need to serialize it back to disk for `helm upgrade`,
-    /// and re-typing every Helm chart field would lose round-trip fidelity.
-    /// Use [`Release::chart_meta_str`] / [`Release::chart_meta_array`] for
-    /// typed access in projections.
     #[serde(default)]
     pub chart: Option<Value>,
-    /// Operator-supplied values from the last install/upgrade.
     #[serde(default)]
     pub config: Option<Value>,
-    /// Rendered Kubernetes manifest YAML.
     #[serde(default)]
     pub manifest: Option<String>,
-    /// Per-hook objects (pre-install, post-upgrade, …).
     #[serde(default)]
     pub hooks: Option<Vec<Value>>,
 }
@@ -133,42 +120,101 @@ pub struct ReleaseInfo {
     pub notes: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ChartHead {
+    #[serde(default)]
+    metadata: Option<Value>,
+}
+
+/// Cheap view of a release: serde skips templates, files, values, manifest
+/// and hooks while parsing, so nothing large is allocated.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReleaseSummary {
+    pub name: String,
+    pub namespace: Option<String>,
+    pub version: i64,
+    #[serde(default)]
+    pub info: ReleaseInfo,
+    #[serde(default)]
+    chart: Option<ChartHead>,
+}
+
+fn meta_str(meta: Option<&Value>, key: &str) -> Option<String> {
+    meta.and_then(|m| m.get(key))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn meta_array(meta: Option<&Value>, key: &str) -> Vec<String> {
+    meta.and_then(|m| m.get(key))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn chart_label(meta: Option<&Value>) -> String {
+    match (meta_str(meta, "name"), meta_str(meta, "version")) {
+        (Some(n), Some(v)) => format!("{n}-{v}"),
+        (Some(n), None) => n,
+        _ => "—".to_owned(),
+    }
+}
+
 impl Release {
     fn chart_metadata(&self) -> Option<&Value> {
         self.chart.as_ref().and_then(|c| c.get("metadata"))
     }
-    /// Pull a string field out of `chart.metadata`. Returns `None` if the
-    /// field is missing or not a string.
     pub fn chart_meta_str(&self, key: &str) -> Option<String> {
-        self.chart_metadata()
-            .and_then(|m| m.get(key))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
+        meta_str(self.chart_metadata(), key)
     }
-    /// Pull an array-of-strings field out of `chart.metadata`. Empty when
-    /// missing or shape-mismatched.
     pub fn chart_meta_array(&self, key: &str) -> Vec<String> {
-        self.chart_metadata()
-            .and_then(|m| m.get(key))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default()
+        meta_array(self.chart_metadata(), key)
     }
-    /// Default values shipped with the chart (`Chart`'s `values` field).
     pub fn chart_default_values(&self) -> Option<Value> {
         self.chart.as_ref().and_then(|c| c.get("values").cloned())
     }
-    /// `<name>-<version>` label, or just `<name>`, or "—".
-    fn chart_label(&self) -> String {
-        match (self.chart_meta_str("name"), self.chart_meta_str("version")) {
-            (Some(n), Some(v)) => format!("{n}-{v}"),
-            (Some(n), None) => n,
-            _ => "—".to_owned(),
+    pub fn chart_identity(&self) -> ChartIdentity {
+        self.chart_metadata()
+            .map(ChartIdentity::from_metadata)
+            .unwrap_or_default()
+    }
+    pub fn summary(&self) -> ReleaseSummary {
+        ReleaseSummary {
+            name: self.name.clone(),
+            namespace: self.namespace.clone(),
+            version: self.version,
+            info: self.info.clone(),
+            chart: Some(ChartHead {
+                metadata: self.chart_metadata().cloned(),
+            }),
         }
+    }
+}
+
+impl ReleaseSummary {
+    fn chart_metadata(&self) -> Option<&Value> {
+        self.chart.as_ref().and_then(|c| c.metadata.as_ref())
+    }
+    pub fn chart_meta_str(&self, key: &str) -> Option<String> {
+        meta_str(self.chart_metadata(), key)
+    }
+    pub fn chart_ref(&self) -> Option<ChartRef> {
+        Some(ChartRef {
+            name: self.chart_meta_str("name")?,
+            version: self.chart_meta_str("version")?,
+            app_version: self.chart_meta_str("appVersion"),
+            description: self.chart_meta_str("description"),
+        })
+    }
+    pub fn key(&self) -> ReleaseKey {
+        (
+            self.namespace.clone().unwrap_or_default(),
+            self.name.clone(),
+        )
     }
 }
 
@@ -176,57 +222,311 @@ impl Release {
 pub enum DecodeError {
     #[error("secret is missing data.release")]
     MissingRelease,
-    #[error("data.release is not utf8")]
-    NotUtf8,
     #[error("base64 decode failed: {0}")]
     Base64(#[from] base64::DecodeError),
     #[error("gzip decode failed: {0}")]
     Gzip(std::io::Error),
+    #[error("release payload exceeds {} MiB decompressed", MAX_RELEASE_JSON_BYTES >> 20)]
+    TooLarge,
     #[error("json decode failed: {0}")]
     Json(#[from] serde_json::Error),
 }
 
-/// Decode a Helm release secret into the parsed `Release` payload.
-///
-/// Helm 3 stores: `data.release` is base64(gzip(base64(json))). The outer
-/// base64 is k8s's secret encoding (kube-rs already strips it for us by
-/// exposing `ByteString` raw bytes), the inner base64 is Helm's, and gzip
-/// sits between. So our pipeline is: bytes → utf8 → base64-decode → gunzip
-/// → json.
-pub fn decode_release(sec: &Secret) -> Result<Release, DecodeError> {
+/// Helm's inner base64 → optional gunzip (by magic bytes) → JSON bytes,
+/// capped at [`MAX_RELEASE_JSON_BYTES`].
+pub fn release_json_bytes(helm_b64: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    let raw = base64::engine::general_purpose::STANDARD.decode(helm_b64)?;
+    if raw.len() > GZIP_MAGIC.len() && raw[..GZIP_MAGIC.len()] == GZIP_MAGIC {
+        let cap = MAX_RELEASE_JSON_BYTES as usize;
+        let mut out = Vec::with_capacity(raw.len().saturating_mul(4).min(cap));
+        GzDecoder::new(&raw[..])
+            .take(MAX_RELEASE_JSON_BYTES + 1)
+            .read_to_end(&mut out)
+            .map_err(DecodeError::Gzip)?;
+        if out.len() as u64 > MAX_RELEASE_JSON_BYTES {
+            return Err(DecodeError::TooLarge);
+        }
+        Ok(out)
+    } else if raw.len() as u64 > MAX_RELEASE_JSON_BYTES {
+        Err(DecodeError::TooLarge)
+    } else {
+        Ok(raw)
+    }
+}
+
+fn secret_payload(sec: &Secret) -> Result<Vec<u8>, DecodeError> {
     let bytes = sec
         .data
         .as_ref()
         .and_then(|m| m.get("release"))
         .ok_or(DecodeError::MissingRelease)?;
-    let helm_b64 = std::str::from_utf8(&bytes.0).map_err(|_| DecodeError::NotUtf8)?;
-    let gzipped = base64::engine::general_purpose::STANDARD.decode(helm_b64.as_bytes())?;
-    let mut gz = GzDecoder::new(&gzipped[..]);
-    let mut json_bytes = Vec::with_capacity(gzipped.len() * 4);
-    gz.read_to_end(&mut json_bytes).map_err(DecodeError::Gzip)?;
-    let release: Release = serde_json::from_slice(&json_bytes)?;
-    Ok(release)
+    release_json_bytes(&bytes.0)
+}
+
+/// The Secret's namespace is authoritative for where the release lives.
+fn secret_namespace(sec: &Secret, payload: Option<String>) -> Option<String> {
+    sec.metadata.namespace.clone().or(payload)
+}
+
+pub fn decode_release(sec: &Secret) -> Result<Release, DecodeError> {
+    let mut rel: Release = serde_json::from_slice(&secret_payload(sec)?)?;
+    rel.namespace = secret_namespace(sec, rel.namespace.take());
+    Ok(rel)
+}
+
+pub fn decode_release_summary(sec: &Secret) -> Result<ReleaseSummary, DecodeError> {
+    let mut rel: ReleaseSummary = serde_json::from_slice(&secret_payload(sec)?)?;
+    rel.namespace = secret_namespace(sec, rel.namespace.take());
+    Ok(rel)
+}
+
+/// Revision number from helm's `version` label, else the
+/// `sh.helm.release.v1.<name>.v<N>` secret name. No decode needed.
+pub fn secret_revision(sec: &Secret) -> Option<i64> {
+    sec.metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("version"))
+        .and_then(|v| v.parse().ok())
+        .or_else(|| {
+            sec.metadata
+                .name
+                .as_deref()?
+                .rsplit_once(".v")?
+                .1
+                .parse()
+                .ok()
+        })
 }
 
 /// Project a release into the table-row shape declared by [`meta`].
-pub fn project_row(rel: &Release) -> Value {
+pub fn project_row(rel: &ReleaseSummary) -> Value {
+    let meta = rel.chart_metadata();
     json!({
         "name": rel.name.clone(),
         "namespace": rel.namespace.clone().unwrap_or_default(),
         "revision": rel.version,
         "status": rel.info.status.clone().unwrap_or_else(|| "unknown".to_owned()),
-        "chart": rel.chart_label(),
-        "app_version": rel.chart_meta_str("appVersion"),
+        "chart": chart_label(meta),
+        "app_version": meta_str(meta, "appVersion"),
         "updated": rel.info.last_deployed.clone(),
     })
 }
 
-/// Detail projection — what the right-side panel renders. Includes every
-/// revision currently present as `history[]`, sorted newest-first.
-/// `helm_available` reflects whether the host has a usable `helm` CLI on
-/// PATH; the frontend uses it to gate the upgrade-edit affordance.
-pub fn project_detail(latest: &Release, history: &[Release], helm_available: bool) -> Value {
-    let history_rows: Vec<Value> = history
+/// Kinds that are never namespaced, so a manifest doc without
+/// `metadata.namespace` isn't defaulted into the release namespace.
+const CLUSTER_SCOPED_KINDS: &[&str] = &[
+    "Namespace",
+    "ClusterRole",
+    "ClusterRoleBinding",
+    "CustomResourceDefinition",
+    "PersistentVolume",
+    "StorageClass",
+    "PriorityClass",
+    "ValidatingWebhookConfiguration",
+    "MutatingWebhookConfiguration",
+    "APIService",
+    "IngressClass",
+    "RuntimeClass",
+    "CSIDriver",
+    "VolumeSnapshotClass",
+];
+
+/// Split a multi-document YAML stream on `---` separator lines without a
+/// parser, so one malformed document can't hide the rest.
+fn yaml_documents(stream: &str) -> impl Iterator<Item = &str> {
+    let mut docs = Vec::new();
+    let mut start = 0;
+    let mut offset = 0;
+    for line in stream.split_inclusive('\n') {
+        let t = line.trim_end();
+        if t == "---" || t.starts_with("--- ") {
+            docs.push(&stream[start..offset]);
+            start = offset + line.len();
+        }
+        offset += line.len();
+    }
+    docs.push(&stream[start..]);
+    docs.into_iter().filter(|d| !d.trim().is_empty())
+}
+
+#[derive(Deserialize)]
+struct DocHead {
+    #[serde(rename = "apiVersion", default)]
+    api_version: Option<String>,
+    kind: String,
+    metadata: DocMeta,
+}
+
+#[derive(Deserialize)]
+struct DocMeta {
+    name: String,
+    #[serde(default)]
+    namespace: Option<String>,
+}
+
+fn manifest_object(doc: &str, release_ns: &str, message: Option<&str>) -> Option<Value> {
+    let head: DocHead = serde_yaml::from_str(doc).ok()?;
+    let kind = head.kind.as_str();
+    let name = head.metadata.name.as_str();
+    let group = head
+        .api_version
+        .as_deref()
+        .and_then(|a| a.rsplit_once('/'))
+        .map_or("", |(g, _)| g);
+    let namespace = match head.metadata.namespace.as_deref() {
+        Some(ns) if !ns.is_empty() => Some(ns),
+        _ if CLUSTER_SCOPED_KINDS.contains(&kind) => None,
+        _ => Some(release_ns),
+    };
+    Some(json!({
+        "group": group,
+        "kind": kind,
+        "namespace": namespace,
+        "name": name,
+        "local": true,
+        "sync": null,
+        "health": null,
+        "message": message,
+        "prune": false,
+    }))
+}
+
+/// `GitOpsResource`-shaped entries for every object in a rendered manifest.
+pub fn manifest_resources(manifest: &str, release_ns: &str) -> Vec<Value> {
+    yaml_documents(manifest)
+        .filter_map(|d| manifest_object(d, release_ns, None))
+        .collect()
+}
+
+/// Hook objects, with `"<events> · <last phase>"` in `message`.
+pub fn hook_resources(hooks: &[Value], release_ns: &str) -> Vec<Value> {
+    hooks
+        .iter()
+        .flat_map(|h| {
+            let events = h
+                .get("events")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let phase = h
+                .pointer("/last_run/phase")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty());
+            let message = match (events.is_empty(), phase) {
+                (false, Some(p)) => Some(format!("{events} · {p}")),
+                (false, None) => Some(events),
+                (true, Some(p)) => Some(p.to_owned()),
+                (true, None) => None,
+            };
+            let manifest = h.get("manifest").and_then(Value::as_str).unwrap_or("");
+            let mut objs: Vec<Value> = yaml_documents(manifest)
+                .filter_map(|d| manifest_object(d, release_ns, message.as_deref()))
+                .collect();
+            if objs.is_empty() {
+                if let (Some(kind), Some(name)) = (
+                    h.get("kind").and_then(Value::as_str),
+                    h.get("name").and_then(Value::as_str),
+                ) {
+                    let ns = (!CLUSTER_SCOPED_KINDS.contains(&kind)).then_some(release_ns);
+                    objs.push(json!({
+                        "group": "",
+                        "kind": kind,
+                        "namespace": ns,
+                        "name": name,
+                        "local": true,
+                        "sync": null,
+                        "health": null,
+                        "message": message,
+                        "prune": false,
+                    }));
+                }
+            }
+            objs
+        })
+        .collect()
+}
+
+fn card(
+    label: &str,
+    status: Option<String>,
+    value: Option<String>,
+    caption: Option<String>,
+    at: Option<String>,
+) -> Value {
+    json!({ "label": label, "status": status, "value": value, "caption": caption, "at": at })
+}
+
+fn release_cards(
+    latest: &Release,
+    history_len: usize,
+    update: Option<&HelmUpdateAvailable>,
+) -> Vec<Value> {
+    let chart_value = match (
+        latest.chart_meta_str("name"),
+        latest.chart_meta_str("version"),
+    ) {
+        (Some(n), Some(v)) => Some(format!("{n}@{v}")),
+        (n, _) => n,
+    };
+    let revisions = if history_len == 1 {
+        "1 revision in history".to_owned()
+    } else {
+        format!("{history_len} revisions in history")
+    };
+    let mut cards = vec![
+        card(
+            "Status",
+            latest.info.status.clone(),
+            None,
+            latest.info.description.clone(),
+            None,
+        ),
+        card(
+            "Revision",
+            None,
+            Some(format!("#{}", latest.version)),
+            Some(revisions),
+            latest.info.last_deployed.clone(),
+        ),
+        card(
+            "Chart",
+            None,
+            chart_value,
+            latest
+                .chart_meta_str("appVersion")
+                .map(|a| format!("app {a}")),
+            None,
+        ),
+    ];
+    if let Some(u) = update {
+        cards.push(card(
+            "Update",
+            None,
+            Some(u.version.clone()),
+            Some(u.source.clone()),
+            None,
+        ));
+    }
+    cards
+}
+
+/// Detail projection. `history` holds every revision present (any order;
+/// emitted newest-first). `helm_available` gates the upgrade affordance.
+pub fn project_detail(
+    latest: &Release,
+    history: &[ReleaseSummary],
+    helm_available: bool,
+    update: Option<&HelmUpdateAvailable>,
+) -> Value {
+    let mut ordered: Vec<&ReleaseSummary> = history.iter().collect();
+    ordered.sort_by_key(|r| std::cmp::Reverse(r.version));
+    let history_rows: Vec<Value> = ordered
         .iter()
         .map(|r| {
             json!({
@@ -240,10 +540,12 @@ pub fn project_detail(latest: &Release, history: &[Release], helm_available: boo
             })
         })
         .collect();
+    let ns = latest.namespace.clone().unwrap_or_default();
+    let hooks = latest.hooks.clone().unwrap_or_default();
 
     json!({
         "name": latest.name.clone(),
-        "namespace": latest.namespace.clone().unwrap_or_default(),
+        "namespace": ns,
         "revision": latest.version,
         "status": latest.info.status.clone(),
         "description": latest.info.description.clone(),
@@ -251,7 +553,7 @@ pub fn project_detail(latest: &Release, history: &[Release], helm_available: boo
         "last_deployed": latest.info.last_deployed.clone(),
         "deleted": latest.info.deleted.clone(),
         "notes": latest.info.notes.clone(),
-        "chart": latest.chart_label(),
+        "chart": chart_label(latest.chart_metadata()),
         "chart_name": latest.chart_meta_str("name"),
         "chart_version": latest.chart_meta_str("version"),
         "app_version": latest.chart_meta_str("appVersion"),
@@ -263,10 +565,206 @@ pub fn project_detail(latest: &Release, history: &[Release], helm_available: boo
         "values_user": latest.config.clone(),
         "values_chart_defaults": latest.chart_default_values(),
         "manifest": latest.manifest.clone(),
-        "hooks": latest.hooks.clone().unwrap_or_default(),
+        "resources": manifest_resources(latest.manifest.as_deref().unwrap_or(""), &ns),
+        "hooks_resources": hook_resources(&hooks, &ns),
+        "hooks": hooks,
+        "cards": release_cards(latest, history_rows.len().max(1), update),
         "history": history_rows,
         "helm_available": helm_available,
+        "update_available": update,
     })
+}
+
+pub type ReleaseKey = (String, String);
+
+/// How a release's latest revision moved after an index mutation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LatestChange<T> {
+    Upsert {
+        key: ReleaseKey,
+        prev: Option<T>,
+        latest: T,
+    },
+    Delete {
+        key: ReleaseKey,
+        prev: T,
+    },
+}
+
+#[derive(Debug)]
+struct Revision<T> {
+    version: i64,
+    resource_version: Option<String>,
+    payload: T,
+}
+
+/// Per-secret revision index for the helm watchers. Holds only a small
+/// payload per revision (a projected row, a chart ref) — never a decoded
+/// release — and remembers each secret's resourceVersion so an unchanged
+/// secret isn't decoded twice.
+#[derive(Debug)]
+pub struct ReleaseIndex<T> {
+    owner: HashMap<String, ReleaseKey>,
+    releases: BTreeMap<ReleaseKey, HashMap<String, Revision<T>>>,
+}
+
+impl<T> Default for ReleaseIndex<T> {
+    fn default() -> Self {
+        Self {
+            owner: HashMap::new(),
+            releases: BTreeMap::new(),
+        }
+    }
+}
+
+fn latest_of<T>(revs: &HashMap<String, Revision<T>>) -> Option<&Revision<T>> {
+    revs.iter()
+        .max_by(|a, b| a.1.version.cmp(&b.1.version).then_with(|| a.0.cmp(b.0)))
+        .map(|(_, r)| r)
+}
+
+impl<T: Clone + PartialEq> ReleaseIndex<T> {
+    pub fn is_current(&self, secret_uid: &str, resource_version: Option<&str>) -> bool {
+        resource_version.is_some()
+            && self
+                .owner
+                .get(secret_uid)
+                .and_then(|k| self.releases.get(k))
+                .and_then(|revs| revs.get(secret_uid))
+                .is_some_and(|r| r.resource_version.as_deref() == resource_version)
+    }
+
+    pub fn latest(&self, key: &ReleaseKey) -> Option<&T> {
+        self.releases
+            .get(key)
+            .and_then(latest_of)
+            .map(|r| &r.payload)
+    }
+
+    pub fn iter_latest(&self) -> impl Iterator<Item = (&ReleaseKey, &T)> {
+        self.releases
+            .iter()
+            .filter_map(|(k, revs)| Some((k, &latest_of(revs)?.payload)))
+    }
+
+    pub fn release_count(&self) -> usize {
+        self.releases.len()
+    }
+
+    pub fn upsert(
+        &mut self,
+        secret_uid: String,
+        key: ReleaseKey,
+        version: i64,
+        resource_version: Option<String>,
+        payload: T,
+    ) -> Vec<LatestChange<T>> {
+        let mut out = Vec::new();
+        if self.owner.get(&secret_uid).is_some_and(|k| *k != key) {
+            out.extend(self.remove(&secret_uid));
+        }
+        let prev = self.latest(&key).cloned();
+        self.releases.entry(key.clone()).or_default().insert(
+            secret_uid.clone(),
+            Revision {
+                version,
+                resource_version,
+                payload,
+            },
+        );
+        self.owner.insert(secret_uid, key.clone());
+        if let Some(latest) = self.latest(&key).cloned() {
+            if prev.as_ref() != Some(&latest) {
+                out.push(LatestChange::Upsert { key, prev, latest });
+            }
+        }
+        out
+    }
+
+    pub fn remove(&mut self, secret_uid: &str) -> Option<LatestChange<T>> {
+        let key = self.owner.remove(secret_uid)?;
+        let revs = self.releases.get_mut(&key)?;
+        let prev = latest_of(revs)?.payload.clone();
+        revs.remove(secret_uid);
+        match latest_of(revs).map(|r| r.payload.clone()) {
+            None => {
+                self.releases.remove(&key);
+                Some(LatestChange::Delete { key, prev })
+            }
+            Some(latest) if latest != prev => Some(LatestChange::Upsert {
+                key,
+                prev: Some(prev),
+                latest,
+            }),
+            Some(_) => None,
+        }
+    }
+
+    /// Drop every secret not replayed by a relist (deletes missed while
+    /// disconnected).
+    pub fn retain_seen(&mut self, seen: &HashSet<String>) -> Vec<LatestChange<T>> {
+        let stale: Vec<String> = self
+            .owner
+            .keys()
+            .filter(|u| !seen.contains(u.as_str()))
+            .cloned()
+            .collect();
+        stale.iter().filter_map(|u| self.remove(u)).collect()
+    }
+}
+
+/// Chart identity carried per release for the chart catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChartRef {
+    pub name: String,
+    pub version: String,
+    pub app_version: Option<String>,
+    pub description: Option<String>,
+}
+
+pub type ChartKey = (String, String);
+
+/// `(chart, version)` → releases whose **latest** revision uses it.
+#[derive(Debug, Default)]
+pub struct ChartUsage {
+    charts: BTreeMap<ChartKey, (ChartRef, usize)>,
+}
+
+impl ChartUsage {
+    /// Apply a latest-revision change; returns chart keys whose row changed.
+    pub fn apply(&mut self, change: &LatestChange<Option<ChartRef>>) -> Vec<ChartKey> {
+        let (prev, next) = match change {
+            LatestChange::Upsert { prev, latest, .. } => (prev.clone().flatten(), latest.clone()),
+            LatestChange::Delete { prev, .. } => (prev.clone(), None),
+        };
+        let mut touched = Vec::with_capacity(2);
+        if let Some(p) = prev {
+            let key = (p.name, p.version);
+            if let Some(entry) = self.charts.get_mut(&key) {
+                entry.1 = entry.1.saturating_sub(1);
+                if entry.1 == 0 {
+                    self.charts.remove(&key);
+                }
+            }
+            touched.push(key);
+        }
+        if let Some(n) = next {
+            let key = (n.name.clone(), n.version.clone());
+            self.charts.entry(key.clone()).or_insert((n, 0)).1 += 1;
+            if !touched.contains(&key) {
+                touched.push(key);
+            }
+        }
+        touched
+    }
+
+    pub fn get(&self, key: &ChartKey) -> Option<(&ChartRef, usize)> {
+        self.charts.get(key).map(|(r, n)| (r, *n))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&ChartKey, &ChartRef, usize)> {
+        self.charts.iter().map(|(k, (r, n))| (k, r, *n))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -285,31 +783,20 @@ pub enum ChartExtractError {
     BadFileEntry,
 }
 
-/// Materialise the chart embedded in this release into `dir` so it can be
-/// fed to `helm upgrade <release> <dir> ...`.
+/// Materialise the embedded chart into `dir` for `helm upgrade <rel> <dir>`.
 ///
-/// Layout written:
-/// - `Chart.yaml` — serialised from `release.chart.metadata`.
-/// - `values.yaml` — from `release.chart.values` (chart defaults). Only
-///   written when present and non-null.
-/// - `templates/<name>` — every entry in `release.chart.templates`.
-/// - `files/<name>` — every entry in `release.chart.files` whose path
-///   doesn't already start with `templates/`.
-/// - `<schema_filename>` — `release.chart.schema` if present (rare).
+/// Writes `Chart.yaml` (from `chart.metadata`), `values.yaml` (chart
+/// defaults), `values.schema.json`, the lock file (`Chart.lock`, or
+/// `requirements.lock` for apiVersion v1 charts) from `chart.lock`, and every
+/// `chart.templates` / `chart.files` entry at its own chart-relative `name`.
 ///
-/// **Subcharts are not bundled.** Helm 3/4 declare `dependencies []*Chart`
-/// as an unexported field on `chart.Chart`, so the JSON in the release
-/// secret never carries subchart sources — only `metadata.dependencies`
-/// (the declarations from `Chart.yaml`) survives. Charts that declare
-/// dependencies need a `helm dependency update` pass against the extracted
-/// dir before `helm upgrade`, otherwise helm rejects with "missing in
-/// charts/ directory". See [`crate::fetch::helm_dependency_update`].
+/// Subcharts are not bundled: helm serialises only the parent chart
+/// (`dependencies []*Chart` is unexported), so charts with dependencies
+/// need [`crate::fetch::helm_dependency_fetch`] afterwards. The lock lets
+/// that be a pinned `helm dependency build`.
 ///
-/// Helm chart files store paths relative to the chart root in their
-/// `name` field (e.g. `templates/deployment.yaml`, `files/config.json`).
-/// We honour that — *no* path normalisation that would re-route a file —
-/// but reject paths containing `..` so a malicious chart can't escape
-/// the temp dir we just made.
+/// Paths that could escape `dir` are rejected — they come from a
+/// cluster-resident secret.
 pub fn extract_chart_to_dir(release: &Release, dir: &Path) -> Result<(), ChartExtractError> {
     let chart = release
         .chart
@@ -320,28 +807,27 @@ pub fn extract_chart_to_dir(release: &Release, dir: &Path) -> Result<(), ChartEx
         .filter(|v| v.is_object())
         .ok_or(ChartExtractError::MissingMetadata)?;
 
-    // Chart.yaml. We re-emit YAML from the parsed JSON value to keep all
-    // metadata fields the chart originally declared (type, dependencies,
-    // annotations, kubeVersion, …). serde_yaml handles JSON Values
-    // transparently.
     fs::create_dir_all(dir)?;
-    let chart_yaml = serde_yaml::to_string(metadata)?;
-    fs::write(dir.join("Chart.yaml"), chart_yaml)?;
+    fs::write(dir.join("Chart.yaml"), serde_yaml::to_string(metadata)?)?;
 
-    // Default values.yaml from chart.values. Kept separate from the
-    // operator-supplied values that the caller will pass via `-f`.
     if let Some(values) = chart.get("values").filter(|v| !v.is_null()) {
-        let values_yaml = serde_yaml::to_string(values)?;
-        fs::write(dir.join("values.yaml"), values_yaml)?;
+        fs::write(dir.join("values.yaml"), serde_yaml::to_string(values)?)?;
     }
 
-    // JSON schema (optional). Stored as base64 in the release; Helm
-    // expects `values.schema.json` in the chart root.
     if let Some(schema_b64) = chart.get("schema").and_then(|v| v.as_str()) {
         let schema = base64::engine::general_purpose::STANDARD
             .decode(schema_b64)
             .map_err(|e| ChartExtractError::Base64("values.schema.json".to_owned(), e))?;
         fs::write(dir.join("values.schema.json"), schema)?;
+    }
+
+    if let Some(lock) = chart.get("lock").filter(|v| v.is_object()) {
+        let lock_name = if metadata.get("apiVersion").and_then(Value::as_str) == Some("v1") {
+            "requirements.lock"
+        } else {
+            "Chart.lock"
+        };
+        fs::write(dir.join(lock_name), serde_yaml::to_string(lock)?)?;
     }
 
     write_chart_files(chart.get("templates"), dir)?;
@@ -350,10 +836,6 @@ pub fn extract_chart_to_dir(release: &Release, dir: &Path) -> Result<(), ChartEx
     Ok(())
 }
 
-/// Return true if the parsed chart metadata declares any dependencies.
-/// Used by the upgrade/install path to decide whether a `helm dependency
-/// update` pass is needed before invoking `helm upgrade` (subcharts are
-/// not bundled in the release secret — see [`extract_chart_to_dir`]).
 pub fn chart_has_dependencies(release: &Release) -> bool {
     release
         .chart
@@ -364,13 +846,8 @@ pub fn chart_has_dependencies(release: &Release) -> bool {
         .is_some_and(|arr| !arr.is_empty())
 }
 
-/// True if `name` is a safe in-tree chart file path (cannot escape the chart
-/// root). String-splitting on `/` (the old guard) missed Windows absolute
-/// paths (`C:\…`) and backslash separators, so we walk real path components
-/// and require every one to be a plain in-tree segment. This rejects `..`
-/// (`ParentDir`), leading `/` (`RootDir`), drive prefixes (`Prefix`), and `.`
-/// (`CurDir`) under whatever platform we're extracting on — which is exactly
-/// the platform whose filesystem we'd be writing to.
+/// Every component must be a plain in-tree segment: rejects `..`, `/`,
+/// drive prefixes and `.` on whichever platform we're writing to.
 fn is_safe_chart_path(name: &str) -> bool {
     !name.is_empty()
         && Path::new(name)
@@ -391,11 +868,6 @@ fn write_chart_files(list: Option<&Value>, root: &Path) -> Result<(), ChartExtra
             .get("data")
             .and_then(|v| v.as_str())
             .ok_or(ChartExtractError::BadFileEntry)?;
-        // Reject paths that would escape the chart root. Helm enforces this
-        // on chart load; we mirror it defensively because file names come from
-        // a cluster-resident release secret — attacker-controllable on a
-        // compromised or multi-tenant cluster, and this is a write-arbitrary-
-        // file primitive otherwise.
         if !is_safe_chart_path(name) {
             return Err(ChartExtractError::BadFileEntry);
         }
@@ -414,7 +886,11 @@ fn write_chart_files(list: Option<&Value>, root: &Path) -> Result<(), ChartExtra
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use k8s_openapi::ByteString;
     use serde_json::json;
+    use std::io::Write;
 
     fn release_with_chart(chart: Value) -> Release {
         Release {
@@ -429,11 +905,335 @@ mod tests {
         }
     }
 
-    /// Regression: charts that declare `dependencies:` in `Chart.yaml`
-    /// (e.g. every Bitnami chart depending on `common`) need a `helm
-    /// dependency update` pass before `helm upgrade` because the release
-    /// secret never carries subchart sources. `chart_has_dependencies`
-    /// is what gates that pass — verify it sees the metadata array.
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
+        enc.write_all(bytes).expect("gzip write");
+        enc.finish().expect("gzip finish")
+    }
+
+    fn b64(bytes: &[u8]) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .encode(bytes)
+            .into_bytes()
+    }
+
+    fn secret(ns: Option<&str>, payload: &[u8]) -> Secret {
+        let mut s = Secret::default();
+        s.metadata.namespace = ns.map(str::to_owned);
+        s.data = Some(BTreeMap::from([(
+            "release".to_owned(),
+            ByteString(payload.to_vec()),
+        )]));
+        s
+    }
+
+    const JSON: &str = r#"{"name":"web","namespace":"payload-ns","version":3,
+        "info":{"status":"deployed"},
+        "chart":{"metadata":{"name":"nginx","version":"1.2.3","appVersion":"1.25"},
+                 "templates":[{"name":"templates/a.yaml","data":"eA=="}]}}"#;
+
+    #[test]
+    fn decode_accepts_gzip_and_plain_payloads() {
+        let gz = release_json_bytes(&b64(&gzip(JSON.as_bytes()))).expect("gzip");
+        let plain = release_json_bytes(&b64(JSON.as_bytes())).expect("plain");
+        assert_eq!(gz, plain);
+        assert_eq!(gz, JSON.as_bytes());
+    }
+
+    #[test]
+    fn decode_rejects_corrupt_payloads() {
+        assert!(matches!(
+            release_json_bytes(b"not base64!!"),
+            Err(DecodeError::Base64(_))
+        ));
+        let mut truncated = gzip(JSON.as_bytes());
+        truncated.truncate(truncated.len() / 2);
+        assert!(matches!(
+            release_json_bytes(&b64(&truncated)),
+            Err(DecodeError::Gzip(_))
+        ));
+        let s = secret(Some("ns"), &b64(b"{not json"));
+        assert!(matches!(decode_release(&s), Err(DecodeError::Json(_))));
+        assert!(matches!(
+            decode_release(&Secret::default()),
+            Err(DecodeError::MissingRelease)
+        ));
+    }
+
+    #[test]
+    fn decode_caps_decompressed_size() {
+        let bomb = vec![b' '; MAX_RELEASE_JSON_BYTES as usize + 1];
+        let payload = b64(&gzip(&bomb));
+        assert!(payload.len() < 1024 * 1024, "compresses small");
+        assert!(matches!(
+            release_json_bytes(&payload),
+            Err(DecodeError::TooLarge)
+        ));
+        let exact = vec![b' '; MAX_RELEASE_JSON_BYTES as usize];
+        assert_eq!(
+            release_json_bytes(&b64(&gzip(&exact)))
+                .expect("at cap")
+                .len(),
+            exact.len()
+        );
+    }
+
+    #[test]
+    fn secret_namespace_wins_over_payload() {
+        let s = secret(Some("real-ns"), &b64(&gzip(JSON.as_bytes())));
+        assert_eq!(
+            decode_release(&s).expect("full").namespace.as_deref(),
+            Some("real-ns")
+        );
+        let sum = decode_release_summary(&s).expect("summary");
+        assert_eq!(sum.key(), ("real-ns".to_owned(), "web".to_owned()));
+        assert_eq!(project_row(&sum)["namespace"], "real-ns");
+        assert_eq!(project_row(&sum)["chart"], "nginx-1.2.3");
+
+        let no_meta_ns = secret(None, &b64(JSON.as_bytes()));
+        assert_eq!(
+            decode_release_summary(&no_meta_ns)
+                .expect("summary")
+                .namespace
+                .as_deref(),
+            Some("payload-ns")
+        );
+    }
+
+    #[test]
+    fn secret_revision_prefers_label_then_name() {
+        let mut s = Secret::default();
+        s.metadata.name = Some("sh.helm.release.v1.web.v12".to_owned());
+        assert_eq!(secret_revision(&s), Some(12));
+        s.metadata.labels = Some(BTreeMap::from([("version".to_owned(), "13".to_owned())]));
+        assert_eq!(secret_revision(&s), Some(13));
+        assert_eq!(secret_revision(&Secret::default()), None);
+    }
+
+    #[test]
+    fn manifest_resources_tolerate_garbage_and_default_namespace() {
+        let manifest = "---\n# Source: a/templates/sa.yaml\napiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: sa\n---\n: : garbage [\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: other\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n  name: cr\n--- \napiVersion: v1\nkind: ConfigMap\n---\n";
+        let got = manifest_resources(manifest, "rel-ns");
+        assert_eq!(
+            got,
+            vec![
+                json!({"group": "", "kind": "ServiceAccount", "namespace": "rel-ns", "name": "sa", "local": true, "sync": null, "health": null, "message": null, "prune": false}),
+                json!({"group": "apps", "kind": "Deployment", "namespace": "other", "name": "web", "local": true, "sync": null, "health": null, "message": null, "prune": false}),
+                json!({"group": "rbac.authorization.k8s.io", "kind": "ClusterRole", "namespace": null, "name": "cr", "local": true, "sync": null, "health": null, "message": null, "prune": false}),
+            ]
+        );
+        assert!(manifest_resources("", "ns").is_empty());
+    }
+
+    #[test]
+    fn hook_resources_carry_events_and_phase() {
+        let hooks = vec![
+            json!({
+                "name": "migrate", "kind": "Job",
+                "events": ["pre-install", "post-upgrade"],
+                "last_run": { "phase": "Succeeded" },
+                "manifest": "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: migrate\n",
+            }),
+            json!({ "name": "t", "kind": "Pod", "events": ["test"], "last_run": { "phase": "" }, "manifest": "garbage: [" }),
+        ];
+        let got = hook_resources(&hooks, "ns");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0]["group"], "batch");
+        assert_eq!(got[0]["message"], "pre-install,post-upgrade · Succeeded");
+        assert_eq!(got[1]["kind"], "Pod");
+        assert_eq!(got[1]["namespace"], "ns");
+        assert_eq!(got[1]["message"], "test");
+    }
+
+    fn summary(version: i64, status: &str, chart_version: &str) -> ReleaseSummary {
+        serde_json::from_value(json!({
+            "name": "web", "namespace": "ns", "version": version,
+            "info": { "status": status, "last_deployed": format!("t{version}") },
+            "chart": { "metadata": { "name": "nginx", "version": chart_version } },
+        }))
+        .expect("summary")
+    }
+
+    #[test]
+    fn detail_sorts_history_and_builds_cards() {
+        let mut latest = release_with_chart(json!({
+            "metadata": { "name": "nginx", "version": "1.2.3", "appVersion": "1.25" },
+        }));
+        latest.version = 10;
+        latest.info.status = Some("deployed".into());
+        latest.info.description = Some("Upgrade complete".into());
+        latest.info.last_deployed = Some("2026-01-01T00:00:00Z".into());
+        latest.manifest = Some("apiVersion: v1\nkind: Service\nmetadata:\n  name: web\n".into());
+        let history = vec![
+            summary(2, "superseded", "1.0.0"),
+            summary(10, "deployed", "1.2.3"),
+            summary(9, "superseded", "1.2.0"),
+        ];
+        let update = HelmUpdateAvailable {
+            source: "bitnami".into(),
+            version: "1.3.0".into(),
+            app_version: None,
+        };
+        let d = project_detail(&latest, &history, true, Some(&update));
+        let revs: Vec<i64> = d["history"]
+            .as_array()
+            .expect("history")
+            .iter()
+            .map(|h| h["revision"].as_i64().expect("rev"))
+            .collect();
+        assert_eq!(revs, [10, 9, 2], "numeric, newest first");
+        assert_eq!(d["history"][1]["chart_version"], "1.2.0");
+        assert_eq!(
+            d["cards"],
+            json!([
+                { "label": "Status", "status": "deployed", "value": null, "caption": "Upgrade complete", "at": null },
+                { "label": "Revision", "status": null, "value": "#10", "caption": "3 revisions in history", "at": "2026-01-01T00:00:00Z" },
+                { "label": "Chart", "status": null, "value": "nginx@1.2.3", "caption": "app 1.25", "at": null },
+                { "label": "Update", "status": null, "value": "1.3.0", "caption": "bitnami", "at": null },
+            ])
+        );
+        assert_eq!(d["resources"][0]["kind"], "Service");
+        assert_eq!(d["resources"][0]["namespace"], "ns");
+        assert_eq!(d["hooks_resources"], json!([]));
+        assert_eq!(d["update_available"]["version"], "1.3.0");
+
+        let no_update = project_detail(&latest, &history[1..2], false, None);
+        assert_eq!(no_update["cards"].as_array().map(Vec::len), Some(3));
+        assert_eq!(no_update["cards"][1]["caption"], "1 revision in history");
+        assert!(no_update["update_available"].is_null());
+    }
+
+    fn key(name: &str) -> ReleaseKey {
+        ("ns".to_owned(), name.to_owned())
+    }
+
+    #[test]
+    fn index_tracks_latest_and_demotes_on_delete() {
+        let mut idx: ReleaseIndex<i64> = ReleaseIndex::default();
+        assert_eq!(
+            idx.upsert("u1".into(), key("a"), 1, Some("r1".into()), 1),
+            vec![LatestChange::Upsert {
+                key: key("a"),
+                prev: None,
+                latest: 1
+            }]
+        );
+        assert_eq!(
+            idx.upsert("u2".into(), key("a"), 2, Some("r2".into()), 2),
+            vec![LatestChange::Upsert {
+                key: key("a"),
+                prev: Some(1),
+                latest: 2
+            }]
+        );
+        assert!(
+            idx.upsert("u1".into(), key("a"), 1, Some("r1b".into()), 1)
+                .is_empty(),
+            "older revision update leaves latest alone"
+        );
+        assert!(idx.is_current("u1", Some("r1b")));
+        assert!(!idx.is_current("u1", Some("r1")));
+        assert!(!idx.is_current("u1", None));
+        assert_eq!(
+            idx.remove("u2"),
+            Some(LatestChange::Upsert {
+                key: key("a"),
+                prev: Some(2),
+                latest: 1
+            })
+        );
+        assert_eq!(
+            idx.remove("u1"),
+            Some(LatestChange::Delete {
+                key: key("a"),
+                prev: 1
+            })
+        );
+        assert_eq!(idx.remove("u1"), None);
+        assert_eq!(idx.release_count(), 0);
+    }
+
+    #[test]
+    fn index_retain_seen_reconciles_missed_deletes() {
+        let mut idx: ReleaseIndex<i64> = ReleaseIndex::default();
+        idx.upsert("a1".into(), key("a"), 1, None, 1);
+        idx.upsert("a2".into(), key("a"), 2, None, 2);
+        idx.upsert("b1".into(), key("b"), 1, None, 1);
+        let seen: HashSet<String> = ["a1".to_owned()].into();
+        let mut changes = idx.retain_seen(&seen);
+        changes.sort_by_key(|c| format!("{c:?}"));
+        assert_eq!(
+            changes,
+            vec![
+                LatestChange::Delete {
+                    key: key("b"),
+                    prev: 1
+                },
+                LatestChange::Upsert {
+                    key: key("a"),
+                    prev: Some(2),
+                    latest: 1
+                },
+            ]
+        );
+        assert_eq!(idx.iter_latest().collect::<Vec<_>>(), [(&key("a"), &1)]);
+    }
+
+    fn chart(version: &str) -> Option<ChartRef> {
+        Some(ChartRef {
+            name: "nginx".into(),
+            version: version.into(),
+            app_version: None,
+            description: None,
+        })
+    }
+
+    fn apply(
+        usage: &mut ChartUsage,
+        changes: impl IntoIterator<Item = LatestChange<Option<ChartRef>>>,
+    ) -> Vec<ChartKey> {
+        changes.into_iter().flat_map(|c| usage.apply(&c)).collect()
+    }
+
+    #[test]
+    fn chart_usage_counts_latest_revisions_only() {
+        let mut idx: ReleaseIndex<Option<ChartRef>> = ReleaseIndex::default();
+        let mut usage = ChartUsage::default();
+        let v1 = ("nginx".to_owned(), "1".to_owned());
+        let v2 = ("nginx".to_owned(), "2".to_owned());
+        let u = &mut usage;
+        assert_eq!(
+            apply(u, idx.upsert("a1".into(), key("a"), 1, None, chart("1"))),
+            vec![v1.clone()]
+        );
+        assert!(
+            apply(u, idx.upsert("a2".into(), key("a"), 2, None, chart("1"))).is_empty(),
+            "same chart, new revision: no count change"
+        );
+        assert_eq!(
+            apply(u, idx.upsert("b1".into(), key("b"), 1, None, chart("1"))),
+            vec![v1.clone()]
+        );
+        assert_eq!(
+            apply(u, idx.upsert("a3".into(), key("a"), 3, None, chart("2"))),
+            vec![v1.clone(), v2.clone()]
+        );
+        assert_eq!(usage.get(&v1).map(|(_, n)| n), Some(1), "only b's latest");
+        assert_eq!(usage.get(&v2).map(|(_, n)| n), Some(1));
+
+        assert_eq!(
+            apply(&mut usage, idx.remove("a3")),
+            vec![v2.clone(), v1.clone()]
+        );
+        assert_eq!(apply(&mut usage, idx.remove("b1")), vec![v1.clone()]);
+        assert_eq!(usage.get(&v1).map(|(_, n)| n), Some(1));
+        assert!(usage.get(&v2).is_none());
+
+        assert!(apply(&mut usage, idx.remove("a2")).is_empty());
+        assert_eq!(apply(&mut usage, idx.remove("a1")), vec![v1]);
+        assert_eq!(usage.iter().count(), 0);
+    }
+
     #[test]
     fn chart_has_dependencies_detects_metadata_array() {
         let with = release_with_chart(json!({
@@ -444,25 +1244,19 @@ mod tests {
             },
         }));
         assert!(chart_has_dependencies(&with));
-
         let empty = release_with_chart(json!({
             "metadata": { "name": "mariadb", "dependencies": [] },
         }));
         assert!(!chart_has_dependencies(&empty));
-
-        let none = release_with_chart(json!({
-            "metadata": { "name": "plain" },
-        }));
+        let none = release_with_chart(json!({ "metadata": { "name": "plain" } }));
         assert!(!chart_has_dependencies(&none));
     }
 
     #[test]
     fn is_safe_chart_path_accepts_in_tree_and_rejects_escapes() {
-        // Legitimate Helm chart member paths.
         assert!(is_safe_chart_path("Chart.yaml"));
         assert!(is_safe_chart_path("templates/deployment.yaml"));
         assert!(is_safe_chart_path("charts/common/values.yaml"));
-        // Escapes / non-plain components.
         assert!(!is_safe_chart_path(""), "empty name");
         assert!(!is_safe_chart_path("../escape"), "parent ref");
         assert!(
@@ -471,9 +1265,6 @@ mod tests {
         );
         assert!(!is_safe_chart_path("/etc/cron.d/evil"), "unix absolute");
         assert!(!is_safe_chart_path("./foo"), "current-dir prefix");
-        // On Windows a drive-absolute path parses to a Prefix/RootDir
-        // component and is rejected; on Unix the same string is a single
-        // in-tree segment (backslash isn't a separator) and stays contained.
         #[cfg(windows)]
         assert!(
             !is_safe_chart_path(r"C:\windows\evil"),
@@ -490,20 +1281,33 @@ mod tests {
         }]);
         let err = write_chart_files(Some(&malicious), tmp.path());
         assert!(matches!(err, Err(ChartExtractError::BadFileEntry)));
-        // Nothing was written outside (or inside) the chart root.
         assert!(!tmp.path().parent().unwrap().join("escape.txt").exists());
     }
 
     #[test]
-    fn extract_writes_chart_yaml_and_values() {
+    fn extract_writes_chart_yaml_values_and_lock() {
         let release = release_with_chart(json!({
-            "metadata": { "name": "plain", "version": "1.0.0" },
+            "metadata": { "apiVersion": "v2", "name": "plain", "version": "1.0.0" },
             "values": { "key": "value" },
+            "lock": { "digest": "sha256:abc", "dependencies": [{ "name": "common", "version": "2.0.0" }] },
+            "files": [{ "name": "config/app.json", "data": "e30=" }],
         }));
         let tmp = tempfile::tempdir().expect("tempdir");
         extract_chart_to_dir(&release, tmp.path()).expect("extract");
         assert!(tmp.path().join("Chart.yaml").exists());
         assert!(tmp.path().join("values.yaml").exists());
+        assert!(tmp.path().join("config/app.json").exists());
+        let lock = fs::read_to_string(tmp.path().join("Chart.lock")).expect("lock");
+        assert!(lock.contains("sha256:abc"));
         assert!(!tmp.path().join("charts").exists());
+
+        let v1 = release_with_chart(json!({
+            "metadata": { "apiVersion": "v1", "name": "old" },
+            "lock": { "digest": "d" },
+        }));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        extract_chart_to_dir(&v1, tmp.path()).expect("extract");
+        assert!(tmp.path().join("requirements.lock").exists());
+        assert!(!tmp.path().join("Chart.lock").exists());
     }
 }

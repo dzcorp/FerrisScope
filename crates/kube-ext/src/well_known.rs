@@ -25,9 +25,14 @@ use serde_json::Value;
 
 use crate::registry::{Category, ColumnDef};
 
+pub mod argocd;
+pub mod fluxcd;
 pub mod gateway_api;
+mod gitops;
+pub mod gitops_ops;
 
 /// Static descriptor for one well-known CRD shape.
+#[derive(Clone, Copy)]
 pub struct WellKnownCrd {
     /// Short, stable id used by the frontend for detail dispatch
     /// (`gateways`, `httproutes`, …). Must not collide with any built-in
@@ -44,7 +49,15 @@ pub struct WellKnownCrd {
 /// All well-known overrides ferrisscope ships. Order is unrelated to rail
 /// order (the rail groups by category).
 pub fn registry() -> &'static [WellKnownCrd] {
-    gateway_api::OVERRIDES
+    static REGISTRY: std::sync::OnceLock<Vec<WellKnownCrd>> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        gateway_api::OVERRIDES
+            .iter()
+            .chain(argocd::OVERRIDES)
+            .chain(fluxcd::OVERRIDES)
+            .copied()
+            .collect()
+    })
 }
 
 pub fn lookup_by_gk(group: &str, kind: &str) -> Option<&'static WellKnownCrd> {

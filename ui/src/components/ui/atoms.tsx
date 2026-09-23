@@ -209,21 +209,30 @@ export function Checkbox({
   indeterminate,
   onChange,
   size = 14,
+  label,
+  disabled,
 }: {
   t: Tokens;
   checked?: boolean;
   indeterminate?: boolean;
   onChange?: (next: boolean) => void;
   size?: number;
+  label?: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
+      role="checkbox"
+      aria-checked={indeterminate && !checked ? "mixed" : !!checked}
+      aria-label={label}
+      disabled={disabled}
       onClick={(e) => {
         e.stopPropagation();
         onChange?.(!checked);
       }}
       style={{
+        opacity: disabled ? 0.5 : 1,
         width: size,
         height: size,
         borderRadius: R_MD,
@@ -231,7 +240,7 @@ export function Checkbox({
           checked || indeterminate ? t.accent : t.border
         }`,
         background: checked || indeterminate ? t.accent : t.surface,
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
@@ -378,6 +387,7 @@ export function Toggle({
   size = "md",
   tone = "accent",
   title,
+  disabled,
 }: {
   t: Tokens;
   checked: boolean;
@@ -386,6 +396,7 @@ export function Toggle({
   size?: "sm" | "md";
   tone?: "accent" | "warn";
   title?: string;
+  disabled?: boolean;
 }) {
   const dims =
     size === "sm"
@@ -395,6 +406,9 @@ export function Toggle({
   return (
     <button
       type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       title={title}
       style={{
@@ -403,7 +417,8 @@ export function Toggle({
         gap: dims.gap,
         border: "none",
         background: "transparent",
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.55 : 1,
         padding: "2px 0",
         color: t.text,
         fontFamily: "inherit",
@@ -450,6 +465,9 @@ export function TextInput({
   mono,
   fullWidth = true,
   style,
+  disabled,
+  invalid,
+  ariaLabel,
 }: {
   t: Tokens;
   value: string;
@@ -458,18 +476,26 @@ export function TextInput({
   mono?: boolean;
   fullWidth?: boolean;
   style?: CSSProperties;
+  disabled?: boolean;
+  invalid?: boolean;
+  ariaLabel?: string;
 }) {
+  const rest = invalid ? t.bad : t.border;
   return (
     <input
       value={value}
       placeholder={placeholder}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      aria-invalid={invalid || undefined}
       onChange={(e) => onChange(e.target.value)}
-      onFocus={(e) => (e.currentTarget.style.borderColor = t.accent)}
-      onBlur={(e) => (e.currentTarget.style.borderColor = t.border)}
+      onFocus={(e) => (e.currentTarget.style.borderColor = invalid ? t.bad : t.accent)}
+      onBlur={(e) => (e.currentTarget.style.borderColor = rest)}
       style={{
         padding: "7px 10px",
         height: 32,
-        border: `1px solid ${t.border}`,
+        border: `1px solid ${rest}`,
+        opacity: disabled ? 0.6 : undefined,
         borderRadius: R_MD,
         background: t.surface,
         color: t.text,

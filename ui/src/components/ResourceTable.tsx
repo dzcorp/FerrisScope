@@ -41,6 +41,7 @@ import {
 } from "../store";
 import { formatQuantity } from "./detail";
 import { execContainers, rowLogContainers } from "../lib/podContainers";
+import { resolveResourceKind } from "../lib/resourceKinds";
 import type {
   ColumnDef,
   MetricsSnapshot,
@@ -51,6 +52,7 @@ import type {
 } from "../types";
 import {
   tokens,
+  statusBucket,
   clusterAccent,
   FF_MONO,
   FONT_MONO,
@@ -100,6 +102,7 @@ import {
   EmptyState,
 } from "./ui";
 import type { ContainerLite } from "./ui";
+import { HelmStorageNotice } from "./detail/helm/storage";
 
 type LoadState =
   | { kind: "loading" }
@@ -1572,6 +1575,14 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
                         ? "These clusters have nothing of this kind."
                         : "This cluster has nothing of this kind."
                   }
+                  action={
+                    kind.id === "helm_releases" ? (
+                      <HelmStorageNotice
+                        t={t}
+                        clusterIds={clusters.map((c) => c.id)}
+                      />
+                    ) : undefined
+                  }
                 />
               );
             })()
@@ -1733,15 +1744,10 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
             setDetailTarget(null);
             closeDetail();
           }}
-          onNavigate={(targetKindName, namespace, name) => {
-            // Map a Kubernetes Kind name (e.g. "StatefulSet") to a registry
-            // kind id ("stateful_sets") and navigate. Falls back silently if
-            // the kind isn't browseable yet (e.g. a CRD we don't ship for).
-            // Cross-kind references (owner refs, node names…) are always
-            // objects on the same cluster as the detail being viewed.
-            const target = kinds.find((k) => k.kind === targetKindName);
+          onNavigate={(targetKindName, namespace, name, clusterId = detailTarget.clusterId, group) => {
+            const target = resolveResourceKind(kinds, useAppStore.getState().kindClusters, targetKindName, clusterId, group);
             if (!target) return;
-            navigateToDetail(target.id, namespace, name, detailTarget.clusterId);
+            navigateToDetail(target.id, namespace, name, clusterId);
           }}
           onOpenExec={
             isPods
@@ -2789,7 +2795,18 @@ function phaseRank(p: string): number {
     case "Completed":
       return 5;
     default:
-      return 6;
+      switch (statusBucket(p)) {
+        case "bad":
+          return 0;
+        case "warn":
+          return 2;
+        case "good":
+          return 4;
+        case "info":
+          return 5;
+        default:
+          return 6;
+      }
   }
 }
 

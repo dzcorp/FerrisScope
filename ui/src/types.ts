@@ -986,6 +986,184 @@ export type WorkloadMeta = {
   managers: FieldManagerInfo[];
 };
 
+export type GitOpsReference = {
+  group: string;
+  kind: string;
+  namespace: string | null;
+  name: string;
+  local: boolean;
+};
+
+export type GitOpsField = {
+  label: string;
+  value: string | null;
+  reference: GitOpsReference | null;
+  entries?: [string, string][];
+};
+
+export type GitOpsActionId =
+  | "sync"
+  | "terminate"
+  | "refresh"
+  | "hard_refresh"
+  | "reconcile"
+  | "suspend"
+  | "resume";
+
+export type GitOpsAction = {
+  id: GitOpsActionId;
+  label: string;
+  patch: Record<string, unknown>;
+  confirmation: string | null;
+  disabled_reason: string | null;
+};
+
+export type GitOpsCard = {
+  label: string;
+  status: string | null;
+  value: string | null;
+  caption: string | null;
+  at: string | null;
+};
+
+export type GitOpsResource = {
+  group: string;
+  kind: string;
+  namespace: string | null;
+  name: string;
+  local: boolean;
+  sync: string | null;
+  health: string | null;
+  message: string | null;
+  prune: boolean;
+  version?: string | null;
+  sync_wave?: number | null;
+  hook?: boolean;
+};
+
+export type GitOpsCondition = {
+  type: string;
+  status: string;
+  negative: boolean;
+  reason: string | null;
+  message: string | null;
+  at: string | null;
+  observed_generation: number | null;
+};
+
+export type ArgoSourceSummary = {
+  repo: string | null;
+  path: string | null;
+  chart: string | null;
+  ref: string | null;
+  target_revision: string;
+};
+
+export type ArgoHistoryEntry = {
+  id: number | null;
+  revision: string | null;
+  deployed_at: string | null;
+  started_at: string | null;
+  initiated_by: string | null;
+  source: string | null;
+  rollback: boolean;
+};
+
+export type ArgoSyncResult = {
+  group: string;
+  kind: string | null;
+  namespace: string | null;
+  name: string | null;
+  status: string | null;
+  message: string | null;
+  hook_type: string | null;
+  hook_phase: string | null;
+  sync_phase: string | null;
+};
+
+export type ArgoExtras = {
+  sources: ArgoSourceSummary[];
+  sync_options: string[];
+  retry: Record<string, unknown> | null;
+  auto_sync: { enabled: boolean; prune: boolean; self_heal: boolean };
+  operation_active: boolean;
+  rollback_blocked: string | null;
+  history: ArgoHistoryEntry[];
+  sync_result: ArgoSyncResult[];
+  images: string[];
+  urls: string[];
+  cascade: boolean;
+};
+
+export type FluxHistoryEntry = {
+  version: number | null;
+  status: string | null;
+  chart: string | null;
+  chart_version: string | null;
+  app_version: string | null;
+  action: string | null;
+  deployed_at: string | null;
+  first_deployed?: string | null;
+  digest: string | null;
+  config_digest?: string | null;
+};
+
+export type FluxExtras = {
+  source: { group: string; kind: string; namespace: string | null; name: string } | null;
+  force_reset: boolean;
+  suspended: boolean;
+  history: FluxHistoryEntry[];
+  failures: number | null;
+};
+
+export type GitOpsSyncResource = {
+  group: string;
+  kind: string;
+  name: string;
+  namespace: string | null;
+};
+
+export type GitOpsRequest =
+  | { type: "action"; id: GitOpsActionId }
+  | {
+      type: "sync";
+      revision: string | null;
+      revisions: string[] | null;
+      prune: boolean;
+      dry_run: boolean;
+      force: boolean;
+      apply_only: boolean;
+      sync_options: string[];
+      resources: GitOpsSyncResource[];
+      retry: Record<string, unknown> | null;
+    }
+  | { type: "rollback"; id: number; prune: boolean; dry_run: boolean }
+  | { type: "set_auto_sync"; enabled: boolean; prune: boolean; self_heal: boolean }
+  | { type: "delete_app"; cascade: "foreground" | "background" | "non_cascading" }
+  | {
+      type: "reconcile";
+      force: boolean;
+      reset: boolean;
+      with_source: { kind_id: string; namespace: string | null; name: string } | null;
+    };
+
+export type GitOpsDetail = {
+  meta: WorkloadMeta;
+  resource_version: string | null;
+  notice: string | null;
+  cards: GitOpsCard[];
+  resources: GitOpsResource[] | null;
+  conditions: GitOpsCondition[];
+  actions: GitOpsAction[];
+  argo?: ArgoExtras | null;
+  flux?: FluxExtras | null;
+  sections: {
+    title: string;
+    fields: GitOpsField[];
+    items: { title: string; fields: GitOpsField[] }[];
+  }[];
+};
+
 export type LabelSelectorSummary = {
   match_labels: [string, string][];
   match_expressions: number;
@@ -1639,6 +1817,13 @@ export type HelmReleaseDetail = {
   values_chart_defaults: unknown;
   manifest: string | null;
   hooks: unknown[];
+  // Objects parsed from `manifest` (sync/health always null, local true).
+  resources: GitOpsResource[];
+  // Hook objects; `message` carries "<events> · <last phase>".
+  hooks_resources: GitOpsResource[];
+  // Status, Revision, Chart, plus Update when one is available.
+  cards: GitOpsCard[];
+  // Newest first (numeric revision order).
   history: HelmReleaseHistoryEntry[];
   // True when the host has a `helm` CLI on PATH. Drives whether the
   // upgrade-edit affordance is enabled in the values panel.
@@ -1654,6 +1839,22 @@ export type HelmUpgradeResult =
       kind: "upgraded";
       revision: number;
       status: string | null;
+      elapsed_ms: number;
+      helm_stdout: string;
+    }
+  | {
+      kind: "failed";
+      message: string;
+      helm_stderr: string;
+      elapsed_ms: number;
+    }
+  | { kind: "helm_missing" };
+
+export type HelmRollbackResult =
+  | {
+      kind: "rolled_back";
+      // New revision written by the rollback; null if it couldn't be read back.
+      revision: number | null;
       elapsed_ms: number;
       helm_stdout: string;
     }
@@ -2819,5 +3020,35 @@ export type ChatEvent =
 /// that does not say so reads as a complete one.
 export type WorkloadPods = {
   rows: ResourceRow[];
+  truncated: boolean;
+};
+
+export type ObjectStatusRef = {
+  group: string;
+  kind: string;
+  namespace: string | null;
+  name: string;
+};
+
+/// `found: false` + `status: "Missing"` is a confirmed absence; with
+/// `error` set the object's state is unknown.
+export type ObjectStatusError =
+  | "forbidden"
+  | "truncated"
+  | "namespace_required"
+  | "discovery"
+  | "timeout"
+  | "failed";
+
+export type ObjectStatus = ObjectStatusRef & {
+  kind_id: string | null;
+  found: boolean;
+  status: string | null;
+  ready: string | null;
+  error: ObjectStatusError | null;
+};
+
+export type ObjectStatuses = {
+  items: ObjectStatus[];
   truncated: boolean;
 };

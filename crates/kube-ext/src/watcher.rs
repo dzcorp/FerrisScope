@@ -459,6 +459,20 @@ fn watcher_config(strategy: ListStrategy) -> watcher::Config {
     cfg
 }
 
+/// Helm release secrets carry the whole chart (up to ~1 MiB each); the
+/// default 500-item page could buffer hundreds of MiB per LIST.
+const HELM_LIST_PAGE_SIZE: u32 = 25;
+
+fn helm_watcher_config(strategy: ListStrategy) -> watcher::Config {
+    let mut cfg = watcher_config(strategy);
+    cfg.field_selector = Some(format!(
+        "type={}",
+        crate::kinds::helm_releases::HELM_SECRET_TYPE
+    ));
+    cfg.page_size = Some(HELM_LIST_PAGE_SIZE);
+    cfg
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ResourceDelta {
@@ -846,153 +860,84 @@ impl ResourceWatcher {
     }
 
     /// Helm releases — synthetic kind backed by Secrets of type
-    /// `helm.sh/release.v1`. We watch Secrets with a `type=` field selector,
-    /// decode each release secret (base64 + gzip + JSON), and aggregate by
-    /// `(namespace, release-name)` keeping only the **highest revision** as
-    /// the live row. Previous revisions stay in the per-release map so a
-    /// delete of the latest revision can demote to the next-highest one
-    /// without dropping the release from the table.
+    /// `helm.sh/release.v1`, aggregated by `(namespace, release)` into one
+    /// row for the highest revision. Deleting the latest revision demotes to
+    /// the next one; deleting the last emits Delete.
     ///
-    /// Why a bespoke constructor instead of a `KindSpec`: `KindSpec` is a
-    /// 1:1 typed resource ↔ row mapping. Helm releases violate both halves
-    /// — multiple secrets per logical row, and the row content lives inside
-    /// the secret's `data.release` blob. Forcing this through `KindSpec`
-    /// would require leaking an aggregator into the trait.
+    /// Bespoke rather than a `KindSpec`: many secrets map to one row, and the
+    /// row lives inside the secret's `data.release` blob.
     pub fn start_helm_releases(client: Client, scope: NsScope, strategy: ListStrategy) -> Self {
         use crate::kinds::helm_releases::{
-            decode_release, project_row, synthetic_uid, Release, HELM_SECRET_TYPE,
+            decode_release_summary, project_row, synthetic_uid, LatestChange, ReleaseIndex,
         };
         use k8s_openapi::api::core::v1::Secret;
         use kube::ResourceExt;
-        use std::collections::BTreeMap;
 
         let dirty = Arc::new(DirtyChannel::new());
-        // Helm release secrets are namespaced — scoping to `One(ns)`
-        // gives the operator only releases deployed there.
         let api: Api<Secret> = match scope.namespace() {
             Some(ns) => Api::namespaced(client, ns),
             None => Api::all(client),
         };
-
-        // Per-release state keyed by `(namespace, name)`. Each entry holds
-        // every revision we've seen, keyed by the underlying secret uid so
-        // delete events can target a specific revision. The "live" revision
-        // is the entry with the highest `version`.
-        type Releases = BTreeMap<(String, String), BTreeMap<String, Release>>;
-        let store: Arc<Mutex<Releases>> = Arc::new(Mutex::new(BTreeMap::new()));
-
-        let mut cfg = watcher_config(strategy);
-        cfg.field_selector = Some(format!("type={HELM_SECRET_TYPE}"));
-        let stream = watcher(api, cfg).default_backoff();
+        let store: Arc<Mutex<ReleaseIndex<Value>>> = Arc::new(Mutex::new(ReleaseIndex::default()));
+        let stream = watcher(api, helm_watcher_config(strategy)).default_backoff();
 
         let init_done = Arc::new(AtomicBool::new(false));
         let init_done_task = init_done.clone();
         let dirty_task = dirty.clone();
         let store_task = store.clone();
 
+        let emit = |dirty: &DirtyChannel, change: LatestChange<Value>| match change {
+            LatestChange::Upsert { key, latest, .. } => record_synth(
+                dirty,
+                synthetic_uid(&key.0, &key.1),
+                latest,
+                "helm_releases",
+            ),
+            LatestChange::Delete { key, .. } => dirty.record_delete(synthetic_uid(&key.0, &key.1)),
+        };
+
         let task = tokio::spawn(async move {
             let started = std::time::Instant::now();
             tracing::info!(kind = "helm_releases", ?strategy, "helm watcher: starting");
             tokio::pin!(stream);
             let mut applied = 0u64;
+            let mut unchanged = 0u64;
             let mut decode_errors = 0u64;
-            let mut first_apply_logged = false;
-            // Secret uids replayed during the current Init→InitDone window.
-            // On InitDone we diff against the per-release secret_uids maps
-            // and prune anything missing — same sleep/wake reconcile as the
-            // typed/dynamic watchers, but the aggregator shape (one row per
-            // logical release, multiple secrets per row) means we have to
-            // walk the store inline instead of using `reconcile_init_seen`.
             let mut init_seen: Option<HashSet<String>> = None;
             while let Some(event) = stream.next().await {
                 let (obj, is_init_apply) = match event {
                     Ok(watcher::Event::Apply(o)) => (o, false),
                     Ok(watcher::Event::InitApply(o)) => (o, true),
                     Ok(watcher::Event::Delete(obj)) => {
-                        let Some(secret_uid) = obj.uid() else {
-                            continue;
-                        };
-                        let mut g = store_task.lock_recover();
-                        // We don't have the parsed Release here (the Delete
-                        // event only carries metadata) — locate which (ns,
-                        // name) holds this secret uid by scanning. Helm
-                        // release counts per cluster are small (hundreds at
-                        // most) so this is fine.
-                        let mut found_key: Option<(String, String)> = None;
-                        for (k, revs) in g.iter() {
-                            if revs.contains_key(&secret_uid) {
-                                found_key = Some(k.clone());
-                                break;
+                        if let Some(uid) = obj.uid() {
+                            let change = store_task.lock_recover().remove(&uid);
+                            if let Some(c) = change {
+                                emit(&dirty_task, c);
                             }
-                        }
-                        let Some(key) = found_key else { continue };
-                        let revs = g.get_mut(&key).expect("key checked above");
-                        revs.remove(&secret_uid);
-                        if revs.is_empty() {
-                            g.remove(&key);
-                            dirty_task.record_delete(synthetic_uid(&key.0, &key.1));
-                        } else if let Some(latest) = revs.values().max_by_key(|r| r.version) {
-                            // A non-latest revision was removed, or latest
-                            // was removed and we now demote: re-emit so the
-                            // table reflects the new live revision.
-                            record_synth(
-                                &dirty_task,
-                                synthetic_uid(&key.0, &key.1),
-                                project_row(latest),
-                                "helm_releases",
-                            );
                         }
                         continue;
                     }
                     Ok(watcher::Event::Init) => {
-                        tracing::debug!(kind = "helm_releases", "helm watcher: init");
                         init_seen = Some(HashSet::new());
                         continue;
                     }
                     Ok(watcher::Event::InitDone) => {
                         init_done_task.store(true, Ordering::SeqCst);
-                        let reconciled = if let Some(seen) = init_seen.take() {
-                            let mut g = store_task.lock_recover();
-                            // Snapshot (key, missing_secret_uid) pairs while
-                            // holding the lock; can't mutate `g` while a
-                            // borrow into it is alive.
-                            let stale: Vec<((String, String), String)> = g
-                                .iter()
-                                .flat_map(|(key, revs)| {
-                                    revs.keys()
-                                        .filter(|u| !seen.contains(u.as_str()))
-                                        .map(|u| (key.clone(), u.clone()))
-                                        .collect::<Vec<_>>()
-                                })
-                                .collect();
-                            for (key, secret_uid) in &stale {
-                                let Some(revs) = g.get_mut(key) else {
-                                    continue;
-                                };
-                                revs.remove(secret_uid);
-                                if revs.is_empty() {
-                                    g.remove(key);
-                                    dirty_task.record_delete(synthetic_uid(&key.0, &key.1));
-                                } else if let Some(latest) = revs.values().max_by_key(|r| r.version)
-                                {
-                                    record_synth(
-                                        &dirty_task,
-                                        synthetic_uid(&key.0, &key.1),
-                                        project_row(latest),
-                                        "helm_releases",
-                                    );
-                                }
-                            }
-                            stale.len()
-                        } else {
-                            0
-                        };
+                        let changes = init_seen
+                            .take()
+                            .map(|seen| store_task.lock_recover().retain_seen(&seen))
+                            .unwrap_or_default();
+                        let reconciled = changes.len();
+                        for c in changes {
+                            emit(&dirty_task, c);
+                        }
                         tracing::info!(
                             kind = "helm_releases",
                             elapsed_ms = started.elapsed().as_millis() as u64,
                             applied,
+                            unchanged,
                             decode_errors,
-                            reconciled_secret_uids = reconciled,
+                            reconciled,
                             "helm watcher: init done"
                         );
                         dirty_task.mark_init_done();
@@ -1011,42 +956,44 @@ impl ResourceWatcher {
                         seen.insert(secret_uid.clone());
                     }
                 }
-                let release = match decode_release(&obj) {
-                    Ok(r) => r,
+                let rv = obj.resource_version();
+                if store_task
+                    .lock_recover()
+                    .is_current(&secret_uid, rv.as_deref())
+                {
+                    unchanged += 1;
+                    continue;
+                }
+                let changes = match decode_release_summary(&obj) {
+                    Ok(rel) => {
+                        let row = project_row(&rel);
+                        store_task.lock_recover().upsert(
+                            secret_uid,
+                            rel.key(),
+                            rel.version,
+                            rv,
+                            row,
+                        )
+                    }
                     Err(e) => {
                         decode_errors += 1;
-                        tracing::debug!(
+                        tracing::warn!(
                             error = %e,
                             secret = %obj.name_any(),
                             namespace = ?obj.namespace(),
                             "helm watcher: decode failed"
                         );
-                        continue;
+                        store_task
+                            .lock_recover()
+                            .remove(&secret_uid)
+                            .into_iter()
+                            .collect()
                     }
                 };
-                let ns = release.namespace.clone().unwrap_or_default();
-                let name = release.name.clone();
-                let key = (ns.clone(), name.clone());
-                let mut g = store_task.lock_recover();
-                let entry = g.entry(key.clone()).or_default();
-                entry.insert(secret_uid, release);
-                if let Some(latest) = entry.values().max_by_key(|r| r.version) {
-                    record_synth(
-                        &dirty_task,
-                        synthetic_uid(&ns, &name),
-                        project_row(latest),
-                        "helm_releases",
-                    );
+                for c in changes {
+                    emit(&dirty_task, c);
                 }
                 applied += 1;
-                if !first_apply_logged {
-                    first_apply_logged = true;
-                    tracing::info!(
-                        kind = "helm_releases",
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        "helm watcher: first apply"
-                    );
-                }
             }
             tracing::info!(
                 kind = "helm_releases",
@@ -1059,15 +1006,11 @@ impl ResourceWatcher {
 
         let store_snap = store.clone();
         let snapshot_fn: Box<dyn Fn() -> Vec<RowJson> + Send + Sync> = Box::new(move || {
-            let g = store_snap.lock_recover();
-            g.iter()
-                .filter_map(|((ns, name), revs)| {
-                    let latest = revs.values().max_by_key(|r| r.version)?;
-                    synth_row(
-                        synthetic_uid(ns, name),
-                        project_row(latest),
-                        "helm_releases",
-                    )
+            store_snap
+                .lock_recover()
+                .iter_latest()
+                .filter_map(|((ns, name), row)| {
+                    synth_row(synthetic_uid(ns, name), row.clone(), "helm_releases")
                 })
                 .collect()
         });
@@ -1081,69 +1024,71 @@ impl ResourceWatcher {
         }
     }
 
-    /// Helm charts — synthetic kind derived from the same Helm release
-    /// secrets the [`Self::start_helm_releases`] watcher consumes, but
-    /// deduplicated by `(chart_name, chart_version)`. One chart row per
-    /// unique pair; `used_by` reflects the number of releases currently
-    /// referencing that chart in the cluster.
+    /// Helm charts — the same release secrets deduplicated by
+    /// `(chart, version)`, plus the operator's `helm search repo` entries.
+    /// `used_by` counts releases whose **latest** revision uses the chart.
     ///
-    /// We run a second watch with the same field selector rather than
-    /// derive from the existing helm_releases watcher because the watcher
-    /// API doesn't expose a "subscribe to another kind's reflector" path
-    /// without significant refactoring. The duplicate watch is cheap on
-    /// the apiserver — Helm release secrets number in the hundreds even
-    /// on busy clusters — and the lazy unsubscribe path means it only
-    /// runs while the operator has the chart catalog open.
+    /// A second watch (rather than sharing the releases watcher) because
+    /// there's no reflector-sharing path; it only runs while the catalog is
+    /// open.
     pub fn start_helm_charts(client: Client, scope: NsScope, strategy: ListStrategy) -> Self {
-        use crate::fetch::{helm_search_repo, HelmRepoChart, HELM_CLUSTER_SOURCE};
+        use crate::fetch::HELM_CLUSTER_SOURCE;
+        use crate::helm::{search_repo_cached, HelmRepoChart};
         use crate::kinds::helm_charts::{project_cluster_row, project_repo_row, synthetic_uid};
-        use crate::kinds::helm_releases::{decode_release, Release, HELM_SECRET_TYPE};
+        use crate::kinds::helm_releases::{
+            decode_release_summary, ChartRef, ChartUsage, LatestChange, ReleaseIndex,
+        };
         use k8s_openapi::api::core::v1::Secret;
         use kube::ResourceExt;
-        use std::collections::{BTreeMap, HashMap, HashSet};
+
+        #[derive(Default)]
+        struct ClusterCharts {
+            index: ReleaseIndex<Option<ChartRef>>,
+            usage: ChartUsage,
+        }
+
+        impl ClusterCharts {
+            fn apply(
+                &mut self,
+                dirty: &DirtyChannel,
+                changes: Vec<LatestChange<Option<ChartRef>>>,
+            ) {
+                for change in &changes {
+                    for key in self.usage.apply(change) {
+                        let uid = synthetic_uid(HELM_CLUSTER_SOURCE, &key.0, &key.1);
+                        match self.usage.get(&key) {
+                            Some((chart, n)) => {
+                                record_synth(
+                                    dirty,
+                                    uid,
+                                    project_cluster_row(chart, n),
+                                    "helm_charts",
+                                );
+                            }
+                            None => dirty.record_delete(uid),
+                        }
+                    }
+                }
+            }
+        }
 
         let dirty = Arc::new(DirtyChannel::new());
-        // Underlying secrets are namespaced; a `One(ns)` chart view shows
-        // only charts deployed there. Repo-side entries (loaded via
-        // `helm search repo` below) are independent of the cluster scope.
         let api: Api<Secret> = match scope.namespace() {
             Some(ns) => Api::namespaced(client, ns),
             None => Api::all(client),
         };
-
-        // Three stores:
-        //   `cluster_charts`: (name, version) → { sample release, set of
-        //              contributing release-secret uids }. Drives the
-        //              in-cluster source rows; deltas come from Apply /
-        //              Delete on helm release secrets.
-        //   `repo_charts`: (repo, name, version) → HelmRepoChart, loaded
-        //              once on subscribe via `helm search repo`.
-        //   `secret_to_chart`: helper for cluster_charts to demote on
-        //              Delete events without scanning.
-        type ClusterKey = (String, String);
-        type RepoKey = (String, String, String);
-        struct ChartEntry {
-            sample: Release,
-            secret_uids: HashSet<String>,
-        }
-        let cluster_charts: Arc<Mutex<BTreeMap<ClusterKey, ChartEntry>>> =
-            Arc::new(Mutex::new(BTreeMap::new()));
-        let repo_charts: Arc<Mutex<BTreeMap<RepoKey, HelmRepoChart>>> =
-            Arc::new(Mutex::new(BTreeMap::new()));
-        let secret_to_chart: Arc<Mutex<HashMap<String, ClusterKey>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        let mut cfg = watcher_config(strategy);
-        cfg.field_selector = Some(format!("type={HELM_SECRET_TYPE}"));
-        let stream = watcher(api, cfg).default_backoff();
+        let cluster: Arc<Mutex<ClusterCharts>> = Arc::new(Mutex::new(ClusterCharts::default()));
+        let repo_charts: Arc<Mutex<Arc<Vec<HelmRepoChart>>>> = Arc::new(Mutex::new(Arc::default()));
+        let stream = watcher(api, helm_watcher_config(strategy)).default_backoff();
 
         let init_done = Arc::new(AtomicBool::new(false));
         let init_done_task = init_done.clone();
         let dirty_task = dirty.clone();
-        let cluster_charts_task = cluster_charts.clone();
-        let repo_charts_task = repo_charts.clone();
-        let secret_map_task = secret_to_chart.clone();
+        let cluster_task = cluster.clone();
+        let repo_task = repo_charts.clone();
 
+        // Repo loading shares the watcher task so dropping the watcher
+        // aborts it (and kills a running `helm search`).
         let task = tokio::spawn(async move {
             let started = std::time::Instant::now();
             tracing::info!(
@@ -1152,237 +1097,150 @@ impl ResourceWatcher {
                 "helm-chart watcher: starting"
             );
 
-            // Repo charts load in parallel with the secret watch's first
-            // page. They're cheap (helm reads its own cache) and
-            // bounded; emit each as Upsert with source=<repo>. We don't
-            // gate InitDone on this — it can complete after.
-            {
-                let dirty = dirty_task.clone();
-                let store = repo_charts_task.clone();
-                tokio::spawn(async move {
-                    let entries = helm_search_repo().await;
-                    let mut g = store.lock_recover();
-                    for rc in &entries {
-                        let key: RepoKey = (rc.repo.clone(), rc.name.clone(), rc.version.clone());
-                        g.insert(key.clone(), rc.clone());
-                        record_synth(
-                            &dirty,
-                            synthetic_uid(&rc.repo, &rc.name, &rc.version),
-                            project_repo_row(rc),
-                            "helm_charts",
-                        );
-                    }
-                    tracing::info!(
-                        kind = "helm_charts",
-                        repo_charts = entries.len(),
-                        "helm-chart watcher: repo entries loaded"
-                    );
-                });
-            }
-
-            tokio::pin!(stream);
-            let mut applied = 0u64;
-            let mut decode_errors = 0u64;
-            // Secret uids replayed during the current Init→InitDone window.
-            // On InitDone we drop secret_to_chart entries for missing uids
-            // and demote the affected ChartEntry — same sleep/wake reconcile
-            // as the typed/dynamic watchers; the secret→chart reverse map
-            // means we don't have to scan cluster_charts here.
-            let mut init_seen: Option<HashSet<String>> = None;
-            while let Some(event) = stream.next().await {
-                let (obj, is_init_apply) = match event {
-                    Ok(watcher::Event::Apply(o)) => (o, false),
-                    Ok(watcher::Event::InitApply(o)) => (o, true),
-                    Ok(watcher::Event::Delete(obj)) => {
-                        let Some(secret_uid) = obj.uid() else {
-                            continue;
-                        };
-                        let key = secret_map_task.lock_recover().remove(&secret_uid);
-                        if let Some(k) = key {
-                            demote_cluster_chart(
-                                &cluster_charts_task,
-                                &k,
-                                &secret_uid,
-                                &dirty_task,
-                            );
-                        }
-                        continue;
-                    }
-                    Ok(watcher::Event::Init) => {
-                        tracing::debug!(kind = "helm_charts", "helm-chart watcher: init");
-                        init_seen = Some(HashSet::new());
-                        continue;
-                    }
-                    Ok(watcher::Event::InitDone) => {
-                        init_done_task.store(true, Ordering::SeqCst);
-                        let reconciled = if let Some(seen) = init_seen.take() {
-                            // Snapshot (secret_uid, key) for any tracked
-                            // secret missing from the new LIST, drop from
-                            // the reverse map, then demote each owning
-                            // chart entry (which may delete the row or
-                            // re-emit with a lower used_by count).
-                            let stale: Vec<(String, ClusterKey)> = secret_map_task
-                                .lock_recover()
-                                .iter()
-                                .filter(|(u, _)| !seen.contains(u.as_str()))
-                                .map(|(u, k)| (u.clone(), k.clone()))
-                                .collect();
-                            for (secret_uid, key) in &stale {
-                                secret_map_task.lock_recover().remove(secret_uid);
-                                demote_cluster_chart(
-                                    &cluster_charts_task,
-                                    key,
-                                    secret_uid,
-                                    &dirty_task,
-                                );
-                            }
-                            stale.len()
-                        } else {
-                            0
-                        };
-                        tracing::info!(
-                            kind = "helm_charts",
-                            elapsed_ms = started.elapsed().as_millis() as u64,
-                            applied,
-                            decode_errors,
-                            reconciled_secret_uids = reconciled,
-                            "helm-chart watcher: init done"
-                        );
-                        dirty_task.mark_init_done();
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            kind = "helm_charts",
-                            "helm-chart watcher: stream error"
-                        );
-                        continue;
-                    }
-                };
-                let Some(secret_uid) = obj.uid() else {
-                    continue;
-                };
-                if is_init_apply {
-                    if let Some(seen) = init_seen.as_mut() {
-                        seen.insert(secret_uid.clone());
-                    }
-                }
-                let release = match decode_release(&obj) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        decode_errors += 1;
-                        tracing::debug!(
-                            error = %e,
-                            "helm-chart watcher: decode failed"
-                        );
-                        continue;
-                    }
-                };
-                let Some(name) = release.chart_meta_str("name") else {
-                    continue;
-                };
-                let Some(version) = release.chart_meta_str("version") else {
-                    continue;
-                };
-                let new_key: ClusterKey = (name.clone(), version.clone());
-
-                // Demote a prior chart-key for this same secret
-                // uid (rare in-place version change) before
-                // promoting into the new key.
-                let prior_key = secret_map_task.lock_recover().get(&secret_uid).cloned();
-                if let Some(old_key) = prior_key {
-                    if old_key != new_key {
-                        demote_cluster_chart(
-                            &cluster_charts_task,
-                            &old_key,
-                            &secret_uid,
-                            &dirty_task,
-                        );
-                    }
-                }
-
-                {
-                    let mut g = cluster_charts_task.lock_recover();
-                    let entry = g.entry(new_key.clone()).or_insert_with(|| ChartEntry {
-                        sample: release.clone(),
-                        secret_uids: HashSet::new(),
-                    });
-                    entry.secret_uids.insert(secret_uid.clone());
+            let load_repos = async {
+                let entries = search_repo_cached().await;
+                for rc in entries.iter() {
                     record_synth(
                         &dirty_task,
-                        synthetic_uid(HELM_CLUSTER_SOURCE, &name, &version),
-                        project_cluster_row(&entry.sample, entry.secret_uids.len()),
+                        synthetic_uid(&rc.repo, &rc.name, &rc.version),
+                        project_repo_row(rc),
                         "helm_charts",
                     );
                 }
-                secret_map_task.lock_recover().insert(secret_uid, new_key);
+                tracing::info!(
+                    kind = "helm_charts",
+                    repo_charts = entries.len(),
+                    "helm-chart watcher: repo entries loaded"
+                );
+                *repo_task.lock_recover() = entries;
+            };
 
-                applied += 1;
-            }
+            let watch = async {
+                tokio::pin!(stream);
+                let mut applied = 0u64;
+                let mut decode_errors = 0u64;
+                let mut init_seen: Option<HashSet<String>> = None;
+                while let Some(event) = stream.next().await {
+                    let (obj, is_init_apply) = match event {
+                        Ok(watcher::Event::Apply(o)) => (o, false),
+                        Ok(watcher::Event::InitApply(o)) => (o, true),
+                        Ok(watcher::Event::Delete(obj)) => {
+                            if let Some(uid) = obj.uid() {
+                                let mut g = cluster_task.lock_recover();
+                                let changes = g.index.remove(&uid).into_iter().collect();
+                                g.apply(&dirty_task, changes);
+                            }
+                            continue;
+                        }
+                        Ok(watcher::Event::Init) => {
+                            init_seen = Some(HashSet::new());
+                            continue;
+                        }
+                        Ok(watcher::Event::InitDone) => {
+                            init_done_task.store(true, Ordering::SeqCst);
+                            let reconciled = match init_seen.take() {
+                                Some(seen) => {
+                                    let mut g = cluster_task.lock_recover();
+                                    let changes = g.index.retain_seen(&seen);
+                                    let n = changes.len();
+                                    g.apply(&dirty_task, changes);
+                                    n
+                                }
+                                None => 0,
+                            };
+                            tracing::info!(
+                                kind = "helm_charts",
+                                elapsed_ms = started.elapsed().as_millis() as u64,
+                                applied,
+                                decode_errors,
+                                reconciled,
+                                "helm-chart watcher: init done"
+                            );
+                            dirty_task.mark_init_done();
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                kind = "helm_charts",
+                                "helm-chart watcher: stream error"
+                            );
+                            continue;
+                        }
+                    };
+                    let Some(secret_uid) = obj.uid() else {
+                        continue;
+                    };
+                    if is_init_apply {
+                        if let Some(seen) = init_seen.as_mut() {
+                            seen.insert(secret_uid.clone());
+                        }
+                    }
+                    let rv = obj.resource_version();
+                    if cluster_task
+                        .lock_recover()
+                        .index
+                        .is_current(&secret_uid, rv.as_deref())
+                    {
+                        continue;
+                    }
+                    let decoded = decode_release_summary(&obj);
+                    let mut g = cluster_task.lock_recover();
+                    let changes = match decoded {
+                        Ok(rel) => {
+                            g.index
+                                .upsert(secret_uid, rel.key(), rel.version, rv, rel.chart_ref())
+                        }
+                        Err(e) => {
+                            decode_errors += 1;
+                            tracing::warn!(
+                                error = %e,
+                                secret = %obj.name_any(),
+                                "helm-chart watcher: decode failed"
+                            );
+                            g.index.remove(&secret_uid).into_iter().collect()
+                        }
+                    };
+                    g.apply(&dirty_task, changes);
+                    applied += 1;
+                }
+            };
+
+            tokio::join!(load_repos, watch);
         });
 
-        // Snapshot for late subscribers — covers both sources.
-        let cluster_snap = cluster_charts.clone();
+        let cluster_snap = cluster.clone();
         let repo_snap = repo_charts.clone();
         let snapshot_fn: Box<dyn Fn() -> Vec<RowJson> + Send + Sync> = Box::new(move || {
-            use crate::fetch::HELM_CLUSTER_SOURCE;
-            let mut out = Vec::new();
-            {
-                let g = cluster_snap.lock_recover();
-                out.extend(g.iter().filter_map(|((name, version), entry)| {
+            let mut out: Vec<RowJson> = cluster_snap
+                .lock_recover()
+                .usage
+                .iter()
+                .filter_map(|((name, version), chart, n)| {
                     synth_row(
                         synthetic_uid(HELM_CLUSTER_SOURCE, name, version),
-                        project_cluster_row(&entry.sample, entry.secret_uids.len()),
+                        project_cluster_row(chart, n),
                         "helm_charts",
                     )
-                }));
-            }
-            {
-                let g = repo_snap.lock_recover();
-                out.extend(g.iter().filter_map(|((repo, name, version), rc)| {
-                    synth_row(
-                        synthetic_uid(repo, name, version),
-                        project_repo_row(rc),
-                        "helm_charts",
-                    )
-                }));
-            }
+                })
+                .collect();
+            let repos = repo_snap.lock_recover().clone();
+            out.extend(repos.iter().filter_map(|rc| {
+                synth_row(
+                    synthetic_uid(&rc.repo, &rc.name, &rc.version),
+                    project_repo_row(rc),
+                    "helm_charts",
+                )
+            }));
             out
         });
 
-        return Self {
+        Self {
             snapshot_fn,
             dirty,
             drainer_taken: AtomicBool::new(false),
             init_done,
             task,
-        };
-
-        // Local helper: drop a secret_uid from a cluster chart entry; if
-        // the entry empties, remove it and emit Delete; otherwise emit a
-        // refreshed Upsert with the new used_by count.
-        fn demote_cluster_chart(
-            charts: &Arc<Mutex<BTreeMap<(String, String), ChartEntry>>>,
-            key: &(String, String),
-            secret_uid: &str,
-            dirty: &DirtyChannel,
-        ) {
-            use crate::fetch::HELM_CLUSTER_SOURCE;
-            let mut g = charts.lock_recover();
-            let Some(entry) = g.get_mut(key) else { return };
-            entry.secret_uids.remove(secret_uid);
-            if entry.secret_uids.is_empty() {
-                g.remove(key);
-                dirty.record_delete(synthetic_uid(HELM_CLUSTER_SOURCE, &key.0, &key.1));
-            } else {
-                record_synth(
-                    dirty,
-                    synthetic_uid(HELM_CLUSTER_SOURCE, &key.0, &key.1),
-                    project_cluster_row(&entry.sample, entry.secret_uids.len()),
-                    "helm_charts",
-                );
-            }
         }
     }
 

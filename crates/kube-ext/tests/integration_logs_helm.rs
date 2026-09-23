@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use ferrisscope_kube_ext::kinds::helm_releases::decode_release;
+use ferrisscope_kube_ext::kinds::helm_releases::{decode_release, secret_revision};
 use ferrisscope_test_support::kind::{ensure_two_clusters, KindCluster};
 use k8s_openapi::api::core::v1::{Pod, Secret};
 use kube::api::{Api, ListParams, LogParams};
@@ -92,7 +92,10 @@ async fn helm_release_decode_round_trips_real_install() {
     // but we do want it to run wherever helm is available (CI installs
     // it; many local envs already have it).
     if which::which("helm").is_err() {
-        eprintln!("helm not on PATH; skipping helm decode test");
+        eprintln!(
+            "SKIPPED helm_release_decode_round_trips_real_install: `helm` not on PATH \
+             (this test passes vacuously; install helm to exercise it)"
+        );
         return;
     }
 
@@ -153,7 +156,7 @@ async fn helm_release_decode_round_trips_real_install() {
     let sec = list
         .items
         .into_iter()
-        .max_by_key(|s| s.metadata.name.clone().unwrap_or_default())
+        .max_by_key(|s| secret_revision(s).unwrap_or(i64::MIN))
         .expect("at least one helm release secret");
 
     let release = decode_release(&sec).expect("decode release");

@@ -1,0 +1,71 @@
+[
+  {
+    "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+    "metadata": {"name":"web","namespace":"argocd","resourceVersion":"42","generation":2},
+    "spec": {
+      "project":"production", "destination":{"server":"https://kubernetes.default.svc","namespace":"prod"},
+      "sources":[{"repoURL":"https://example.com/charts","chart":"web","targetRevision":"1.2.3","helm":{"valueFiles":["$values/prod.yaml"],"parameters":[{"name":"replicas","value":"3"}]}},{"repoURL":"https://example.com/config.git","targetRevision":"main","ref":"values"}],
+      "syncPolicy":{"automated":{"prune":true,"selfHeal":true},"syncOptions":["CreateNamespace=true"],"retry":{"limit":5}},
+      "ignoreDifferences":[{"group":"apps","kind":"Deployment","jsonPointers":["/spec/replicas"]}]
+    },
+    "status": {
+      "sync":{"status":"Synced","revisions":["1.2.3","abc123"]},"health":{"status":"Healthy"},"reconciledAt":"2026-09-01T12:00:00Z",
+      "resources":[{"group":"apps","version":"v1","kind":"Deployment","namespace":"prod","name":"web","status":"Synced","health":{"status":"Healthy"}}],
+      "operationState":{"phase":"Succeeded","message":"successfully synced","startedAt":"2026-09-01T12:00:00Z","finishedAt":"2026-09-01T12:00:03Z","syncResult":{"revision":"abc123","resources":[{"kind":"Deployment","namespace":"prod","name":"web","status":"Synced","message":"deployment.apps/web configured"}]}},
+      "history":[{"id":1,"revisions":["1.2.3","abc123"],"deployedAt":"2026-09-01T12:00:03Z"}]
+    }
+  },
+  {
+    "apiVersion":"argoproj.io/v1alpha1","kind":"ApplicationSet",
+    "metadata":{"name":"fleet","namespace":"argocd","resourceVersion":"43","generation":1},
+    "spec":{"goTemplate":true,"generators":[{"git":{"repoURL":"https://example.com/config.git","revision":"main","directories":[{"path":"clusters/*"}]}}],"template":{"metadata":{"name":"{{.path.basename}}"},"spec":{"project":"production","source":{"repoURL":"https://example.com/config.git","path":"{{.path.path}}"},"destination":{"name":"{{.path.basename}}","namespace":"prod"}}},"syncPolicy":{"preserveResourcesOnDeletion":true},"strategy":{"type":"RollingSync"}},
+    "status":{"conditions":[{"type":"ResourcesUpToDate","status":"True","reason":"ApplicationSetUpToDate","message":"All applications have been generated"}],"applicationStatus":[{"application":"prod","status":"Healthy","message":"Complete","step":"1"}]}
+  },
+  {
+    "apiVersion":"argoproj.io/v1alpha1","kind":"AppProject",
+    "metadata":{"name":"production","namespace":"argocd","resourceVersion":"44"},
+    "spec":{"description":"Production workloads","sourceRepos":["https://example.com/*"],"sourceNamespaces":["argocd"],"destinations":[{"server":"https://kubernetes.default.svc","namespace":"prod"}],"clusterResourceWhitelist":[{"group":"","kind":"Namespace"}],"roles":[{"name":"reader","groups":["operators"],"policies":["p, proj:production:reader, applications, get, production/*, allow"]}],"syncWindows":[{"kind":"deny","schedule":"0 0 * * 6","duration":"48h","applications":["*"],"manualSync":true,"timeZone":"UTC"}]}
+  },
+  {
+    "apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization",
+    "metadata":{"name":"apps","namespace":"flux-system","resourceVersion":"45","generation":2},
+    "spec":{"interval":"10m","retryInterval":"1m","timeout":"5m","path":"./apps","sourceRef":{"kind":"GitRepository","name":"config"},"targetNamespace":"prod","prune":true,"wait":true,"dependsOn":[{"name":"infra"}],"postBuild":{"substitute":{"ENV":"prod"},"substituteFrom":[{"kind":"ConfigMap","name":"variables","optional":false}]},"decryption":{"provider":"sops","secretRef":{"name":"sops-key"}},"healthChecks":[{"apiVersion":"apps/v1","kind":"Deployment","namespace":"prod","name":"web"}]},
+    "status":{"observedGeneration":2,"lastAppliedRevision":"main@sha1:abc123","conditions":[{"type":"Ready","status":"True","observedGeneration":2,"reason":"ReconciliationSucceeded","message":"Applied revision: main@sha1:abc123"}],"inventory":{"entries":[{"id":"prod_web_apps_Deployment","v":"v1"},{"id":"prod_variables__ConfigMap","v":"v1"}]}}
+  },
+  {
+    "apiVersion":"helm.toolkit.fluxcd.io/v2","kind":"HelmRelease",
+    "metadata":{"name":"web","namespace":"flux-system","resourceVersion":"46","generation":2},
+    "spec":{"interval":"10m","releaseName":"web-prod","targetNamespace":"prod","chart":{"spec":{"chart":"web","version":"1.x","sourceRef":{"kind":"HelmRepository","name":"charts"}}},"dependsOn":[{"name":"database"}],"valuesFrom":[{"kind":"Secret","name":"web-values","valuesKey":"values.yaml"}],"install":{"remediation":{"retries":3}},"upgrade":{"remediation":{"retries":3,"strategy":"rollback"}},"driftDetection":{"mode":"enabled"}},
+    "status":{"observedGeneration":2,"lastAttemptedRevision":"1.2.3","helmChart":"flux-system/flux-system-web","conditions":[{"type":"Ready","status":"False","observedGeneration":2,"reason":"UpgradeFailed","message":"Deployment did not become ready"}],"failures":1,"history":[{"name":"web-prod","namespace":"prod","version":3,"status":"failed","chartName":"web","chartVersion":"1.2.3","appVersion":"2.0.0","lastDeployed":"2026-09-01T12:00:00Z"}]}
+  },
+  {
+    "apiVersion":"source.toolkit.fluxcd.io/v1","kind":"GitRepository",
+    "metadata":{"name":"config","namespace":"flux-system","resourceVersion":"47","generation":2},
+    "spec":{"interval":"1m","url":"https://example.com/config.git","ref":{"branch":"main"},"secretRef":{"name":"git-auth"},"verify":{"mode":"head","secretRef":{"name":"git-signing-keys"}},"include":[{"repository":{"name":"shared"},"fromPath":"lib","toPath":"shared"}]},
+    "status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True","observedGeneration":2}],"artifact":{"revision":"main@sha1:abc123","digest":"sha256:123","url":"http://source-controller/flux-system/config.tar.gz","size":1024,"lastUpdateTime":"2026-09-01T12:00:00Z"}}
+  },
+  {
+    "apiVersion":"source.toolkit.fluxcd.io/v1","kind":"OCIRepository",
+    "metadata":{"name":"oci","namespace":"flux-system","resourceVersion":"48","generation":2},
+    "spec":{"interval":"5m","url":"oci://example.com/config","ref":{"semver":"1.x"},"provider":"generic","layerSelector":{"mediaType":"application/vnd.cncf.flux.content.v1.tar+gzip","operation":"copy"}},
+    "status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True","observedGeneration":2}],"artifact":{"revision":"1.2.3@sha256:123","digest":"sha256:123"}}
+  },
+  {
+    "apiVersion":"source.toolkit.fluxcd.io/v1","kind":"HelmRepository",
+    "metadata":{"name":"charts","namespace":"flux-system","resourceVersion":"49","generation":2},
+    "spec":{"interval":"10m","url":"https://example.com/charts","type":"default","certSecretRef":{"name":"chart-ca"}},
+    "status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True","observedGeneration":2}],"artifact":{"revision":"sha256:123","digest":"sha256:123"}}
+  },
+  {
+    "apiVersion":"source.toolkit.fluxcd.io/v1","kind":"Bucket",
+    "metadata":{"name":"bucket","namespace":"flux-system","resourceVersion":"50","generation":2},
+    "spec":{"interval":"5m","provider":"aws","bucketName":"manifests","endpoint":"s3.amazonaws.com","region":"us-east-1","prefix":"prod/","secretRef":{"name":"s3-auth"}},
+    "status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True","observedGeneration":2}],"artifact":{"revision":"sha256:123","digest":"sha256:123"}}
+  },
+  {
+    "apiVersion":"source.toolkit.fluxcd.io/v1","kind":"HelmChart",
+    "metadata":{"name":"flux-system-web","namespace":"flux-system","resourceVersion":"51","generation":2},
+    "spec":{"interval":"5m","chart":"web","version":"1.x","sourceRef":{"kind":"HelmRepository","name":"charts"},"valuesFiles":["values.yaml","prod.yaml"],"reconcileStrategy":"Revision"},
+    "status":{"observedGeneration":2,"conditions":[{"type":"Ready","status":"True","observedGeneration":2}],"artifact":{"revision":"1.2.3","digest":"sha256:123"},"observedValuesFiles":["values.yaml","prod.yaml"]}
+  }
+]

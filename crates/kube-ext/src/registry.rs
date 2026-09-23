@@ -29,10 +29,7 @@ pub enum Category {
     Storage,
     Access,
     Cluster,
-    /// Application-level packaging on top of raw Kubernetes — Helm releases
-    /// today, Argo Applications / Flux Kustomizations later. Synthetic
-    /// kinds: not single-resource watches, derived from existing data
-    /// (e.g. Helm releases come from Secrets of type `helm.sh/release.v1`).
+    /// Helm releases and discovered Argo CD / Flux resources.
     Apps,
     /// CRDs and (eventually) browsing of their custom resources. Sits at
     /// the bottom of the rail so it doesn't compete visually with the
@@ -118,6 +115,28 @@ pub trait KindSpec: Send + Sync + 'static {
 pub struct ResourceKindEntry {
     pub meta: ResourceKind,
     pub start: Box<dyn Fn(Client, NsScope, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync>,
+    /// Row projection for a one-shot LIST, same shape the watcher emits.
+    /// `None` for synthetic kinds with no single backing object.
+    pub project: Option<RowProjector>,
+}
+
+/// Projects a listed object into its watcher row shape; `None` when the
+/// object doesn't deserialize into the kind's typed struct.
+pub type RowProjector = Arc<dyn Fn(&DynamicObject) -> Option<Value> + Send + Sync>;
+
+fn typed_projector<S: KindSpec>() -> RowProjector {
+    Arc::new(|obj: &DynamicObject| {
+        let mut v = serde_json::to_value(obj).ok()?;
+        if let Value::Object(map) = &mut v {
+            map.insert(
+                "apiVersion".into(),
+                Value::String(S::K::api_version(&()).into_owned()),
+            );
+            map.insert("kind".into(), Value::String(S::K::kind(&()).into_owned()));
+        }
+        let typed: S::K = serde_json::from_value(v).ok()?;
+        Some(S::project(&typed))
+    })
 }
 
 impl ResourceKindEntry {
@@ -140,6 +159,7 @@ impl ResourceKindEntry {
                 };
                 Arc::new(ResourceWatcher::start_with_api::<S>(api, strategy))
             }),
+            project: Some(typed_projector::<S>()),
         }
     }
 
@@ -156,6 +176,7 @@ impl ResourceKindEntry {
             start: Box::new(|client, _scope, strategy| {
                 Arc::new(ResourceWatcher::start::<S>(client, strategy))
             }),
+            project: Some(typed_projector::<S>()),
         }
     }
 
@@ -227,6 +248,9 @@ impl ResourceKindEntry {
         let namespaced = crd.namespaced;
         let log_id = id.to_owned();
         let projector = Arc::new(DynamicProjector::new(printer_columns));
+        let list_projector = projector.clone();
+        let project: RowProjector =
+            Arc::new(move |obj: &DynamicObject| Some(list_projector.project(obj)));
         let start: Box<
             dyn Fn(Client, NsScope, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync,
         > = Box::new(move |client, scope, strategy| {
@@ -242,7 +266,11 @@ impl ResourceKindEntry {
                 strategy,
             ))
         });
-        Self { meta, start }
+        Self {
+            meta,
+            start,
+            project: Some(project),
+        }
     }
 
     fn from_well_known(wk: &'static crate::well_known::WellKnownCrd, crd: &DiscoveredCrd) -> Self {
@@ -291,7 +319,11 @@ impl ResourceKindEntry {
                 strategy,
             ))
         });
-        Self { meta, start }
+        Self {
+            meta,
+            start,
+            project: Some(Arc::new(move |obj: &DynamicObject| Some(project_fn(obj)))),
+        }
     }
 }
 
@@ -635,6 +667,7 @@ pub fn helm_releases_entry() -> ResourceKindEntry {
                 client, scope, strategy,
             ))
         }),
+        project: None,
     }
 }
 
@@ -656,6 +689,7 @@ pub fn helm_charts_entry() -> ResourceKindEntry {
                 strategy,
             ))
         }),
+        project: None,
     }
 }
 
@@ -725,6 +759,24 @@ pub fn registry() -> Vec<ResourceKindEntry> {
             crate::kinds::custom_resource_definitions::CustomResourceDefinitionSpec,
         >(),
     ]
+}
+
+fn builtin_registry() -> &'static [ResourceKindEntry] {
+    static BUILTIN: OnceLock<Vec<ResourceKindEntry>> = OnceLock::new();
+    BUILTIN.get_or_init(registry)
+}
+
+/// Built-in kind serving the real `(group, kind)`. Synthetic kinds (Helm) are
+/// excluded: they borrow `group`/`kind` for display but aren't apiserver objects.
+pub fn lookup_by_gk(group: &str, kind: &str) -> Option<&'static ResourceKindEntry> {
+    builtin_registry()
+        .iter()
+        .find(|e| e.project.is_some() && e.meta.group == group && e.meta.kind == kind)
+}
+
+/// Built-in entry by id, without rebuilding the registry.
+pub fn lookup_builtin(id: &str) -> Option<&'static ResourceKindEntry> {
+    builtin_registry().iter().find(|e| e.meta.id == id)
 }
 
 pub fn lookup(id: &str) -> Option<ResourceKindEntry> {
@@ -819,6 +871,34 @@ mod tests {
             1,
             "most-recent id must survive"
         );
+    }
+
+    #[test]
+    fn lookup_by_gk_finds_builtins_and_skips_synthetic_helm() {
+        assert_eq!(lookup_by_gk("", "Pod").map(|e| e.meta.id), Some("pods"));
+        assert_eq!(
+            lookup_by_gk("apps", "Deployment").map(|e| e.meta.id),
+            Some("deployments")
+        );
+        assert!(lookup_by_gk("", "Deployment").is_none());
+        assert!(lookup_by_gk("", "HelmRelease").is_none());
+        assert!(lookup_by_gk("", "HelmChart").is_none());
+        assert!(lookup_by_gk("helm.toolkit.fluxcd.io", "HelmRelease").is_none());
+        assert_eq!(lookup_builtin("pods").map(|e| e.meta.kind), Some("Pod"));
+    }
+
+    #[test]
+    fn typed_projector_matches_watcher_projection() {
+        let entry = lookup_by_gk("apps", "Deployment").expect("builtin");
+        let obj: DynamicObject = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "web", "namespace": "prod"},
+            "spec": {"replicas": 3, "selector": {}, "template": {}},
+            "status": {"readyReplicas": 2}
+        }))
+        .expect("object");
+        let row = (entry.project.as_ref().expect("projector"))(&obj).expect("row");
+        assert_eq!(row["ready"], "2/3");
+        assert_eq!(row["name"], "web");
     }
 
     #[test]

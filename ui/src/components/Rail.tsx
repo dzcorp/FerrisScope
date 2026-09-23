@@ -21,6 +21,7 @@ import {
 } from "../theme";
 import { IS_MAC } from "../lib/keyboard";
 import { compareApiGroups } from "../lib/crdGroups";
+import { resourceKindLabel } from "../lib/resourceKinds";
 import { ErrorBlock, Icons, Tooltip, resolveKindIcon } from "./ui";
 import { OpenClustersStrip } from "./OpenClustersStrip";
 
@@ -801,9 +802,12 @@ function RailItem({
   const showIcons = useResolvedTheme().display.showRailIcons;
   const renderIcon = showIcons || !open;
   const icon = resolveKindIcon(kind.kind, kind.group, category);
+  const label = resourceKindLabel(kind);
+  const tooltip = `${label} (${kind.group ? `${kind.group}/` : ""}${kind.version})`;
   const btn = (
     <button
       type="button"
+      title={tooltip}
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -861,16 +865,19 @@ function RailItem({
           transition: "opacity .15s",
           whiteSpace: "nowrap",
           color: active ? t.accent : t.text,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
         }}
       >
-        {kind.kind}
+        {label}
       </div>
     </button>
   );
   return open ? (
     btn
   ) : (
-    <Tooltip label={kind.kind} side="right">
+    <Tooltip label={tooltip} side="right">
       {btn}
     </Tooltip>
   );
