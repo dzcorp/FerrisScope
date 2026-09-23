@@ -11,6 +11,19 @@ import { tokens } from "../../theme";
 describe("Btn", () => {
   const t = tokens("dark");
 
+  it("pressed renders toggle state for filter chips", () => {
+    const { getByRole, rerender } = render(
+      <Btn t={t} pressed>
+        Out of sync
+      </Btn>,
+    );
+    expect(getByRole("button", { name: "Out of sync" })).toHaveAttribute("aria-pressed", "true");
+    rerender(<Btn t={t} pressed={false}>Out of sync</Btn>);
+    expect(getByRole("button", { name: "Out of sync" })).toHaveAttribute("aria-pressed", "false");
+    rerender(<Btn t={t}>Out of sync</Btn>);
+    expect(getByRole("button", { name: "Out of sync" })).not.toHaveAttribute("aria-pressed");
+  });
+
   it("renders children and fires onClick", async () => {
     const onClick = vi.fn();
     const { getByRole } = render(

@@ -1,4 +1,5 @@
 export { Btn, IconBtn } from "./Btn";
+export { Dialog } from "./Dialog";
 export type { BtnVariant, BtnSize } from "./Btn";
 export { ErrorBoundary } from "./ErrorBoundary";
 export { Tooltip } from "./Tooltip";
