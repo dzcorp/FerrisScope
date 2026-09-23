@@ -1800,6 +1800,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "directories",
+ "ferrisscope-sleepclock-ext",
  "ferrisscope-test-support",
  "futures",
  "hex",
@@ -1882,6 +1883,14 @@ name = "ferrisscope-mimalloc-ext"
 version = "1.0.0"
 dependencies = [
  "libmimalloc-sys",
+]
+
+[[package]]
+name = "ferrisscope-sleepclock-ext"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

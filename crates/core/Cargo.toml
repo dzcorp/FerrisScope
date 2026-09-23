@@ -48,4 +48,5 @@ hex.workspace = true
 sha2.workspace = true
 base64.workspace = true
 async-trait.workspace = true
+ferrisscope-sleepclock-ext.workspace = true
 rusqlite.workspace = true

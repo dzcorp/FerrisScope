@@ -22,6 +22,7 @@ pub mod prefs;
 pub mod prom_cache;
 pub mod prometheus;
 pub mod quantity;
+pub mod resume;
 pub mod search;
 pub mod sources;
 pub mod ssh;

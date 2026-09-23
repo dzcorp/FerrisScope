@@ -1,0 +1,19 @@
+[package]
+name = "ferrisscope-sleepclock-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Workspace `forbid(unsafe_code)` blocks the clock FFI this crate exists for;
+# the unsafe is isolated here (mirrors `ferrisscope-fdpass-ext`).
+[lints.rust]
+unsafe_code = "allow"
+
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_WindowsProgramming"] }

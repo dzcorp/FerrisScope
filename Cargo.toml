@@ -9,6 +9,7 @@ members = [
     "crates/mimalloc-ext",
     "crates/winpipe-ext",
     "crates/fdpass-ext",
+    "crates/sleepclock-ext",
     "crates/test-support",
 ]
 
@@ -144,6 +145,7 @@ ferrisscope-helper = { path = "crates/helper" }
 ferrisscope-mimalloc-ext = { path = "crates/mimalloc-ext" }
 ferrisscope-winpipe-ext = { path = "crates/winpipe-ext" }
 ferrisscope-fdpass-ext = { path = "crates/fdpass-ext" }
+ferrisscope-sleepclock-ext = { path = "crates/sleepclock-ext" }
 ferrisscope-test-support = { path = "crates/test-support" }
 
 # Test deps
