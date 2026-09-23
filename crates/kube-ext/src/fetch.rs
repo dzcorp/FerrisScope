@@ -73,6 +73,25 @@ pub enum FetchError {
     Conflict(String),
     #[error("{0}")]
     Timeout(String),
+    #[error("{0}")]
+    InvalidArgument(String),
+}
+
+impl From<crate::helm::HelmArgError> for FetchError {
+    fn from(e: crate::helm::HelmArgError) -> Self {
+        Self::InvalidArgument(e.to_string())
+    }
+}
+
+/// Synthetic helm kinds register `core/v1 secrets` as their GVK; the generic
+/// object paths must not resolve them, or they'd act on a same-named Secret.
+fn reject_synthetic_kind(kind_id: &str) -> Result<(), FetchError> {
+    if matches!(kind_id, "helm_releases" | "helm_charts") {
+        return Err(FetchError::UnknownKind(format!(
+            "{kind_id} is a synthetic helm view, not an API object"
+        )));
+    }
+    Ok(())
 }
 
 pub async fn get_resource_yaml(
@@ -81,6 +100,7 @@ pub async fn get_resource_yaml(
     namespace: Option<&str>,
     name: &str,
 ) -> Result<String, FetchError> {
+    reject_synthetic_kind(kind_id)?;
     let entry =
         registry::lookup(kind_id).ok_or_else(|| FetchError::UnknownKind(kind_id.to_owned()))?;
     let meta = &entry.meta;
@@ -453,112 +473,125 @@ pub async fn list_secrets_in_namespace(
     Ok(Value::Array(out))
 }
 
-/// Helm release detail: list every revision secret for this release in the
-/// namespace, decode each, and return the latest revision's projection
-/// alongside a sorted history. We use the `owner=helm,name=<release>` label
-/// selector that Helm itself sets on release secrets — the apiserver does
-/// the filtering server-side, so this stays cheap on big clusters.
-///
-/// The projection includes `helm_available` so the frontend can disable
-/// the upgrade-edit affordance when the host has no `helm` CLI installed.
-/// [`helm_available`] re-probes `$PATH` on every call so the managed-helm
-/// installer can flip the result mid-session without restarting the app.
+pub use crate::helm::{helm_available, HelmRepoChart, HelmUpdateAvailable};
+use crate::helm::{
+    helm_command, run_helm, HelmRunError, KubeTarget, HELM_KILL_TIMEOUT, HELM_OP_TIMEOUT,
+    HELM_READ_TIMEOUT,
+};
+
+/// Helm release detail: the latest revision fully decoded plus a summary of
+/// every revision. `helm_available` is re-probed per call so the managed
+/// installer can flip it mid-session.
 pub async fn get_helm_release_detail(
     client: Client,
     namespace: &str,
     name: &str,
 ) -> Result<Value, FetchError> {
+    let secrets = list_release_secrets(client, namespace, name).await?;
+    let (latest_idx, latest) = decode_latest_release(namespace, name, &secrets)?;
+    let mut history: Vec<helm_releases::ReleaseSummary> = secrets
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != latest_idx)
+        .filter_map(|(_, s)| match helm_releases::decode_release_summary(s) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::debug!(error = %e, "helm history: skipping undecodable revision");
+                None
+            }
+        })
+        .collect();
+    history.push(latest.summary());
+
+    let helm = helm_available();
+    let update = match (
+        helm,
+        latest.chart_meta_str("name"),
+        latest.chart_meta_str("version"),
+    ) {
+        (true, Some(n), Some(v)) => {
+            crate::helm::find_chart_update(&n, &v, &latest.chart_identity()).await
+        }
+        _ => None,
+    };
+    Ok(helm_releases::project_detail(
+        &latest,
+        &history,
+        helm,
+        update.as_ref(),
+    ))
+}
+
+/// Every revision secret of one release (`owner=helm,name=<release>`).
+async fn list_release_secrets(
+    client: Client,
+    namespace: &str,
+    name: &str,
+) -> Result<Vec<Secret>, FetchError> {
+    crate::helm::validate_namespace(namespace)?;
+    crate::helm::validate_release_name(name)?;
     let api: Api<Secret> = Api::namespaced(client, namespace);
     let lp = ListParams::default().labels(&format!("owner=helm,name={name}"));
-    let list = api.list(&lp).await?;
-    let mut releases: Vec<helm_releases::Release> = list
+    let secrets: Vec<Secret> = api
+        .list(&lp)
+        .await?
         .items
-        .iter()
-        .filter_map(|sec| helm_releases::decode_release(sec).ok())
+        .into_iter()
+        .filter(|s| s.type_.as_deref() == Some(helm_releases::HELM_SECRET_TYPE))
         .collect();
-    if releases.is_empty() {
+    if secrets.is_empty() {
         return Err(FetchError::UnknownKind(format!(
             "helm release {namespace}/{name}"
         )));
     }
-    releases.sort_by_key(|b| std::cmp::Reverse(b.version));
-    let latest = releases[0].clone();
+    Ok(secrets)
+}
 
-    // Look up "update available" against the operator's local helm repo
-    // cache. helm_search_repo is best-effort — empty list when helm
-    // isn't installed or no repos are configured, in which case we just
-    // omit the indicator. We don't run `helm repo update` here (slow,
-    // network); the operator triggers that explicitly via the "Update
-    // repos" button.
-    let chart_name = latest.chart_meta_str("name");
-    let chart_version = latest.chart_meta_str("version");
-    let update_available = match (chart_name.as_deref(), chart_version.as_deref()) {
-        (Some(name), Some(ver)) => {
-            let repos = helm_search_repo().await;
-            find_update_for_chart(name, ver, &repos)
-        }
-        _ => None,
-    };
+/// The highest revision is picked from secret labels, then decoded; a
+/// corrupt latest is an error rather than a silent fall back to an older
+/// revision.
+fn decode_latest_release(
+    namespace: &str,
+    name: &str,
+    secrets: &[Secret],
+) -> Result<(usize, helm_releases::Release), FetchError> {
+    let (idx, sec) = secrets
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, s)| {
+            helm_releases::secret_revision(s)
+                .or_else(|| {
+                    helm_releases::decode_release_summary(s)
+                        .ok()
+                        .map(|r| r.version)
+                })
+                .unwrap_or(i64::MIN)
+        })
+        .ok_or_else(|| FetchError::UnknownKind(format!("helm release {namespace}/{name}")))?;
+    let rel = helm_releases::decode_release(sec).map_err(|e| {
+        FetchError::Conflict(format!(
+            "helm release {namespace}/{name}: latest revision secret {} can't be decoded: {e}",
+            sec.metadata.name.as_deref().unwrap_or("?")
+        ))
+    })?;
+    Ok((idx, rel))
+}
 
-    let mut value = helm_releases::project_detail(&latest, &releases, helm_available());
-    if let serde_json::Value::Object(ref mut map) = value {
-        map.insert(
-            "update_available".to_owned(),
-            match update_available {
-                Some(u) => serde_json::to_value(u).unwrap_or(Value::Null),
-                None => Value::Null,
-            },
-        );
+/// Helm keeps an `uninstalled` release's history only with `--keep-history`;
+/// `helm upgrade` can't move it forward.
+fn ensure_upgradable(rel: &helm_releases::Release) -> Result<(), FetchError> {
+    if rel.info.status.as_deref() == Some("uninstalled") {
+        return Err(FetchError::Conflict(format!(
+            "helm release {}/{} is uninstalled (history kept); install it again instead of upgrading",
+            rel.namespace.as_deref().unwrap_or(""),
+            rel.name
+        )));
     }
-    Ok(value)
+    Ok(())
 }
 
-/// `which helm` against the process `$PATH`. Re-probes on every call: the
-/// in-app managed-helm installer (`crates/app/src/helm_install.rs`) can
-/// install helm mid-session, and we want the helm-aware UI affordances to
-/// pick that up immediately. The cost is one filesystem stat per PATH entry,
-/// which is negligible compared to the network calls in
-/// `get_helm_release_detail`.
-pub fn helm_available() -> bool {
-    which::which("helm").is_ok()
-}
-
-// Hard ceilings on helm subprocess runtime. Helm has no internal deadline
-// for an unreachable repo or apiserver — without these, a hung `helm`
-// child pins its task forever and the UI never resolves.
-const HELM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const HELM_MUTATE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
-
-#[derive(Debug, thiserror::Error)]
-enum HelmRunError {
-    #[error("spawn helm: {0}")]
-    Spawn(std::io::Error),
-    #[error("helm timed out after {}s and was killed", .0.as_secs())]
-    TimedOut(std::time::Duration),
-}
-
-/// Run a prepared helm command with a hard deadline. Goes through
-/// `tokio::process` (not `spawn_blocking` + `std::process`) so that on
-/// timeout the child is actually killed via `kill_on_drop` — a blocking
-/// thread abandoned by `tokio::time::timeout` would leave helm running
-/// with its sockets open.
-async fn run_helm(
-    cmd: std::process::Command,
-    limit: std::time::Duration,
-) -> Result<std::process::Output, HelmRunError> {
-    let mut cmd = tokio::process::Command::from(cmd);
-    cmd.kill_on_drop(true);
-    match tokio::time::timeout(limit, cmd.output()).await {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err(HelmRunError::Spawn(e)),
-        Err(_) => Err(HelmRunError::TimedOut(limit)),
-    }
-}
-
-/// Captured stderr + timing from a failed `helm dependency update` —
-/// shaped to map directly into `HelmUpgradeResult::Failed` /
-/// `HelmInstallResult::Failed` so the caller can surface the message in
-/// the same UI banner as a failed upgrade.
+/// Mapped straight into the `Failed` variant of the upgrade / install /
+/// rollback results so every banner looks the same.
 #[derive(Debug)]
 pub struct HelmDepUpdateFailure {
     pub message: String,
@@ -566,50 +599,78 @@ pub struct HelmDepUpdateFailure {
     pub elapsed_ms: u64,
 }
 
-/// Run `helm dependency update <chart_dir>` to fetch declared subcharts
-/// into `<chart_dir>/charts/`. Helm release secrets serialize only the
-/// parent chart — `dependencies []*Chart` is unexported on
-/// `chart.Chart` (verified against helm v3.18 / v4.1) — so any chart
-/// whose `Chart.yaml` has a `dependencies:` block needs this pass before
-/// `helm upgrade <release> <chart_dir>` will accept it. Without it the
-/// CLI rejects with "missing in charts/ directory".
-///
-/// `--dependency-update` on `helm upgrade` is *not* a substitute: it
-/// fails to initialize the OCI registry client and errors with "missing
-/// registry client" for OCI-hosted deps (e.g. Bitnami's
-/// `oci://registry-1.docker.io/bitnamicharts/common`).
-pub async fn helm_dependency_update(
+async fn run_dependency(
+    verb: &str,
     chart_dir: &std::path::Path,
+    started: std::time::Instant,
 ) -> Result<(), HelmDepUpdateFailure> {
-    use std::process::Stdio;
-    let started = std::time::Instant::now();
-    let mut cmd = std::process::Command::new("helm");
-    cmd.arg("dependency")
-        .arg("update")
-        .arg(chart_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = match run_helm(cmd, HELM_MUTATE_TIMEOUT).await {
-        Ok(o) => o,
-        Err(e) => {
-            return Err(HelmDepUpdateFailure {
-                message: format!("helm dependency update: {e}"),
-                helm_stderr: String::new(),
-                elapsed_ms: started.elapsed().as_millis() as u64,
-            });
-        }
-    };
-    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let cmd = helm_command(crate::helm::dependency_args(verb, chart_dir));
+    let output = run_helm(cmd, HELM_KILL_TIMEOUT)
+        .await
+        .map_err(|e| HelmDepUpdateFailure {
+            message: format!("helm dependency {verb}: {e}"),
+            helm_stderr: String::new(),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })?;
     if output.status.success() {
         return Ok(());
     }
     Err(HelmDepUpdateFailure {
         message: format!(
-            "helm dependency update exited with status {}",
+            "helm dependency {verb} exited with status {}",
             output.status
         ),
         helm_stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// Fetch declared subcharts into `<chart_dir>/charts/` (release secrets
+/// never carry them). `dependency build` pins to the extracted lock file;
+/// only a lock that no longer matches `Chart.yaml` falls back to
+/// `dependency update`. `upgrade --dependency-update` is no substitute: it
+/// lacks a registry client for OCI-hosted deps.
+pub async fn helm_dependency_fetch(
+    chart_dir: &std::path::Path,
+) -> Result<(), HelmDepUpdateFailure> {
+    let started = std::time::Instant::now();
+    match run_dependency("build", chart_dir, started).await {
+        Err(fail) if fail.helm_stderr.contains("out of sync") => {
+            tracing::info!("helm dependency build: lock out of sync, falling back to update");
+            run_dependency("update", chart_dir, started).await
+        }
+        other => other,
+    }
+}
+
+enum HelmRun {
+    Done { stdout: String, elapsed_ms: u64 },
+    Failed(HelmDepUpdateFailure),
+}
+
+async fn run_helm_mutation(args: Vec<std::ffi::OsString>) -> Result<HelmRun, FetchError> {
+    let started = std::time::Instant::now();
+    let output = match run_helm(helm_command(&args), HELM_KILL_TIMEOUT).await {
+        Ok(o) => o,
+        Err(e @ HelmRunError::TimedOut(_)) => {
+            return Ok(HelmRun::Failed(HelmDepUpdateFailure {
+                message: e.to_string(),
+                helm_stderr: String::new(),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            }));
+        }
+        Err(e) => return Err(FetchError::Conflict(e.to_string())),
+    };
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if !output.status.success() {
+        return Ok(HelmRun::Failed(HelmDepUpdateFailure {
+            message: format!("helm exited with status {}", output.status),
+            helm_stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            elapsed_ms,
+        }));
+    }
+    Ok(HelmRun::Done {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         elapsed_ms,
     })
 }
@@ -619,100 +680,23 @@ pub async fn helm_dependency_update(
 /// repo charts carry the repo name itself (e.g. `bitnami`).
 pub const HELM_CLUSTER_SOURCE: &str = "cluster";
 
-/// One entry returned by `helm search repo -o json`. Helm names entries
-/// in `<repo>/<chart>` form when the operator has multiple repos
-/// configured; we pull the repo prefix off and surface it separately so
-/// the frontend can render it as its own column.
-#[derive(Debug, Clone)]
-pub struct HelmRepoChart {
-    pub repo: String,
-    pub name: String,
-    pub version: String,
-    pub app_version: Option<String>,
-    pub description: Option<String>,
-}
-
-/// Run `helm search repo -o json` and parse the result. Best-effort: if
-/// helm isn't on PATH or the operator has no repos configured, we return
-/// an empty list rather than surfacing a hard error — the catalog merely
-/// won't include any repo charts.
-///
-/// We **don't** pass `--versions`. That flag returns every version of
-/// every chart (often hundreds for popular charts) and would overwhelm
-/// the catalog. Latest only is what `helm search repo` shows by default
-/// and matches what an operator running the CLI sees.
+/// `helm search repo` (latest version per chart), served from the
+/// process-wide cache that [`helm_repo_update`] invalidates.
 pub async fn helm_search_repo() -> Vec<HelmRepoChart> {
-    if !helm_available() {
-        return Vec::new();
-    }
-    let mut cmd = std::process::Command::new("helm");
-    cmd.arg("search").arg("repo").arg("--output").arg("json");
-    let output = match run_helm(cmd, HELM_READ_TIMEOUT).await {
-        Ok(o) => o,
-        Err(e) => {
-            // Best-effort source: an empty catalog beats a hard error,
-            // but a hung/missing helm shouldn't be invisible in logs.
-            tracing::warn!("helm search repo: {e}");
-            return Vec::new();
-        }
-    };
-    if !output.status.success() {
-        // Common when no repos configured: helm exits with status 1 and
-        // "Error: no repositories configured" on stderr. That's not a
-        // failure of our app — just an empty catalog source.
-        return Vec::new();
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let raw: Vec<Value> = match serde_json::from_str(&stdout) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    raw.into_iter()
-        .filter_map(|entry| {
-            // helm's `name` is `<repo>/<chart>`; split on the first '/'.
-            let qualified = entry.get("name")?.as_str()?.to_owned();
-            let slash = qualified.find('/')?;
-            let repo = qualified[..slash].to_owned();
-            let name = qualified[slash + 1..].to_owned();
-            if repo.is_empty() || name.is_empty() {
-                return None;
-            }
-            let version = entry.get("version")?.as_str()?.to_owned();
-            let app_version = entry
-                .get("app_version")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-            let description = entry
-                .get("description")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-            Some(HelmRepoChart {
-                repo,
-                name,
-                version,
-                app_version,
-                description,
-            })
-        })
-        .collect()
+    crate::helm::search_repo_cached().await.as_ref().clone()
 }
 
-/// Run `helm show values <chart-ref> --version <version>` and return the
-/// raw YAML text. Used when the operator opens a repo-chart's detail
-/// panel: we don't have the chart files locally (no release secret to
-/// extract from), so we ask helm directly. Returns empty string on
-/// failure rather than erroring — operators can still install the chart
-/// with no overrides.
+/// `helm show values <chart-ref> --version <version>` for a repo chart's
+/// detail panel. Empty on failure — the chart can still be installed
+/// without overrides.
 pub async fn helm_show_values(chart_ref: &str, version: &str) -> String {
-    if !helm_available() {
+    if !helm_available()
+        || crate::helm::validate_chart_ref(chart_ref).is_err()
+        || crate::helm::validate_version(version).is_err()
+    {
         return String::new();
     }
-    let mut cmd = std::process::Command::new("helm");
-    cmd.arg("show")
-        .arg("values")
-        .arg(chart_ref)
-        .arg("--version")
-        .arg(version);
+    let cmd = helm_command(["show", "values", "--version", version, "--", chart_ref]);
     let output = match run_helm(cmd, HELM_READ_TIMEOUT).await {
         Ok(o) => o,
         Err(e) => {
@@ -745,18 +729,47 @@ pub enum HelmUpgradeResult {
     HelmMissing,
 }
 
-/// Run `helm upgrade <release> <chart-dir> -n <ns> --kube-context <ctx>
-/// [--kubeconfig <path>] -f <values.yaml>`. The chart is materialised
-/// from the existing release secret (so we don't need a repo) and
-/// `values_yaml` is the operator's edited User values text. Returns
-/// either a typed result or an error if we couldn't even reach the
-/// shell-out stage.
+fn helm_tempdir() -> Result<tempfile::TempDir, FetchError> {
+    tempfile::Builder::new()
+        .prefix("ferrisscope-helm-")
+        .tempdir()
+        .map_err(|e| FetchError::Conflict(format!("tempdir: {e}")))
+}
+
+fn write_values_file(
+    dir: &std::path::Path,
+    values_yaml: &str,
+) -> Result<std::path::PathBuf, FetchError> {
+    let path = dir.join("values.yaml");
+    std::fs::write(&path, values_yaml)
+        .map_err(|e| FetchError::Conflict(format!("write values: {e}")))?;
+    Ok(path)
+}
+
+/// Extract the release's embedded chart into `<tmp>/chart` and fetch its
+/// subcharts. `Ok(Err(failure))` = dependency fetch failed (banner-worthy).
+async fn stage_release_chart(
+    release: &helm_releases::Release,
+    tmp: &std::path::Path,
+) -> Result<Result<std::path::PathBuf, HelmDepUpdateFailure>, FetchError> {
+    let chart_dir = tmp.join("chart");
+    helm_releases::extract_chart_to_dir(release, &chart_dir)
+        .map_err(|e| FetchError::Conflict(format!("chart extract: {e}")))?;
+    if helm_releases::chart_has_dependencies(release) {
+        if let Err(fail) = helm_dependency_fetch(&chart_dir).await {
+            return Ok(Err(fail));
+        }
+    }
+    Ok(Ok(chart_dir))
+}
+
+/// `helm upgrade` an existing release. `values_yaml` is the operator's
+/// complete user-values intent (`--reset-values`, so an empty buffer means
+/// chart defaults). The chart comes from the latest release secret, or
+/// with `chart_override = Some((repo, version))` from `<repo>/<chart>`.
 ///
-/// Why `helm` (the CLI) and not a Rust reimplementation: Helm's template
-/// engine, hook lifecycle, and storage driver are large — getting any of
-/// them wrong means the upgrade succeeds in our app but produces a
-/// drifted state in the cluster. The CLI is the source of truth for both
-/// our app and `kubectl`-using operators.
+/// Shells out to the CLI: templates, hooks and the storage driver must
+/// behave exactly as for `helm`-using operators.
 pub async fn helm_upgrade(
     client: Client,
     context_name: &str,
@@ -764,158 +777,152 @@ pub async fn helm_upgrade(
     namespace: &str,
     name: &str,
     values_yaml: &str,
-    // Optional repo override. `None` keeps the existing chart unchanged
-    // (extract from the latest release secret + apply new values).
-    // `Some((source, version))` swaps in a different chart from a helm
-    // repo — `helm upgrade <release> <source>/<chart-name> --version <v>`
-    // — same as the chart-install path but for an existing release.
     chart_override: Option<(&str, &str)>,
 ) -> Result<HelmUpgradeResult, FetchError> {
-    use std::process::Stdio;
-
+    if let Some((src, ver)) = chart_override {
+        crate::helm::validate_repo_name(src)?;
+        crate::helm::validate_version(ver)?;
+    }
     if !helm_available() {
         return Ok(HelmUpgradeResult::HelmMissing);
     }
+    let secrets = list_release_secrets(client, namespace, name).await?;
+    let (_, latest) = decode_latest_release(namespace, name, &secrets)?;
+    drop(secrets);
+    ensure_upgradable(&latest)?;
 
-    // Pull the latest revision so we can extract its chart (when no
-    // override) or learn the chart name (when overriding to a repo
-    // version). We avoid `client.clone()` past this point — helm CLI
-    // talks to the apiserver itself via the kubeconfig.
-    let api: Api<Secret> = Api::namespaced(client, namespace);
-    let lp = ListParams::default().labels(&format!("owner=helm,name={name}"));
-    let list = api.list(&lp).await?;
-    let mut releases: Vec<helm_releases::Release> = list
-        .items
-        .iter()
-        .filter_map(|sec| helm_releases::decode_release(sec).ok())
-        .collect();
-    if releases.is_empty() {
-        return Err(FetchError::UnknownKind(format!(
-            "helm release {namespace}/{name}"
-        )));
-    }
-    releases.sort_by_key(|b| std::cmp::Reverse(b.version));
-    let latest = releases[0].clone();
-
-    // Stage chart + values file in a temp dir. Drops at function exit;
-    // helm has long since finished by then.
-    let tmp = tempfile::Builder::new()
-        .prefix("ferrisscope-helm-")
-        .tempdir()
-        .map_err(|e| FetchError::Conflict(format!("tempdir: {e}")))?;
-    let values_path = tmp.path().join("values.yaml");
-    std::fs::write(&values_path, values_yaml)
-        .map_err(|e| FetchError::Conflict(format!("write values: {e}")))?;
-
-    // Resolve which chart to upgrade to. Default = the chart files
-    // already embedded in the release secret (preserve current chart,
-    // change values). With an override = `<repo>/<chart-name>` — helm
-    // pulls the new version from its repo cache.
-    let chart_arg: std::ffi::OsString;
-    let mut version_arg: Option<String> = None;
-    if let Some((src, ver)) = chart_override {
-        let chart_name = latest
-            .chart_meta_str("name")
-            .ok_or_else(|| FetchError::Conflict("release has no chart name".to_owned()))?;
-        chart_arg = format!("{src}/{chart_name}").into();
-        version_arg = Some(ver.to_owned());
-    } else {
-        let chart_dir = tmp.path().join("chart");
-        helm_releases::extract_chart_to_dir(&latest, &chart_dir)
-            .map_err(|e| FetchError::Conflict(format!("chart extract: {e}")))?;
-        // Subcharts aren't bundled in the release secret — fetch them
-        // from their declared repos before invoking `helm upgrade`.
-        if helm_releases::chart_has_dependencies(&latest) {
-            if let Err(fail) = helm_dependency_update(&chart_dir).await {
+    let tmp = helm_tempdir()?;
+    let values_path = write_values_file(tmp.path(), values_yaml)?;
+    let (chart_arg, version): (std::ffi::OsString, Option<&str>) = match chart_override {
+        Some((src, ver)) => {
+            let chart_name = latest
+                .chart_meta_str("name")
+                .ok_or_else(|| FetchError::Conflict("release has no chart name".to_owned()))?;
+            crate::helm::validate_repo_name(&chart_name)?;
+            (format!("{src}/{chart_name}").into(), Some(ver))
+        }
+        None => match stage_release_chart(&latest, tmp.path()).await? {
+            Ok(dir) => (dir.into_os_string(), None),
+            Err(fail) => {
                 return Ok(HelmUpgradeResult::Failed {
                     message: fail.message,
                     helm_stderr: fail.helm_stderr,
                     elapsed_ms: fail.elapsed_ms,
-                });
+                })
+            }
+        },
+    };
+
+    let args = crate::helm::upgrade_args(
+        &crate::helm::UpgradeSpec {
+            release: name,
+            namespace,
+            chart: &chart_arg,
+            values_file: &values_path,
+            version,
+            install: false,
+            create_namespace: false,
+            reset_values: true,
+            wait: false,
+            timeout: HELM_OP_TIMEOUT,
+        },
+        KubeTarget {
+            context: context_name,
+            kubeconfig: kubeconfig_path,
+        },
+    );
+    Ok(match run_helm_mutation(args).await? {
+        HelmRun::Failed(f) => HelmUpgradeResult::Failed {
+            message: f.message,
+            helm_stderr: f.helm_stderr,
+            elapsed_ms: f.elapsed_ms,
+        },
+        HelmRun::Done { stdout, elapsed_ms } => {
+            let out = crate::helm::summarize_release_output(&stdout);
+            HelmUpgradeResult::Upgraded {
+                revision: out.revision.unwrap_or(latest.version + 1),
+                status: out.status,
+                elapsed_ms,
+                helm_stdout: out.summary,
             }
         }
-        chart_arg = chart_dir.into_os_string();
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HelmRollbackResult {
+    RolledBack {
+        /// The new revision helm wrote (a rollback is a new revision).
+        revision: Option<i64>,
+        elapsed_ms: u64,
+        helm_stdout: String,
+    },
+    Failed {
+        message: String,
+        helm_stderr: String,
+        elapsed_ms: u64,
+    },
+    HelmMissing,
+}
+
+/// `helm rollback <release> [revision]`; `None` = previous revision.
+pub async fn helm_rollback(
+    client: Client,
+    context_name: &str,
+    kubeconfig_path: Option<&std::path::Path>,
+    namespace: &str,
+    name: &str,
+    revision: Option<i64>,
+) -> Result<HelmRollbackResult, FetchError> {
+    crate::helm::validate_namespace(namespace)?;
+    crate::helm::validate_release_name(name)?;
+    if let Some(r) = revision {
+        crate::helm::validate_revision(r)?;
     }
-
-    let mut cmd = std::process::Command::new("helm");
-    cmd.arg("upgrade")
-        .arg(name)
-        .arg(&chart_arg)
-        .arg("--namespace")
-        .arg(namespace)
-        .arg("--kube-context")
-        .arg(context_name)
-        .arg("-f")
-        .arg(&values_path)
-        // No --reset-values: passing -f *replaces* user values for this
-        // upgrade, which is what the operator just typed. Using
-        // --reuse-values would re-merge the prior config and the edits
-        // wouldn't fully apply.
-        .arg("--output")
-        .arg("json")
-        // Operator-friendly safety net. Without --wait, helm returns as
-        // soon as it's submitted the manifests; the operator immediately
-        // sees stale data in the panel. With --wait we'd block too long
-        // on slow rollouts, so leave it off and rely on the watcher's
-        // delta to refresh the row.
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(v) = &version_arg {
-        cmd.arg("--version").arg(v);
+    if !helm_available() {
+        return Ok(HelmRollbackResult::HelmMissing);
     }
-    if let Some(p) = kubeconfig_path {
-        cmd.arg("--kubeconfig").arg(p);
-    }
-
-    let started = std::time::Instant::now();
-    let output = match run_helm(cmd, HELM_MUTATE_TIMEOUT).await {
-        Ok(o) => o,
-        // Timeout lands in the same Failed banner as a helm error — the
-        // operator needs the message, not a generic command failure.
-        Err(e @ HelmRunError::TimedOut(_)) => {
-            return Ok(HelmUpgradeResult::Failed {
-                message: e.to_string(),
-                helm_stderr: String::new(),
-                elapsed_ms: started.elapsed().as_millis() as u64,
-            });
-        }
-        Err(e) => return Err(FetchError::Conflict(e.to_string())),
-    };
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-    if !output.status.success() {
-        return Ok(HelmUpgradeResult::Failed {
-            message: format!("helm exited with status {}", output.status),
-            helm_stderr: stderr,
-            elapsed_ms,
-        });
-    }
-
-    // Parse helm's JSON output — it includes the new revision (`version`)
-    // and the resulting status. We're tolerant of shape drift; if helm
-    // changed its output schema we still report success, just without
-    // the structured revision number.
-    let parsed: Option<Value> = serde_json::from_str(&stdout).ok();
-    let revision = parsed
-        .as_ref()
-        .and_then(|v| v.get("version"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(latest.version + 1);
-    let status = parsed
-        .as_ref()
-        .and_then(|v| v.get("info"))
-        .and_then(|i| i.get("status"))
-        .and_then(|s| s.as_str())
-        .map(str::to_owned);
-
-    Ok(HelmUpgradeResult::Upgraded {
+    let args = crate::helm::rollback_args(
+        name,
+        namespace,
         revision,
-        status,
-        elapsed_ms,
-        helm_stdout: stdout,
+        KubeTarget {
+            context: context_name,
+            kubeconfig: kubeconfig_path,
+        },
+    );
+    Ok(match run_helm_mutation(args).await? {
+        HelmRun::Failed(f) => HelmRollbackResult::Failed {
+            message: f.message,
+            helm_stderr: f.helm_stderr,
+            elapsed_ms: f.elapsed_ms,
+        },
+        HelmRun::Done { stdout, elapsed_ms } => {
+            // Metadata-only list: the `version` label is enough.
+            let api: Api<Secret> = Api::namespaced(client, namespace);
+            let lp = ListParams::default().labels(&format!("owner=helm,name={name}"));
+            let revision = match api.list_metadata(&lp).await {
+                Ok(list) => list
+                    .items
+                    .iter()
+                    .filter_map(|m| m.metadata.labels.as_ref()?.get("version")?.parse().ok())
+                    .max(),
+                Err(e) => {
+                    tracing::debug!(error = %e, "helm rollback: revision lookup failed");
+                    None
+                }
+            };
+            let mut end = stdout.len().min(2048);
+            while !stdout.is_char_boundary(end) {
+                end -= 1;
+            }
+            HelmRollbackResult::RolledBack {
+                revision,
+                elapsed_ms,
+                helm_stdout: stdout[..end].trim().to_owned(),
+            }
+        }
     })
 }
 
@@ -942,27 +949,101 @@ pub async fn get_helm_chart_detail(
     get_helm_chart_detail_repo(source, chart_name, chart_version).await
 }
 
+/// Where a revision secret lives, so the one full decode can re-fetch it.
+#[derive(Debug, Clone)]
+struct RevisionRef {
+    secret_namespace: String,
+    secret_name: String,
+    summary: helm_releases::ReleaseSummary,
+}
+
+impl RevisionRef {
+    fn uses_chart(&self, chart_name: &str, chart_version: &str) -> bool {
+        self.summary.chart_meta_str("name").as_deref() == Some(chart_name)
+            && self.summary.chart_meta_str("version").as_deref() == Some(chart_version)
+    }
+}
+
+/// Summaries of every helm release secret in the cluster, listed in small
+/// pages (each secret can carry ~1 MiB of chart).
+async fn list_helm_revisions(client: Client) -> Result<Vec<RevisionRef>, FetchError> {
+    let api: Api<Secret> = Api::all(client);
+    let mut lp = ListParams::default()
+        .fields(&format!("type={}", helm_releases::HELM_SECRET_TYPE))
+        .limit(HELM_LIST_PAGE);
+    let mut out = Vec::new();
+    loop {
+        let page = api.list(&lp).await?;
+        for sec in &page.items {
+            let (Some(ns), Some(name)) = (&sec.metadata.namespace, &sec.metadata.name) else {
+                continue;
+            };
+            match helm_releases::decode_release_summary(sec) {
+                Ok(summary) => out.push(RevisionRef {
+                    secret_namespace: ns.clone(),
+                    secret_name: name.clone(),
+                    summary,
+                }),
+                Err(e) => {
+                    tracing::debug!(error = %e, secret = %name, "helm: skipping undecodable secret");
+                }
+            }
+        }
+        match page.metadata.continue_ {
+            Some(token) if !token.is_empty() => lp = lp.continue_token(&token),
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
+const HELM_LIST_PAGE: u32 = 25;
+
+/// Latest revision per `(namespace, release)`.
+fn latest_revisions(revisions: Vec<RevisionRef>) -> Vec<RevisionRef> {
+    let mut latest: std::collections::BTreeMap<helm_releases::ReleaseKey, RevisionRef> =
+        std::collections::BTreeMap::new();
+    for r in revisions {
+        match latest.get(&r.summary.key()) {
+            Some(cur) if cur.summary.version >= r.summary.version => {}
+            _ => {
+                latest.insert(r.summary.key(), r);
+            }
+        }
+    }
+    latest.into_values().collect()
+}
+
+async fn fetch_full_release(
+    client: Client,
+    r: &RevisionRef,
+) -> Result<helm_releases::Release, FetchError> {
+    let api: Api<Secret> = Api::namespaced(client, &r.secret_namespace);
+    let sec = api.get(&r.secret_name).await?;
+    helm_releases::decode_release(&sec).map_err(|e| {
+        FetchError::Conflict(format!(
+            "helm release secret {}/{} can't be decoded: {e}",
+            r.secret_namespace, r.secret_name
+        ))
+    })
+}
+
 async fn get_helm_chart_detail_cluster(
     client: Client,
     chart_name: &str,
     chart_version: &str,
 ) -> Result<Value, FetchError> {
-    let releases = list_all_helm_releases(client).await?;
-    let matches: Vec<&helm_releases::Release> = releases
-        .iter()
-        .filter(|r| {
-            r.chart_meta_str("name").as_deref() == Some(chart_name)
-                && r.chart_meta_str("version").as_deref() == Some(chart_version)
-        })
+    let matches: Vec<RevisionRef> = latest_revisions(list_helm_revisions(client.clone()).await?)
+        .into_iter()
+        .filter(|r| r.uses_chart(chart_name, chart_version))
         .collect();
-    let sample = matches.first().copied().ok_or_else(|| {
+    let first = matches.first().ok_or_else(|| {
         FetchError::UnknownKind(format!(
             "no release uses chart {chart_name}@{chart_version}"
         ))
     })?;
+    let sample = fetch_full_release(client, first).await?;
 
-    // Default values: serialize chart.values back to YAML so the editor
-    // shows operators the same form they'd paste into `helm install -f`.
     let default_values_yaml = sample
         .chart_default_values()
         .as_ref()
@@ -973,12 +1054,13 @@ async fn get_helm_chart_detail_cluster(
     let used_by: Vec<Value> = matches
         .iter()
         .map(|r| {
+            let s = &r.summary;
             json!({
-                "namespace": r.namespace.clone().unwrap_or_default(),
-                "name": r.name.clone(),
-                "revision": r.version,
-                "status": r.info.status.clone(),
-                "updated": r.info.last_deployed.clone(),
+                "namespace": s.namespace.clone().unwrap_or_default(),
+                "name": s.name.clone(),
+                "revision": s.version,
+                "status": s.info.status.clone(),
+                "updated": s.info.last_deployed.clone(),
             })
         })
         .collect();
@@ -1004,6 +1086,9 @@ async fn get_helm_chart_detail_repo(
     chart_name: &str,
     chart_version: &str,
 ) -> Result<Value, FetchError> {
+    crate::helm::validate_repo_name(repo)?;
+    crate::helm::validate_repo_name(chart_name)?;
+    crate::helm::validate_version(chart_version)?;
     if !helm_available() {
         return Err(FetchError::Conflict(
             "helm CLI not found on PATH".to_owned(),
@@ -1011,11 +1096,7 @@ async fn get_helm_chart_detail_repo(
     }
     let chart_ref = format!("{repo}/{chart_name}");
     let default_values_yaml = helm_show_values(&chart_ref, chart_version).await;
-    // Re-running helm_search_repo gives us the description + app_version
-    // for this entry. We avoid `helm show chart` (would be a third
-    // helm process per detail open). Cheap because helm caches its repo
-    // index.
-    let entries = helm_search_repo().await;
+    let entries = crate::helm::search_repo_cached().await;
     let entry = entries
         .iter()
         .find(|e| e.repo == repo && e.name == chart_name && e.version == chart_version);
@@ -1080,153 +1161,91 @@ pub async fn helm_install_chart(
     chart_version: &str,
     values_yaml: &str,
 ) -> Result<HelmInstallResult, FetchError> {
+    crate::helm::validate_namespace(target_namespace)?;
+    crate::helm::validate_release_name(target_release)?;
+    if source != HELM_CLUSTER_SOURCE {
+        crate::helm::validate_repo_name(source)?;
+        crate::helm::validate_repo_name(chart_name)?;
+        crate::helm::validate_version(chart_version)?;
+    }
     if !helm_available() {
         return Ok(HelmInstallResult::HelmMissing);
     }
 
-    // Stage values.yaml in a temp dir for both paths. Repo-source
-    // installs only need this; cluster-source also stages the chart
-    // alongside.
-    let tmp = tempfile::Builder::new()
-        .prefix("ferrisscope-helm-")
-        .tempdir()
-        .map_err(|e| FetchError::Conflict(format!("tempdir: {e}")))?;
-    let values_path = tmp.path().join("values.yaml");
-    std::fs::write(&values_path, values_yaml)
-        .map_err(|e| FetchError::Conflict(format!("write values: {e}")))?;
-
-    // Resolve the chart-ref helm should install from. For cluster
-    // source, that's a path to the extracted chart; for repo source
-    // it's `<repo>/<chart>` and helm handles the rest.
-    let chart_arg: std::ffi::OsString;
-    let mut version_arg: Option<String> = None;
-    if source == HELM_CLUSTER_SOURCE {
-        let releases = list_all_helm_releases(client).await?;
-        let sample = releases
+    let tmp = helm_tempdir()?;
+    let values_path = write_values_file(tmp.path(), values_yaml)?;
+    let (chart_arg, version): (std::ffi::OsString, Option<&str>) = if source == HELM_CLUSTER_SOURCE
+    {
+        let hit = list_helm_revisions(client.clone())
+            .await?
             .into_iter()
-            .find(|r| {
-                r.chart_meta_str("name").as_deref() == Some(chart_name)
-                    && r.chart_meta_str("version").as_deref() == Some(chart_version)
-            })
+            .find(|r| r.uses_chart(chart_name, chart_version))
             .ok_or_else(|| {
                 FetchError::UnknownKind(format!(
                     "no release uses chart {chart_name}@{chart_version}"
                 ))
             })?;
-        let chart_dir = tmp.path().join("chart");
-        helm_releases::extract_chart_to_dir(&sample, &chart_dir)
-            .map_err(|e| FetchError::Conflict(format!("chart extract: {e}")))?;
-        // Subcharts aren't bundled in the release secret — fetch them
-        // from their declared repos before invoking `helm install`.
-        if helm_releases::chart_has_dependencies(&sample) {
-            if let Err(fail) = helm_dependency_update(&chart_dir).await {
+        let sample = fetch_full_release(client, &hit).await?;
+        match stage_release_chart(&sample, tmp.path()).await? {
+            Ok(dir) => (dir.into_os_string(), None),
+            Err(fail) => {
                 return Ok(HelmInstallResult::Failed {
                     message: fail.message,
                     helm_stderr: fail.helm_stderr,
                     elapsed_ms: fail.elapsed_ms,
-                });
+                })
             }
         }
-        chart_arg = chart_dir.into_os_string();
     } else {
-        chart_arg = format!("{source}/{chart_name}").into();
-        version_arg = Some(chart_version.to_owned());
-    }
-
-    let mut cmd = std::process::Command::new("helm");
-    cmd.arg("install")
-        .arg(target_release)
-        .arg(&chart_arg)
-        .arg("--namespace")
-        .arg(target_namespace)
-        .arg("--create-namespace")
-        .arg("--kube-context")
-        .arg(context_name)
-        .arg("-f")
-        .arg(&values_path)
-        .arg("--output")
-        .arg("json");
-    if let Some(v) = &version_arg {
-        cmd.arg("--version").arg(v);
-    }
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    if let Some(p) = kubeconfig_path {
-        cmd.arg("--kubeconfig").arg(p);
-    }
-
-    let started = std::time::Instant::now();
-    let output = match run_helm(cmd, HELM_MUTATE_TIMEOUT).await {
-        Ok(o) => o,
-        Err(e @ HelmRunError::TimedOut(_)) => {
-            return Ok(HelmInstallResult::Failed {
-                message: e.to_string(),
-                helm_stderr: String::new(),
-                elapsed_ms: started.elapsed().as_millis() as u64,
-            });
-        }
-        Err(e) => return Err(FetchError::Conflict(e.to_string())),
+        (format!("{source}/{chart_name}").into(), Some(chart_version))
     };
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
-    if !output.status.success() {
-        return Ok(HelmInstallResult::Failed {
-            message: format!("helm exited with status {}", output.status),
-            helm_stderr: stderr,
-            elapsed_ms,
-        });
-    }
-
-    let parsed: Option<Value> = serde_json::from_str(&stdout).ok();
-    let revision = parsed
-        .as_ref()
-        .and_then(|v| v.get("version"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(1);
-    let status = parsed
-        .as_ref()
-        .and_then(|v| v.get("info"))
-        .and_then(|i| i.get("status"))
-        .and_then(|s| s.as_str())
-        .map(str::to_owned);
-
-    Ok(HelmInstallResult::Installed {
-        revision,
-        namespace: target_namespace.to_owned(),
-        release_name: target_release.to_owned(),
-        status,
-        elapsed_ms,
-        helm_stdout: stdout,
+    let args = crate::helm::install_args(
+        target_release,
+        target_namespace,
+        &chart_arg,
+        &values_path,
+        version,
+        KubeTarget {
+            context: context_name,
+            kubeconfig: kubeconfig_path,
+        },
+    );
+    Ok(match run_helm_mutation(args).await? {
+        HelmRun::Failed(f) => HelmInstallResult::Failed {
+            message: f.message,
+            helm_stderr: f.helm_stderr,
+            elapsed_ms: f.elapsed_ms,
+        },
+        HelmRun::Done { stdout, elapsed_ms } => {
+            let out = crate::helm::summarize_release_output(&stdout);
+            HelmInstallResult::Installed {
+                revision: out.revision.unwrap_or(1),
+                namespace: target_namespace.to_owned(),
+                release_name: target_release.to_owned(),
+                status: out.status,
+                elapsed_ms,
+                helm_stdout: out.summary,
+            }
+        }
     })
 }
 
-/// Run `helm repo update`. Slow (network: hits every configured repo's
-/// index.yaml). Best-effort: failures bubble up so the UI can show them
-/// in a toast. Returns the elapsed time so the operator knows the
-/// refresh actually happened.
+/// `helm repo update` (slow, network). Invalidates the search / chart
+/// identity caches so update indicators pick up new versions.
 pub async fn helm_repo_update() -> Result<u64, FetchError> {
-    use std::process::Stdio;
     if !helm_available() {
         return Err(FetchError::Conflict(
             "helm CLI not found on PATH".to_owned(),
         ));
     }
     let started = std::time::Instant::now();
-    let mut cmd = std::process::Command::new("helm");
-    cmd.arg("repo")
-        .arg("update")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = run_helm(cmd, HELM_MUTATE_TIMEOUT)
-        .await
-        .map_err(|e| match e {
-            HelmRunError::TimedOut(_) => FetchError::Timeout(format!("helm repo update: {e}")),
-            e => FetchError::Conflict(e.to_string()),
-        })?;
+    let result = run_helm(helm_command(["repo", "update"]), HELM_KILL_TIMEOUT).await;
+    crate::helm::invalidate_repo_caches();
+    let output = result.map_err(|e| match e {
+        HelmRunError::TimedOut(_) => FetchError::Timeout(format!("helm repo update: {e}")),
+        e => FetchError::Conflict(e.to_string()),
+    })?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1238,81 +1257,30 @@ pub async fn helm_repo_update() -> Result<u64, FetchError> {
     Ok(elapsed_ms)
 }
 
-/// Find the highest semver-newer chart version in `repos` that matches
-/// `chart_name`. Returns `None` when nothing newer (or no parse).
-///
-/// Why semver: helm chart versions follow it ("0.10.0 > 0.9.0", which a
-/// string compare would get wrong). For non-semver tags (rare) we silently
-/// skip — a non-parseable repo entry doesn't block detecting parseable
-/// updates.
-pub fn find_update_for_chart(
-    chart_name: &str,
-    current_version: &str,
-    repos: &[HelmRepoChart],
-) -> Option<HelmUpdateAvailable> {
-    let current = semver::Version::parse(current_version).ok()?;
-    let mut best: Option<(semver::Version, &HelmRepoChart)> = None;
-    for entry in repos {
-        if entry.name != chart_name {
-            continue;
-        }
-        let Ok(v) = semver::Version::parse(&entry.version) else {
-            continue;
-        };
-        if v <= current {
-            continue;
-        }
-        match &best {
-            Some((b, _)) if *b >= v => {}
-            _ => best = Some((v.clone(), entry)),
-        }
-    }
-    best.map(|(v, e)| HelmUpdateAvailable {
-        source: e.repo.clone(),
-        version: v.to_string(),
-        app_version: e.app_version.clone(),
-    })
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct HelmUpdateAvailable {
-    pub source: String,
-    pub version: String,
-    pub app_version: Option<String>,
-}
-
-/// Run `helm uninstall <release> -n <ns>`. Used by `delete_resource_cmd`
-/// when the operator deletes a `helm_releases` row. Going through helm
-/// (vs. trying to delete the release secret directly) is correct: helm
-/// removes BOTH the rendered Kubernetes resources AND the release
-/// secrets, in the right order, with hooks. Direct secret deletion would
-/// just leak the deployed workloads.
+/// `helm uninstall` — the only correct delete for a release: it removes the
+/// rendered resources and the release secrets in order, with hooks.
 pub async fn helm_uninstall(
     context_name: &str,
     kubeconfig_path: Option<&std::path::Path>,
     namespace: &str,
     release_name: &str,
 ) -> Result<(), FetchError> {
-    use std::process::Stdio;
+    crate::helm::validate_namespace(namespace)?;
+    crate::helm::validate_release_name(release_name)?;
     if !helm_available() {
         return Err(FetchError::Conflict(
             "helm CLI not found on PATH — install helm to uninstall releases".to_owned(),
         ));
     }
-    let mut cmd = std::process::Command::new("helm");
-    cmd.arg("uninstall")
-        .arg(release_name)
-        .arg("--namespace")
-        .arg(namespace)
-        .arg("--kube-context")
-        .arg(context_name)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(p) = kubeconfig_path {
-        cmd.arg("--kubeconfig").arg(p);
-    }
-    let output = run_helm(cmd, HELM_MUTATE_TIMEOUT)
+    let cmd = helm_command(crate::helm::uninstall_args(
+        release_name,
+        namespace,
+        KubeTarget {
+            context: context_name,
+            kubeconfig: kubeconfig_path,
+        },
+    ));
+    let output = run_helm(cmd, HELM_KILL_TIMEOUT)
         .await
         .map_err(|e| match e {
             HelmRunError::TimedOut(_) => {
@@ -1330,21 +1298,8 @@ pub async fn helm_uninstall(
     Ok(())
 }
 
-/// List every helm release secret across the cluster, decoded. Used by
-/// chart detail + install to find a chart's source release. Cheap: helm
-/// release secrets are tiny in count even on large clusters, and the
-/// apiserver does the type-filtering server-side.
-async fn list_all_helm_releases(client: Client) -> Result<Vec<helm_releases::Release>, FetchError> {
-    let api: Api<Secret> = Api::all(client);
-    // Field selector matches what the watchers use, so server-side
-    // filtering applies here too.
-    let lp = ListParams::default().fields(&format!("type={}", helm_releases::HELM_SECRET_TYPE));
-    let list = api.list(&lp).await?;
-    Ok(list
-        .items
-        .iter()
-        .filter_map(|sec| helm_releases::decode_release(sec).ok())
-        .collect())
+pub async fn helm_storage_probe(client: Client) -> Result<bool, FetchError> {
+    Ok(crate::helm::helm_storage_probe(client).await?)
 }
 
 pub async fn get_resource_quota_detail(
@@ -1925,6 +1880,7 @@ pub async fn delete_resource(
     grace_period_seconds: Option<u32>,
     cascade: Option<Cascade>,
 ) -> Result<(), FetchError> {
+    reject_synthetic_kind(kind_id)?;
     let entry =
         registry::lookup(kind_id).ok_or_else(|| FetchError::UnknownKind(kind_id.to_owned()))?;
     let meta = &entry.meta;
@@ -2326,6 +2282,7 @@ pub async fn apply_resource(
     fields: Value,
     force: bool,
 ) -> Result<ApplyResult, FetchError> {
+    reject_synthetic_kind(kind_id)?;
     let entry =
         registry::lookup(kind_id).ok_or_else(|| FetchError::UnknownKind(kind_id.to_owned()))?;
     let meta = &entry.meta;
@@ -2473,6 +2430,7 @@ pub async fn merge_patch_resource(
     patch: Value,
     resource_version: Option<&str>,
 ) -> Result<MergePatchResult, FetchError> {
+    reject_synthetic_kind(kind_id)?;
     let entry =
         registry::lookup(kind_id).ok_or_else(|| FetchError::UnknownKind(kind_id.to_owned()))?;
     let meta = &entry.meta;
@@ -2552,6 +2510,131 @@ mod run_helm_tests {
         let cmd = std::process::Command::new("ferrisscope-no-such-binary");
         let err = run_helm(cmd, Duration::from_secs(1)).await.unwrap_err();
         assert!(matches!(err, HelmRunError::Spawn(_)), "got {err:?}");
+    }
+}
+
+#[cfg(test)]
+mod helm_fetch_tests {
+    use super::*;
+    use base64::Engine;
+    use k8s_openapi::ByteString;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn generic_paths_refuse_synthetic_helm_kinds() {
+        for id in ["helm_releases", "helm_charts"] {
+            assert!(matches!(
+                reject_synthetic_kind(id),
+                Err(FetchError::UnknownKind(_))
+            ));
+        }
+        assert!(reject_synthetic_kind("secrets").is_ok());
+        assert!(reject_synthetic_kind("pods").is_ok());
+    }
+
+    fn release_secret(name: &str, version: Option<i64>, payload: &str) -> Secret {
+        let mut s = Secret::default();
+        s.metadata.name = Some(name.to_owned());
+        s.metadata.namespace = Some("ns".to_owned());
+        s.metadata.labels =
+            version.map(|v| BTreeMap::from([("version".to_owned(), v.to_string())]));
+        s.data = Some(BTreeMap::from([(
+            "release".to_owned(),
+            ByteString(
+                base64::engine::general_purpose::STANDARD
+                    .encode(payload)
+                    .into_bytes(),
+            ),
+        )]));
+        s
+    }
+
+    fn payload(version: i64, status: &str) -> String {
+        json!({ "name": "web", "namespace": "ns", "version": version, "info": { "status": status } })
+            .to_string()
+    }
+
+    #[test]
+    fn latest_is_chosen_numerically_and_must_decode() {
+        let secrets = vec![
+            release_secret(
+                "sh.helm.release.v1.web.v9",
+                Some(9),
+                &payload(9, "superseded"),
+            ),
+            release_secret(
+                "sh.helm.release.v1.web.v10",
+                Some(10),
+                &payload(10, "deployed"),
+            ),
+            release_secret("sh.helm.release.v1.web.v2", None, &payload(2, "superseded")),
+        ];
+        let (idx, rel) = decode_latest_release("ns", "web", &secrets).expect("latest");
+        assert_eq!(
+            (idx, rel.version),
+            (1, 10),
+            "10 > 9 numerically, not lexically"
+        );
+
+        let corrupt = vec![
+            release_secret(
+                "sh.helm.release.v1.web.v1",
+                Some(1),
+                &payload(1, "superseded"),
+            ),
+            release_secret("sh.helm.release.v1.web.v2", Some(2), "{broken"),
+        ];
+        let err = decode_latest_release("ns", "web", &corrupt).expect_err("no silent fallback");
+        assert!(err.to_string().contains("v2"), "{err}");
+    }
+
+    #[test]
+    fn uninstalled_release_is_not_upgradable() {
+        let rel = |status: &str| {
+            let v: helm_releases::Release =
+                serde_json::from_str(&payload(3, status)).expect("release");
+            v
+        };
+        assert!(ensure_upgradable(&rel("deployed")).is_ok());
+        assert!(ensure_upgradable(&rel("failed")).is_ok());
+        let err = ensure_upgradable(&rel("uninstalled")).expect_err("uninstalled");
+        assert!(err.to_string().contains("uninstalled"), "{err}");
+    }
+
+    fn revision(ns: &str, name: &str, version: i64, chart_version: &str) -> RevisionRef {
+        RevisionRef {
+            secret_namespace: ns.to_owned(),
+            secret_name: format!("sh.helm.release.v1.{name}.v{version}"),
+            summary: serde_json::from_value(json!({
+                "name": name, "namespace": ns, "version": version,
+                "chart": { "metadata": { "name": "nginx", "version": chart_version } },
+            }))
+            .expect("summary"),
+        }
+    }
+
+    #[test]
+    fn chart_used_by_counts_latest_revisions_only() {
+        let revs = vec![
+            revision("a", "web", 1, "1.0.0"),
+            revision("a", "web", 2, "2.0.0"),
+            revision("b", "web", 5, "1.0.0"),
+            revision("b", "api", 1, "1.0.0"),
+            revision("b", "api", 3, "1.0.0"),
+        ];
+        let used: Vec<(String, String, i64)> = latest_revisions(revs)
+            .into_iter()
+            .filter(|r| r.uses_chart("nginx", "1.0.0"))
+            .map(|r| (r.secret_namespace, r.summary.name, r.summary.version))
+            .collect();
+        assert_eq!(
+            used,
+            [
+                ("b".to_owned(), "api".to_owned(), 3),
+                ("b".to_owned(), "web".to_owned(), 5),
+            ],
+            "a/web moved to 2.0.0; b/api counted once"
+        );
     }
 }
 

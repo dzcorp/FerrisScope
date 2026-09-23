@@ -282,6 +282,10 @@ pub(crate) fn build_registry(
         app.clone(),
         cluster.clone(),
     )));
+    reg.register(Arc::new(helm::HelmRollback::new(
+        app.clone(),
+        cluster.clone(),
+    )));
 
     // Generic K8s primitives — what the external MCP server used to
     // provide. Pods (list/get/delete/run), arbitrary resources by GVK
