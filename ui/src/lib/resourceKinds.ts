@@ -13,6 +13,12 @@ export function resourceKindLabel(
   return kind.kind;
 }
 
+/// CRD-derived kinds (`crd:` generic, `wkcrd:` well-known overrides) are
+/// cluster-local and appear only after per-cluster discovery.
+export function isDynamicKindId(id: string): boolean {
+  return id.startsWith("crd:") || id.startsWith("wkcrd:");
+}
+
 export function resolveResourceKind(
   kinds: ResourceKind[],
   kindClusters: Record<string, string[]>,
@@ -24,7 +30,7 @@ export function resolveResourceKind(
     (k) =>
       k.kind === kindName &&
       (group === undefined || k.group === group) &&
-      (!(k.id.startsWith("crd:") || k.id.startsWith("wkcrd:")) ||
+      (!isDynamicKindId(k.id) ||
         kindClusters[k.id]?.includes(clusterId)),
   );
   return matches.length === 1 ? matches[0] : undefined;

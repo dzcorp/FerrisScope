@@ -75,6 +75,7 @@ import {
   namespaceClusterTags,
 } from "./lib/multiCluster";
 import { IS_MAC } from "./lib/keyboard";
+import { prunedNamespaceFilter } from "./lib/nsFilter";
 import { goToFleet } from "./lib/clusterTabs";
 import { hotkeyIntent, intentPreventsDefault } from "./lib/hotkeys";
 import { isClusterUnavailableError } from "./lib/unavailable";
@@ -474,6 +475,8 @@ export default function App() {
     scopeExtras,
     selectedKindId,
     selectedNamespaces,
+    openTabs,
+    activeTabId,
     settings,
     dockSize,
     updateState,
@@ -601,6 +604,8 @@ export default function App() {
     // The value keeps the origin cluster so the modal can label
     // namespaces that exist on only a subset of the members.
     const seen = new Map<string, { cid: string; name: string }>();
+    // Members whose namespace list completed its initial LIST.
+    const synced = new Set<string>();
 
     const refresh = () => {
       const next: Record<string, string[]> = {};
@@ -621,18 +626,13 @@ export default function App() {
     // all-namespaces view, and a multi-namespace filter simply loses
     // the deleted entry.
     const reconcileFilter = () => {
-      const live = new Set(
-        Array.from(seen.values(), (v) => v.name),
+      const next = prunedNamespaceFilter(
+        useAppStore.getState().selectedNamespaces,
+        new Set(Array.from(seen.values(), (v) => v.name)),
+        synced.size,
+        ids.length,
       );
-      const sel = useAppStore.getState().selectedNamespaces;
-      if (sel.size === 0) return;
-      let changed = false;
-      const next = new Set<string>();
-      for (const name of sel) {
-        if (live.has(name)) next.add(name);
-        else changed = true;
-      }
-      if (changed) useAppStore.getState().setSelectedNamespaces(next);
+      if (next) useAppStore.getState().setSelectedNamespaces(next);
     };
 
     for (const cid of ids) {
@@ -648,7 +648,9 @@ export default function App() {
               seen.delete(`${cid}::${delta.uid}`);
               reconcileFilter();
             } else {
-              return; // init_done — nothing to update on the namespace map
+              synced.add(cid);
+              reconcileFilter();
+              return;
             }
             refresh();
           });
@@ -665,6 +667,7 @@ export default function App() {
           }
           // Initial snapshot might already lack a namespace the operator
           // had filtered to (deleted while another scope was active).
+          if (snap.init_done) synced.add(cid);
           reconcileFilter();
           refresh();
         } catch (e) {

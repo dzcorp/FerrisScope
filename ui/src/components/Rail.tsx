@@ -99,7 +99,9 @@ export function Rail({}: Props) {
       .listResourceKinds()
       .then((ks) => {
         staticKindsCount.current = ks.length;
-        setKinds(ks);
+        // CRD discovery for the active scope runs separately; don't drop a
+        // restored CRD selection before it lands.
+        setKinds(ks, true);
       })
       .catch((e: unknown) => setKindsError(String(e)));
   }, [setKinds, setKindsError, setKindsLoading]);
@@ -155,7 +157,7 @@ export function Rail({}: Props) {
           availability[k.id]!.push(cid);
         }
       }
-      setKinds([...head, ...union]);
+      setKinds([...head, ...union], perMember.size + exhausted < ids.length);
       setKindClusters(availability);
     };
 
@@ -202,6 +204,8 @@ export function Rail({}: Props) {
                 setKinds(current.slice(0, staticKindsCount.current));
               }
               setCustomError(lastError);
+            } else if (perMember.size + exhausted === ids.length) {
+              publish();
             }
           });
       };

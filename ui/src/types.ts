@@ -371,6 +371,10 @@ export type PrefsTabRef = {
   selected_context: string | null;
   selected_virtual_context: string | null;
   scope_extras: string[];
+  /// Absent on files that predate per-tab persistence — hydrate then seeds
+  /// from the global `selected_kind_id` / `selected_namespaces`.
+  selected_kind_id?: string | null;
+  selected_namespaces?: string[] | null;
 };
 
 /// A saved multi-cluster view: a user-named set of kubeconfig contexts that

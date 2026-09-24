@@ -1503,6 +1503,89 @@ describe("startup scope restore behaviour", () => {
     expect(useAppStore.getState().scopeExtras).toEqual(["default::c"]);
   });
 
+  it("restores each tab's namespace filter and kind (not just the active one)", () => {
+    seedPrefs();
+    const st = useAppStore.getState();
+    st.selectContext("default::a");
+    useAppStore.setState({
+      selectedNamespaces: new Set(["team-a"]),
+      selectedKindId: "deployments",
+    });
+    st.selectContext("default::b");
+    useAppStore.setState({
+      selectedNamespaces: new Set(["team-b"]),
+      selectedKindId: "pods",
+    });
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    useAppStore.setState({
+      openTabs: [],
+      activeTabId: null,
+      selectedContext: null,
+      selectedNamespaces: new Set(),
+      selectedKindId: null,
+    });
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.selectedContext).toBe("default::b");
+    expect(s.selectedNamespaces).toEqual(new Set(["team-b"]));
+    expect(s.selectedKindId).toBe("pods");
+    const a = s.openTabs.find((t) => t.selectedContext === "default::a")!;
+    expect(a.slice.selectedNamespaces).toEqual(new Set(["team-a"]));
+    expect(a.slice.selectedKindId).toBe("deployments");
+    useAppStore.getState().switchTab(a.id);
+    expect(useAppStore.getState().selectedNamespaces).toEqual(
+      new Set(["team-a"]),
+    );
+  });
+
+  it("restores 'all namespaces' on a tab even when the global field has a filter", () => {
+    seedPrefs();
+    useAppStore.getState().selectContext("default::a");
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.ui.selected_namespaces = ["stale"];
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().selectedNamespaces.size).toBe(0);
+  });
+
+  it("seeds tabs from the global fields when refs predate per-tab state", () => {
+    seedPrefs();
+    useAppStore.getState().selectContext("default::a");
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.ui.open_tabs = prefs.ui.open_tabs!.map(
+      ({ id, selected_context, selected_virtual_context, scope_extras }) => ({
+        id,
+        selected_context,
+        selected_virtual_context,
+        scope_extras,
+      }),
+    );
+    prefs.ui.selected_namespaces = ["team-a"];
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().selectedNamespaces).toEqual(
+      new Set(["team-a"]),
+    );
+  });
+
+  it("keeps a restored CRD kind while discovery is still pending", () => {
+    seedPrefs();
+    useAppStore.getState().selectContext("default::a");
+    const crd = "wkcrd:argo-app|argoproj.io|v1alpha1|applications|Application|Namespaced";
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    prefs.ui.open_tabs![0]!.selected_kind_id = crd;
+    useAppStore.setState({ kinds: [{ id: "pods" } as never] });
+    useAppStore.getState().hydratePrefs(prefs);
+    expect(useAppStore.getState().selectedKindId).toBe(crd);
+    useAppStore.getState().setKinds([{ id: "pods" } as never], true);
+    expect(useAppStore.getState().selectedKindId).toBe(crd);
+    useAppStore
+      .getState()
+      .setKinds([{ id: "pods" } as never, { id: crd } as never], false);
+    expect(useAppStore.getState().selectedKindId).toBe(crd);
+    // Discovery settled without it → fall back to the first kind.
+    useAppStore.getState().setKinds([{ id: "pods" } as never], false);
+    expect(useAppStore.getState().selectedKindId).toBe("pods");
+  });
+
   it("drops extras entirely when there is no anchor to extend", () => {
     seedPrefs();
     const prefs = buildPrefsPayload(useAppStore.getState());

@@ -339,6 +339,13 @@ pub struct TabRef {
     pub selected_virtual_context: Option<String>,
     #[serde(default)]
     pub scope_extras: Vec<String>,
+    /// Per-tab kind + namespace filter. `None` / absent on files written
+    /// before per-tab persistence; the frontend then seeds from the global
+    /// `UiState` fields.
+    #[serde(default)]
+    pub selected_kind_id: Option<String>,
+    #[serde(default)]
+    pub selected_namespaces: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -501,12 +508,15 @@ mod tests {
                 selected_context: Some("default::a".into()),
                 selected_virtual_context: None,
                 scope_extras: vec![],
+                ..TabRef::default()
             },
             TabRef {
                 id: "t2".into(),
                 selected_context: None,
                 selected_virtual_context: Some("v1".into()),
                 scope_extras: vec!["default::c".into()],
+                selected_kind_id: Some("deployments".into()),
+                selected_namespaces: Some(vec!["team-a".into()]),
             },
         ];
         prefs.ui.active_tab = Some("t2".into());
@@ -520,7 +530,26 @@ mod tests {
             Some("v1")
         );
         assert_eq!(back.ui.open_tabs[1].scope_extras, vec!["default::c"]);
+        assert_eq!(
+            back.ui.open_tabs[1].selected_kind_id.as_deref(),
+            Some("deployments")
+        );
+        assert_eq!(
+            back.ui.open_tabs[1].selected_namespaces,
+            Some(vec!["team-a".to_owned()])
+        );
+        assert_eq!(back.ui.open_tabs[0].selected_namespaces, None);
         assert_eq!(back.ui.active_tab.as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn tab_ref_without_per_tab_filter_parses() {
+        let legacy =
+            r#"{ "ui": { "open_tabs": [ { "id": "t1", "selected_context": "default::a" } ] } }"#;
+        let prefs = parse(legacy);
+        assert_eq!(prefs.ui.open_tabs.len(), 1);
+        assert_eq!(prefs.ui.open_tabs[0].selected_kind_id, None);
+        assert_eq!(prefs.ui.open_tabs[0].selected_namespaces, None);
     }
 
     #[test]
