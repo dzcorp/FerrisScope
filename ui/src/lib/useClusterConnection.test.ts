@@ -441,4 +441,59 @@ describe("useClusterConnection permanent-failure gating", () => {
     expect(result.current.autoReconnect).toBeNull();
     expect(reconnectCluster).not.toHaveBeenCalled();
   });
+
+  it("waking from sleep reconnects a healthy-looking cluster", async () => {
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+
+    act(() => useAppStore.getState().bumpResumeEpoch());
+    expect(result.current.autoReconnect).toEqual({ attempt: 1, max: MAX });
+    await flush(backoff(0));
+    expect(reconnectCluster).toHaveBeenCalledTimes(1);
+    expect(connectContext).toHaveBeenCalledTimes(2);
+    expect(result.current.state.status).toBe("ok");
+  });
+
+  it("waking from sleep restarts a session that had exhausted into the error banner", async () => {
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+    connectContext.mockRejectedValue(new Error("connection refused"));
+    fireHealth(UNAVAIL);
+    for (let k = 1; k <= MAX; k++) await flush(backoff(k - 1));
+    await flush(backoff(MAX));
+    expect(result.current.state.status).toBe("error");
+    expect(result.current.autoReconnect).toBeNull();
+
+    connectContext.mockResolvedValue({ server_version: "v1" });
+    act(() => useAppStore.getState().bumpResumeEpoch());
+    expect(result.current.autoReconnect).toEqual({ attempt: 1, max: MAX });
+    await flush(backoff(0));
+    expect(reconnectCluster).toHaveBeenCalledTimes(MAX + 1);
+    expect(result.current.state.status).toBe("ok");
+  });
+
+  it("a connect that lands after waking is trusted, not redone", async () => {
+    let resolve: (v: unknown) => void = () => {};
+    connectContext.mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+    expect(result.current.state.status).toBe("connecting");
+
+    act(() => useAppStore.getState().bumpResumeEpoch());
+    await act(async () => resolve({ server_version: "v1" }));
+    await flush(backoff(0) * 2);
+    expect(result.current.state.status).toBe("ok");
+    expect(reconnectCluster).not.toHaveBeenCalled();
+  });
+
+  it("a cancelled connect is left alone on wake", async () => {
+    connectContext.mockReturnValueOnce(new Promise(() => {}));
+    const { result } = renderHook(() => useClusterConnection(CTX));
+    await flush();
+    act(() => result.current.cancel());
+    act(() => useAppStore.getState().bumpResumeEpoch());
+    await flush(backoff(0) * 2);
+    expect(result.current.state.status).toBe("cancelled");
+    expect(reconnectCluster).not.toHaveBeenCalled();
+  });
 });

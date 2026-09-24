@@ -7,9 +7,9 @@
 //! the operator's machine. We materialise a small per-call YAML that:
 //!
 //!   1. Carries only the cluster + user + context the call is bound to.
-//!   2. Rewrites `cluster.server` to `https://127.0.0.1:<local_port>` (the
-//!      port owned by the live `SshSession`'s `direct-tcpip` listener — the
-//!      same listener our in-process kube client opens TCP to).
+//!   2. Rewrites `cluster.server` to a stable local relay port that forwards
+//!      to the live `SshSession`'s tunnel, so the file stays valid when a
+//!      reconnect rebuilds the tunnel on a new port.
 //!   3. Sets `tls-server-name` to the apiserver's original hostname so SNI
 //!      and certificate validation still match the cert presented by the
 //!      apiserver — TLS happens above the TCP layer the tunnel rewrites.
@@ -23,7 +23,12 @@
 //! terminal session's `scratch_files` and the MCP process's
 //! `scratch_kubeconfig` already implement that lifecycle.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, LazyLock};
+
+use tokio::net::{TcpListener, TcpStream};
 
 use directories::ProjectDirs;
 
@@ -59,7 +64,14 @@ pub(crate) async fn materialize_if_needed(
             return None;
         }
     };
-    let local_port = entry.cluster.tunnel_local_port()?;
+    publish_tunnel_port(cluster_id, entry.cluster.tunnel_local_port()?);
+    let local_port = match stable_port(cluster_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(cluster_id, error = %e, "ssh-scratch: relay bind failed");
+            return None;
+        }
+    };
 
     // Re-pull the parsed kubeconfig. `Cluster::connect_ssh` already fetched
     // it once but doesn't store the parsed form, only the built `kube::Config`.
@@ -94,6 +106,86 @@ pub(crate) async fn materialize_if_needed(
         return None;
     }
     Some(path)
+}
+
+/// A stable local port per SSH cluster that relays to whichever tunnel is
+/// current. Scratch kubeconfigs point here, so a terminal opened before a
+/// reconnect (which rebuilds the tunnel on a new port) keeps working.
+struct Relay {
+    upstream: Arc<AtomicU16>,
+    port: Option<u16>,
+}
+
+static RELAYS: LazyLock<std::sync::Mutex<HashMap<String, Relay>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn relays() -> std::sync::MutexGuard<'static, HashMap<String, Relay>> {
+    RELAYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Record the live tunnel port for `cluster_id`. Called whenever a cluster
+/// entry is (re)built.
+pub(crate) fn publish_tunnel_port(cluster_id: &str, port: u16) {
+    relays()
+        .entry(cluster_id.to_owned())
+        .or_insert_with(|| Relay {
+            upstream: Arc::new(AtomicU16::new(port)),
+            port: None,
+        })
+        .upstream
+        .store(port, Ordering::SeqCst);
+}
+
+async fn stable_port(cluster_id: &str) -> std::io::Result<u16> {
+    let upstream = {
+        let map = relays();
+        let relay = map
+            .get(cluster_id)
+            .ok_or_else(|| std::io::Error::other("no tunnel published"))?;
+        if let Some(port) = relay.port {
+            return Ok(port);
+        }
+        relay.upstream.clone()
+    };
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let port = listener.local_addr()?.port();
+    let mut map = relays();
+    let relay = map
+        .get_mut(cluster_id)
+        .ok_or_else(|| std::io::Error::other("no tunnel published"))?;
+    // Lost a race with a concurrent caller: keep theirs, drop our listener.
+    if let Some(existing) = relay.port {
+        return Ok(existing);
+    }
+    relay.port = Some(port);
+    tokio::spawn(run_relay(listener, upstream));
+    Ok(port)
+}
+
+async fn run_relay(listener: TcpListener, upstream: Arc<AtomicU16>) {
+    loop {
+        let mut inbound = match listener.accept().await {
+            Ok((sock, _)) => sock,
+            Err(e) => {
+                tracing::warn!(error = %e, "ssh-scratch relay: accept failed");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        let port = upstream.load(Ordering::SeqCst);
+        tokio::spawn(async move {
+            match TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(mut out) => {
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut out).await;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, port, "ssh-scratch relay: tunnel unreachable");
+                }
+            }
+        });
+    }
 }
 
 async fn fetch_remote_kubeconfig(
@@ -195,4 +287,47 @@ fn original_host_from_url(url: &str) -> Result<String, String> {
         Some((h, _)) => h.to_owned(),
         None => authority.to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn greeter(msg: &'static [u8]) -> u16 {
+        let l = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = l.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                let _ = s.write_all(msg).await;
+            }
+        });
+        port
+    }
+
+    async fn read_via(port: u16) -> Vec<u8> {
+        let mut s = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let mut buf = vec![0u8; 3];
+        s.read_exact(&mut buf).await.expect("read");
+        buf
+    }
+
+    #[tokio::test]
+    async fn relay_follows_the_tunnel_across_a_reconnect() {
+        let id = "test::relay-follows";
+        publish_tunnel_port(id, greeter(b"old").await);
+        let stable = stable_port(id).await.expect("relay");
+        assert_eq!(read_via(stable).await, b"old");
+
+        publish_tunnel_port(id, greeter(b"new").await);
+        assert_eq!(stable_port(id).await.expect("relay"), stable);
+        assert_eq!(read_via(stable).await, b"new");
+    }
+
+    #[tokio::test]
+    async fn no_relay_without_a_published_tunnel() {
+        assert!(stable_port("test::never-published").await.is_err());
+    }
 }

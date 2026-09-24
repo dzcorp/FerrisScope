@@ -69,6 +69,15 @@ const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// OS default) or 295 s (kube's read-timeout).
 const TCP_KEEPALIVE_RETRIES: u32 = 3;
 
+/// Linux `TCP_USER_TIMEOUT`: caps how long written data may stay unacked, so a
+/// request on a pooled socket that died across suspend / network change errors
+/// in ~1 min instead of hanging for the ~15 min retransmit budget. Keepalive
+/// only covers idle sockets. Linux also applies this to keepalive, so it must
+/// not undercut the keepalive detection window. macOS / Windows expose no
+/// equivalent through hyper-util.
+#[cfg(target_os = "linux")]
+const TCP_USER_TIMEOUT: Duration = Duration::from_mins(1);
+
 /// HTTP/2 keepalive-while-idle. **Inert today** — kube 3.1 negotiates HTTP/1.1
 /// to the apiserver (above), so no H2 connection exists to ping. Kept as
 /// zero-cost future-proofing: if a future kube/feature enables H2 ALPN, these
@@ -111,6 +120,8 @@ fn build_compressed_client(config: Config) -> Result<Client> {
     http.set_keepalive(Some(TCP_KEEPALIVE_IDLE));
     http.set_keepalive_interval(Some(TCP_KEEPALIVE_INTERVAL));
     http.set_keepalive_retries(Some(TCP_KEEPALIVE_RETRIES));
+    #[cfg(target_os = "linux")]
+    http.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT));
 
     // Mirror kube's `ClientBuilder::try_from` proxy dispatch, restricted to the
     // features this workspace enables: `http-proxy` only (no `socks5`). Each arm
@@ -1046,6 +1057,13 @@ mod tests {
     fn h2_keepalive_timeout_below_interval() {
         // A missed PING ACK must be acted on before the next ping is queued.
         assert!(H2_KEEPALIVE_TIMEOUT < H2_KEEPALIVE_INTERVAL);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tcp_user_timeout_does_not_undercut_keepalive() {
+        let keepalive_window = TCP_KEEPALIVE_IDLE + TCP_KEEPALIVE_INTERVAL * TCP_KEEPALIVE_RETRIES;
+        assert!(TCP_USER_TIMEOUT >= keepalive_window);
     }
 
     // `ClientBuilder::build()` spawns a `tower::Buffer` worker, so these need a

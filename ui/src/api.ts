@@ -777,6 +777,9 @@ export const api = {
     // backend reconnect bridge is bounded regardless of this value.
     tailLines: number | null,
     onEvent: (evt: LogEvent) => void,
+    // Raw RFC3339 timestamp of the last line already shown, when reopening an
+    // interrupted stream: the backend skips the overlap instead of re-tailing.
+    resumeAfter: string | null = null,
   ): Promise<{ streamId: string; close: () => void }> => {
     const channel = new Channel<LogEvent>();
     channel.onmessage = onEvent;
@@ -787,6 +790,7 @@ export const api = {
       container,
       previous,
       tailLines,
+      resumeAfter,
       onEvent: channel,
     });
     return {
@@ -1345,6 +1349,14 @@ export function onClusterHealth(
 ): Promise<UnlistenFn> {
   const name = `cluster-health://${sanitizeEventSegment(clusterId)}`;
   return listen<ClusterHealthEvent>(name, (e) => handler(e.payload));
+}
+
+// The machine woke from sleep. Every connected cluster has already been torn
+// down as unavailable by the backend; listeners reconnect with a fresh budget.
+export function onSystemResumed(
+  handler: (evt: { sleptMs: number }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ sleptMs: number }>("system://resumed", (e) => handler(e.payload));
 }
 
 // Background `cluster.info` probe completed for a cluster. `connect_context`

@@ -250,6 +250,36 @@ describe("LogPanel target resolution", () => {
     expect(utils.getByText(/2 pods · 2 streams/)).toBeInTheDocument();
   });
 
+  it("re-arms a workload's pod watch after its cluster reconnects, keeping the streams", async () => {
+    const m = mockBackend({
+      resolve: () => ({
+        pods: [{ namespace: "default", name: "api-1", containers: [{ name: "app", kind: "main" as const }] }],
+        warnings: [],
+      }),
+    });
+    await act(async () => {
+      render(
+        <LogPanel
+          mode="dark"
+          targets={[{ clusterId: ctxEu.id, kindId: "deployments", namespace: "default", name: "api" }]}
+          onClose={() => {}}
+        />,
+      );
+    });
+    const count = (cmd: string) => m.calls.filter((c) => c.cmd === cmd).length;
+    expect(count("watch_log_pods")).toBe(1);
+    const streamsBefore = count("start_log_stream");
+
+    await act(async () => useAppStore.getState().clearClusterHealth(ctxUs.id));
+    expect(count("watch_log_pods")).toBe(1);
+
+    await act(async () => useAppStore.getState().clearClusterHealth(ctxEu.id));
+    expect(count("unwatch_log_pods")).toBe(1);
+    expect(count("watch_log_pods")).toBe(2);
+    expect(count("resolve_log_pods_cmd")).toBe(1);
+    expect(count("start_log_stream")).toBe(streamsBefore);
+  });
+
   it("surfaces per-target resolution warnings without blanking the view", async () => {
     mockBackend({
       resolve: () => ({

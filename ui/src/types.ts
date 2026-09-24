@@ -541,7 +541,10 @@ export type LogEvent =
   // Container not producing logs yet (PodInitializing / ContainerCreating);
   // the backend is polling and will switch to `line`/`batch` once it starts.
   | { kind: "waiting"; reason: string }
-  | { kind: "ended"; reason: string };
+  | { kind: "ended"; reason: string }
+  // Stopped because the cluster connection dropped, not because the
+  // container finished; reopen once the cluster reconnects.
+  | { kind: "interrupted"; reason: string };
 
 // One entry of a logs/metrics observation request — a pod or a pod-bearing
 // workload (deployments, statefulsets, daemonsets, replicasets, jobs). The

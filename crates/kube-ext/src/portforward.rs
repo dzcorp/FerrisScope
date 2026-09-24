@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use ferrisscope_core::portforwards::{ForwardSpec, ForwardTarget};
+use futures::future::BoxFuture;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Pod, Service};
@@ -50,12 +51,25 @@ pub enum PortForwardError {
         namespace: String,
         name: String,
     },
+    #[error("cluster unavailable: {0}")]
+    ClientUnavailable(String),
     #[error("service {namespace}/{name} has no port matching {port}")]
     ServicePortMismatch {
         namespace: String,
         name: String,
         port: u16,
     },
+}
+
+/// Resolves the cluster's client for each new connection, so a forward
+/// follows the cluster across reconnects instead of pinning a dead pool.
+pub type ClientSource = Arc<dyn Fn() -> BoxFuture<'static, Result<Client, String>> + Send + Sync>;
+
+pub fn fixed_client(client: Client) -> ClientSource {
+    Arc::new(move || {
+        let client = client.clone();
+        Box::pin(async move { Ok(client) })
+    })
 }
 
 /// Lifecycle state for a single forward. Broadcast on every transition so the
@@ -386,10 +400,7 @@ fn workload_selector_job(j: &Job) -> Option<String> {
 /// Start a listener for `spec`. Returns the handle and the actual bound local
 /// port (resolved when `requested_local_port` was None or 0).
 ///
-/// `client` is the cluster's kube client at start time. The handle keeps a
-/// clone for per-connection pod resolution; if the cluster is dropped from
-/// `AppState` and re-created (re-connect), the next `start_forward` re-uses
-/// the new client.
+/// `clients` is consulted per connection (see [`ClientSource`]).
 ///
 /// `prebound` lets the caller supply an already-bound listening socket instead
 /// of binding here. Global (DNS) forwards use this on Linux for privileged
@@ -397,7 +408,7 @@ fn workload_selector_job(j: &Job) -> Option<String> {
 /// to the app, which the app then drives. When `None`, we bind `spec`'s address
 /// ourselves (every Simple forward, and every high-port / non-Linux global one).
 pub async fn start(
-    client: Client,
+    clients: ClientSource,
     spec: ForwardSpec,
     prebound: Option<std::net::TcpListener>,
     status_tx: broadcast::Sender<(String, ForwardStatus)>,
@@ -432,19 +443,18 @@ pub async fn start(
     let status_for_task = status.clone();
     let tx_for_task = status_tx.clone();
     let id_for_task = id.clone();
-    let client_for_task = client.clone();
 
     let task = tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((sock, _peer)) => {
-                    let client = client_for_task.clone();
+                    let clients = clients.clone();
                     let target = target.clone();
                     let id = id_for_task.clone();
                     let tx = tx_for_task.clone();
                     let status = status_for_task.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = bridge_one(client, &target, remote_port, sock).await {
+                        if let Err(e) = bridge_one(&clients, &target, remote_port, sock).await {
                             let st = ForwardStatus::Reconnecting {
                                 reason: e.to_string(),
                             };
@@ -479,11 +489,14 @@ pub async fn start(
 }
 
 async fn bridge_one(
-    client: Client,
+    clients: &ClientSource,
     target: &ForwardTarget,
     remote_port: u16,
     mut sock: tokio::net::TcpStream,
 ) -> Result<(), PortForwardError> {
+    let client = clients()
+        .await
+        .map_err(PortForwardError::ClientUnavailable)?;
     let (pod_name, pod_port) = resolve_pod(&client, target, remote_port).await?;
     let pods: Api<Pod> = Api::namespaced(client, &target.namespace);
     let mut pf = pods.portforward(&pod_name, &[pod_port]).await?;
@@ -588,6 +601,53 @@ mod tests {
             q, None,
             "must not fall back to the widened matchLabels query"
         );
+    }
+
+    #[tokio::test]
+    async fn each_connection_asks_the_source_for_a_fresh_client() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let clients: ClientSource = {
+            let calls = calls.clone();
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Err("reconnecting".to_owned()) })
+            })
+        };
+        let spec = ForwardSpec {
+            id: "pf".to_owned(),
+            cluster_id: "c".to_owned(),
+            target: ForwardTarget {
+                kind: "Pod".to_owned(),
+                namespace: "ns".to_owned(),
+                name: "p".to_owned(),
+            },
+            remote_port: 80,
+            requested_local_port: None,
+            autostart: false,
+            mode: Default::default(),
+            local_ip: None,
+        };
+        let tx = new_status_channel();
+        let mut rx = tx.subscribe();
+        let handle = start(clients, spec, None, tx)
+            .await
+            .expect("listener binds");
+        let addr = ("127.0.0.1", handle.actual_local_port);
+        for _ in 0..2 {
+            let _conn = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            loop {
+                let (_, st) = rx.recv().await.expect("status");
+                if let ForwardStatus::Reconnecting { reason } = st {
+                    assert!(
+                        reason.contains("cluster unavailable: reconnecting"),
+                        "{reason}"
+                    );
+                    break;
+                }
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     /// No spec at all — total, not a panic.

@@ -52,9 +52,15 @@ pub enum LogEvent {
     Waiting {
         reason: String,
     },
-    /// Stream finished for good (container terminated, fatal error, gave
-    /// up reconnecting). No further events follow.
+    /// Stream finished for good (container terminated, fatal error). No
+    /// further events follow.
     Ended {
+        reason: String,
+    },
+    /// Stream stopped because the cluster connection was lost or reset, not
+    /// because the container finished. Reopen it once the cluster is back.
+    /// No further events follow.
+    Interrupted {
         reason: String,
     },
 }
@@ -80,6 +86,14 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// reconnects now and then never exhausts it; the cap only exists to stop
 /// a tight close→reopen busy-loop when classification is wrong.
 const MAX_DEAD_RECONNECTS: u32 = 10;
+/// Retries while the apiserver is unreachable (network still coming back
+/// after a resume, VPN reconnecting). With [`transient_backoff`] this spans
+/// roughly four and a half minutes.
+const MAX_TRANSIENT_RETRIES: u32 = 12;
+
+fn transient_backoff(attempt: u32) -> Duration {
+    Duration::from_secs((2u64 << attempt.min(4)).min(30))
+}
 
 /// Outcome of a failed `log_stream` open.
 enum OpenFailure {
@@ -91,6 +105,8 @@ enum OpenFailure {
     /// container reason (bad image, missing config, crash loop). Give up
     /// with the cleaned message so the operator sees *why*.
     Fatal(String),
+    /// Couldn't reach the apiserver (transport failure, 429/5xx).
+    Transient(String),
 }
 
 /// How a live stream ended.
@@ -113,6 +129,8 @@ enum ContainerLiveness {
     Done,
     /// Couldn't tell — be conservative and stop.
     Unknown,
+    /// The pod lookup itself failed on a transport or server error.
+    Unreachable(String),
 }
 
 /// Pull a clean, human-readable string out of a kube error. For API errors
@@ -155,6 +173,9 @@ fn is_stuck_reason(lower: &str) -> bool {
 /// they're checked first and treated as fatal. Everything else is fatal.
 fn classify_open_error(err: &kube::Error) -> OpenFailure {
     let msg = clean_kube_message(err);
+    if is_transient(err) {
+        return OpenFailure::Transient(msg);
+    }
     if matches!(err, kube::Error::Api(_)) {
         let lower = msg.to_lowercase();
         // Stuck reasons also read as "is waiting to start: <reason>", so
@@ -170,6 +191,17 @@ fn classify_open_error(err: &kube::Error) -> OpenFailure {
         }
     }
     OpenFailure::Fatal(msg)
+}
+
+fn is_transient(err: &kube::Error) -> bool {
+    match err {
+        kube::Error::Api(status) => status.code == 429 || status.code >= 500,
+        kube::Error::HyperError(_)
+        | kube::Error::Service(_)
+        | kube::Error::ReadEvents(_)
+        | kube::Error::Auth(_) => true,
+        _ => false,
+    }
 }
 
 /// Extract the RFC3339(Nano) timestamp the apiserver prepends to each line
@@ -252,6 +284,7 @@ async fn probe_container(api: &Api<Pod>, pod: &str, container: Option<&str>) -> 
     match api.get_opt(pod).await {
         Ok(Some(p)) => classify_container_liveness(&p, container),
         Ok(None) => ContainerLiveness::Done,
+        Err(e) if is_transient(&e) => ContainerLiveness::Unreachable(clean_kube_message(&e)),
         Err(_) => ContainerLiveness::Unknown,
     }
 }
@@ -266,6 +299,7 @@ async fn open_stream(
     tx: &broadcast::Sender<LogEvent>,
 ) -> Option<impl AsyncBufRead + Unpin> {
     let mut attempts: u32 = 0;
+    let mut transient: u32 = 0;
     let mut last_waiting: Option<String> = None;
     loop {
         match api.log_stream(pod, params).await {
@@ -295,6 +329,18 @@ async fn open_stream(
                     });
                     return None;
                 }
+                OpenFailure::Transient(reason) if transient < MAX_TRANSIENT_RETRIES => {
+                    let _ = tx.send(LogEvent::Waiting {
+                        reason: format!("reconnecting — {reason}"),
+                    });
+                    last_waiting = None;
+                    tokio::time::sleep(transient_backoff(transient)).await;
+                    transient += 1;
+                }
+                OpenFailure::Transient(reason) => {
+                    let _ = tx.send(LogEvent::Interrupted { reason });
+                    return None;
+                }
             },
         }
     }
@@ -313,24 +359,24 @@ async fn run_live(
     // whole available history (`kubectl logs --tail=-1`). Only the initial open
     // uses it; reconnects fall back to `DEFAULT_TAIL_LINES` (see below).
     tail_lines: Option<i64>,
+    // Timestamp of the last line a previous stream already showed; the first
+    // open then bridges like a reconnect instead of re-tailing.
+    resume_after: Option<String>,
 ) {
     // Timestamp of the last line we forwarded. On reconnect the apiserver
     // re-sends an overlapping `tail_lines` window; we skip anything at or
     // before this so reconnects don't duplicate already-shown output.
-    let mut last_ts: Option<String> = None;
+    let mut first = resume_after.is_none();
+    let mut last_ts: Option<String> = resume_after;
     let mut dead_reconnects: u32 = 0;
-    let mut first = true;
+    let mut unreachable: u32 = 0;
 
     loop {
         // First open honours the operator's tail; reconnects bridge with a
         // bounded tail so picking "all history" doesn't re-pull the entire log
         // on every network blip. When a finite tail was chosen we re-request it
         // verbatim — `last_ts` de-duplication drops the overlap regardless.
-        let this_tail = if first {
-            tail_lines
-        } else {
-            Some(tail_lines.unwrap_or(DEFAULT_TAIL_LINES))
-        };
+        let this_tail = tail_for_open(first, tail_lines);
         first = false;
         let params = live_log_params(container, this_tail);
 
@@ -374,7 +420,21 @@ async fn run_live(
             dead_reconnects = 0;
         }
         let liveness = probe_container(api, pod, container).await;
+        if !matches!(liveness, ContainerLiveness::Unreachable(_)) {
+            unreachable = 0;
+        }
         match liveness {
+            ContainerLiveness::Unreachable(e) if unreachable < MAX_TRANSIENT_RETRIES => {
+                let _ = tx.send(LogEvent::Waiting {
+                    reason: format!("reconnecting — {e}"),
+                });
+                tokio::time::sleep(transient_backoff(unreachable)).await;
+                unreachable += 1;
+            }
+            ContainerLiveness::Unreachable(e) => {
+                let _ = tx.send(LogEvent::Interrupted { reason: e });
+                return;
+            }
             ContainerLiveness::Active | ContainerLiveness::Waiting(_)
                 if dead_reconnects < MAX_DEAD_RECONNECTS =>
             {
@@ -414,6 +474,14 @@ async fn run_live(
                 return;
             }
         }
+    }
+}
+
+fn tail_for_open(first: bool, tail_lines: Option<i64>) -> Option<i64> {
+    if first {
+        tail_lines
+    } else {
+        Some(tail_lines.unwrap_or(DEFAULT_TAIL_LINES))
     }
 }
 
@@ -522,6 +590,7 @@ impl LogStream {
         container: Option<&str>,
         previous: bool,
         tail_lines: Option<i64>,
+        resume_after: Option<String>,
     ) -> Result<Arc<Self>> {
         let api: Api<Pod> = Api::namespaced(client, namespace);
         let pod = pod.to_owned();
@@ -541,7 +610,15 @@ impl LogStream {
                 // follow, no reconnect (see `run_previous`).
                 run_previous(&api, &pod, container.as_deref(), &tx_task).await;
             } else {
-                run_live(&api, &pod, container.as_deref(), &tx_task, tail_lines).await;
+                run_live(
+                    &api,
+                    &pod,
+                    container.as_deref(),
+                    &tx_task,
+                    tail_lines,
+                    resume_after,
+                )
+                .await;
             }
         });
 
@@ -687,7 +764,7 @@ mod tests {
                 // Cleaned message — no `ApiError:` / `Status { … }` debug noise.
                 assert!(!msg.contains("Status {"));
             }
-            OpenFailure::Fatal(_) => panic!("PodInitializing should be retryable"),
+            _ => panic!("PodInitializing should be retryable"),
         }
     }
 
@@ -724,9 +801,7 @@ mod tests {
                     msg.contains(reason),
                     "{reason}: message should carry the reason"
                 ),
-                OpenFailure::Starting(_) => {
-                    panic!("{reason} should fail fast, not poll")
-                }
+                _ => panic!("{reason} should fail fast, not poll"),
             }
         }
     }
@@ -742,8 +817,54 @@ mod tests {
         let err = api_err("logs is forbidden: cannot get resource", 403);
         match classify_open_error(&err) {
             OpenFailure::Fatal(msg) => assert!(msg.contains("forbidden")),
-            OpenFailure::Starting(_) => panic!("403 should be fatal"),
+            _ => panic!("403 should be fatal"),
         }
+    }
+
+    #[test]
+    fn transport_and_server_errors_are_transient() {
+        let io = kube::Error::ReadEvents(std::io::Error::other("connection reset"));
+        assert!(matches!(
+            classify_open_error(&io),
+            OpenFailure::Transient(_)
+        ));
+        for code in [429, 500, 503] {
+            let err = api_err("try again", code);
+            assert!(
+                matches!(classify_open_error(&err), OpenFailure::Transient(_)),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn reopen_after_interruption_bridges_with_a_bounded_tail() {
+        assert_eq!(tail_for_open(true, None), None);
+        assert_eq!(tail_for_open(true, Some(50)), Some(50));
+        assert_eq!(tail_for_open(false, None), Some(DEFAULT_TAIL_LINES));
+        assert_eq!(tail_for_open(false, Some(50)), Some(50));
+    }
+
+    #[test]
+    fn interrupted_serialises_with_its_own_tag() {
+        let v = serde_json::to_value(LogEvent::Interrupted {
+            reason: "x".to_owned(),
+        })
+        .expect("serialises");
+        assert_eq!(
+            v,
+            serde_json::json!({ "kind": "interrupted", "reason": "x" })
+        );
+    }
+
+    #[test]
+    fn transient_backoff_grows_then_caps() {
+        let secs: Vec<u64> = (0..7).map(|n| transient_backoff(n).as_secs()).collect();
+        assert_eq!(secs, vec![2, 4, 8, 16, 30, 30, 30]);
+        let total: u64 = (0..MAX_TRANSIENT_RETRIES)
+            .map(|n| transient_backoff(n).as_secs())
+            .sum();
+        assert!((180..=360).contains(&total), "{total}s");
     }
 
     #[test]

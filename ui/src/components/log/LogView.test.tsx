@@ -13,6 +13,7 @@ import { LogView, type LogViewSource, type LogViewState } from "./LogView";
 import { tokens } from "../../theme";
 import { setMockInvoke, resetMockInvoke, Channel } from "../../test/tauri-mock";
 import type { LogEvent } from "../../types";
+import { useAppStore } from "../../store";
 
 const t = tokens("dark");
 
@@ -164,6 +165,52 @@ describe("LogView", () => {
     expect(last.status).toEqual({ kind: "ended", reason: "stream closed" });
     // Unlike `waiting`, `ended` does append a system line to the body.
     expect(last.lineCount).toBe(1);
+  });
+
+  it("reopens an interrupted stream after the cluster reconnects, resuming after the last line", async () => {
+    const starts: Record<string, unknown>[] = [];
+    const stopped: string[] = [];
+    let channel: Channel<LogEvent> | null = null;
+    setMockInvoke((cmd, args) => {
+      if (cmd === "start_log_stream") {
+        starts.push(args!);
+        channel = args!.onEvent as Channel<LogEvent>;
+        return `s${starts.length}`;
+      }
+      if (cmd === "stop_log_stream") stopped.push(String(args!.streamId));
+      return undefined;
+    });
+    // Deferred rAF: the synchronous stub never clears the pending handle, so
+    // only the first flush of a test would land.
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      queueMicrotask(() => cb(0));
+      return 1;
+    });
+    const emit = (evt: LogEvent) =>
+      act(async () => {
+        channel!.onmessage(evt);
+      });
+    const states: LogViewState[] = [];
+    await act(async () => {
+      renderLogView("app", (st) => states.push(st));
+    });
+    expect(starts[0]!.resumeAfter).toBeNull();
+    await emit({ kind: "line", text: "2026-05-14T10:30:00.500Z before sleep" });
+    await emit({ kind: "interrupted", reason: "cluster connection reset" });
+    expect(states.at(-1)!.status.kind).toBe("waiting");
+    expect(stopped).toEqual(["s1"]);
+
+    useAppStore.setState({ clusterReconnecting: { ctx: true } });
+    await act(async () => useAppStore.getState().clearClusterHealth("ctx"));
+    expect(starts).toHaveLength(1);
+
+    useAppStore.setState({ clusterReconnecting: {} });
+    await act(async () => useAppStore.getState().clearClusterHealth("ctx"));
+    expect(starts).toHaveLength(2);
+    expect(starts[1]!.resumeAfter).toBe("2026-05-14T10:30:00.500Z");
+    expect(states.at(-1)!.status.kind).toBe("streaming");
+    // line + "connection lost" + "reconnected"
+    expect(states.at(-1)!.lineCount).toBe(3);
   });
 
   it("Cmd+F opens an in-place find bar that counts matches", async () => {

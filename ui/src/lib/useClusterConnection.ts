@@ -108,6 +108,9 @@ export function useClusterConnection(context: ContextInfo): {
   const healthReason = useAppStore(
     (s) => s.clusterHealthReason[context.id] ?? null,
   );
+  const resumeEpoch = useAppStore((s) => s.resumeEpoch);
+  const resumeSeenRef = useRef(resumeEpoch);
+  const resumeDeferredRef = useRef(false);
 
   // Mutable auto-reconnect session state. Refs, not state, so re-running the
   // connect effect (via setAttempt) never clobbers them.
@@ -131,6 +134,7 @@ export function useClusterConnection(context: ContextInfo): {
   // stable), and reads the *current* context id through cidRef.
   const ctlRef = useRef<{
     onUnavailable: (reason: string | null) => void;
+    onResumed: () => void;
     onConnectResolved: (result: "ok" | "error", message?: string) => void;
     reset: (resetCounter: boolean) => void;
   } | null>(null);
@@ -207,6 +211,13 @@ export function useClusterConnection(context: ContextInfo): {
           return;
         }
         scheduleNext(); // starts the session on the first unavailable; advances it after
+      },
+      // The machine slept: the backend already tore the cluster down, and the
+      // network may take a while to come back, so start over with a full
+      // budget even if an earlier session had exhausted it.
+      onResumed() {
+        endSession(true);
+        scheduleNext();
       },
       onConnectResolved(result, message) {
         attemptInFlightRef.current = false;
@@ -345,6 +356,22 @@ export function useClusterConnection(context: ContextInfo): {
     if (state.status !== "ok") return;
     ctlRef.current?.onUnavailable(healthReason);
   }, [healthStatus, healthReason, state.status]);
+
+  // A connect already in flight when the machine woke settles first: success
+  // means it came up after the backend teardown, failure joins the session.
+  useEffect(() => {
+    if (resumeSeenRef.current === resumeEpoch) return;
+    if (state.status === "connecting") {
+      resumeDeferredRef.current = true;
+      return;
+    }
+    resumeSeenRef.current = resumeEpoch;
+    const deferred = resumeDeferredRef.current;
+    resumeDeferredRef.current = false;
+    if (state.status === "cancelled") return;
+    if (deferred && state.status === "ok") return;
+    ctlRef.current?.onResumed();
+  }, [resumeEpoch, state.status]);
 
   useEffect(() => {
     const id = ++reqId.current;

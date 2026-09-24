@@ -866,7 +866,13 @@ impl GlobalForwardManager {
             // Linux — have the helper bind and pass the socket. Everything else
             // binds in-process.
             let prebound = self.prebind_privileged(&spec).await;
-            match start_forward(client.clone(), spec, prebound, registry.status_tx.clone()).await {
+            let clients = match self.app.get() {
+                Some(app) => {
+                    crate::commands::live_client_source(app.clone(), cluster_id.to_owned())
+                }
+                None => ferrisscope_kube_ext::fixed_client(client.clone()),
+            };
+            match start_forward(clients, spec, prebound, registry.status_tx.clone()).await {
                 Ok(handle) => {
                     registry.by_id.lock().await.insert(id.clone(), handle);
                     forward_ids.push(id);
