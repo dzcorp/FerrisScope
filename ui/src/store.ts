@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { clusterLabels, type ClusterLabel } from "./lib/clusterName";
+import { isDynamicKindId } from "./lib/resourceKinds";
 import type {
   ClusterHealthStatus,
   ContextInfo,
@@ -12,6 +13,7 @@ import type {
   Prefs,
   PrefsRailMode,
   PrefsStartupScope,
+  PrefsTabRef,
   ResourceKind,
   SettingsTarget,
   TableView,
@@ -526,7 +528,10 @@ type AppState = {
   /// Clear the focus outright (the "showing 1 of N" chip's ×).
   clearFocusedCluster: () => void;
 
-  setKinds: (ks: ResourceKind[]) => void;
+  /// `discoveryPending` keeps a selected CRD / well-known kind that CRD
+  /// discovery hasn't published yet (restore on launch, tab switch) instead
+  /// of falling back to the first kind.
+  setKinds: (ks: ResourceKind[], discoveryPending?: boolean) => void;
   setKindsError: (err: string) => void;
   setKindsLoading: () => void;
   selectKind: (id: string) => void;
@@ -1125,13 +1130,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearFocusedCluster: () => set({ focusedClusterId: null }),
 
   setKindsLoading: () => set({ kindsStatus: "loading", kindsError: null }),
-  setKinds: (ks) =>
+  setKinds: (ks, discoveryPending = false) =>
     set((s) => ({
       kinds: ks,
       kindsStatus: "ready",
       kindsError: null,
       selectedKindId:
-        s.selectedKindId && ks.some((k) => k.id === s.selectedKindId)
+        s.selectedKindId &&
+        (ks.some((k) => k.id === s.selectedKindId) ||
+          (discoveryPending && isDynamicKindId(s.selectedKindId)))
           ? s.selectedKindId
           : ks[0]?.id ?? null,
     })),
@@ -1526,12 +1533,14 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // Persisted kind, validated against the (possibly not-yet-loaded) kind
       // list. Used both for the active tab's mirror and to seed restored tabs.
-      const restoredKindId =
-        prefs.ui.selected_kind_id &&
+      const kindKnown = (id: string | null | undefined): id is string =>
+        !!id &&
         (s.kinds.length === 0 ||
-          s.kinds.some((k) => k.id === prefs.ui.selected_kind_id))
-          ? prefs.ui.selected_kind_id
-          : null;
+          isDynamicKindId(id) ||
+          s.kinds.some((k) => k.id === id));
+      const restoredKindId = kindKnown(prefs.ui.selected_kind_id)
+        ? prefs.ui.selected_kind_id
+        : null;
 
       // Reconstruct the open cluster tabs (refs only — live slices like
       // terminals/chats can't survive a restart). "fleet" ignores the saved
@@ -1555,9 +1564,19 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         return false;
       };
-      const makeTabSlice = (): ScopeSlice => {
+      // Per-tab kind / namespaces when the ref carries them; files from
+      // before per-tab persistence fall back to the global fields.
+      const makeTabSlice = (ref?: PrefsTabRef): ScopeSlice => {
         const sl = emptyScopeSlice();
-        sl.selectedKindId = restoredKindId;
+        sl.selectedKindId =
+          ref?.selected_kind_id !== undefined
+            ? kindKnown(ref.selected_kind_id)
+              ? ref.selected_kind_id
+              : null
+            : restoredKindId;
+        sl.selectedNamespaces = new Set(
+          ref?.selected_namespaces ?? prefs.ui.selected_namespaces,
+        );
         return sl;
       };
       // One tab built from the legacy single-anchor fields — used for
@@ -1599,7 +1618,7 @@ export const useAppStore = create<AppState>((set, get) => ({
               : (ref.selected_context ?? null),
             selectedVirtualContextId: ref.selected_virtual_context ?? null,
             scopeExtras: ref.scope_extras ?? [],
-            slice: makeTabSlice(),
+            slice: makeTabSlice(ref),
           }));
           const wantActive = prefs.ui.active_tab ?? null;
           activeTabId = (
@@ -1629,7 +1648,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedContext: activeTab ? activeTab.selectedContext : null,
       scopeExtras: activeTab ? activeTab.scopeExtras : [],
       selectedKindId: activeTab ? activeTab.slice.selectedKindId : null,
-      selectedNamespaces: new Set(prefs.ui.selected_namespaces),
+      selectedNamespaces: activeTab
+        ? activeTab.slice.selectedNamespaces
+        : new Set<string>(),
       dockSize: {
         right: prefs.ui.dock_size_right,
         bottom: prefs.ui.dock_size_bottom,
@@ -1890,12 +1911,18 @@ export function buildPrefsPayload(s: {
               selected_context: s.selectedContext,
               selected_virtual_context: s.selectedVirtualContextId,
               scope_extras: s.scopeExtras,
+              selected_kind_id: s.selectedKindId,
+              selected_namespaces: Array.from(s.selectedNamespaces).sort(),
             }
           : {
               id: tab.id,
               selected_context: tab.selectedContext,
               selected_virtual_context: tab.selectedVirtualContextId,
               scope_extras: tab.scopeExtras,
+              selected_kind_id: tab.slice.selectedKindId,
+              selected_namespaces: Array.from(
+                tab.slice.selectedNamespaces,
+              ).sort(),
             },
       ),
       active_tab: s.activeTabId,
