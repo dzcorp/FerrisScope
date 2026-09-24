@@ -524,6 +524,84 @@ pub async fn snapshot(handle: &ForwardHandle) -> ForwardEntry {
     }
 }
 
+/// Whether a Simple forward could bind `127.0.0.1:<port>` right now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LocalPortProbe {
+    Free,
+    InUse,
+    /// Bindable, but another listener on `addr` would answer `localhost:<port>`
+    /// for some clients (IPv6 `::1`, or a wildcard the OS lets us shadow).
+    Shadowed {
+        addr: String,
+    },
+    /// Privileged (<1024 without the capability) or, on Windows, an excluded range.
+    PermissionDenied,
+    Error {
+        message: String,
+    },
+}
+
+/// Ports scanned upward for a suggestion before falling back to an OS pick.
+const SUGGEST_SCAN: u16 = 32;
+
+async fn try_bind(addr: std::net::SocketAddr) -> std::io::Result<()> {
+    TcpListener::bind(addr).await.map(drop)
+}
+
+/// Listeners the 127.0.0.1 bind doesn't collide with but that still serve
+/// `localhost`. Linux already refuses 127.0.0.1 under a `*:<port>` listener;
+/// macOS (SO_REUSEADDR) and Windows let the specific bind shadow it.
+fn shadow_addrs(port: u16) -> impl Iterator<Item = std::net::SocketAddr> {
+    let v6 = std::net::SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), port);
+    let any = (!cfg!(target_os = "linux"))
+        .then(|| std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), port));
+    std::iter::once(v6).chain(any)
+}
+
+/// Probe with the exact bind `start` performs (tokio sets SO_REUSEADDR, so a
+/// port with only TIME_WAIT sockets reads as free, as it would at start).
+/// Advisory only — another process can take the port before `start` runs.
+pub async fn probe_local_port(port: u16) -> LocalPortProbe {
+    let addr = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), port);
+    if let Err(e) = try_bind(addr).await {
+        return match e.kind() {
+            std::io::ErrorKind::AddrInUse => LocalPortProbe::InUse,
+            std::io::ErrorKind::PermissionDenied => LocalPortProbe::PermissionDenied,
+            _ => LocalPortProbe::Error {
+                message: e.to_string(),
+            },
+        };
+    }
+    for addr in shadow_addrs(port) {
+        // Other failures (no IPv6, privileged) say nothing about a listener.
+        if matches!(try_bind(addr).await, Err(e) if e.kind() == std::io::ErrorKind::AddrInUse) {
+            return LocalPortProbe::Shadowed {
+                addr: addr.to_string(),
+            };
+        }
+    }
+    LocalPortProbe::Free
+}
+
+/// A free unprivileged port near `port`: 80 → 8080, 443 → 8443, 8080 → 8081….
+/// Falls back to an OS-assigned port when the whole scan window is taken.
+pub async fn suggest_local_port(port: u16) -> Option<u16> {
+    let first = if port < 1024 {
+        port + 8000
+    } else {
+        port.saturating_add(1)
+    };
+    for p in (first..=u16::MAX).take(usize::from(SUGGEST_SCAN)) {
+        if p != port && probe_local_port(p).await == LocalPortProbe::Free {
+            return Some(p);
+        }
+    }
+    let addr = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 0);
+    let listener = TcpListener::bind(addr).await.ok()?;
+    listener.local_addr().ok().map(|a| a.port())
+}
+
 /// Construct a fresh broadcast channel for status events. The registry holds
 /// the sender; the command layer hands receivers to the Tauri event forwarder.
 pub fn new_status_channel() -> broadcast::Sender<(String, ForwardStatus)> {
@@ -533,8 +611,64 @@ pub fn new_status_channel() -> broadcast::Sender<(String, ForwardStatus)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, LabelSelectorRequirement};
     use std::collections::BTreeMap;
+
+    async fn held_port() -> (TcpListener, u16) {
+        let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = l.local_addr().expect("addr").port();
+        (l, port)
+    }
+
+    #[tokio::test]
+    async fn probe_reports_held_then_released_port() {
+        let (l, port) = held_port().await;
+        assert_eq!(probe_local_port(port).await, LocalPortProbe::InUse);
+        drop(l);
+        assert_eq!(probe_local_port(port).await, LocalPortProbe::Free);
+    }
+
+    #[tokio::test]
+    async fn ipv6_localhost_listener_reads_as_shadowed() {
+        let Ok(l) = TcpListener::bind("[::1]:0").await else {
+            return; // no IPv6 loopback on this host
+        };
+        let port = l.local_addr().expect("addr").port();
+        assert!(matches!(
+            probe_local_port(port).await,
+            LocalPortProbe::Shadowed { addr } if addr == format!("[::1]:{port}")
+        ));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn wildcard_listener_is_shadowed_or_in_use() {
+        let l = TcpListener::bind("0.0.0.0:0").await.expect("bind");
+        let port = l.local_addr().expect("addr").port();
+        assert_ne!(probe_local_port(port).await, LocalPortProbe::Free);
+    }
+
+    #[tokio::test]
+    async fn suggestion_skips_the_busy_port_and_is_bindable() {
+        let (_l, port) = held_port().await;
+        let s = suggest_local_port(port).await.expect("suggestion");
+        assert_ne!(s, port);
+        assert!(s >= 1024);
+        assert_eq!(probe_local_port(s).await, LocalPortProbe::Free);
+    }
+
+    #[tokio::test]
+    async fn privileged_port_suggests_the_8000_offset_neighbourhood() {
+        let s = suggest_local_port(80).await.expect("suggestion");
+        assert!(s >= 1024, "never suggest a privileged port, got {s}");
+    }
+
+    #[tokio::test]
+    async fn suggestion_near_the_top_of_the_range_does_not_overflow() {
+        let s = suggest_local_port(u16::MAX).await.expect("suggestion");
+        assert_ne!(s, u16::MAX);
+    }
 
     fn deployment(sel: LabelSelector) -> Deployment {
         Deployment {

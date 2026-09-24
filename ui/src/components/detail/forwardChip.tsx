@@ -2,11 +2,15 @@
 // Deployment / StatefulSet / DaemonSet detail panels next to every port the
 // operator might want to tunnel locally.
 //
-// Three visible states:
+// Visible states:
 //   - idle  → hollow chip with the forward icon. Click → start an ephemeral
-//             forward (autostart=false). Backend dedupes by (cluster, target,
-//             remote_port) so a duplicate click against an already-running
-//             forward just returns the same entry.
+//             forward on an OS-picked local port (autostart=false). Backend
+//             dedupes by (cluster, target, remote_port) so a duplicate click
+//             against an already-running forward just returns the same entry.
+//             The caret beside it opens `pick`.
+//   - pick  → inline local-port input. Enter / ✓ starts on that port (empty =
+//             auto); Esc / × returns to idle. The typed port is pre-checked
+//             (`pfCheckLocalPort`); a clash says why and offers a free port.
 //   - busy  → request in-flight; chip is disabled.
 //   - live  → solid chip with the bound local port; click → stop. The pin
 //             icon next to it toggles persistence.
@@ -14,7 +18,7 @@
 // Reads from the global forwards map so two detail panels showing the same
 // port stay in lockstep without prop-drilling.
 
-import { useState } from "react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import { api } from "../../api";
 import { useAppStore } from "../../store";
 import {
@@ -26,7 +30,7 @@ import {
   tintPair,
   tokensAreDark,
 } from "../../theme";
-import type { ForwardTarget } from "../../types";
+import type { ForwardEntry, ForwardTarget, LocalPortCheck } from "../../types";
 import { toast } from "../../lib/dialog";
 import { Icons, Tooltip } from "../ui";
 
@@ -47,22 +51,50 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
   const upsertForward = useAppStore((s) => s.upsertForward);
   const removeForward = useAppStore((s) => s.removeForward);
   const [busy, setBusy] = useState(false);
-  // Hover only drives the idle affordance's fill — it's a call-to-action, so
-  // it brightens to accentSoft on hover to read as a clickable button.
-  const [hover, setHover] = useState(false);
+  // Per-segment hover: the hovered half fills with accentSoft, the group border brightens.
+  const [hover, setHover] = useState<"main" | "pick" | "ok" | "cancel" | "suggest" | null>(null);
+  const [picking, setPicking] = useState(false);
+  const [portDraft, setPortDraft] = useState("");
+  const [check, setCheck] = useState<LocalPortCheck | null>(null);
+  const heldBy = useAppStore((s) => (check?.held_by ? s.forwards[check.held_by] : undefined));
+  const hasEntry = entry != null;
+  useEffect(() => {
+    if (hasEntry) setPicking(false);
+  }, [hasEntry]);
+
+  const draftPort = picking ? parseLocalPort(portDraft) : null;
+  useEffect(() => {
+    if (typeof draftPort !== "number") return;
+    let current = true;
+    const timer = setTimeout(() => {
+      api
+        .pfCheckLocalPort(draftPort)
+        .then((c) => current && setCheck(c))
+        .catch(() => undefined);
+    }, CHECK_DEBOUNCE_MS);
+    return () => {
+      current = false;
+      clearTimeout(timer);
+    };
+  }, [draftPort]);
 
   if (protocol && protocol.toUpperCase() !== "TCP") {
     return null;
   }
 
-  const onStart = async () => {
+  const onStart = async (localPort: number | null = null) => {
     setBusy(true);
     try {
-      const ent = await api.pfStart(clusterId, target, remotePort, null, false);
+      const ent = await api.pfStart(clusterId, target, remotePort, localPort, false);
       upsertForward(ent);
+      setPicking(false);
       toast.ok(`Forwarding ${target.kind} ${target.name}:${remotePort} → 127.0.0.1:${ent.actual_local_port}`);
     } catch (e) {
-      toast.bad(`Forward failed: ${String(e)}`);
+      // Lost a race for the port since the pre-check: show why inline instead.
+      const recheck =
+        localPort === null ? null : await api.pfCheckLocalPort(localPort).catch(() => null);
+      if (recheck && recheck.probe.kind !== "free") setCheck(recheck);
+      else toast.bad(`Forward failed: ${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -94,23 +126,158 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
     }
   };
 
+  if (!entry && picking) {
+    const localPort = draftPort;
+    const invalid = localPort === undefined;
+    const issue: PortIssue | null = invalid
+      ? { tone: "bad", blocking: true, title: "Enter a port from 1 to 65535" }
+      : check && check.port === localPort
+        ? portIssue(check, heldBy)
+        : null;
+    const blocked = invalid || issue?.blocking === true;
+    const suggestion = issue && !invalid ? check?.suggestion ?? null : null;
+    const submit = () => {
+      if (!blocked && !busy) void onStart(localPort);
+    };
+    const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      } else if (e.key === "Escape") {
+        // Swallow before the drawer's Esc layer so only the picker closes.
+        e.preventDefault();
+        setPicking(false);
+      }
+    };
+    const toneColor = issue ? (issue.tone === "bad" ? t.bad : t.warn) : undefined;
+    return (
+      <span
+        style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-start", gap: 4 }}
+      >
+        <span style={splitGroup(t, true, toneColor)}>
+          <label style={{ ...segment(t, false, false), cursor: "text" }}>
+            <input
+              type="text"
+              inputMode="numeric"
+              aria-label="Local port"
+              aria-invalid={blocked}
+              placeholder="auto"
+              autoFocus
+              value={portDraft}
+              disabled={busy}
+              onChange={(e) => setPortDraft(e.target.value.trim())}
+              onFocus={(e) => e.target.select()}
+              onKeyDown={onKeyDown}
+              style={portInput(t, toneColor)}
+            />
+          </label>
+          <Tooltip
+            label={localPort == null ? "Start on an automatic port" : `Start on local port ${localPort}`}
+          >
+            <button
+              type="button"
+              aria-label="Start forward"
+              onClick={submit}
+              disabled={busy || blocked}
+              onMouseEnter={() => setHover("ok")}
+              onMouseLeave={() => setHover(null)}
+              style={segment(t, hover === "ok" && !blocked, true, busy || blocked)}
+            >
+              {Icons.check}
+            </button>
+          </Tooltip>
+          <Tooltip label="Cancel">
+            <button
+              type="button"
+              aria-label="Cancel"
+              onClick={() => setPicking(false)}
+              disabled={busy}
+              onMouseEnter={() => setHover("cancel")}
+              onMouseLeave={() => setHover(null)}
+              style={{ ...segment(t, hover === "cancel", true, busy), color: t.textMuted }}
+            >
+              {Icons.close}
+            </button>
+          </Tooltip>
+        </span>
+        {/* Always mounted so screen readers announce the text when it appears. */}
+        <span role="status" aria-live="polite" style={{ display: "contents" }}>
+          {issue && toneColor && (
+            <span style={callout(t, toneColor)}>
+              <span aria-hidden style={{ display: "inline-flex", flexShrink: 0, marginTop: 1 }}>
+                {issue.tone === "bad" ? Icons.error : Icons.warn}
+              </span>
+              <span style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
+                <span style={{ fontWeight: 600 }}>{issue.title}</span>
+                {issue.detail && <span style={{ color: t.textMuted }}>{issue.detail}</span>}
+              </span>
+              {suggestion !== null && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPortDraft(String(suggestion));
+                    void onStart(suggestion);
+                  }}
+                  disabled={busy}
+                  onMouseEnter={() => setHover("suggest")}
+                  onMouseLeave={() => setHover(null)}
+                  style={{
+                    ...segment(t, hover === "suggest", false, busy),
+                    ...splitGroup(t, hover === "suggest"),
+                    // segment's borderLeft would otherwise strip the pill's left edge.
+                    borderLeft: splitGroup(t, hover === "suggest").border,
+                    alignItems: "center",
+                    flexShrink: 0,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  Use {suggestion}
+                </button>
+              )}
+            </span>
+          )}
+        </span>
+      </span>
+    );
+  }
+
   if (!entry) {
     return (
-      <Tooltip
-        label={`Forward ${target.kind} ${target.name}:${remotePort} to a local port`}
-      >
-        <button
-          type="button"
-          onClick={onStart}
-          disabled={busy}
-          onMouseEnter={() => setHover(true)}
-          onMouseLeave={() => setHover(false)}
-          style={chipButton(t, null, busy, hover)}
+      <span style={splitGroup(t, hover !== null)}>
+        <Tooltip
+          label={`Forward ${target.kind} ${target.name}:${remotePort} to an automatic local port`}
         >
-          <span style={{ display: "inline-flex" }}>{Icons.forward}</span>
-          <span style={{ fontFamily: FF_MONO }}>forward</span>
-        </button>
-      </Tooltip>
+          <button
+            type="button"
+            onClick={() => void onStart()}
+            disabled={busy}
+            onMouseEnter={() => setHover("main")}
+            onMouseLeave={() => setHover(null)}
+            style={segment(t, hover === "main", false, busy)}
+          >
+            <span style={{ display: "inline-flex" }}>{Icons.forward}</span>
+            <span>forward</span>
+          </button>
+        </Tooltip>
+        <Tooltip label="Forward to a chosen local port">
+          <button
+            type="button"
+            aria-label="Pick local port"
+            onClick={() => {
+              setPortDraft(String(remotePort));
+              setCheck(null);
+              setPicking(true);
+              setHover(null);
+            }}
+            disabled={busy}
+            onMouseEnter={() => setHover("pick")}
+            onMouseLeave={() => setHover(null)}
+            style={{ ...segment(t, hover === "pick", true, busy), padding: "0 5px" }}
+          >
+            {Icons.chevD}
+          </button>
+        </Tooltip>
+      </span>
     );
   }
 
@@ -200,6 +367,129 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
   );
 }
 
+const CHECK_DEBOUNCE_MS = 150;
+
+export type PortIssue = {
+  tone: "warn" | "bad";
+  // Blocking issues disable start; a shadowed port only warns.
+  blocking: boolean;
+  title: string;
+  detail?: string;
+};
+
+// What's wrong with a checked port, or null when it's free.
+export function portIssue(check: LocalPortCheck, other?: ForwardEntry): PortIssue | null {
+  const port = check.port;
+  if (check.held_by) {
+    return {
+      tone: "warn",
+      blocking: true,
+      title: `Port ${port} is already forwarded`,
+      detail: other
+        ? `${other.spec.target.kind} ${other.spec.target.name}:${other.spec.remote_port} is using it.`
+        : "Another FerrisScope forward is using it.",
+    };
+  }
+  switch (check.probe.kind) {
+    case "free":
+      return null;
+    case "in_use":
+      return {
+        tone: "warn",
+        blocking: true,
+        title: `Port ${port} is in use`,
+        detail: "Another app on this machine is listening on it.",
+      };
+    case "shadowed":
+      return {
+        tone: "warn",
+        blocking: false,
+        title: `Port ${port} is shared`,
+        detail: `Another app listens on ${check.probe.addr}; localhost:${port} may reach it instead.`,
+      };
+    case "permission_denied":
+      return {
+        tone: "bad",
+        blocking: true,
+        title: port < 1024 ? `Port ${port} needs admin rights` : `Port ${port} is reserved by the system`,
+        detail: port < 1024 ? "Ports below 1024 are privileged." : undefined,
+      };
+    case "error":
+      return { tone: "bad", blocking: true, title: `Can't use port ${port}`, detail: check.probe.message };
+  }
+}
+
+function callout(t: Tokens, tone: string) {
+  const fill = tintPair(tone, tokensAreDark(t));
+  return {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 7,
+    maxWidth: 340,
+    padding: "4px 6px 4px 7px",
+    background: fill.bg,
+    border: `1px solid ${hexWithAlpha(tone, 0.4)}`,
+    borderRadius: R_SM,
+    color: fill.fg,
+    fontSize: FS_SM,
+    lineHeight: 1.35,
+  } as const;
+}
+
+// "" → null (auto); a TCP port → number; anything else → undefined (invalid).
+export function parseLocalPort(raw: string): number | null | undefined {
+  if (raw === "") return null;
+  if (!/^\d{1,5}$/.test(raw)) return undefined;
+  const n = Number(raw);
+  return n >= 1 && n <= 65535 ? n : undefined;
+}
+
+// Idle / picker affordance: one accent-bordered pill split into segments.
+function splitGroup(t: Tokens, hot: boolean, tone?: string) {
+  const edge = tone ?? (hot ? t.accent : hexWithAlpha(t.accent, 0.45));
+  return {
+    display: "inline-flex",
+    alignItems: "stretch",
+    border: `1px solid ${edge}`,
+    borderRadius: R_SM,
+    overflow: "hidden",
+    fontSize: FS_SM,
+    fontFamily: FF_MONO,
+  } as const;
+}
+
+function segment(t: Tokens, hover: boolean, divided: boolean, busy = false) {
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+    padding: "1px 7px",
+    border: "none",
+    borderLeft: divided ? `1px solid ${hexWithAlpha(t.accent, 0.45)}` : "none",
+    background: hover ? t.accentSoft : "transparent",
+    color: t.accent,
+    fontFamily: "inherit",
+    fontSize: "inherit",
+    fontWeight: 600,
+    cursor: busy ? "not-allowed" : "pointer",
+    opacity: busy ? 0.6 : 1,
+  } as const;
+}
+
+function portInput(t: Tokens, tone?: string) {
+  return {
+    width: "6ch",
+    fontFamily: "inherit",
+    fontSize: "inherit",
+    fontWeight: 600,
+    background: "transparent",
+    color: tone ?? t.text,
+    border: "none",
+    padding: 0,
+    outline: "none",
+  } as const;
+}
+
 function iconButton(t: Tokens, busy: boolean) {
   return {
     border: `1px solid ${t.borderSoft}`,
@@ -213,30 +503,8 @@ function iconButton(t: Tokens, busy: boolean) {
   } as const;
 }
 
-// `tone` is the status color for an existing forward (good/info/warn/bad),
-// or `null` for the idle "start a forward" affordance. A live chip paints
-// its border + text in the tone and floods the background with a 16% tint
-// of the same color so the running tunnel stands out. The idle chip is a
-// call-to-action: it wears the brand accent (border + text) so the operator
-// can spot where to port-forward, and fills with accentSoft on hover.
-function chipButton(t: Tokens, tone: string | null, busy: boolean, hover = false) {
-  if (tone === null) {
-    return {
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 5,
-      fontSize: FS_SM,
-      padding: "1px 7px",
-      borderRadius: R_SM,
-      border: `1px solid ${hover ? t.accent : hexWithAlpha(t.accent, 0.45)}`,
-      background: hover ? t.accentSoft : "transparent",
-      color: t.accent,
-      fontWeight: 600,
-      cursor: busy ? "wait" : "pointer",
-      fontFamily: "inherit",
-      opacity: busy ? 0.6 : 1,
-    } as const;
-  }
+// `tone` is the status color of an existing forward (good/info/warn/bad).
+function chipButton(t: Tokens, tone: string, busy: boolean) {
   // Live chip: tinted fill + a foreground that statusFill's rule keeps legible
   // (raw tone in dark mode, darkened in light mode so amber/green don't wash
   // out on their own pale tint). The border keeps the full-saturation tone.

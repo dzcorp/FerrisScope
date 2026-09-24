@@ -4,12 +4,13 @@
 // bad. These tests pin the tone-by-status mapping and the idle vs live
 // chrome, since the color *is* the feature here.
 
-import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import { ForwardChip, forwardId } from "./forwardChip";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { ForwardChip, forwardId, parseLocalPort, portIssue } from "./forwardChip";
+import { api } from "../../api";
 import { useAppStore } from "../../store";
 import { tokens, hexWithAlpha, tintPair, THEMES, type Tokens } from "../../theme";
-import type { ForwardEntry, ForwardStatus, ForwardTarget } from "../../types";
+import type { ForwardEntry, ForwardStatus, ForwardTarget, LocalPortCheck } from "../../types";
 
 const t = tokens("dark");
 const clusterId = "ctx-a";
@@ -49,10 +50,19 @@ beforeEach(() => {
 });
 
 describe("ForwardChip", () => {
-  it("idle: accent-colored 'forward' call-to-action, filling on hover", () => {
+  it("idle: split pill — auto 'forward' half + port-picker half, each filling on hover", () => {
     render(<ForwardChip t={t} clusterId={clusterId} target={target} remotePort={remotePort} />);
     const btn = chipButton();
+    const pick = screen.getByRole("button", { name: "Pick local port" });
     expect(btn).toHaveTextContent("forward");
+    // Both halves share one bordered group, split by a divider on the picker half.
+    expect(btn.parentElement).toBe(pick.parentElement);
+    expect(btn.parentElement!.style.border).toMatch(/rgb/);
+    expect(pick.style.borderLeft).toMatch(/rgb/);
+    fireEvent.mouseEnter(pick);
+    expect(pick.style.background).not.toBe("transparent");
+    expect(btn.style.background).toBe("transparent");
+    fireEvent.mouseLeave(pick);
     // Accent text so the affordance is easy to spot; transparent until hover.
     expect(btn.style.color).toBe(toRgb(t.accent));
     expect(btn.style.background).toBe("transparent");
@@ -108,6 +118,218 @@ describe("ForwardChip", () => {
   });
 });
 
+describe("parseLocalPort", () => {
+  it("empty means auto", () => expect(parseLocalPort("")).toBeNull());
+  it("accepts the TCP range", () => {
+    expect(parseLocalPort("1")).toBe(1);
+    expect(parseLocalPort("8080")).toBe(8080);
+    expect(parseLocalPort("65535")).toBe(65535);
+  });
+  it("rejects out-of-range and non-numeric", () => {
+    for (const bad of ["0", "65536", "99999", "123456", "80a", "-1", "8.0", " 80"]) {
+      expect(parseLocalPort(bad)).toBeUndefined();
+    }
+  });
+});
+
+function portCheck(port: number, probe: LocalPortCheck["probe"], extra: Partial<LocalPortCheck> = {}): LocalPortCheck {
+  return { port, probe, held_by: null, suggestion: null, ...extra };
+}
+
+describe("portIssue", () => {
+  it("free port has no issue", () => {
+    expect(portIssue(portCheck(8080, { kind: "free" }))).toBeNull();
+  });
+  it("explains each clash kind with a title and blocking flag", () => {
+    expect(portIssue(portCheck(8080, { kind: "in_use" }))).toMatchObject({
+      tone: "warn",
+      blocking: true,
+      title: "Port 8080 is in use",
+    });
+    expect(portIssue(portCheck(80, { kind: "permission_denied" }))).toMatchObject({
+      tone: "bad",
+      title: "Port 80 needs admin rights",
+    });
+    expect(portIssue(portCheck(50000, { kind: "permission_denied" }))?.title).toBe(
+      "Port 50000 is reserved by the system",
+    );
+    expect(portIssue(portCheck(1, { kind: "error", message: "boom" }))).toMatchObject({
+      blocking: true,
+      detail: "boom",
+    });
+  });
+  it("shadowed warns without blocking and names the other listener", () => {
+    const issue = portIssue(portCheck(8080, { kind: "shadowed", addr: "[::1]:8080" }));
+    expect(issue).toMatchObject({ tone: "warn", blocking: false, title: "Port 8080 is shared" });
+    expect(issue?.detail).toContain("[::1]:8080");
+  });
+  it("names our own forward holding the port", () => {
+    const other = entry({ kind: "active" });
+    const c = portCheck(8080, { kind: "in_use" }, { held_by: other.spec.id });
+    expect(portIssue(c, other)).toMatchObject({
+      title: "Port 8080 is already forwarded",
+      detail: "Pod api-0:8080 is using it.",
+    });
+    expect(portIssue(c)?.detail).toMatch(/Another FerrisScope forward/);
+  });
+});
+
+describe("ForwardChip local-port picker", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "pfCheckLocalPort").mockImplementation(async (port) => portCheck(port, { kind: "free" }));
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function renderChip() {
+    render(<ForwardChip t={t} clusterId={clusterId} target={target} remotePort={remotePort} />);
+  }
+
+  it("main chip still starts on an automatic port", async () => {
+    const start = vi.spyOn(api, "pfStart").mockResolvedValue(entry({ kind: "listening" }));
+    renderChip();
+    fireEvent.click(chipButton());
+    await waitFor(() => expect(start).toHaveBeenCalledWith(clusterId, target, remotePort, null, false));
+    expect(await screen.findByText(":51080")).toBeInTheDocument();
+  });
+
+  it("caret opens an input prefilled with the remote port; Enter starts on it", async () => {
+    const start = vi.spyOn(api, "pfStart").mockResolvedValue(entry({ kind: "listening" }));
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    const input = screen.getByRole("textbox", { name: "Local port" });
+    expect(input).toHaveValue(String(remotePort));
+    fireEvent.change(input, { target: { value: "9000" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(start).toHaveBeenCalledWith(clusterId, target, remotePort, 9000, false));
+    expect(await screen.findByText(":51080")).toBeInTheDocument();
+  });
+
+  it("empty input starts on an automatic port", async () => {
+    const start = vi.spyOn(api, "pfStart").mockResolvedValue(entry({ kind: "listening" }));
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Local port" }), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    await waitFor(() => expect(start).toHaveBeenCalledWith(clusterId, target, remotePort, null, false));
+  });
+
+  it("invalid port disables start and never calls the backend", () => {
+    const start = vi.spyOn(api, "pfStart");
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    const input = screen.getByRole("textbox", { name: "Local port" });
+    fireEvent.change(input, { target: { value: "70000" } });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("status")).toHaveTextContent("Enter a port from 1 to 65535");
+    expect(screen.getByRole("button", { name: "Start forward" })).toBeDisabled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("picker shows only the port input, no loopback prefix", () => {
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    expect(screen.queryByText(/127\.0\.0\.1/)).toBeNull();
+  });
+
+  it("Esc and × return to idle without starting", () => {
+    const start = vi.spyOn(api, "pfStart");
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Local port" }), { key: "Escape" });
+    expect(screen.queryByRole("textbox")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("busy port: says why, blocks start, and one-click starts the suggested port", async () => {
+    vi.mocked(api.pfCheckLocalPort).mockResolvedValue(
+      portCheck(remotePort, { kind: "in_use" }, { suggestion: 8081 }),
+    );
+    const start = vi.spyOn(api, "pfStart").mockResolvedValue(entry({ kind: "listening" }));
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    expect(await screen.findByText("Port 8080 is in use")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Another app on this machine");
+    expect(screen.getByRole("button", { name: "Start forward" })).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Local port" }), { key: "Enter" });
+    expect(start).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Use 8081" }));
+    await waitFor(() => expect(start).toHaveBeenCalledWith(clusterId, target, remotePort, 8081, false));
+  });
+
+  it("a stale check for a previous draft never blocks the current port", async () => {
+    vi.mocked(api.pfCheckLocalPort).mockImplementation(async (port) =>
+      port === remotePort ? portCheck(port, { kind: "in_use" }) : portCheck(port, { kind: "free" }),
+    );
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    await screen.findByText("Port 8080 is in use");
+    fireEvent.change(screen.getByRole("textbox", { name: "Local port" }), { target: { value: "9001" } });
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    expect(screen.getByRole("button", { name: "Start forward" })).not.toBeDisabled();
+  });
+
+  it("losing the port race after the pre-check shows the clash inline", async () => {
+    vi.mocked(api.pfCheckLocalPort)
+      .mockResolvedValueOnce(portCheck(remotePort, { kind: "free" }))
+      .mockResolvedValue(portCheck(remotePort, { kind: "in_use" }, { suggestion: 8081 }));
+    vi.spyOn(api, "pfStart").mockRejectedValue("io: Address already in use (os error 98)");
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    await waitFor(() => expect(api.pfCheckLocalPort).toHaveBeenCalledTimes(1));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Local port" }), { key: "Enter" });
+    expect(await screen.findByText("Port 8080 is in use")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use 8081" })).toBeInTheDocument();
+  });
+
+  it("shadowed port warns but still lets the operator start on it", async () => {
+    vi.mocked(api.pfCheckLocalPort).mockResolvedValue(
+      portCheck(remotePort, { kind: "shadowed", addr: "[::1]:8080" }, { suggestion: 8081 }),
+    );
+    const start = vi.spyOn(api, "pfStart").mockResolvedValue(entry({ kind: "listening" }));
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    expect(await screen.findByText("Port 8080 is shared")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use 8081" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    await waitFor(() => expect(start).toHaveBeenCalledWith(clusterId, target, remotePort, 8080, false));
+  });
+
+  it("reopening the picker drops the previous check result", async () => {
+    vi.mocked(api.pfCheckLocalPort).mockResolvedValueOnce(portCheck(remotePort, { kind: "in_use" }));
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    await screen.findByText("Port 8080 is in use");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  });
+
+  it("suggestion button keeps its own border", async () => {
+    vi.mocked(api.pfCheckLocalPort).mockResolvedValue(
+      portCheck(remotePort, { kind: "in_use" }, { suggestion: 8081 }),
+    );
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    const use = await screen.findByRole("button", { name: "Use 8081" });
+    expect(use.style.borderStyle).toBe("solid");
+    expect(use.style.borderLeftColor).toMatch(/rgb/);
+  });
+
+  it("bind failure keeps the picker open so the operator can pick another port", async () => {
+    vi.spyOn(api, "pfStart").mockRejectedValue("bind: address in use");
+    renderChip();
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Local port" }), { key: "Enter" });
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Local port" })).not.toBeDisabled(),
+    );
+  });
+});
+
 // Every shipped theme × palette × mode. The chip pulls its colors straight
 // from the resolved palette tokens, so this is the real "no surprises across
 // themes" guard: a palette whose accent/status color the tint helper can't
@@ -150,8 +372,10 @@ describe("ForwardChip color resolution across every theme", () => {
         );
         const btn = chipButton();
         // A colored border + non-empty text color in every state — the chip
-        // never collapses to an invisible/unstyled control.
-        expect(btn.style.border).toMatch(/rgb/);
+        // never collapses to an invisible/unstyled control. Idle draws its
+        // border on the split group, live states on the chip itself.
+        const edge = status ? btn : btn.parentElement!;
+        expect(edge.style.border).toMatch(/rgb/);
         expect(btn.style.color).not.toBe("");
         unmount();
       }

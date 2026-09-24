@@ -2559,6 +2559,24 @@ export type ForwardEntry = {
   status: ForwardStatus;
 };
 
+// `pf_check_local_port`: can a Simple forward bind 127.0.0.1:<port> now?
+export type LocalPortProbe =
+  | { kind: "free" }
+  | { kind: "in_use" }
+  // Bindable, but another listener on `addr` also answers localhost:<port>.
+  | { kind: "shadowed"; addr: string }
+  | { kind: "permission_denied" }
+  | { kind: "error"; message: string };
+
+export type LocalPortCheck = {
+  port: number;
+  probe: LocalPortProbe;
+  // Id of this app's own forward already on the port.
+  held_by: string | null;
+  // Free alternative; only set when `port` isn't free.
+  suggestion: number | null;
+};
+
 // Status-only event payload. The id resolves against the local
 // `Map<id, ForwardEntry>` the store keeps in sync via `pfList`.
 export type ForwardStatusEvent = {
