@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useResolvedTheme } from "../store";
 import { FF_MONO, FONT_SANS, FS_MD, FS_SM, FS_XS, R_LG, R_MD } from "../theme";
 import { Checkbox, Icons } from "./ui";
 import { labelColumnHeader } from "../lib/labelColumns";
+import { useEscLayer } from "../lib/escStack";
 
 type Props = {
   /// Distinct label keys present on the current rows (the universe to pick
@@ -20,34 +22,36 @@ type Props = {
 // listing every label key found on the current rows; checking one adds a
 // custom column reading that label, unchecking removes it. The chosen set is
 // owned + persisted per (scope, kind) by the parent ResourceTable.
-export function ColumnPicker({
-  available,
-  enabled,
-  onToggle,
-  onReset,
-}: Props) {
+export function ColumnPicker({ available, enabled, onToggle, onReset }: Props) {
   const resolved = useResolvedTheme();
   const t = resolved.tokens;
   const mode = resolved.mode;
-  const [open, setOpen] = useState(false);
+  // Anchor of the open menu (viewport coords); null when closed.
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+  const open = pos !== null;
   const ref = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const toggle = () => {
+    if (open || !ref.current) return setPos(null);
+    const r = ref.current.getBoundingClientRect();
+    setPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
+  };
 
-  // Close on outside click + Esc. Same pattern as SessionsPopover / Select.
+  useEscLayer(open, () => setPos(null));
+  // Close on outside click, resize and Esc. Same pattern as SessionsPopover / Select.
   useEffect(() => {
     if (!open) return;
     const onMouseDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const n = e.target as Node;
+      if (!ref.current?.contains(n) && !menuRef.current?.contains(n))
+        setPos(null);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
+    const onResize = () => setPos(null);
     document.addEventListener("mousedown", onMouseDown);
-    document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onResize);
     return () => {
       document.removeEventListener("mousedown", onMouseDown);
-      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResize);
     };
   }, [open]);
 
@@ -80,7 +84,7 @@ export function ColumnPicker({
         aria-expanded={open}
         aria-label="Customize columns"
         title="Customize columns"
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
         style={{
           width: 30,
           height: "100%",
@@ -97,154 +101,160 @@ export function ColumnPicker({
       >
         {Icons.more}
       </button>
-      {open && (
-        <div
-          role="menu"
-          style={{
-            position: "absolute",
-            top: "100%",
-            right: 0,
-            marginTop: 4,
-            zIndex: 50,
-            width: 280,
-            background: t.surface,
-            border: `1px solid ${t.border}`,
-            borderRadius: R_LG,
-            boxShadow:
-              mode === "dark"
-                ? "0 12px 32px rgba(0,0,0,0.45)"
-                : "0 12px 32px rgba(15,20,30,0.18)",
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-            fontFamily: FONT_SANS,
-          }}
-        >
+      {pos &&
+        // Portalled: the table is its own stacking context, so the menu
+        // would otherwise sit under the panel tray and drawers.
+        createPortal(
           <div
+            ref={menuRef}
+            role="menu"
             style={{
-              padding: "8px 10px",
-              borderBottom: `1px solid ${t.borderSoft}`,
-              background: t.surfaceAlt,
+              position: "fixed",
+              top: pos.top,
+              right: pos.right,
+              zIndex: 50,
+              width: 280,
+              background: t.surface,
+              border: `1px solid ${t.border}`,
+              borderRadius: R_LG,
+              boxShadow:
+                mode === "dark"
+                  ? "0 12px 32px rgba(0,0,0,0.45)"
+                  : "0 12px 32px rgba(15,20,30,0.18)",
               display: "flex",
-              alignItems: "center",
-              gap: 8,
+              flexDirection: "column",
+              overflow: "hidden",
+              fontFamily: FONT_SANS,
             }}
           >
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div
-                style={{
-                  color: t.textMuted,
-                  fontSize: FS_SM,
-                  fontFamily: FF_MONO,
-                  letterSpacing: 0.5,
-                  textTransform: "uppercase",
-                }}
-              >
-                Custom columns
+            <div
+              style={{
+                padding: "8px 10px",
+                borderBottom: `1px solid ${t.borderSoft}`,
+                background: t.surfaceAlt,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  style={{
+                    color: t.textMuted,
+                    fontSize: FS_SM,
+                    fontFamily: FF_MONO,
+                    letterSpacing: 0.5,
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Custom columns
+                </div>
+                <div
+                  style={{ color: t.textDim, fontSize: FS_XS, marginTop: 2 }}
+                >
+                  From resource labels
+                </div>
               </div>
-              <div style={{ color: t.textDim, fontSize: FS_XS, marginTop: 2 }}>
-                From resource labels
-              </div>
+              {enabled.length > 0 && (
+                <button
+                  type="button"
+                  onClick={onReset}
+                  title="Remove all custom columns"
+                  style={{
+                    flexShrink: 0,
+                    background: "transparent",
+                    border: `1px solid ${t.border}`,
+                    borderRadius: R_MD,
+                    color: t.textMuted,
+                    fontSize: FS_XS,
+                    fontFamily: FONT_SANS,
+                    padding: "3px 8px",
+                    cursor: "pointer",
+                  }}
+                >
+                  Reset
+                </button>
+              )}
             </div>
-            {enabled.length > 0 && (
-              <button
-                type="button"
-                onClick={onReset}
-                title="Remove all custom columns"
-                style={{
-                  flexShrink: 0,
-                  background: "transparent",
-                  border: `1px solid ${t.border}`,
-                  borderRadius: R_MD,
-                  color: t.textMuted,
-                  fontSize: FS_XS,
-                  fontFamily: FONT_SANS,
-                  padding: "3px 8px",
-                  cursor: "pointer",
-                }}
-              >
-                Reset
-              </button>
-            )}
-          </div>
-          <div style={{ overflow: "auto", maxHeight: 320 }}>
-            {keys.length === 0 ? (
-              <div
-                style={{
-                  padding: 14,
-                  color: t.textDim,
-                  fontSize: FS_MD,
-                  textAlign: "center",
-                }}
-              >
-                No labels on these resources.
-              </div>
-            ) : (
-              keys.map((key) => {
-                const checked = enabledSet.has(key);
-                return (
-                  <div
-                    key={key}
-                    role="menuitemcheckbox"
-                    aria-checked={checked}
-                    aria-label={key}
-                    onClick={() => onToggle(key)}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      padding: "7px 10px",
-                      borderBottom: `1px solid ${t.borderSoft}`,
-                      cursor: "pointer",
-                    }}
-                  >
-                    {/* Checkbox stops click propagation, so a direct hit
-                        toggles once; clicking the rest of the row toggles via
-                        the row handler. */}
-                    <Checkbox
-                      t={t}
-                      checked={checked}
-                      onChange={() => onToggle(key)}
-                    />
+            <div style={{ overflow: "auto", maxHeight: 320 }}>
+              {keys.length === 0 ? (
+                <div
+                  style={{
+                    padding: 14,
+                    color: t.textDim,
+                    fontSize: FS_MD,
+                    textAlign: "center",
+                  }}
+                >
+                  No labels on these resources.
+                </div>
+              ) : (
+                keys.map((key) => {
+                  const checked = enabledSet.has(key);
+                  return (
                     <div
+                      key={key}
+                      role="menuitemcheckbox"
+                      aria-checked={checked}
+                      aria-label={key}
+                      onClick={() => onToggle(key)}
                       style={{
-                        minWidth: 0,
                         display: "flex",
-                        flexDirection: "column",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "7px 10px",
+                        borderBottom: `1px solid ${t.borderSoft}`,
+                        cursor: "pointer",
                       }}
                     >
-                      <span
+                      {/* Checkbox stops click propagation, so a direct hit
+                        toggles once; clicking the rest of the row toggles via
+                        the row handler. */}
+                      <Checkbox
+                        t={t}
+                        checked={checked}
+                        onChange={() => onToggle(key)}
+                      />
+                      <div
                         style={{
-                          color: t.text,
-                          fontSize: FS_MD,
-                          fontWeight: 600,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
+                          minWidth: 0,
+                          display: "flex",
+                          flexDirection: "column",
                         }}
                       >
-                        {labelColumnHeader(key)}
-                      </span>
-                      <span
-                        style={{
-                          color: t.textDim,
-                          fontSize: FS_XS,
-                          fontFamily: FF_MONO,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {key}
-                      </span>
+                        <span
+                          style={{
+                            color: t.text,
+                            fontSize: FS_MD,
+                            fontWeight: 600,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {labelColumnHeader(key)}
+                        </span>
+                        <span
+                          style={{
+                            color: t.textDim,
+                            fontSize: FS_XS,
+                            fontFamily: FF_MONO,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {key}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-      )}
+                  );
+                })
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

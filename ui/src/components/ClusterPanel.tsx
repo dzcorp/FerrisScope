@@ -11,6 +11,7 @@ import { ResourceTable } from "./ResourceTable";
 import { ConnectionDiagnosticsModal } from "./ConnectionDiagnosticsModal";
 import { CloudIdentityNote } from "./CloudIdentityNote";
 import { Btn, EmptyState, ErrorBlock, LoadingLine } from "./ui";
+import { useTabKind } from "../lib/tabScope";
 
 type Props = {
   mode: ThemeMode;
@@ -25,9 +26,7 @@ export function ClusterPanel({ mode, context }: Props) {
   const t = useResolvedTheme().tokens;
   const { state, cancel, reconnect, autoReconnect } =
     useClusterConnection(context);
-  const selectedKind = useAppStore((s) =>
-    s.kinds.find((k) => k.id === s.selectedKindId) ?? null,
-  );
+  const selectedKind = useTabKind();
   const healthStatus = useAppStore(
     (s) => s.clusterHealth[context.id] ?? "healthy",
   );

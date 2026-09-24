@@ -20,7 +20,9 @@ type Props = {
 /// shown when more than one cluster tab is open — a single tab needs no
 /// switcher. Clicking a row switches to that tab (preserving every tab's state
 /// via the store's stash/restore); the × closes it and disconnects the cluster
-/// if no other tab still uses it. The active tab is highlighted.
+/// if no other tab still uses it. The active tab is highlighted. Rows are
+/// keyboard-focusable (Enter switches, Delete closes) and middle-click closes,
+/// which is the only close affordance on the collapsed rail.
 export function OpenClustersStrip({ t, open }: Props) {
   const openTabs = useAppStore((s) => s.openTabs);
   const activeTabId = useAppStore((s) => s.activeTabId);
@@ -29,6 +31,7 @@ export function OpenClustersStrip({ t, open }: Props) {
   const virtualContexts = useAppStore((s) => s.virtualContexts);
   const labels = useClusterLabels();
   const [hoverId, setHoverId] = useState<string | null>(null);
+  const [focusId, setFocusId] = useState<string | null>(null);
 
   if (openTabs.length < 2) return null;
 
@@ -79,7 +82,30 @@ export function OpenClustersStrip({ t, open }: Props) {
             aria-current={isActive ? "true" : undefined}
             onMouseEnter={() => setHoverId(tab.id)}
             onMouseLeave={() => setHoverId((h) => (h === tab.id ? null : h))}
+            tabIndex={0}
+            aria-label={`${fullLabel}${isActive ? " (active)" : ""}`}
+            title={open ? undefined : "Middle-click to close"}
             onClick={() => switchTab(tab.id)}
+            onAuxClick={(e) => {
+              if (e.button !== 1) return;
+              e.preventDefault();
+              void closeClusterTab(tab.id);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                switchTab(tab.id);
+              } else if (e.key === "Delete" || e.key === "Backspace") {
+                e.preventDefault();
+                void closeClusterTab(tab.id);
+              }
+            }}
+            onFocus={() => setFocusId(tab.id)}
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                setFocusId((f) => (f === tab.id ? null : f));
+              }
+            }}
             style={{
               display: "flex",
               alignItems: "center",
@@ -136,7 +162,7 @@ export function OpenClustersStrip({ t, open }: Props) {
                     display: "inline-flex",
                     padding: 2,
                     borderRadius: R_SM,
-                    opacity: hoverId === tab.id || isActive ? 1 : 0,
+                    opacity: hoverId === tab.id || focusId === tab.id || isActive ? 1 : 0,
                     transition: "opacity .12s",
                   }}
                 >

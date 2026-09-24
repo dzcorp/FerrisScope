@@ -41,6 +41,8 @@ import { ResourceTable, type TableCluster } from "./ResourceTable";
 import { makeChatTab, makeTerminalTab, makeYamlTab } from "./Dock";
 import { toast } from "../lib/dialog";
 import { EmptyState, Icons, LoadingLine, Tooltip } from "./ui";
+import { useEscLayer } from "../lib/escStack";
+import { useTabKind, useTabSlice } from "../lib/tabScope";
 
 type MemberConn = {
   state: ConnectState;
@@ -89,9 +91,7 @@ function MemberConnection({
 // their own Reconnect — the table keeps serving the healthy members.
 export function VirtualClusterPanel({ mode, title, viewScopeId, contexts }: Props) {
   const t = useResolvedTheme().tokens;
-  const selectedKind = useAppStore((s) =>
-    s.kinds.find((k) => k.id === s.selectedKindId) ?? null,
-  );
+  const selectedKind = useTabKind();
   const clusterHealth = useAppStore((s) => s.clusterHealth);
   const clusterHealthReason = useAppStore((s) => s.clusterHealthReason);
 
@@ -282,7 +282,7 @@ function VirtualClusterBar({
   colorIdx: Record<string, number>;
 }) {
   const t = useResolvedTheme().tokens;
-  const scopeExtras = useAppStore((s) => s.scopeExtras);
+  const scopeExtras = useTabSlice((v) => v.scopeExtras);
   const addScopeExtra = useAppStore((s) => s.addScopeExtra);
   const allContexts = useAppStore((s) => s.contexts);
   const addDockTab = useAppStore((s) => s.addDockTab);
@@ -292,9 +292,10 @@ function VirtualClusterBar({
   const absorbScopeExtras = useAppStore((s) => s.absorbScopeExtras);
   // The saved virtual context this view extends, if any — drives the
   // "Add to <name>" option in save mode (vs. always creating a new one).
+  const vctxId = useTabSlice((v) => v.selectedVirtualContextId);
   const activeVctx = useAppStore((s) =>
-    s.selectedVirtualContextId
-      ? s.virtualContexts.find((v) => v.id === s.selectedVirtualContextId) ??
+    vctxId
+      ? s.virtualContexts.find((v) => v.id === vctxId) ??
         null
       : null,
   );
@@ -660,9 +661,9 @@ function MemberStrip({
 }) {
   const t = useResolvedTheme().tokens;
   const clusterHealth = useAppStore((s) => s.clusterHealth);
-  const scopeExtras = useAppStore((s) => s.scopeExtras);
+  const scopeExtras = useTabSlice((v) => v.scopeExtras);
   const removeScopeExtra = useAppStore((s) => s.removeScopeExtra);
-  const focusedClusterId = useAppStore((s) => s.focusedClusterId);
+  const focusedClusterId = useTabSlice((v) => v.focusedClusterId);
   const toggleFocusedCluster = useAppStore((s) => s.toggleFocusedCluster);
 
   const [overflowOpen, setOverflowOpen] = useState(false);
@@ -723,20 +724,16 @@ function MemberStrip({
   });
   const showRollup = shouldShowRollup(counts, fit.hidden.length);
 
+  useEscLayer(overflowOpen, () => setOverflowOpen(false));
   useEffect(() => {
     if (!overflowOpen) return;
     const onDown = (e: MouseEvent) => {
       if (overflowRef.current && !overflowRef.current.contains(e.target as Node))
         setOverflowOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOverflowOpen(false);
-    };
     window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
     };
   }, [overflowOpen]);
   useEffect(() => {

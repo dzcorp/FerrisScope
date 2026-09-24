@@ -169,6 +169,33 @@ describe("ComparePanel", () => {
     expect(modified).toMatch(/replicas: ['"]5['"]/);
   });
 
+  it("outside click and Esc hide it to the tray; only × closes", async () => {
+    mockBothSides();
+    const onMinimize = vi.fn();
+    const onClose = vi.fn();
+    const { unmount } = render(
+      <ComparePanel mode="dark" target={TARGET} onClose={onClose} onMinimize={onMinimize} />,
+    );
+    expect(document.documentElement.style.getPropertyValue("--fs-drawer-w")).toBe("min(1200px, 94vw)");
+    fireEvent.click(screen.getByTestId("drawer-scrim"));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onMinimize).toHaveBeenCalledTimes(2);
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText("Close"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByLabelText("Minimize to tray")).toBeNull();
+    unmount();
+    expect(document.documentElement.style.getPropertyValue("--fs-drawer-w")).toBe("");
+  });
+
+  it("without a tray host, outside click closes", async () => {
+    mockBothSides();
+    const onClose = vi.fn();
+    render(<ComparePanel mode="dark" target={TARGET} onClose={onClose} />);
+    fireEvent.click(screen.getByTestId("drawer-scrim"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("swap flips sides without refetching", async () => {
     mockBothSides();
     render(<ComparePanel mode="dark" target={TARGET} onClose={() => {}} />);

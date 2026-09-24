@@ -24,6 +24,7 @@ pub mod prometheus;
 pub mod quantity;
 pub mod resume;
 pub mod search;
+pub mod session;
 pub mod sources;
 pub mod ssh;
 pub mod sync;

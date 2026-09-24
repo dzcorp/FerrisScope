@@ -3896,6 +3896,20 @@ pub(crate) async fn set_prefs(prefs: Prefs) -> Result<(), String> {
     Ok(())
 }
 
+/// UI session snapshot (open dock tabs, drawers, tray per cluster tab).
+/// Opaque JSON owned by the frontend; `null` when nothing was saved.
+#[tauri::command]
+pub(crate) async fn get_session() -> Result<serde_json::Value, String> {
+    Ok(ferrisscope_core::session::load().await)
+}
+
+#[tauri::command]
+pub(crate) async fn set_session(session: serde_json::Value) -> Result<(), String> {
+    ferrisscope_core::session::save(&session)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Recompute the watcher's path set + emit `kubeconfig://changed` so the UI
 /// re-runs `list_contexts`. Called after any source mutation. Also stops any
 /// port-forwards whose cluster vanished (source removed / disabled / default

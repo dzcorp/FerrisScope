@@ -7,6 +7,7 @@ import { Stat, StatusPill, Gauge, Icons, Kbd, Tooltip } from "./ui";
 import { makeChatTab, makeTerminalTab, makeYamlTab } from "./Dock";
 import { MOD_KEY, SHIFT_KEY } from "../lib/keyboard";
 import { useMetricsSubscription } from "../lib/useMetricsSubscription";
+import { useTabActive, useTabSlice } from "../lib/tabScope";
 
 type ConnectState =
   | { status: "idle" }
@@ -35,7 +36,10 @@ export function ClusterBar({ mode, context, state, style }: Props) {
   const clusterShort = clusterLabels[context.id]?.short ?? context.cluster;
   const clusterQualifier = clusterLabels[context.id]?.qualifier ?? null;
 
-  const addMenuOpen = useAppStore((s) => s.addMenuOpen);
+  // The add menu is app-global; a hidden tab's bar must not render it or
+  // listen for the outside click that closes it.
+  const tabActive = useTabActive();
+  const addMenuOpen = useAppStore((s) => s.addMenuOpen) && tabActive;
   const setAddMenuOpen = useAppStore((s) => s.setAddMenuOpen);
   const addDockTab = useAppStore((s) => s.addDockTab);
 
@@ -358,7 +362,7 @@ export function AddMenuTrigger({
   ariaLabel: string;
 }) {
   const t = useResolvedTheme().tokens;
-  const dockTabs = useAppStore((s) => s.dockTabs);
+  const dockTabs = useTabSlice((v) => v.dockTabs);
   return (
     <Tooltip label={tooltip}>
       <button
@@ -421,7 +425,7 @@ export function AddMenuTrigger({
 /// the namespace selection straight from the store so both bars stay in sync.
 export function NamespaceButton() {
   const t = useResolvedTheme().tokens;
-  const selectedNamespaces = useAppStore((s) => s.selectedNamespaces);
+  const selectedNamespaces = useTabSlice((v) => v.selectedNamespaces);
   const openNsModal = useAppStore((s) => s.openNsModal);
 
   const nsCount = selectedNamespaces.size;

@@ -13,6 +13,10 @@ import {
   selectSelectionDegraded,
   buildPrefsPayload,
   selectClustersToDisconnect,
+  drawerKey,
+  TRAY_CAP,
+  DETAIL_HISTORY_CAP,
+  type Drawer,
   type DockTab,
   type ConfirmModal,
   type Toast,
@@ -32,12 +36,11 @@ beforeEach(() => {
     contexts: [],
     kinds: [],
     dockTabs: [],
-    dockActiveId: null,
+    dockActive: { bottom: null, right: null },
+    dockMin: { bottom: false, right: false },
     modals: [],
     toasts: [],
     notifications: [],
-    detailHistory: [],
-    detailIndex: -1,
     pendingDetail: null,
     metricsByCluster: {},
     forwards: {},
@@ -305,10 +308,8 @@ describe("selectContext clears scope", () => {
           state: {},
         },
       ] satisfies DockTab[],
-      dockActiveId: "t1",
+      dockActive: { bottom: "t1", right: null },
       metricsByCluster: { "ctx-1": { pods: {}, available: false } as never },
-      detailHistory: [{ clusterId: null, kindId: "pods", namespace: "default", name: "x" }],
-      detailIndex: 0,
     });
 
     useAppStore.getState().selectContext("ctx-2");
@@ -318,12 +319,10 @@ describe("selectContext clears scope", () => {
     expect(s.selection.size).toBe(0);
     expect(s.selectedNamespaces.size).toBe(0);
     expect(s.dockTabs).toHaveLength(0);
-    expect(s.dockActiveId).toBeNull();
+    expect(s.dockActive).toEqual({ bottom: null, right: null });
     // Per-cluster metrics are global and kept warm across tab switches now —
     // other open tabs may still be showing the cluster they reference.
     expect(Object.keys(s.metricsByCluster).length).toBeGreaterThanOrEqual(0);
-    expect(s.detailHistory).toHaveLength(0);
-    expect(s.detailIndex).toBe(-1);
   });
 });
 
@@ -426,34 +425,15 @@ describe("modals queue", () => {
 });
 
 describe("navigateToDetail", () => {
-  it("appends entries to detailHistory and tracks index", () => {
-    useAppStore.getState().navigateToDetail("pods", "default", "a");
-    useAppStore.getState().navigateToDetail("pods", "default", "b");
+  it("switches the table to the kind and arms the pending detail", () => {
+    useAppStore.getState().navigateToDetail("pods", "default", "b", "c1");
     const s = useAppStore.getState();
-    expect(s.detailHistory.map((e) => e.name)).toEqual(["a", "b"]);
-    expect(s.detailIndex).toBe(1);
-    expect(s.pendingDetail?.name).toBe("b");
+    expect(s.pendingDetail).toEqual({ clusterId: "c1", kindId: "pods", namespace: "default", name: "b" });
     expect(s.selectedKindId).toBe("pods");
   });
 
-  it("dedupes consecutive identical navigations", () => {
-    useAppStore.getState().navigateToDetail("pods", "default", "a");
-    useAppStore.getState().navigateToDetail("pods", "default", "a");
-    expect(useAppStore.getState().detailHistory).toHaveLength(1);
-  });
 
-  it("drops the forward branch when navigating sideways from a back state", () => {
-    useAppStore.getState().navigateToDetail("pods", "default", "a");
-    useAppStore.getState().navigateToDetail("pods", "default", "b");
-    useAppStore.getState().navigateToDetail("pods", "default", "c");
-    // Simulate a "back" by lowering the index (the actual back action lives
-    // elsewhere; we test the mutator's branch-drop behavior directly).
-    useAppStore.setState({ detailIndex: 0 });
-    useAppStore.getState().navigateToDetail("pods", "default", "x");
-    const s = useAppStore.getState();
-    expect(s.detailHistory.map((e) => e.name)).toEqual(["a", "x"]);
-    expect(s.detailIndex).toBe(1);
-  });
+
 
   it("extends an active namespace filter to include the target namespace", () => {
     // Without this, the table's apiserver-scoped subscription would never
@@ -481,19 +461,6 @@ describe("navigateToDetail", () => {
     expect(useAppStore.getState().selectedNamespaces).toBe(ns);
   });
 
-  it("detailBack re-extends the filter for the restored entry", () => {
-    useAppStore.setState({ selectedNamespaces: new Set(["default"]) });
-    useAppStore.getState().navigateToDetail("pods", "default", "a");
-    useAppStore.getState().navigateToDetail("pods", "kube-system", "b");
-    // Operator narrows the filter after navigating away…
-    useAppStore.setState({ selectedNamespaces: new Set(["kube-system"]) });
-    useAppStore.getState().detailBack();
-    // …going back to the default-namespace entry makes it visible again.
-    expect([...useAppStore.getState().selectedNamespaces].sort()).toEqual([
-      "default",
-      "kube-system",
-    ]);
-  });
 });
 
 describe("semverGt", () => {
@@ -530,7 +497,7 @@ describe("dock tabs", () => {
     useAppStore.getState().addDockTab(mkTab("t1", "bottom"));
     const s = useAppStore.getState();
     expect(s.dockTabs.map((t) => t.id)).toEqual(["t1"]);
-    expect(s.dockActiveId).toBe("t1");
+    expect(s.dockActive.bottom).toBe("t1");
     // Only `bottom` un-minimised — `right` left alone so the chat panel
     // stays collapsed if it was.
     expect(s.dockMin.bottom).toBe(false);
@@ -538,42 +505,63 @@ describe("dock tabs", () => {
   });
 
   it("closeDockTab on the active tab activates the next survivor in the same placement", () => {
-    useAppStore.getState().addDockTab(mkTab("b1", "bottom"));
-    useAppStore.getState().addDockTab(mkTab("b2", "bottom"));
-    useAppStore.getState().addDockTab(mkTab("r1", "right"));
-    // Active is r1 (last added). Closing it should leave the bottom group
-    // alone and pick the last surviving right-placed tab — but there's
-    // none, so fall through to the last overall tab.
-    useAppStore.getState().closeDockTab("r1");
-    expect(useAppStore.getState().dockActiveId).toBe("b2");
-    // Closing the active b2 falls back to b1 (same placement).
-    useAppStore.getState().closeDockTab("b2");
-    expect(useAppStore.getState().dockActiveId).toBe("b1");
-    // Closing the final tab nulls active.
-    useAppStore.getState().closeDockTab("b1");
-    expect(useAppStore.getState().dockActiveId).toBeNull();
+    const st = () => useAppStore.getState();
+    st().addDockTab(mkTab("b1", "bottom"));
+    st().addDockTab(mkTab("b2", "bottom"));
+    st().addDockTab(mkTab("r1", "right"));
+    st().closeDockTab("r1");
+    expect(st().dockActive).toEqual({ bottom: "b2", right: null });
+    st().closeDockTab("b2");
+    expect(st().dockActive.bottom).toBe("b1");
+    st().closeDockTab("b1");
+    expect(st().dockActive.bottom).toBeNull();
+  });
+
+  it("keeps an independent active tab per placement", () => {
+    const st = () => useAppStore.getState();
+    st().addDockTab(mkTab("r1", "right"));
+    st().addDockTab(mkTab("r2", "right"));
+    st().setDockActiveId("r1");
+    st().addDockTab(mkTab("b1", "bottom"));
+    st().setDockActiveId("b1");
+    // Focusing a terminal must not flip the visible chat.
+    expect(st().dockActive).toEqual({ bottom: "b1", right: "r1" });
+  });
+
+  it("setDockActiveId ignores unknown ids", () => {
+    const st = () => useAppStore.getState();
+    st().addDockTab(mkTab("b1", "bottom"));
+    st().setDockActiveId("nope");
+    expect(st().dockActive.bottom).toBe("b1");
   });
 
   it("closeDockTab on a non-active tab leaves the active selection alone", () => {
-    useAppStore.getState().addDockTab(mkTab("a"));
-    useAppStore.getState().addDockTab(mkTab("b"));
-    // a is no longer active; closing it shouldn't move focus.
-    expect(useAppStore.getState().dockActiveId).toBe("b");
-    useAppStore.getState().closeDockTab("a");
-    expect(useAppStore.getState().dockActiveId).toBe("b");
+    const st = () => useAppStore.getState();
+    st().addDockTab(mkTab("a"));
+    st().addDockTab(mkTab("b"));
+    expect(st().dockActive.bottom).toBe("b");
+    st().closeDockTab("a");
+    expect(st().dockActive.bottom).toBe("b");
+  });
+
+  it("closing the last tab of a minimised placement clears its minimised flag", () => {
+    const st = () => useAppStore.getState();
+    st().addDockTab(mkTab("r1", "right"));
+    st().setDockMin("right", true);
+    st().closeDockTab("r1");
+    expect(st().dockMin.right).toBe(false);
   });
 
   it("closeAllDockTabs / closeDockTabsByPlacement", () => {
-    useAppStore.getState().addDockTab(mkTab("b1", "bottom"));
-    useAppStore.getState().addDockTab(mkTab("r1", "right"));
-    useAppStore.getState().closeDockTabsByPlacement("right");
-    expect(useAppStore.getState().dockTabs.map((t) => t.id)).toEqual(["b1"]);
-    // The active tab was r1; with right closed it falls back to the last
-    // remaining tab.
-    expect(useAppStore.getState().dockActiveId).toBe("b1");
-    useAppStore.getState().closeAllDockTabs();
-    expect(useAppStore.getState().dockTabs).toHaveLength(0);
-    expect(useAppStore.getState().dockActiveId).toBeNull();
+    const st = () => useAppStore.getState();
+    st().addDockTab(mkTab("b1", "bottom"));
+    st().addDockTab(mkTab("r1", "right"));
+    st().closeDockTabsByPlacement("right");
+    expect(st().dockTabs.map((t) => t.id)).toEqual(["b1"]);
+    expect(st().dockActive).toEqual({ bottom: "b1", right: null });
+    st().closeAllDockTabs();
+    expect(st().dockTabs).toHaveLength(0);
+    expect(st().dockActive).toEqual({ bottom: null, right: null });
   });
 
   it("patchDockTabState merges into the tab's local state without touching siblings", () => {
@@ -889,58 +877,6 @@ describe("UI scale", () => {
   });
 });
 
-describe("detail navigation back/forward", () => {
-  it("back walks the history; forward returns; closeDetail clears", () => {
-    const s = useAppStore.getState();
-    s.navigateToDetail("pods", "default", "a");
-    s.navigateToDetail("pods", "default", "b");
-    s.navigateToDetail("pods", "default", "c");
-    expect(useAppStore.getState().detailIndex).toBe(2);
-
-    useAppStore.getState().detailBack();
-    expect(useAppStore.getState().detailIndex).toBe(1);
-    expect(useAppStore.getState().pendingDetail?.name).toBe("b");
-
-    useAppStore.getState().detailBack();
-    expect(useAppStore.getState().detailIndex).toBe(0);
-
-    // Already at index 0 — further back is a no-op.
-    useAppStore.getState().detailBack();
-    expect(useAppStore.getState().detailIndex).toBe(0);
-
-    useAppStore.getState().detailForward();
-    expect(useAppStore.getState().detailIndex).toBe(1);
-    expect(useAppStore.getState().pendingDetail?.name).toBe("b");
-
-    // Past the end is a no-op.
-    useAppStore.getState().detailForward();
-    useAppStore.getState().detailForward();
-    useAppStore.getState().detailForward();
-    expect(useAppStore.getState().detailIndex).toBe(2);
-
-    useAppStore.getState().closeDetail();
-    expect(useAppStore.getState().detailHistory).toHaveLength(0);
-    expect(useAppStore.getState().detailIndex).toBe(-1);
-    expect(useAppStore.getState().pendingDetail).toBeNull();
-  });
-
-  it("pushDetailEntry adds to history but does NOT switch kind or arm pendingDetail", () => {
-    const s = useAppStore.getState();
-    s.pushDetailEntry("pods", "default", "a");
-    expect(useAppStore.getState().detailHistory).toHaveLength(1);
-    expect(useAppStore.getState().pendingDetail).toBeNull();
-    // Pushing the same again is deduped.
-    s.pushDetailEntry("pods", "default", "a");
-    expect(useAppStore.getState().detailHistory).toHaveLength(1);
-  });
-
-  it("consumePendingDetail clears the slot once a panel has picked it up", () => {
-    useAppStore.getState().navigateToDetail("pods", "default", "x");
-    expect(useAppStore.getState().pendingDetail).not.toBeNull();
-    useAppStore.getState().consumePendingDetail();
-    expect(useAppStore.getState().pendingDetail).toBeNull();
-  });
-});
 
 describe("kinds + rail mode", () => {
   it("setKinds falls back to the first kind when the previous selection is gone", () => {
@@ -1377,6 +1313,12 @@ describe("absorbScopeExtras", () => {
 });
 
 describe("startup scope restore behaviour", () => {
+  // A cold start has no open tabs when prefs arrive.
+  const boot = (prefs: ReturnType<typeof buildPrefsPayload>) => {
+    useAppStore.setState({ openTabs: [], activeTabId: null });
+    useAppStore.getState().hydratePrefs(prefs);
+  };
+
   const seedPrefs = () => {
     useAppStore.setState({
       contexts: [vctxCtx("default::a"), vctxCtx("default::b"), vctxCtx("default::c")],
@@ -1396,8 +1338,8 @@ describe("startup scope restore behaviour", () => {
     expect(prefs.settings.startup_scope).toBe("latest_view");
 
     // Simulate a fresh boot: clear the selection, hydrate from the file.
-    useAppStore.setState({ selectedContext: null, scopeExtras: [] });
-    useAppStore.getState().hydratePrefs(prefs);
+    useAppStore.setState({ selectedContext: null, scopeExtras: [], openTabs: [], activeTabId: null });
+    boot(prefs);
     const s = useAppStore.getState();
     expect(s.selectedContext).toBe("default::a");
     expect(s.scopeExtras).toEqual(["default::c"]);
@@ -1407,8 +1349,8 @@ describe("startup scope restore behaviour", () => {
     const id = seedPrefs();
     useAppStore.getState().selectVirtualContext(id);
     const prefs = buildPrefsPayload(useAppStore.getState());
-    useAppStore.setState({ selectedVirtualContextId: null });
-    useAppStore.getState().hydratePrefs(prefs);
+    useAppStore.setState({ selectedVirtualContextId: null, openTabs: [], activeTabId: null });
+    boot(prefs);
     expect(useAppStore.getState().selectedVirtualContextId).toBe(id);
   });
 
@@ -1419,8 +1361,8 @@ describe("startup scope restore behaviour", () => {
     const prefs = buildPrefsPayload(useAppStore.getState());
     prefs.settings.startup_scope = "latest_cluster";
     prefs.ui.selected_virtual_context = id; // even if a vctx was active…
-    useAppStore.setState({ selectedContext: null, scopeExtras: [] });
-    useAppStore.getState().hydratePrefs(prefs);
+    useAppStore.setState({ selectedContext: null, scopeExtras: [], openTabs: [], activeTabId: null });
+    boot(prefs);
     const s = useAppStore.getState();
     expect(s.selectedVirtualContextId).toBeNull();
     expect(s.selectedContext).toBe("default::a");
@@ -1434,8 +1376,8 @@ describe("startup scope restore behaviour", () => {
     prefs.settings.startup_scope = "fleet";
     prefs.ui.selected_context = "default::a";
     prefs.ui.scope_extras = ["default::c"];
-    useAppStore.setState({ selectedContext: null, selectedVirtualContextId: null, scopeExtras: [] });
-    useAppStore.getState().hydratePrefs(prefs);
+    useAppStore.setState({ selectedContext: null, selectedVirtualContextId: null, scopeExtras: [], openTabs: [], activeTabId: null });
+    boot(prefs);
     const s = useAppStore.getState();
     expect(s.selectedContext).toBeNull();
     expect(s.selectedVirtualContextId).toBeNull();
@@ -1456,7 +1398,7 @@ describe("startup scope restore behaviour", () => {
       activeTabId: null,
       selectedContext: null,
     });
-    useAppStore.getState().hydratePrefs(prefs);
+    boot(prefs);
     const s = useAppStore.getState();
     expect(s.openTabs).toHaveLength(2);
     expect(s.selectedContext).toBe("default::b");
@@ -1475,7 +1417,7 @@ describe("startup scope restore behaviour", () => {
     prefs.ui.selected_context = "default::a";
     prefs.settings.startup_scope = "latest_view";
     useAppStore.setState({ openTabs: [], activeTabId: null });
-    useAppStore.getState().hydratePrefs(prefs);
+    boot(prefs);
     const s = useAppStore.getState();
     expect(s.openTabs).toHaveLength(1);
     expect(s.selectedContext).toBe("default::a");
@@ -1487,7 +1429,7 @@ describe("startup scope restore behaviour", () => {
     useAppStore.getState().selectContext("default::a");
     const prefs = buildPrefsPayload(useAppStore.getState());
     prefs.settings.startup_scope = "fleet";
-    useAppStore.getState().hydratePrefs(prefs);
+    boot(prefs);
     expect(useAppStore.getState().openTabs).toHaveLength(0);
     expect(useAppStore.getState().activeTabId).toBeNull();
   });
@@ -1499,7 +1441,7 @@ describe("startup scope restore behaviour", () => {
     const prefs = buildPrefsPayload(useAppStore.getState());
     prefs.ui.scope_extras = ["default::c", "default::gone", "default::c"];
     useAppStore.setState({ scopeExtras: [] });
-    useAppStore.getState().hydratePrefs(prefs);
+    boot(prefs);
     expect(useAppStore.getState().scopeExtras).toEqual(["default::c"]);
   });
 
@@ -1524,7 +1466,7 @@ describe("startup scope restore behaviour", () => {
       selectedNamespaces: new Set(),
       selectedKindId: null,
     });
-    useAppStore.getState().hydratePrefs(prefs);
+    boot(prefs);
     const s = useAppStore.getState();
     expect(s.selectedContext).toBe("default::b");
     expect(s.selectedNamespaces).toEqual(new Set(["team-b"]));
@@ -1543,7 +1485,7 @@ describe("startup scope restore behaviour", () => {
     useAppStore.getState().selectContext("default::a");
     const prefs = buildPrefsPayload(useAppStore.getState());
     prefs.ui.selected_namespaces = ["stale"];
-    useAppStore.getState().hydratePrefs(prefs);
+    boot(prefs);
     expect(useAppStore.getState().selectedNamespaces.size).toBe(0);
   });
 
@@ -1560,7 +1502,7 @@ describe("startup scope restore behaviour", () => {
       }),
     );
     prefs.ui.selected_namespaces = ["team-a"];
-    useAppStore.getState().hydratePrefs(prefs);
+    boot(prefs);
     expect(useAppStore.getState().selectedNamespaces).toEqual(
       new Set(["team-a"]),
     );
@@ -1573,7 +1515,7 @@ describe("startup scope restore behaviour", () => {
     const prefs = buildPrefsPayload(useAppStore.getState());
     prefs.ui.open_tabs![0]!.selected_kind_id = crd;
     useAppStore.setState({ kinds: [{ id: "pods" } as never] });
-    useAppStore.getState().hydratePrefs(prefs);
+    boot(prefs);
     expect(useAppStore.getState().selectedKindId).toBe(crd);
     useAppStore.getState().setKinds([{ id: "pods" } as never], true);
     expect(useAppStore.getState().selectedKindId).toBe(crd);
@@ -1592,10 +1534,30 @@ describe("startup scope restore behaviour", () => {
     prefs.ui.selected_context = null;
     prefs.ui.selected_virtual_context = null;
     prefs.ui.scope_extras = ["default::c"];
-    useAppStore.getState().hydratePrefs(prefs);
+    boot(prefs);
     expect(useAppStore.getState().scopeExtras).toEqual([]);
   });
+  it("keeps a tab opened before prefs arrived and merges restored ones", () => {
+    seedPrefs();
+    const st = useAppStore.getState();
+    st.selectContext("default::a");
+    st.selectContext("default::b");
+    const prefs = buildPrefsPayload(useAppStore.getState());
+    useAppStore.setState({ openTabs: [], activeTabId: null, selectedContext: null });
+    // Operator clicks cluster c on Fleet while getPrefs is still in flight.
+    useAppStore.getState().selectContext("default::c");
+    useAppStore.getState().hydratePrefs(prefs);
+    const s = useAppStore.getState();
+    expect(s.selectedContext).toBe("default::c");
+    expect(s.openTabs.map((t) => t.selectedContext).sort()).toEqual([
+      "default::a",
+      "default::b",
+      "default::c",
+    ]);
+    expect(s.activeTabId).toBe(s.openTabs.find((t) => t.selectedContext === "default::c")?.id);
+  });
 });
+
 
 describe("cluster tabs", () => {
   const ctx = (id: string) =>
@@ -1761,27 +1723,384 @@ describe("cluster degraded state", () => {
   });
 });
 
-// ResourceTable owns the detail / per-row-log drawers, so App's Esc router
-// cannot see them directly. Without this published flag one Esc closed the
-// detail panel AND wiped the selection it was opened from.
-describe("rowDrawerOpen", () => {
-  it("publishes and clears drawer open-ness", () => {
-    const st = useAppStore.getState();
-    expect(useAppStore.getState().rowDrawerOpen).toBe(false);
-    st.setRowDrawerOpen(true);
-    expect(useAppStore.getState().rowDrawerOpen).toBe(true);
-    st.setRowDrawerOpen(false);
-    expect(useAppStore.getState().rowDrawerOpen).toBe(false);
+
+describe("setContexts prunes tabs whose cluster vanished", () => {
+  const c = (id: string) => ({ id, name: id, source: "default" }) as never;
+  it("closes background and active tabs whose context is gone", () => {
+    const st = () => useAppStore.getState();
+    useAppStore.setState({ contexts: [c("a"), c("b"), c("x")] });
+    st().selectContext("a");
+    st().selectContext("x");
+    st().selectContext("b");
+    st().setContexts([c("a"), c("b")]);
+    expect(st().openTabs.map((t) => t.selectedContext)).toEqual(["a", "b"]);
+    expect(st().selectedContext).toBe("b");
+    st().setContexts([c("a")]);
+    expect(st().openTabs.map((t) => t.selectedContext)).toEqual(["a"]);
+    expect(st().selectedContext).toBe("a");
+    expect(st().activeTabId).toBe(st().openTabs[0]?.id);
+  });
+  it("keeps a tab holding terminals or chats even when its context is gone", () => {
+    const st = () => useAppStore.getState();
+    useAppStore.setState({ contexts: [c("a"), c("x")] });
+    st().selectContext("x");
+    st().addDockTab({ id: "sh", kind: "terminal", title: "sh", placement: "bottom", state: {} });
+    st().selectContext("a");
+    st().setContexts([c("a")]);
+    expect(st().openTabs.map((t) => t.selectedContext)).toEqual(["x", "a"]);
+  });
+  it("leaves tab objects alone when nothing about them changed", () => {
+    const st = () => useAppStore.getState();
+    useAppStore.setState({ contexts: [c("a"), c("b")] });
+    st().selectContext("a");
+    st().selectContext("b");
+    const bg = st().openTabs[0];
+    st().setContexts([c("a"), c("b")]);
+    expect(st().openTabs[0]).toBe(bg);
+  });
+  it("an empty context list is transient and prunes nothing", () => {
+    const st = () => useAppStore.getState();
+    useAppStore.setState({ contexts: [c("a")] });
+    st().selectContext("a");
+    st().setContexts([]);
+    expect(st().openTabs).toHaveLength(1);
+    expect(st().selectedContext).toBe("a");
+  });
+});
+
+describe("drawer + tray", () => {
+  const st = () => useAppStore.getState();
+  const logs = (name: string): Drawer => ({
+    kind: "logs",
+    targets: [{ clusterId: "c1", kindId: "pods", namespace: "ns", name }],
+  });
+  const detail = (name: string): Drawer => ({
+    kind: "detail",
+    kindId: "pods",
+    clusterId: "c1",
+    uid: `uid-${name}`,
+    namespace: "ns",
+    name,
+  });
+  beforeEach(() => useAppStore.setState({ drawer: null, tray: [] }));
+
+  it("minimise parks the open drawer and clears it", () => {
+    st().openDrawer(logs("a"));
+    st().minimizeDrawer();
+    expect(st().drawer).toBeNull();
+    expect(st().tray.map((i) => i.drawer)).toEqual([logs("a")]);
+    st().minimizeDrawer();
+    expect(st().tray).toHaveLength(1);
   });
 
-  // Every ResourceTable render calls this; a fresh object each time would
-  // re-render every subscriber.
-  it("is a no-op when the value is unchanged", () => {
-    const st = useAppStore.getState();
-    st.setRowDrawerOpen(true);
-    const before = useAppStore.getState();
-    st.setRowDrawerOpen(true);
-    expect(useAppStore.getState()).toBe(before);
-    st.setRowDrawerOpen(false);
+  it("re-minimising the same subject replaces its entry and moves it last", () => {
+    st().openDrawer(logs("a"));
+    st().minimizeDrawer();
+    st().openDrawer(logs("b"));
+    st().minimizeDrawer();
+    st().openDrawer(logs("a"));
+    st().minimizeDrawer();
+    expect(st().tray.map((i) => drawerKey(i.drawer))).toEqual([
+      drawerKey(logs("b")),
+      drawerKey(logs("a")),
+    ]);
+  });
+
+  it("caps the tray, dropping the oldest", () => {
+    for (let i = 0; i < TRAY_CAP + 3; i++) {
+      st().openDrawer(logs(`p${i}`));
+      st().minimizeDrawer();
+    }
+    expect(st().tray).toHaveLength(TRAY_CAP);
+    expect(st().tray[0]?.drawer).toEqual(logs("p3"));
+  });
+
+  it("restore reopens a drawer and parks the one showing", () => {
+    st().openDrawer(logs("a"));
+    st().minimizeDrawer();
+    st().openDrawer(logs("b"));
+    st().restoreTrayItem(st().tray[0]!.id);
+    expect(st().drawer).toEqual(logs("a"));
+    expect(st().tray.map((i) => i.drawer)).toEqual([logs("b")]);
+  });
+
+  it("restoring a detail swaps it back in place without touching the table", () => {
+    st().openDrawer(detail("a"));
+    const id = st().drawerId;
+    st().minimizeDrawer();
+    useAppStore.setState({ selectedKindId: "deployments" });
+    st().restoreTrayItem(st().tray[0]!.id);
+    expect(st().drawer).toEqual(detail("a"));
+    expect(st().drawerId).toBe(id);
+    expect(st().selectedKindId).toBe("deployments");
+    expect(st().pendingDetail).toBeNull();
+    expect(st().tray).toHaveLength(0);
+  });
+
+  it("closeTrayItem drops one entry; unknown ids are no-ops", () => {
+    st().openDrawer(logs("a"));
+    st().minimizeDrawer();
+    st().restoreTrayItem("nope");
+    expect(st().tray).toHaveLength(1);
+    st().closeTrayItem(st().tray[0]!.id);
+    expect(st().tray).toHaveLength(0);
+  });
+
+  it("drawer and tray belong to their cluster tab", () => {
+    useAppStore.setState({ contexts: [{ id: "a", name: "a" } as never, { id: "b", name: "b" } as never] });
+    st().selectContext("a");
+    st().openDrawer(logs("x"));
+    st().minimizeDrawer();
+    st().openDrawer(logs("y"));
+    st().selectContext("b");
+    expect(st().drawer).toBeNull();
+    expect(st().tray).toHaveLength(0);
+    st().selectContext("a");
+    expect(st().drawer).toEqual(logs("y"));
+    expect(st().tray.map((i) => i.drawer)).toEqual([logs("x")]);
+  });
+});
+
+describe("hydrateSession", () => {
+  const st = () => useAppStore.getState();
+  const y = (id: string): DockTab => ({ id, kind: "yaml", title: id, placement: "bottom", state: {} });
+  const restored = (id: string) => ({
+    dockTabs: [y(id)],
+    dockActive: { bottom: id, right: null },
+    dockMin: { bottom: false, right: false },
+    drawer: null,
+    tray: [],
+  });
+
+  it("attaches slices to the active tab's mirror and background tabs", () => {
+    useAppStore.setState({ contexts: [{ id: "a", name: "a" } as never, { id: "b", name: "b" } as never] });
+    st().selectContext("a");
+    st().selectContext("b");
+    const [ta, tb] = st().openTabs;
+    st().hydrateSession({ [ta!.id]: restored("ya"), [tb!.id]: restored("yb"), ghost: restored("g") });
+    expect(st().dockTabs.map((t) => t.id)).toEqual(["yb"]);
+    st().switchTab(ta!.id);
+    expect(st().dockTabs.map((t) => t.id)).toEqual(["ya"]);
+  });
+
+  it("gives a restored drawer an instance id, so hiding it doesn't remount it", () => {
+    useAppStore.setState({ contexts: [{ id: "a", name: "a" } as never], drawer: null, drawerId: null, tray: [] });
+    st().selectContext("a");
+    const logs: Drawer = { kind: "logs", targets: [{ clusterId: "a", kindId: "pods", namespace: "ns", name: "p" }] };
+    st().hydrateSession({ [st().activeTabId!]: { ...restored("x"), dockTabs: [], drawer: logs } });
+    const id = st().drawerId;
+    expect(id).toBeTruthy();
+    st().minimizeDrawer();
+    expect(st().tray[0]!.id).toBe(id);
+  });
+
+  it("never overwrites work the operator already started", () => {
+    useAppStore.setState({ contexts: [{ id: "a", name: "a" } as never] });
+    st().selectContext("a");
+    st().addDockTab(y("mine"));
+    st().hydrateSession({ [st().activeTabId!]: restored("old") });
+    expect(st().dockTabs.map((t) => t.id)).toEqual(["mine"]);
+  });
+});
+
+describe("drawer instance identity", () => {
+  const st = () => useAppStore.getState();
+  const logs = (name: string): Drawer => ({
+    kind: "logs",
+    targets: [{ clusterId: "c1", kindId: "pods", namespace: "ns", name }],
+  });
+  beforeEach(() => useAppStore.setState({ drawer: null, drawerId: null, tray: [] }));
+
+  it("keeps one instance id through minimise and restore", () => {
+    st().openDrawer(logs("a"));
+    const id = st().drawerId;
+    expect(id).toBeTruthy();
+    st().minimizeDrawer();
+    expect(st().tray[0]?.id).toBe(id);
+    st().restoreTrayItem(id!);
+    expect(st().drawerId).toBe(id);
+  });
+
+  it("re-opening the same subject keeps the instance; a new one gets a new id", () => {
+    st().openDrawer(logs("a"));
+    const id = st().drawerId;
+    st().openDrawer(logs("a"));
+    expect(st().drawerId).toBe(id);
+    st().openDrawer(logs("b"));
+    expect(st().drawerId).not.toBe(id);
+  });
+
+  it("a detail replacing a same-kind detail keeps the panel instance", () => {
+    const det = (name: string, kindId = "pods"): Drawer => ({
+      kind: "detail", kindId, clusterId: "c1", uid: name, namespace: "ns", name,
+    });
+    st().openDrawer(det("a"));
+    const id = st().drawerId;
+    st().openDrawer(det("b"));
+    expect(st().drawerId).toBe(id);
+    st().openDrawer(det("c", "deployments"));
+    expect(st().drawerId).not.toBe(id);
+  });
+
+  it("a minimised detail records its view on the parked drawer", () => {
+    st().openDrawer({ kind: "detail", kindId: "pods", clusterId: "c1", uid: "u", namespace: "ns", name: "p" });
+    st().minimizeDrawer({ tab: "yaml", scrollTop: 420 });
+    const parked = st().tray[0]!.drawer;
+    expect(parked.kind === "detail" && parked.view).toEqual({ tab: "yaml", scrollTop: 420 });
+  });
+
+  it("kindCache accumulates every discovered kind", () => {
+    const a = { id: "a" } as never;
+    const b = { id: "b" } as never;
+    useAppStore.setState({ kindCache: {} });
+    st().setKinds([a]);
+    st().setKinds([b]);
+    expect(Object.keys(st().kindCache).sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("discovery republish keeps identities", () => {
+  const st = () => useAppStore.getState();
+  const k = (id: string, cols = 1) => ({ id, columns: Array.from({ length: cols }, (_, i) => ({ id: `c${i}` })) }) as never;
+
+  it("setKinds reuses unchanged kind objects and the array itself", () => {
+    useAppStore.setState({ kinds: [], kindCache: {} });
+    st().setKinds([k("a"), k("b")]);
+    const before = st().kinds;
+    st().setKinds([k("a"), k("b")]);
+    expect(st().kinds).toBe(before);
+    st().setKinds([k("a"), k("b", 2)]);
+    expect(st().kinds[0]).toBe(before[0]);
+    expect(st().kinds[1]).not.toBe(before[1]);
+  });
+
+  it("setKindClusters with equal content is a no-op", () => {
+    st().setKindClusters({ x: ["a"] });
+    const before = st().kindClusters;
+    st().setKindClusters({ x: ["a"] });
+    expect(st().kindClusters).toBe(before);
+    st().setKindClusters({ x: ["a", "b"] });
+    expect(st().kindClusters).not.toBe(before);
+  });
+});
+
+describe("per-drawer detail history", () => {
+  const st = () => useAppStore.getState();
+  const ref = (name: string, kindId = "pods") => ({
+    kindId,
+    clusterId: "c1",
+    uid: `u-${name}`,
+    namespace: "ns",
+    name,
+  });
+  const current = () => {
+    const d = st().drawer;
+    return d?.kind === "detail" ? d.name : null;
+  };
+  beforeEach(() => useAppStore.setState({ drawer: null, drawerId: null, tray: [] }));
+
+  it("links grow the open panel's history; back and forward walk it", () => {
+    st().openDrawer({ kind: "detail", ...ref("deploy", "deployments") });
+    st().navigateDrawerDetail(ref("rs", "replicasets"));
+    st().navigateDrawerDetail(ref("pod"));
+    expect(current()).toBe("pod");
+    st().drawerDetailBack();
+    expect(current()).toBe("rs");
+    st().drawerDetailBack();
+    expect(current()).toBe("deploy");
+    st().drawerDetailBack();
+    expect(current()).toBe("deploy");
+    st().drawerDetailForward();
+    st().drawerDetailForward();
+    expect(current()).toBe("pod");
+    st().drawerDetailForward();
+    expect(current()).toBe("pod");
+  });
+
+  it("following a link from a back state drops the forward branch", () => {
+    st().openDrawer({ kind: "detail", ...ref("a") });
+    st().navigateDrawerDetail(ref("b"));
+    st().drawerDetailBack();
+    st().navigateDrawerDetail(ref("x"));
+    const d = st().drawer;
+    expect(d?.kind === "detail" && d.forward).toEqual([]);
+    expect(d?.kind === "detail" && d.back?.map((r) => r.name)).toEqual(["a"]);
+  });
+
+  it("each panel keeps its own history across hide/restore; the table is untouched", () => {
+    useAppStore.setState({ selectedKindId: "services" });
+    st().openDrawer({ kind: "detail", ...ref("a") });
+    st().navigateDrawerDetail(ref("a2"));
+    st().minimizeDrawer();
+    st().openDrawer({ kind: "detail", ...ref("b", "deployments") });
+    st().navigateDrawerDetail(ref("b2", "deployments"));
+    st().drawerDetailBack();
+    expect(current()).toBe("b");
+    st().restoreTrayItem(st().tray[0]!.id);
+    expect(current()).toBe("a2");
+    st().drawerDetailBack();
+    expect(current()).toBe("a");
+    st().restoreTrayItem(st().tray[0]!.id);
+    expect(current()).toBe("b");
+    st().drawerDetailForward();
+    expect(current()).toBe("b2");
+    expect(st().selectedKindId).toBe("services");
+    expect(st().pendingDetail).toBeNull();
+  });
+
+  it("caps the back stack", () => {
+    st().openDrawer({ kind: "detail", ...ref("p0") });
+    for (let i = 1; i <= DETAIL_HISTORY_CAP + 10; i++) st().navigateDrawerDetail(ref(`p${i}`));
+    const d = st().drawer;
+    expect(d?.kind === "detail" && d.back?.length).toBe(DETAIL_HISTORY_CAP);
+  });
+
+  it("history actions are no-ops without an open detail", () => {
+    st().navigateDrawerDetail(ref("x"));
+    st().drawerDetailBack();
+    expect(st().drawer).toBeNull();
+  });
+});
+
+describe("saveDrawerView", () => {
+  const st = () => useAppStore.getState();
+  const det = (name: string): Drawer => ({ kind: "detail", kindId: "pods", clusterId: "c1", uid: name, namespace: "ns", name });
+  beforeEach(() => useAppStore.setState({ drawer: null, drawerId: null, tray: [], openTabs: [], activeTabId: null }));
+
+  it("records the view on the open drawer or a parked one, by instance", () => {
+    st().openDrawer(det("a"));
+    const openId = st().drawerId!;
+    st().minimizeDrawer();
+    st().openDrawer(det("b"));
+    const bId = st().drawerId!;
+    st().saveDrawerView(null, openId, drawerKey(det("a")), { tab: "yaml", scrollTop: 10 });
+    st().saveDrawerView(null, bId, drawerKey(det("b")), { tab: "events", scrollTop: 20 });
+    const parked = st().tray[0]!.drawer;
+    expect(parked.kind === "detail" && parked.view).toEqual({ tab: "yaml", scrollTop: 10 });
+    const d = st().drawer;
+    expect(d?.kind === "detail" && d.view).toEqual({ tab: "events", scrollTop: 20 });
+  });
+
+  it("ignores a stale report after the panel moved to another object", () => {
+    st().openDrawer(det("a"));
+    const id = st().drawerId!;
+    st().navigateDrawerDetail({ kindId: "pods", clusterId: "c1", uid: "b", namespace: "ns", name: "b" });
+    st().saveDrawerView(null, id, drawerKey(det("a")), { tab: "yaml" });
+    const d = st().drawer;
+    expect(d?.kind === "detail" && d.view).toBeUndefined();
+  });
+
+  it("writes into a background tab's slice after a switch", () => {
+    useAppStore.setState({ contexts: [{ id: "a", name: "a" } as never, { id: "b", name: "b" } as never] });
+    st().selectContext("a");
+    st().openDrawer(det("x"));
+    const id = st().drawerId!;
+    const tabA = st().activeTabId!;
+    st().selectContext("b");
+    st().saveDrawerView(tabA, id, drawerKey(det("x")), { tab: "yaml", scrollTop: 5 });
+    expect(st().drawer).toBeNull();
+    st().switchTab(tabA);
+    const d = st().drawer;
+    expect(d?.kind === "detail" && d.view).toEqual({ tab: "yaml", scrollTop: 5 });
   });
 });

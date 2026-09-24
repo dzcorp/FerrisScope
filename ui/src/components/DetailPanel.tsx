@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, onResourceDelta } from "../api";
 import { parseYaml, stripYaml, type Json } from "../lib/yamlEdit";
-import { selectClusterDegraded, useAppStore, useResolvedTheme } from "../store";
+import { selectClusterDegraded, useAppStore, useResolvedTheme, type DetailRef, type DetailView } from "../store";
 import { execContainers, rowLogContainers } from "../lib/podContainers";
 import type {
   Cascade,
@@ -44,6 +44,7 @@ import type { ContainerLite } from "./ui";
 import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
 import { confirm, toast } from "../lib/dialog";
 import { logErr } from "../lib/log";
+import { useEscLayer } from "../lib/escStack";
 import {
   Mono,
   ChipStrip,
@@ -153,6 +154,9 @@ import {
 import { HelmChartSummary } from "./detail/helm/chart";
 import { DETAIL_POLL_MS, shouldPollDetail } from "./detail/detailPoll";
 import { NamespaceForwardButton } from "./forwards/NamespaceForwardButton";
+import { useDrawerEdge } from "../lib/drawerEdge";
+import { scrollTopWithin, useRestoreScroll } from "../lib/scrollMemory";
+import { useTabActive } from "../lib/tabScope";
 
 // Set of kind ids that have a structured Summary tab. Used to gate the tab
 // label + the default tab + the dispatch in the body.
@@ -281,6 +285,10 @@ function resourceVersionFromYaml(rawYaml: string): string | null {
 }
 
 type Tab = "summary" | "yaml" | "events" | "related" | "logs" | "metrics";
+const TABS: readonly string[] = ["summary", "yaml", "events", "related", "logs", "metrics"];
+function isTab(v: string): v is Tab {
+  return TABS.includes(v);
+}
 
 // Kinds that surface a Related tab. Today: Pod (owner chain, node, SA,
 // image-pull-secrets, mounted ConfigMaps/Secrets/PVCs) and the workload
@@ -352,11 +360,28 @@ type Props = {
   // and never get refresh triggers.
   subscribeNamespaces?: string[] | null;
   onClose: () => void;
+  /// Park the panel in the tray, reporting where the operator was so a
+  /// restore lands there. Omitted = no minimise button.
+  onMinimize?: (view: DetailView) => void;
+  /// Inner tab + scroll to open at (a restored minimised panel).
+  initialView?: DetailView;
+  /// This panel's own back/forward trail.
+  history?: DetailHistory;
+  /// Called once as the panel unmounts (its cluster tab was switched away,
+  /// or it was closed) with where the operator was.
+  onLeave?: (view: DetailView) => void;
   onNavigate?: DetailNavigate;
   // Open `kubectl exec -it` against this pod in a Dock terminal tab.
   // null/undefined = let the caller default-pick the container; a specific
   // name forces that container.
   onOpenExec?: (container?: string | null) => void;
+};
+
+export type DetailHistory = {
+  prev: DetailRef | null;
+  next: DetailRef | null;
+  onBack: () => void;
+  onForward: () => void;
 };
 
 // Detail side panel — slides in from the right, replaces the previous modal
@@ -367,9 +392,13 @@ export function DetailPanel({
   clusterId,
   kind,
   target,
-  row,
+  row: rowProp,
   subscribeNamespaces = null,
   onClose,
+  onMinimize,
+  initialView,
+  history,
+  onLeave,
   onNavigate,
   onOpenExec,
 }: Props) {
@@ -406,9 +435,46 @@ export function DetailPanel({
   const hasEvents =
     kind.id !== "events" && kind.id !== "helm_releases" && kind.id !== "helm_charts";
   const hasRelated = RELATED_KINDS.has(kind.id);
-  const [tab, setTab] = useState<Tab>(
-    hasSummary ? "summary" : hasYaml ? "yaml" : "summary",
+  const [tab, setTab] = useState<Tab>(() => {
+    const want = initialView?.tab;
+    return want && isTab(want) ? want : hasSummary ? "summary" : hasYaml ? "yaml" : "summary";
+  });
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  // Tracked from scroll events rather than read at unmount, when the DOM
+  // may already be detached.
+  const lastScrollRef = useRef(initialView?.scrollTop ?? 0);
+  const onLeaveRef = useRef(onLeave);
+  onLeaveRef.current = onLeave;
+  const leaveTabRef = useRef(tab);
+  leaveTabRef.current = tab;
+  useEffect(
+    () => () => onLeaveRef.current?.({ tab: leaveTabRef.current, scrollTop: lastScrollRef.current }),
+    [],
   );
+  // A different inner tab has its own scroller; don't carry the old offset.
+  const firstTabRef = useRef(true);
+  useEffect(() => {
+    if (firstTabRef.current) {
+      firstTabRef.current = false;
+      return;
+    }
+    lastScrollRef.current = 0;
+  }, [tab]);
+  // Latest projected row: seeded by the host, then kept current from this
+  // panel's own delta listener, so a parked panel whose table moved to
+  // another kind still has live status for its header actions.
+  const [row, setRow] = useState<ResourceRow | null>(rowProp ?? null);
+  useEffect(() => {
+    // Never carry the previous object's row into a reused panel.
+    setRow((prev) => rowProp ?? (prev?.uid === target.uid ? prev : null));
+  }, [rowProp, target.uid]);
+  // Read inside long-lived listeners/timers: a panel in a hidden keep-alive
+  // tab stops polling and ignores history hotkeys.
+  const tabActive = useTabActive();
+  const tabActiveRef = useRef(tabActive);
+  tabActiveRef.current = tabActive;
+  const staleRef = useRef(false);
+  useRestoreScroll(bodyRef, initialView?.scrollTop);
   const [load, setLoad] = useState<LoadState>({ kind: "loading" });
   // YAML-tab edit state. `buffer` is the operator's in-flight draft; null
   // means "in sync with the server". `saving` blocks the controls during the
@@ -430,11 +496,33 @@ export function DetailPanel({
   tabRef.current = tab;
   const yamlBufferRef = useRef(yamlBuffer);
   yamlBufferRef.current = yamlBuffer;
+  // Closing and minimising both unmount the panel, dropping a YAML draft.
+  const leaveIfClean = async (leave: () => void) => {
+    if (
+      yamlBufferRef.current != null &&
+      !(await confirm({
+        title: "Discard YAML edits?",
+        body: "Your manifest edits haven't been applied.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        tone: "danger",
+      }))
+    ) {
+      return;
+    }
+    leave();
+  };
+  const requestClose = () => leaveIfClean(onClose);
+  // Outside click and Esc park the panel in the tray (it stays mounted, so a
+  // YAML draft survives); only × closes it.
+  const hide = () =>
+    onMinimize ? onMinimize({ tab, scrollTop: scrollTopWithin(bodyRef.current) }) : void requestClose();
+  useEscLayer(true, hide, { blurInputsFirst: true });
+  useDrawerEdge("min(760px, 95vw)");
 
-  const detailHistory = useAppStore((s) => s.detailHistory);
-  const detailIndex = useAppStore((s) => s.detailIndex);
-  const detailBack = useAppStore((s) => s.detailBack);
-  const detailForward = useAppStore((s) => s.detailForward);
+  // Read by the long-lived Alt+←/→ listener.
+  const historyRef = useRef(history);
+  historyRef.current = history;
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
   // Cluster can't take writes (unavailable / mid auto-reconnect). Disables
   // every mutating action + exec/forward in the title bar and forces the YAML
@@ -460,10 +548,10 @@ export function DetailPanel({
     },
     kind.id === "helm_releases",
   );
-  const canBack = detailIndex > 0;
-  const canForward = detailIndex >= 0 && detailIndex < detailHistory.length - 1;
-  const prevEntry = canBack ? detailHistory[detailIndex - 1] : null;
-  const nextEntry = canForward ? detailHistory[detailIndex + 1] : null;
+  const prevEntry = history?.prev ?? null;
+  const nextEntry = history?.next ?? null;
+  const canBack = prevEntry !== null;
+  const canForward = nextEntry !== null;
 
   // Title-bar action group (pod only for now). Each button anchors a
   // ContextMenu below itself; the menu's `rowName` header re-states the
@@ -868,6 +956,15 @@ export function DetailPanel({
   };
 
   useEffect(() => {
+    if (!tabActive || !staleRef.current) return;
+    staleRef.current = false;
+    refetch();
+    setDetailVersion((v) => v + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabActive]);
+
+  useEffect(() => {
+    staleRef.current = false;
     refetch();
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -892,7 +989,10 @@ export function DetailPanel({
     onResourceDelta(clusterId, kind.id, subscribeNamespaces, (delta) => {
       if (cancelled) return;
       if (delta.kind === "upsert" && delta.row.uid === target.uid) {
-        scheduleRefetch();
+        setRow(delta.row);
+        // A parked panel defers the fetch until it's shown again.
+        if (tabActiveRef.current) scheduleRefetch();
+        else staleRef.current = true;
       }
     }).then((fn) => {
       if (cancelled) {
@@ -915,7 +1015,7 @@ export function DetailPanel({
       if (cancelled) return;
       if (
         shouldPollDetail({
-          hidden: typeof document !== "undefined" && document.hidden,
+          hidden: (typeof document !== "undefined" && document.hidden) || !tabActiveRef.current,
           yamlEditing: yamlBufferRef.current != null,
           tab: tabRef.current,
         })
@@ -933,19 +1033,16 @@ export function DetailPanel({
     setYamlSaving(false);
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-        return;
-      }
       // Alt+← / Alt+→ — IDE-style navigation history. We don't bind plain
       // arrows because the YAML / summary scroll regions need them.
+      if (!tabActiveRef.current) return;
       if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
-        if (e.key === "ArrowLeft") {
+        if (e.key === "ArrowLeft" && historyRef.current?.prev) {
           e.preventDefault();
-          detailBack();
-        } else if (e.key === "ArrowRight") {
+          historyRef.current.onBack();
+        } else if (e.key === "ArrowRight" && historyRef.current?.next) {
           e.preventDefault();
-          detailForward();
+          historyRef.current.onForward();
         }
       }
     };
@@ -964,7 +1061,8 @@ export function DetailPanel({
   return (
     <>
       <div
-        onClick={onClose}
+        data-testid="drawer-scrim"
+        onClick={hide}
         style={{
           position: "fixed",
           top: "var(--fs-titlebar-h, 0px)",
@@ -1063,7 +1161,7 @@ export function DetailPanel({
               t={t}
               size="lg"
               title={`Back to ${prevEntry!.kindId} · ${prevEntry!.name} (Alt+←)`}
-              onClick={detailBack}
+              onClick={() => history?.onBack()}
             >
               {Icons.chevL}
             </IconBtn>
@@ -1073,7 +1171,7 @@ export function DetailPanel({
               t={t}
               size="lg"
               title={`Forward to ${nextEntry!.kindId} · ${nextEntry!.name} (Alt+→)`}
-              onClick={detailForward}
+              onClick={() => history?.onForward()}
             >
               {Icons.chevR}
             </IconBtn>
@@ -1352,7 +1450,7 @@ export function DetailPanel({
               {Icons.refresh}
             </IconBtn>
           )}
-          <IconBtn t={t} size="lg" title="Close (Esc)" onClick={onClose}>
+          <IconBtn t={t} size="lg" title="Close" onClick={() => void requestClose()}>
             {Icons.close}
           </IconBtn>
         </header>
@@ -1447,6 +1545,11 @@ export function DetailPanel({
         </div>
 
         <div
+          ref={bodyRef}
+          data-testid="detail-body"
+          onScrollCapture={(e) => {
+            lastScrollRef.current = (e.target as HTMLElement).scrollTop;
+          }}
           style={{
             flex: 1,
             minHeight: 0,

@@ -51,6 +51,8 @@ import { usePodSelection } from "./log/usePodSelection";
 import { SourceRail } from "./log/SourceRail";
 import { logErr } from "../lib/log";
 import type { LogContainer, LogPodTarget } from "../types";
+import { useEscLayer } from "../lib/escStack";
+import { useDrawerEdge } from "../lib/drawerEdge";
 
 // One requested observation — a pod or a pod-bearing workload on a specific
 // cluster. Workloads expand to their pods via `resolve_log_pods`; pod
@@ -362,6 +364,7 @@ type Props = {
   defaultContainer?: string | null;
   initialTab?: ObserveTab;
   onClose: () => void;
+  onMinimize?: () => void;
 };
 
 // Logs & metrics panel — slides in from the right (R-09 prefers panels over
@@ -376,6 +379,7 @@ export function LogPanel({
   defaultContainer,
   initialTab,
   onClose,
+  onMinimize,
 }: Props) {
   const t = useResolvedTheme().tokens;
   // Panel chrome (title bar, tabs, Selects) follows the theme; the log body
@@ -413,13 +417,9 @@ export function LogPanel({
 
   // Esc closes the panel. The LogView find bar's own Esc stops propagation
   // before this fires, so dismissing a search never also closes the panel.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Outside click and Esc park the panel in the tray; only × closes it.
+  const hide = onMinimize ?? onClose;
+  useEscLayer(true, hide);
 
   const clusterNameFor = useCallback(
     (cid: string) =>
@@ -498,6 +498,7 @@ export function LogPanel({
     [singlePod, readyPods],
   );
 
+  useDrawerEdge(`min(${targets.length > 1 ? 860 : 680}px, 94vw)`);
   if (targets.length === 0) return null;
 
   const kindLabel = KIND_LABELS[targets[0]!.kindId] ?? "Resource";
@@ -516,7 +517,8 @@ export function LogPanel({
   return (
     <>
       <div
-        onClick={onClose}
+        data-testid="drawer-scrim"
+        onClick={hide}
         style={{
           position: "fixed",
           top: "var(--fs-titlebar-h, 0px)",
@@ -686,7 +688,7 @@ export function LogPanel({
               ) : null}
             </div>
           </div>
-          <IconBtn t={t} title="Close (Esc)" onClick={onClose}>
+          <IconBtn t={t} title="Close" onClick={onClose}>
             {Icons.close}
           </IconBtn>
         </header>

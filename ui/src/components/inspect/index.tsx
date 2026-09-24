@@ -39,6 +39,8 @@ import { FieldsTab } from "./FieldsTab";
 import { EventsTab } from "./EventsTab";
 import { PodsTab } from "./PodsTab";
 import { OBSERVABLE_KIND_IDS } from "../LogPanel";
+import { useEscLayer } from "../../lib/escStack";
+import { useDrawerEdge } from "../../lib/drawerEdge";
 
 export type InspectSubject = {
   /// The selection key — `${clusterId}::${uid}`.
@@ -184,12 +186,13 @@ type Props = {
   mode: ThemeMode;
   target: InspectTarget;
   onClose: () => void;
+  onMinimize?: () => void;
   /// Cross-kind navigation, same contract as DetailPanel's — takes a
   /// Kubernetes Kind name. Closing the drawer first is the caller's job.
   onNavigate?: DetailNavigate;
 };
 
-export function InspectPanel({ mode, target, onClose, onNavigate }: Props) {
+export function InspectPanel({ mode, target, onClose, onMinimize, onNavigate }: Props) {
   const t = useResolvedTheme().tokens;
   const [tab, setTab] = useState<InspectTab>("fields");
   const [attempt, setAttempt] = useState(0);
@@ -214,13 +217,10 @@ export function InspectPanel({ mode, target, onClose, onNavigate }: Props) {
     attempt,
   );
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Outside click and Esc park the panel in the tray; only × closes it.
+  const hide = onMinimize ?? onClose;
+  useEscLayer(true, hide);
+  useDrawerEdge("min(1200px, 94vw)");
 
   // A Pods tab over pods themselves would just restate the subjects.
   const hasPods =
@@ -246,7 +246,8 @@ export function InspectPanel({ mode, target, onClose, onNavigate }: Props) {
   return (
     <>
       <div
-        onClick={onClose}
+        data-testid="drawer-scrim"
+        onClick={hide}
         style={{
           position: "fixed",
           top: "var(--fs-titlebar-h, 0px)",
@@ -345,7 +346,7 @@ export function InspectPanel({ mode, target, onClose, onNavigate }: Props) {
               ))}
             </div>
           </div>
-          <IconBtn t={t} size="lg" title="Close (Esc)" onClick={onClose}>
+          <IconBtn t={t} size="lg" title="Close" onClick={onClose}>
             {Icons.close}
           </IconBtn>
         </header>

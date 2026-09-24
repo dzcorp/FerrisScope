@@ -3,6 +3,7 @@ import { useResolvedTheme } from "../../store";
 import { tokens, FF_MONO, FONT_SANS, type ThemeMode, R_LG, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { Btn, Icons } from "../ui";
 import type { SessionMeta } from "../../types";
+import { useEscLayer } from "../../lib/escStack";
 
 /// Per-session live runtime hint. Only includes sessions that are
 /// currently open in the parent's chat tab — flat sessions are absent
@@ -57,20 +58,16 @@ export function SessionsPopover({
   const [renameDraft, setRenameDraft] = useState("");
   const [query, setQuery] = useState("");
 
+  useEscLayer(true, onClose);
   // Close on outside click + Esc. Same pattern as Select in atoms.tsx.
   useEffect(() => {
     const onMouseDown = (e: MouseEvent) => {
       if (!ref.current) return;
       if (!ref.current.contains(e.target as Node)) onClose();
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
     document.addEventListener("mousedown", onMouseDown);
-    document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("mousedown", onMouseDown);
-      document.removeEventListener("keydown", onKey);
     };
   }, [onClose]);
 
@@ -294,6 +291,7 @@ export function SessionsPopover({
                               if (v) onRename(s.id, v);
                               setRenamingId(null);
                             } else if (e.key === "Escape") {
+                              e.preventDefault();
                               setRenamingId(null);
                             }
                           }}

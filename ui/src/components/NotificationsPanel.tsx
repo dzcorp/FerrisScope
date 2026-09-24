@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useAppStore, useResolvedTheme } from "../store";
 import type { Notification, NotificationDetail, NotificationMeta } from "../store";
 import {
@@ -13,6 +13,7 @@ import {
   FS_XS,
 } from "../theme";
 import { Btn, Eyebrow, IconBtn, Icons, EmptyState } from "./ui";
+import { useEscLayer } from "../lib/escStack";
 
 type Props = { mode: ThemeMode };
 
@@ -26,14 +27,7 @@ export function NotificationsPanel({ mode }: Props) {
   const notifications = useAppStore((s) => s.notifications);
   const clear = useAppStore((s) => s.clearNotifications);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, close]);
+  useEscLayer(open, close);
 
   if (!open) return null;
 

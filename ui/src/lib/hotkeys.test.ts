@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   hotkeyIntent,
   intentPreventsDefault,
+  resolveTabHotkey,
+  tabHotkey,
   type HotkeyEvent,
   type HotkeyIntent,
   type HotkeyLayers,
@@ -200,5 +202,39 @@ describe("Esc while a drawer is open", () => {
         ...layers({ hasSelection: true, drawerOpen: true, paletteOpen: true }),
       }),
     ).toBe("esc-palette");
+  });
+});
+
+describe("tabHotkey", () => {
+  it("Ctrl+Tab / Ctrl+Shift+Tab cycle", () => {
+    expect(tabHotkey(ev({ key: "Tab", ctrlKey: true }))).toEqual({ kind: "next" });
+    expect(tabHotkey(ev({ key: "Tab", ctrlKey: true, shiftKey: true }))).toEqual({ kind: "prev" });
+    expect(tabHotkey(ev({ key: "Tab" }))).toBeNull();
+    expect(tabHotkey(ev({ key: "Tab", metaKey: true }))).toBeNull();
+  });
+
+  it("Mod+digit jumps by physical key; 9 is the last tab", () => {
+    expect(tabHotkey(ev({ key: "1", code: "Digit1", ctrlKey: true }))).toEqual({ kind: "index", index: 0 });
+    expect(tabHotkey(ev({ key: "&", code: "Digit1", metaKey: true }))).toEqual({ kind: "index", index: 0 });
+    expect(tabHotkey(ev({ key: "9", code: "Digit9", ctrlKey: true }))).toEqual({ kind: "index", index: -1 });
+    expect(tabHotkey(ev({ key: "0", code: "Digit0", ctrlKey: true }))).toBeNull();
+    expect(tabHotkey(ev({ key: "1", code: "Digit1" }))).toBeNull();
+  });
+});
+
+describe("resolveTabHotkey", () => {
+  const ids = ["a", "b", "c"];
+  it("wraps around", () => {
+    expect(resolveTabHotkey({ kind: "next" }, ids, "c")).toBe("a");
+    expect(resolveTabHotkey({ kind: "prev" }, ids, "a")).toBe("c");
+  });
+  it("from Fleet, next is first and prev is last", () => {
+    expect(resolveTabHotkey({ kind: "next" }, ids, null)).toBe("a");
+    expect(resolveTabHotkey({ kind: "prev" }, ids, null)).toBe("c");
+  });
+  it("index out of range is a no-op", () => {
+    expect(resolveTabHotkey({ kind: "index", index: 5 }, ids, "a")).toBeNull();
+    expect(resolveTabHotkey({ kind: "index", index: -1 }, ids, "a")).toBe("c");
+    expect(resolveTabHotkey({ kind: "next" }, [], null)).toBeNull();
   });
 });

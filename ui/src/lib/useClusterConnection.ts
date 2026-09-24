@@ -3,6 +3,7 @@ import { isPermanentConnectFailure } from "./connectFailure";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, onClusterHealth, onClusterInfoChanged } from "../api";
 import { useAppStore } from "../store";
+import { useTabActive } from "./tabScope";
 import type { ClusterInfo, ContextInfo } from "../types";
 
 export type ConnectState =
@@ -109,6 +110,10 @@ export function useClusterConnection(context: ContextInfo): {
     (s) => s.clusterHealthReason[context.id] ?? null,
   );
   const resumeEpoch = useAppStore((s) => s.resumeEpoch);
+  // A hidden keep-alive tab leaves polling and recovery to whichever tab is
+  // visible; it catches up on becoming active again.
+  const tabActive = useTabActive();
+  const wasActiveRef = useRef(tabActive);
   const resumeSeenRef = useRef(resumeEpoch);
   const resumeDeferredRef = useRef(false);
 
@@ -332,7 +337,7 @@ export function useClusterConnection(context: ContextInfo): {
   // map lookup per tick on the backend — no apiserver traffic — so it stays
   // cheap even across a large virtual context (one poll per member).
   useEffect(() => {
-    if (state.status !== "ok") return;
+    if (state.status !== "ok" || !tabActive) return;
     let stopped = false;
     const timer = window.setInterval(
       () => pullHealth(() => stopped),
@@ -342,7 +347,7 @@ export function useClusterConnection(context: ContextInfo): {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [state.status, pullHealth]);
+  }, [state.status, pullHealth, tabActive]);
 
   // Store-driven recovery. Fires on the transition INTO unavailable, from
   // whichever source noticed it, and only while the connection itself is up
@@ -352,15 +357,18 @@ export function useClusterConnection(context: ContextInfo): {
   useEffect(() => {
     const prev = prevHealthRef.current;
     prevHealthRef.current = healthStatus;
-    if (prev === healthStatus || healthStatus !== "unavailable") return;
+    const activated = tabActive && !wasActiveRef.current;
+    wasActiveRef.current = tabActive;
+    if (!tabActive || healthStatus !== "unavailable") return;
+    if (prev === healthStatus && !activated) return;
     if (state.status !== "ok") return;
     ctlRef.current?.onUnavailable(healthReason);
-  }, [healthStatus, healthReason, state.status]);
+  }, [healthStatus, healthReason, state.status, tabActive]);
 
   // A connect already in flight when the machine woke settles first: success
   // means it came up after the backend teardown, failure joins the session.
   useEffect(() => {
-    if (resumeSeenRef.current === resumeEpoch) return;
+    if (!tabActive || resumeSeenRef.current === resumeEpoch) return;
     if (state.status === "connecting") {
       resumeDeferredRef.current = true;
       return;
@@ -371,7 +379,7 @@ export function useClusterConnection(context: ContextInfo): {
     if (state.status === "cancelled") return;
     if (deferred && state.status === "ok") return;
     ctlRef.current?.onResumed();
-  }, [resumeEpoch, state.status]);
+  }, [resumeEpoch, state.status, tabActive]);
 
   useEffect(() => {
     const id = ++reqId.current;

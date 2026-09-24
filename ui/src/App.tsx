@@ -37,8 +37,6 @@ import {
   TITLEBAR_INSET_PX,
 } from "./components/TitleBar";
 import { Rail } from "./components/Rail";
-import { ClusterPanel } from "./components/ClusterPanel";
-import { VirtualClusterPanel } from "./components/VirtualClusterPanel";
 import { FleetLanding } from "./components/FleetLanding";
 import { CommandPalette } from "./components/CommandPalette";
 import { NamespaceModal } from "./components/NamespaceModal";
@@ -49,18 +47,9 @@ import {
   buildNodeBulkActions,
   buildPodBulkActions,
 } from "./components/bulkActions";
+import { compareTargetFromSelection } from "./components/ComparePanel";
+import { inspectTargetFromSelection } from "./components/inspect";
 import {
-  ComparePanel,
-  compareTargetFromSelection,
-  type CompareTarget,
-} from "./components/ComparePanel";
-import {
-  InspectPanel,
-  inspectTargetFromSelection,
-  type InspectTarget,
-} from "./components/inspect";
-import {
-  LogPanel,
   OBSERVABLE_KIND_IDS,
   type ObserveTab,
   type ObserveTarget,
@@ -77,10 +66,32 @@ import {
 import { IS_MAC } from "./lib/keyboard";
 import { prunedNamespaceFilter } from "./lib/nsFilter";
 import { goToFleet } from "./lib/clusterTabs";
-import { hotkeyIntent, intentPreventsDefault } from "./lib/hotkeys";
+import { hotkeyIntent, intentPreventsDefault, resolveTabHotkey, tabHotkey } from "./lib/hotkeys";
 import { isClusterUnavailableError } from "./lib/unavailable";
 import { applyThemeCssVars } from "./lib/themeDom";
 import { Icons } from "./components/ui";
+import { useEscLayer } from "./lib/escStack";
+import { createSaver, flushAll, registerFlushOnClose } from "./lib/saver";
+import { PanelTray } from "./components/PanelTray";
+import { buildSession, parseSession } from "./lib/session";
+import { TabScopeProvider } from "./lib/tabScope";
+import { TabMainView } from "./components/TabMainView";
+import { TabDrawers } from "./components/TabDrawers";
+
+// Full-object write: the payload builder round-trips every persisted field.
+const prefsSaver = createSaver(
+  () => api.setPrefs(buildPrefsPayload(useAppStore.getState())),
+  250,
+  logErr("app"),
+);
+registerFlushOnClose(prefsSaver);
+
+const sessionSaver = createSaver(
+  () => api.setSession(buildSession(useAppStore.getState())),
+  1000,
+  logErr("app"),
+);
+registerFlushOnClose(sessionSaver);
 
 const RAIL_COLLAPSED_W = 56;
 const RAIL_OPEN_W = 220;
@@ -164,6 +175,8 @@ export default function App() {
   );
   const multiClusterActive =
     activeVirtualContext !== null || activeClusterIds.length > 1;
+  const showCluster =
+    (multiClusterActive && activeContexts.length > 0) || selectedContext !== null;
   // Origin labels for the namespace modal: a namespace that exists on only
   // a subset of the active members gets compressed cluster-name chips in
   // the member's accent color. undefined in single-cluster views and when
@@ -194,13 +207,13 @@ export default function App() {
   const selectedKind = useAppStore((s) =>
     s.kinds.find((kk) => kk.id === s.selectedKindId),
   );
-  // Kind-name -> registry-id resolution for the Inspect drawer's cross-kind
-  // links (a pod row's Pod / Node names).
-  const kinds = useAppStore((s) => s.kinds);
-  const navigateToDetail = useAppStore((s) => s.navigateToDetail);
 
   const paletteOpen = useAppStore((s) => s.paletteOpen);
-  const rowDrawerOpen = useAppStore((s) => s.rowDrawerOpen);
+  const drawerOpen = useAppStore((s) => s.drawer !== null);
+  const openDrawer = useAppStore((s) => s.openDrawer);
+  // The bulk bar floats above the detail panel but would cover the wider
+  // logs / compare / inspect drawers.
+  const bulkHidden = useAppStore((s) => s.drawer !== null && s.drawer.kind !== "detail");
   const openPalette = useAppStore((s) => s.openPalette);
   const filterEditing = useAppStore((s) => s.filterEditing);
   const openFilterEditor = useAppStore((s) => s.openFilterEditor);
@@ -243,9 +256,6 @@ export default function App() {
   // YAML compare drawer — armed from the bulk bar when exactly two rows of
   // one kind are selected (any kind; the killer use is the same object on
   // two members of a virtual context).
-  const [compareTarget, setCompareTarget] = useState<CompareTarget | null>(
-    null,
-  );
   const compareActions = (): BulkAction[] => {
     if (!selectedKind || selection.size !== 2) return [];
     return [
@@ -261,7 +271,7 @@ export default function App() {
             clusterLabelFor,
             (cid) => colorIdx[cid] ?? 0,
           );
-          if (target) setCompareTarget(target);
+          if (target) openDrawer({ kind: "compare", target });
         },
       },
     ];
@@ -270,9 +280,6 @@ export default function App() {
   // Structured N-way comparison drawer — any kind, 2+ selected. Sibling to
   // Compare YAML: that one diffs a pair's raw manifests, this one compares
   // fields across N and merges their events and pods.
-  const [inspectTarget, setInspectTarget] = useState<InspectTarget | null>(
-    null,
-  );
   const inspectActions = (): BulkAction[] => {
     if (!selectedKind || selection.size < 2) return [];
     return [
@@ -288,7 +295,7 @@ export default function App() {
             clusterLabelFor,
             (cid) => colorIdx[cid] ?? 0,
           );
-          if (target) setInspectTarget(target);
+          if (target) openDrawer({ kind: "inspect", target });
         },
       },
     ];
@@ -298,10 +305,6 @@ export default function App() {
   // pod-bearing workloads (deployments, statefulsets, daemonsets,
   // replicasets, jobs). The selection may span clusters; the panel groups
   // its resolve calls per cluster.
-  const [observeTarget, setObserveTarget] = useState<{
-    targets: ObserveTarget[];
-    initialTab: ObserveTab;
-  } | null>(null);
   const observeActions = (): BulkAction[] => {
     if (
       !selectedKind ||
@@ -324,7 +327,7 @@ export default function App() {
           name: meta.name,
         });
       }
-      if (targets.length > 0) setObserveTarget({ targets, initialTab });
+      if (targets.length > 0) openDrawer({ kind: "logs", targets, initialTab });
     };
     return [
       { icon: Icons.logs, label: "Logs", onClick: open("logs") },
@@ -371,6 +374,45 @@ export default function App() {
   // Set once after the initial prefs load — gates the persist effect so the
   // hydration write doesn't immediately echo defaults back to disk.
   const [prefsLoaded, setPrefsLoaded] = useState(false);
+  // Same gate for session.json, so an empty pre-restore state never
+  // overwrites the saved session.
+  const [sessionLoaded, setSessionLoaded] = useState(false);
+  // Subscribed outside React: App needn't re-render for drawer/tray churn.
+  useEffect(() => {
+    if (!sessionLoaded) return;
+    sessionSaver.schedule();
+    return useAppStore.subscribe((s, prev) => {
+      if (
+        s.dockTabs !== prev.dockTabs ||
+        s.dockActive !== prev.dockActive ||
+        s.dockMin !== prev.dockMin ||
+        s.tray !== prev.tray ||
+        s.drawer !== prev.drawer ||
+        s.openTabs !== prev.openTabs ||
+        s.activeTabId !== prev.activeTabId
+      ) {
+        sessionSaver.schedule();
+      }
+    });
+  }, [sessionLoaded]);
+
+  // Write pending prefs/session before the window goes away; the debounce
+  // would otherwise drop the last 250 ms of changes on quit.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    getCurrentWindow()
+      .onCloseRequested(() => flushAll())
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(logErr("app"));
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   // macOS: keep the native window appearance in lockstep with the app theme so
   // the title-bar vibrancy material (and traffic-light rendering) matches —
@@ -412,7 +454,12 @@ export default function App() {
       .getPrefs()
       .then((p) => hydratePrefs(p))
       .catch(reportErr("app", "Couldn't load preferences — using defaults"))
-      .finally(() => setPrefsLoaded(true));
+      .finally(() => setPrefsLoaded(true))
+      // Session slices attach to the tabs prefs just reopened.
+      .then(() => api.getSession())
+      .then((raw) => useAppStore.getState().hydrateSession(parseSession(raw)))
+      .catch(reportErr("app", "Couldn't restore open panels"))
+      .finally(() => setSessionLoaded(true));
     const unlisten = listen<void>("app://ready", () => setReady(true));
 
     // Port-forwards: hydrate from backend (which already restarted any pinned
@@ -452,16 +499,7 @@ export default function App() {
   // selection state (cluster, kind, namespaces, rail pin) rides the same
   // debounce — they all coalesce into one prefs.json write.
   useEffect(() => {
-    if (!prefsLoaded) return;
-    const t = setTimeout(() => {
-      // Full-object write: the payload builder round-trips every persisted
-      // field, so a field missing from the deps below would still be written
-      // with its current value (it would just not trigger the write).
-      api
-        .setPrefs(buildPrefsPayload(useAppStore.getState()))
-        .catch(logErr("app"));
-    }, 250);
-    return () => clearTimeout(t);
+    if (prefsLoaded) prefsSaver.schedule();
   }, [
     prefsLoaded,
     themeMode,
@@ -723,6 +761,14 @@ export default function App() {
     return () => window.removeEventListener("contextmenu", onCtx);
   }, []);
 
+  // Esc closes the most recently opened layer (lib/escStack); these register
+  // alongside the drawers so a palette opened over a drawer closes first.
+  useEscLayer(addMenuOpen, () => setAddMenuOpen(false));
+  useEscLayer(paletteOpen, closePalette);
+  useEscLayer(filterEditing, closeFilterEditor);
+  useEscLayer(settingsOpen, closeSettings);
+  useEscLayer(nsModalOpen, closeNsModal);
+
   // Global keyboard layer. R-13: Esc cascades from the deepest layer outward.
   // Order: addMenu → palette → settings → ns modal → detail/log panels →
   // bulk selection. Detail/Log panels register their own Esc to close
@@ -741,19 +787,23 @@ export default function App() {
         nsModalOpen,
         filterEditing,
         hasSelection: selection.size > 0,
-        drawerOpen:
-          !!compareTarget ||
-          !!observeTarget ||
-          !!inspectTarget ||
-          // Detail panel / per-row logs live inside ResourceTable, which
-          // publishes this. App cannot observe them directly.
-          rowDrawerOpen,
+        drawerOpen,
         inTextInput:
           tgt != null &&
           tgt.closest(
             "input, textarea, [contenteditable=''], [contenteditable='true']",
           ) != null,
       });
+      const tabHk = tabHotkey(e);
+      if (tabHk) {
+        const st = useAppStore.getState();
+        const id = resolveTabHotkey(tabHk, st.openTabs.map((tt) => tt.id), st.activeTabId);
+        if (id) {
+          e.preventDefault();
+          st.switchTab(id);
+        }
+        return;
+      }
       if (!intent) return;
       if (intentPreventsDefault(intent)) e.preventDefault();
       switch (intent) {
@@ -827,9 +877,7 @@ export default function App() {
     settingsOpen,
     nsModalOpen,
     selection,
-    compareTarget,
-    observeTarget,
-    inspectTarget,
+    drawerOpen,
     activeContexts,
     addDockTab,
     clearSelection,
@@ -929,70 +977,32 @@ export default function App() {
           overflow: "hidden",
         }}
       >
-        {multiClusterActive && activeContexts.length > 0 ? (
-          <>
-            <Rail mode={themeMode} />
-            <main
-              style={{
-                flex: 1,
-                minWidth: 0,
-                minHeight: 0,
-                display: "flex",
-                flexDirection: "column",
-                background: t.bg,
-              }}
-            >
-              <VirtualClusterPanel
-                // Remount on virtual-context switch so per-member connection
-                // state never bleeds between virtual contexts.
-                key={activeVirtualContext?.id ?? selectedContextName ?? "adhoc"}
-                mode={themeMode}
-                title={
-                  activeVirtualContext
-                    ? activeVirtualContext.name
-                    : `${(selectedContext && clusterLabels[selectedContext.id]?.short) ?? selectedContext?.name ?? "Ad-hoc"} +${activeContexts.length - 1}`
-                }
-                viewScopeId={
-                  activeVirtualContext
-                    ? `vctx:${activeVirtualContext.id}`
-                    : selectedContextName ?? "adhoc"
-                }
-                contexts={activeContexts}
-              />
-            </main>
-          </>
-        ) : selectedContext ? (
-          <>
-            <Rail mode={themeMode} />
-            <main
-              style={{
-                flex: 1,
-                minWidth: 0,
-                minHeight: 0,
-                display: "flex",
-                flexDirection: "column",
-                // Opaque so the dense table stays readable; macOS vibrancy is
-                // confined to the chrome (header + rail) around it.
-                background: t.bg,
-              }}
-            >
-              <ClusterPanel mode={themeMode} context={selectedContext} />
-            </main>
-          </>
-        ) : (
-          <main
-            style={{
-              flex: 1,
-              minWidth: 0,
-              minHeight: 0,
-              display: "flex",
-              flexDirection: "column",
-              background: t.bg,
-            }}
-          >
-            <FleetLanding mode={themeMode} onSelect={selectContext} />
-          </main>
-        )}
+        {showCluster && <Rail mode={themeMode} />}
+        <main
+          style={{
+            flex: 1,
+            minWidth: 0,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column",
+            // Opaque so the dense table stays readable; macOS vibrancy is
+            // confined to the chrome (header + rail) around it.
+            background: t.bg,
+          }}
+        >
+          {/* Only the selected cluster tab is mounted: switching away stops
+              its watches, metrics and streams. Its state lives in the tab's
+              slice (kind, namespaces, drawers, table/detail scroll) and is
+              re-applied when it mounts again; keyed so tabs never share an
+              instance. */}
+          {showCluster && activeTabId && (
+            <TabScopeProvider key={activeTabId} tabId={activeTabId} active>
+              <TabMainView mode={themeMode} />
+              <TabDrawers mode={themeMode} />
+            </TabScopeProvider>
+          )}
+          {!showCluster && <FleetLanding mode={themeMode} onSelect={selectContext} />}
+        </main>
       </div>
 
       {/* Bottom dock for terminals + YAML scratchpads. Right dock for AI
@@ -1041,7 +1051,7 @@ export default function App() {
           Hidden (zIndex 35 > drawer 31) while the compare drawer is open —
           the selection itself survives so the operator can act on the same
           rows after closing the diff. */}
-      {!compareTarget && !observeTarget && !inspectTarget && selectedKind?.id === "pods" && activeContexts.length > 0 && selection.size > 0 && (
+      {!bulkHidden && selectedKind?.id === "pods" && activeContexts.length > 0 && selection.size > 0 && (
         <BulkBar
           mode={themeMode}
           count={selection.size}
@@ -1060,9 +1070,7 @@ export default function App() {
           ]}
         />
       )}
-      {!compareTarget &&
-        !observeTarget &&
-        !inspectTarget &&
+      {!bulkHidden &&
         selectedKind?.id === "nodes" &&
         activeContexts.length > 0 &&
         selection.size > 0 && (
@@ -1085,9 +1093,7 @@ export default function App() {
       {/* Generic bulk bar for everything that isn't pods or nodes. Copy +
           Delete only — both ride the dynamic API so no per-kind plumbing is
           needed. Restart / cordon / drain stay pod- and node-specific. */}
-      {!compareTarget &&
-        !observeTarget &&
-        !inspectTarget &&
+      {!bulkHidden &&
         selectedKind &&
         selectedKind.id !== "pods" &&
         selectedKind.id !== "nodes" &&
@@ -1113,51 +1119,6 @@ export default function App() {
           />
         )}
 
-      {inspectTarget && (
-        <InspectPanel
-          mode={themeMode}
-          target={inspectTarget}
-          onClose={() => setInspectTarget(null)}
-          onNavigate={(targetKindName, namespace, name, fromCluster) => {
-            // Same Kind-name -> registry-id mapping the detail panel uses.
-            const target = kinds.find((k) => k.kind === targetKindName);
-            if (!target) {
-              // Registry not loaded, or a kind we don't model. Close anyway —
-              // leaving the drawer up on a dead click looks like a hang.
-              setInspectTarget(null);
-              return;
-            }
-            // The row's OWN cluster. An Inspect can span clusters (that is the
-            // point of it for a virtual context), and every subject sharing a
-            // kind says nothing about them sharing a cluster — keying off
-            // `subjects[0]` opened cluster B's pod inside cluster A.
-            const clusterId =
-              fromCluster ?? inspectTarget.subjects[0]?.clusterId ?? null;
-            // Close first: the drawer sits at the same z-index as the detail
-            // panel and would cover whatever we just opened.
-            setInspectTarget(null);
-            navigateToDetail(target.id, namespace, name, clusterId);
-          }}
-        />
-      )}
-
-      {compareTarget && (
-        <ComparePanel
-          mode={themeMode}
-          target={compareTarget}
-          onClose={() => setCompareTarget(null)}
-        />
-      )}
-
-      {observeTarget && (
-        <LogPanel
-          mode={themeMode}
-          targets={observeTarget.targets}
-          initialTab={observeTarget.initialTab}
-          onClose={() => setObserveTarget(null)}
-        />
-      )}
-
       {paletteOpen && (
         <CommandPalette mode={themeMode} onClose={closePalette} />
       )}
@@ -1180,6 +1141,7 @@ export default function App() {
         <SettingsPanel mode={themeMode} onClose={closeSettings} />
       )}
 
+      <PanelTray />
       <NotificationsPanel mode={themeMode} />
       <PortForwardsPanel mode={themeMode} />
       <ModalHost mode={themeMode} />

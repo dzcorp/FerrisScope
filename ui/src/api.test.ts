@@ -1014,6 +1014,15 @@ describe("metrics + prefs + table views", () => {
     expect(cap.calls[1]?.args).toEqual({ prefs });
   });
 
+  it("getSession / setSession pass the snapshot through untouched", async () => {
+    const cap = captureNext(null);
+    const session = { version: 1, tabs: { t1: { dock: [] } } };
+    await api.getSession();
+    await api.setSession(session);
+    expect(cap.calls[0]).toEqual({ cmd: "get_session", args: undefined });
+    expect(cap.calls[1]).toEqual({ cmd: "set_session", args: { session } });
+  });
+
   it("getTableViews / setTableView", async () => {
     const cap = captureNext({ views: {} });
     await api.getTableViews();

@@ -4,6 +4,7 @@ import { FF_MONO, FONT_SANS, type ThemeMode, R_MD, FS_MD, FS_SM, FS_XS } from ".
 import type { ChatTool } from "../../types";
 import type { McpStatus } from "./chatStreaming";
 import { ErrorBlock } from "../ui";
+import { useEscLayer } from "../../lib/escStack";
 
 type Props = {
   mode: ThemeMode;
@@ -32,20 +33,16 @@ export function ToolsPopover({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
 
+  useEscLayer(true, onClose);
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (!ref.current) return;
       if (e.target instanceof Node && ref.current.contains(e.target)) return;
       onClose();
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
     document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
     };
   }, [onClose]);
 

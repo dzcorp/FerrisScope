@@ -34,6 +34,7 @@ import { api, onResourceDelta } from "../api";
 import {
   selectClusterDegraded,
   selectSelectionDegraded,
+  type Drawer,
   type SelectionMeta,
   useAppStore,
   useClusterLabels,
@@ -41,7 +42,6 @@ import {
 } from "../store";
 import { formatQuantity } from "./detail";
 import { execContainers, rowLogContainers } from "../lib/podContainers";
-import { resolveResourceKind } from "../lib/resourceKinds";
 import type {
   ColumnDef,
   MetricsSnapshot,
@@ -61,8 +61,8 @@ import {
   FS_SM,
   FS_XS,
 } from "../theme";
-import { LogPanel } from "./LogPanel";
-import { DetailPanel, type DetailTarget } from "./DetailPanel";
+import type { DetailTarget } from "./DetailPanel";
+import type { ObserveTarget } from "./LogPanel";
 import { ContextMenu, type MenuPosition } from "./ContextMenu";
 import {
   actionsForRow,
@@ -103,6 +103,9 @@ import {
 } from "./ui";
 import type { ContainerLite } from "./ui";
 import { HelmStorageNotice } from "./detail/helm/storage";
+import { readTab, useTabScope, useTabSlice, writeTab } from "../lib/tabScope";
+import { publishRows } from "../lib/rowRegistry";
+import { useTableTop } from "../lib/tableTop";
 
 type LoadState =
   | { kind: "loading" }
@@ -322,24 +325,27 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // Filter is driven by the global palette (Cmd+F / `/` / breadcrumb icon).
   // Lifted to the store so the AppHeader can render the active-filter chip
   // and so the palette in filter mode can edit it live without prop drilling.
-  const tableFilter = useAppStore((s) => s.tableFilter);
-  const focusedClusterId = useAppStore((s) => s.focusedClusterId);
+  // Hidden (keep-alive) tabs read their own slice and must not publish to
+  // app-global state; see lib/tabScope.
+  const { tabId, active } = useTabScope();
+  const tableFilter = useTabSlice((v) => v.tableFilter);
+  const focusedClusterId = useTabSlice((v) => v.focusedClusterId);
   const setTableCount = useAppStore((s) => s.setTableCount);
-  const [logTarget, setLogTarget] = useState<ScopedRow | null>(null);
-  const [logDefaultContainer, setLogDefaultContainer] = useState<string | null>(
-    null,
+  // Drawers live in the store (per cluster tab) and render in TabDrawers;
+  // the table only opens them and highlights the detail's row.
+  // Only the highlighted row's id: the whole drawer changes on every
+  // navigation and view save, and the table is expensive to re-render.
+  const detailSid = useTabSlice((v) =>
+    v.drawer?.kind === "detail" && v.drawer.kindId === kind.id
+      ? scopedUid(v.drawer.clusterId, v.drawer.uid)
+      : null,
   );
-  const [detailTarget, setDetailTarget] = useState<DetailTarget | null>(null);
-  // Publish drawer open-ness so App's Esc router can see it. These two drawers
-  // are mounted here, not by App, and a row click opens the detail panel
-  // WITHOUT clearing the selection — so without this, one Esc closed the panel
-  // and wiped the selection behind it.
-  const setRowDrawerOpen = useAppStore((s) => s.setRowDrawerOpen);
-  const rowDrawerOpen = !!detailTarget || !!logTarget;
-  useEffect(() => {
-    setRowDrawerOpen(rowDrawerOpen);
-    return () => setRowDrawerOpen(false);
-  }, [rowDrawerOpen, setRowDrawerOpen]);
+  const openDrawer = useAppStore((s) => s.openDrawer);
+  const openDetail = (t: DetailTarget) => {
+    const d: Drawer = { kind: "detail", kindId: kind.id, ...t };
+    if (active) openDrawer(d);
+    else writeTab(tabId, { drawer: d, drawerId: crypto.randomUUID() });
+  };
   const [menu, setMenu] = useState<{
     pos: MenuPosition;
     row: ScopedRow;
@@ -351,20 +357,20 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   } | null>(null);
 
   // Namespace filter is global (cluster-bar driven, persisted on the store).
-  const selectedNamespaces = useAppStore((s) => s.selectedNamespaces);
+  const selectedNamespaces = useTabSlice((v) => v.selectedNamespaces);
   // Per-table multi-select lives on the store too so the bulk-action bar can
   // be rendered at App level.
-  const selection = useAppStore((s) => s.selection);
+  const selection = useTabSlice((v) => v.selection);
   const toggleSelection = useAppStore((s) => s.toggleSelection);
   const setSelection = useAppStore((s) => s.setSelection);
   const clearSelection = useAppStore((s) => s.clearSelection);
-  const pendingDetail = useAppStore((s) => s.pendingDetail);
-  const consumePendingDetail = useAppStore((s) => s.consumePendingDetail);
+  const pendingDetail = useTabSlice((v) => v.pendingDetail);
+  const consumePendingDetail = useCallback(
+    () => writeTab(tabId, { pendingDetail: null }),
+    [tabId],
+  );
   const navigateToDetail = useAppStore((s) => s.navigateToDetail);
   const setSelectedNamespaces = useAppStore((s) => s.setSelectedNamespaces);
-  const pushDetailEntry = useAppStore((s) => s.pushDetailEntry);
-  const closeDetail = useAppStore((s) => s.closeDetail);
-  const kinds = useAppStore((s) => s.kinds);
   // Per-cluster heartbeat state — rows from an unavailable member render
   // dimmed in a merged view (the single-cluster view dims the whole pane
   // via ClusterPanel's UnavailableOverlay instead). Record identity only
@@ -398,7 +404,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // cluster-local). The rail publishes `kindClusters` for dynamic kinds;
   // intersect so we never subscribe a kind on a cluster that lacks it.
   // Built-in kinds have no entry → all members.
-  const kindClusterIds = useAppStore((s) => s.kindClusters[kind.id]);
+  const kindClusterIds = useTabSlice((v) => v.kindClusters[kind.id]);
   const effectiveClusters = useMemo(
     () =>
       kindClusterIds
@@ -407,12 +413,15 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     [clusters, kindClusterIds],
   );
   const clusterLabels = useClusterLabels();
-  const clusterIds = useMemo(
-    () => effectiveClusters.map((c) => c.id),
-    [effectiveClusters],
-  );
   // NUL separator — cluster ids contain "::" and may contain spaces.
-  const clusterKey = clusterIds.join(String.fromCharCode(0));
+  const clusterKey = effectiveClusters.map((c) => c.id).join(String.fromCharCode(0));
+  // Keyed on content: the rail republishes identical availability maps on
+  // every tab switch, and a new array here would resubscribe (and blank) a
+  // kept-alive table.
+  const clusterIds = useMemo(
+    () => (clusterKey ? clusterKey.split(String.fromCharCode(0)) : []),
+    [clusterKey],
+  );
   // Per-cluster display metadata for the synthetic Cluster column. Flows
   // through a ref so the columns memo never rebuilds on a name change.
   // `short` is the compressed sibling-distinguishing name (common prefix /
@@ -436,6 +445,8 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // Keyed by scoped id (`${clusterId}::${uid}`) so rows from different
   // clusters can never collide once tables merge across a virtual context.
   const rowsRef = useRef<Map<string, ScopedRow>>(new Map());
+  // The detail drawer renders outside the table and seeds its row from here.
+  useEffect(() => publishRows(tabId, rowsRef), [tabId]);
 
   // Per-subscription namespace lists. Each entry becomes one backend
   // subscribe call → one `Api::namespaced(ns)` watcher → one event
@@ -481,8 +492,6 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     rowsRef.current = localMap;
     setLoad({ kind: "loading" });
     setRows([]);
-    setLogTarget(null);
-    setDetailTarget(null);
     setMenu(null);
 
     // Coalesce delta-driven setRows into one render per animation frame.
@@ -635,7 +644,9 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     // membership) or the member set changes, we tear down the old
     // subscriptions and open a new fan against the matching backend slots.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clusterKey, kind.id, subscribeScopeKey, subscribeScopes, clusterIds]);
+    // `subscribeScopes` / `clusterIds` are covered by their content keys.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clusterKey, kind.id, subscribeScopeKey]);
 
   // Cross-kind navigation: if the operator clicked "Controlled By: …" on
   // another kind's detail panel, the store carries the (namespace, name) here.
@@ -659,13 +670,12 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         : rows.find(byNameNs);
     if (match) {
       const ns = match.namespace;
-      setDetailTarget({
+      openDetail({
         clusterId: match.__clusterId,
         uid: match.uid,
         namespace: typeof ns === "string" ? ns : null,
         name: String(match.name ?? ""),
       });
-      setLogTarget(null);
       consumePendingDetail();
     }
   }, [pendingDetail, kind.id, rows, load.kind, consumePendingDetail]);
@@ -682,13 +692,13 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     const handle = window.setTimeout(() => {
       // Re-check against the live store — rows may have resolved (and
       // consumed) the entry between scheduling and firing.
-      if (useAppStore.getState().pendingDetail !== entry) return;
+      if (readTab(tabId).pendingDetail !== entry) return;
       consumePendingDetail();
       const where = entry.namespace ? `${entry.namespace}/` : "";
-      toast.warn(`${where}${entry.name} not found — it may have been deleted`);
+      if (active) toast.warn(`${where}${entry.name} not found — it may have been deleted`);
     }, PENDING_DETAIL_TIMEOUT_MS);
     return () => window.clearTimeout(handle);
-  }, [pendingDetail, kind.id, load.kind, consumePendingDetail]);
+  }, [pendingDetail, kind.id, load.kind, consumePendingDetail, tabId, active]);
 
   // A cluster focus set from the multi-cluster bar only applies while the
   // view actually spans several members — a single-cluster tab can't be
@@ -727,9 +737,10 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // (`Pods · 232` / `Pods · 12/232`). Reset to null on unmount so a stale
   // count doesn't linger after navigating away from a kind.
   useEffect(() => {
+    if (!active) return;
     setTableCount({ filtered: filtered.length, total: rows.length });
     return () => setTableCount(null);
-  }, [filtered.length, rows.length, setTableCount]);
+  }, [active, filtered.length, rows.length, setTableCount]);
 
   // Hide the namespace column when the operator has filtered to exactly one
   // namespace — every row would say the same thing. The cluster bar already
@@ -953,6 +964,49 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const headerRef = useRef<HTMLDivElement | null>(null);
+  // Below the header row, so the tray never covers the column picker.
+  useTableTop(scrollRef);
+
+  // Remember the scroll offset per kind in this tab's slice, so switching
+  // cluster tabs (which unmounts the table) returns to the same place.
+  const lastScrollRef = useRef(0);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    lastScrollRef.current = 0;
+    const onScroll = () => {
+      lastScrollRef.current = el.scrollTop;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    const kindId = kind.id;
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      const saved = readTab(tabId).tableScroll ?? {};
+      if ((saved[kindId] ?? 0) !== lastScrollRef.current) {
+        writeTab(tabId, { tableScroll: { ...saved, [kindId]: lastScrollRef.current } });
+      }
+    };
+  }, [kind.id, tabId]);
+  const restoredKindRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (load.kind !== "ready" || restoredKindRef.current === kind.id) return;
+    restoredKindRef.current = kind.id;
+    const top = readTab(tabId).tableScroll?.[kind.id];
+    const el = scrollRef.current;
+    if (!top || !el) return;
+    // Rows land over a few frames; wait until the offset is reachable.
+    let frames = 0;
+    let raf = 0;
+    const tick = () => {
+      if (el.scrollHeight - el.clientHeight >= top || ++frames >= 120) {
+        el.scrollTop = top;
+        return;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [load.kind, kind.id, tabId]);
   const tableShellRef = useRef<HTMLDivElement | null>(null);
 
   // Keep the header aligned with the body when columns overflow the
@@ -1141,34 +1195,6 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     });
   }, [containerWidth, visibleColumns, naturalWidths]);
 
-  // The row action opens the panel for the one row under the cursor. Pod
-  // rows already carry their container list so no resolve round-trip runs;
-  // workload rows resolve to their pods inside the panel.
-  const logTargets = useMemo(() => {
-    if (!logTarget) return null;
-    if (kind.id === "pods") {
-      // Read off `container_states` so init containers and native sidecars are
-      // offered too — the log endpoint serves them like any other container.
-      const containers = rowLogContainers(logTarget);
-      return [
-        {
-          clusterId: logTarget.__clusterId,
-          kindId: "pods",
-          namespace: String(logTarget.namespace ?? ""),
-          name: String(logTarget.name ?? ""),
-          containers,
-        },
-      ];
-    }
-    return [
-      {
-        clusterId: logTarget.__clusterId,
-        kindId: kind.id,
-        namespace: String(logTarget.namespace ?? ""),
-        name: String(logTarget.name ?? ""),
-      },
-    ];
-  }, [logTarget, kind.id]);
 
   // Click handler for the select-column. Pulls range / additive logic into
   // one place so both the cell-wide click target (Slice 1) and modifier
@@ -1465,6 +1491,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
 
         <div
           ref={scrollRef}
+          data-testid="table-body"
           // paddingRight mirrors the header so columns stay aligned and the
           // auto-fit (which measures this element's content box) fills the
           // reduced width. The reserved strip reads as table right-padding.
@@ -1486,14 +1513,12 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
             const ns = row.namespace;
             const nsStr = typeof ns === "string" ? ns : null;
             const nm = String(row.name ?? "");
-            setLogTarget(null);
-            setDetailTarget({
+            openDetail({
               clusterId: row.__clusterId,
               uid: row.uid,
               namespace: nsStr,
               name: nm,
             });
-            pushDetailEntry(kind.id, nsStr, nm, row.__clusterId);
           }}
           onContextMenu={(e) => {
             const target = e.target as HTMLElement | null;
@@ -1591,10 +1616,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
               {virtualRows.map((vi) => {
                 const row = sortedRows[vi.index];
                 if (!row) return null;
-                const selected =
-                  detailTarget &&
-                  scopedUid(detailTarget.clusterId, detailTarget.uid) ===
-                    row.original.__sid;
+                const selected = detailSid === row.original.__sid;
                 const checked = selection.has(row.original.__sid);
                 // In a merged view, rows from a member whose heartbeat
                 // declared it unavailable stay rendered but dimmed —
@@ -1705,103 +1727,6 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         </div>
       </div>
 
-      {logTargets && (
-        <LogPanel
-          mode={mode}
-          targets={logTargets}
-          defaultContainer={logDefaultContainer}
-          onClose={() => setLogTarget(null)}
-        />
-      )}
-
-      {detailTarget && (
-        <DetailPanel
-          mode={mode}
-          clusterId={detailTarget.clusterId}
-          kind={kind}
-          target={detailTarget}
-          // Detail's delta listener needs the channel that actually
-          // carries this row's events. With per-namespace subscriptions,
-          // the row lives in the watcher scoped to its own namespace —
-          // not the table's full selection. Cluster-scoped kinds and
-          // detail targets without a namespace fall back to All.
-          subscribeNamespaces={
-            kind.namespaced && detailTarget.namespace
-              ? [detailTarget.namespace]
-              : null
-          }
-          row={
-            rowsRef.current.get(
-              scopedUid(detailTarget.clusterId, detailTarget.uid),
-            ) ??
-            filtered.find(
-              (r) =>
-                r.__sid === scopedUid(detailTarget.clusterId, detailTarget.uid),
-            ) ??
-            null
-          }
-          onClose={() => {
-            setDetailTarget(null);
-            closeDetail();
-          }}
-          onNavigate={(targetKindName, namespace, name, clusterId = detailTarget.clusterId, group) => {
-            const target = resolveResourceKind(kinds, useAppStore.getState().kindClusters, targetKindName, clusterId, group);
-            if (!target) return;
-            navigateToDetail(target.id, namespace, name, clusterId);
-          }}
-          onOpenExec={
-            isPods
-              ? (container) => {
-                  // Same Dock-terminal flow the row context menu uses, but
-                  // sourced from the detail panel's container picker so the
-                  // operator can target an init/sidecar without round-
-                  // tripping back to the table.
-                  const r = rowsRef.current.get(
-                    scopedUid(detailTarget.clusterId, detailTarget.uid),
-                  );
-                  if (!r) return;
-                  const ns =
-                    typeof r.namespace === "string" ? r.namespace : null;
-                  if (!ns) {
-                    toast.bad("Pod has no namespace — can't exec.");
-                    return;
-                  }
-                  addDockTab(
-                    makeTerminalTab(
-                      {
-                        mode: "exec",
-                        clusterId: r.__clusterId,
-                        namespace: ns,
-                        pod: String(r.name ?? ""),
-                        container: container ?? null,
-                      },
-                      clusterLabel(r.__clusterId),
-                    ),
-                  );
-                  setDetailTarget(null);
-                }
-              : kind.id === "nodes"
-                ? () => {
-                    // Node "shell" is `kubectl debug node/<name>` — same path
-                    // the row context menu uses. The container arg is
-                    // irrelevant here; the debug pod is the shell.
-                    const r = rowsRef.current.get(
-                      scopedUid(detailTarget.clusterId, detailTarget.uid),
-                    );
-                    if (!r) return;
-                    openNodeDebugTab(
-                      r.__clusterId,
-                      clusterLabel(r.__clusterId),
-                      String(r.name ?? ""),
-                      addDockTab,
-                    );
-                    setDetailTarget(null);
-                  }
-                : undefined
-          }
-        />
-      )}
-
       {menu?.scope === "selection" && (
         <ContextMenu
           mode={mode}
@@ -1845,19 +1770,15 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
                   const ns = menu.row.namespace;
                   const nsStr = typeof ns === "string" ? ns : null;
                   const nm = String(menu.row.name ?? "");
-                  setLogTarget(null);
-                  setDetailTarget({
+                  openDetail({
                     clusterId: menu.row.__clusterId,
                     uid: menu.row.uid,
                     namespace: nsStr,
                     name: nm,
                   });
-                  pushDetailEntry(kind.id, nsStr, nm, menu.row.__clusterId);
                 },
                 openLogs: () => {
-                  setDetailTarget(null);
-                  setLogDefaultContainer(null);
-                  setLogTarget(menu.row);
+                  openDrawer({ kind: "logs", targets: [rowLogTarget(menu.row, kind.id)] });
                 },
               },
             ),
@@ -2311,7 +2232,7 @@ function genericDelete(
 // scrapes the actual name from kubectl's first stdout line ("Creating
 // debugging pod <name> with container …") and writes it into the cleanup
 // descriptor before close.
-function openNodeDebugTab(
+export function openNodeDebugTab(
   clusterId: string,
   contextLabel: string,
   nodeName: string,
@@ -3020,4 +2941,18 @@ function formatAge(value: unknown, nowMs: number): string {
   if (h < 24) return `${h}h`;
   const d = Math.floor(h / 24);
   return `${d}d`;
+}
+
+/// The row action opens logs for the one row under the cursor. Pod rows
+/// already carry their container list so no resolve round-trip runs; workload
+/// rows resolve to their pods inside the panel.
+export function rowLogTarget(row: ScopedRow, kindId: string): ObserveTarget {
+  const base = {
+    clusterId: row.__clusterId,
+    kindId,
+    namespace: String(row.namespace ?? ""),
+    name: String(row.name ?? ""),
+  };
+  // `container_states` also offers init containers and native sidecars.
+  return kindId === "pods" ? { ...base, containers: rowLogContainers(row) } : base;
 }
