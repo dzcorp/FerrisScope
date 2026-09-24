@@ -2485,8 +2485,14 @@ mod run_helm_tests {
     use super::{run_helm, HelmRunError};
     use std::time::Duration;
 
+    // Windows children inherit whichever pipe handles exist at spawn time, so
+    // a concurrently spawned `sleep` can hold another test's stdout open until
+    // it exits. Serialise the spawning tests.
+    static SPAWN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn kills_and_reports_on_timeout() {
+        let _serial = SPAWN.lock().await;
         let mut cmd = std::process::Command::new("sleep");
         cmd.arg("5");
         let started = std::time::Instant::now();
@@ -2498,6 +2504,7 @@ mod run_helm_tests {
 
     #[tokio::test]
     async fn passes_through_success_output() {
+        let _serial = SPAWN.lock().await;
         let mut cmd = std::process::Command::new("echo");
         cmd.arg("hi");
         let out = run_helm(cmd, Duration::from_secs(5)).await.unwrap();
@@ -2507,6 +2514,7 @@ mod run_helm_tests {
 
     #[tokio::test]
     async fn surfaces_spawn_failure_for_missing_binary() {
+        let _serial = SPAWN.lock().await;
         let cmd = std::process::Command::new("ferrisscope-no-such-binary");
         let err = run_helm(cmd, Duration::from_secs(1)).await.unwrap_err();
         assert!(matches!(err, HelmRunError::Spawn(_)), "got {err:?}");
