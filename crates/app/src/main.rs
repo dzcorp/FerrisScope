@@ -277,6 +277,7 @@ fn main() {
             commands::pf_start,
             commands::pf_stop,
             commands::pf_list,
+            commands::pf_check_local_port,
             commands::pf_set_autostart,
             commands::gf_enable_namespace,
             commands::gf_enable_service,

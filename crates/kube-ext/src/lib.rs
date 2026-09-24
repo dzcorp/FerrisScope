@@ -50,8 +50,9 @@ pub use object_status::{
     resolve_object_statuses, CachedSlot, ObjectRef, ObjectStatus, ObjectStatuses, StatusError,
 };
 pub use portforward::{
-    fixed_client, new_status_channel, snapshot as forward_snapshot, start as start_forward,
-    ClientSource, ForwardEntry, ForwardHandle, ForwardStatus, PortForwardError,
+    fixed_client, new_status_channel, probe_local_port, snapshot as forward_snapshot,
+    start as start_forward, suggest_local_port, ClientSource, ForwardEntry, ForwardHandle,
+    ForwardStatus, LocalPortProbe, PortForwardError,
 };
 pub use registry::{
     clear_printer_column_cache, lookup, registry, Category, ColumnDef, ColumnKind, DiscoveredCrd,

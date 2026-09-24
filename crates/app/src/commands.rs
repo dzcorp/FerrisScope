@@ -4485,6 +4485,52 @@ pub(crate) async fn pf_start(
     Ok(snapshot)
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct LocalPortCheck {
+    port: u16,
+    probe: ferrisscope_kube_ext::LocalPortProbe,
+    /// Id of this app's own Simple forward already listening on `port`.
+    held_by: Option<String>,
+    /// Free alternative; only set when `port` isn't free.
+    suggestion: Option<u16>,
+}
+
+/// Pre-flight for a custom local port so the picker can explain a clash and
+/// offer an alternative before `pf_start` fails on bind.
+#[tauri::command]
+pub(crate) async fn pf_check_local_port(
+    port: u16,
+    state: State<'_, AppState>,
+) -> Result<LocalPortCheck, String> {
+    if port == 0 {
+        return Err("port 0 means auto; nothing to check".into());
+    }
+    let held_by = state
+        .portforwards
+        .by_id
+        .lock()
+        .await
+        .values()
+        .find(|h| h.spec.local_ip.is_none() && h.actual_local_port == port)
+        .map(|h| h.spec.id.clone());
+    let probe = if held_by.is_some() {
+        ferrisscope_kube_ext::LocalPortProbe::InUse
+    } else {
+        ferrisscope_kube_ext::probe_local_port(port).await
+    };
+    let suggestion = if probe == ferrisscope_kube_ext::LocalPortProbe::Free {
+        None
+    } else {
+        ferrisscope_kube_ext::suggest_local_port(port).await
+    };
+    Ok(LocalPortCheck {
+        port,
+        probe,
+        held_by,
+        suggestion,
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn pf_stop(id: String, state: State<'_, AppState>) -> Result<(), String> {
     let removed = state.portforwards.by_id.lock().await.remove(&id);

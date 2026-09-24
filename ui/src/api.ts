@@ -49,6 +49,7 @@ import type {
   ForwardStatusEvent,
   ForwardTarget,
   GlobalForwardSession,
+  LocalPortCheck,
   HelperStatus,
   HorizontalPodAutoscalerDetail,
   IngressClassDetail,
@@ -939,6 +940,8 @@ export const api = {
     }),
   pfStop: (id: string) => invoke<void>("pf_stop", { id }),
   pfList: () => invoke<ForwardEntry[]>("pf_list"),
+  // Advisory pre-flight for a custom local port; pf_start can still lose a race.
+  pfCheckLocalPort: (port: number) => invoke<LocalPortCheck>("pf_check_local_port", { port }),
   // Toggle the pin on an existing forward without tearing the listener down.
   pfSetAutostart: (id: string, pinned: boolean) =>
     invoke<void>("pf_set_autostart", { id, pinned }),

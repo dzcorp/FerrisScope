@@ -878,6 +878,13 @@ describe("port-forward", () => {
     expect(cap.calls[0]?.args).toEqual({ id: "pf-1" });
     expect(cap.calls[2]?.args).toEqual({ id: "pf-1", pinned: false });
   });
+
+  it("pfCheckLocalPort routes the port to pf_check_local_port", async () => {
+    const cap = captureNext({ port: 8080, probe: { kind: "free" }, held_by: null, suggestion: null });
+    await api.pfCheckLocalPort(8080);
+    expect(cap.calls[0]?.cmd).toBe("pf_check_local_port");
+    expect(cap.calls[0]?.args).toEqual({ port: 8080 });
+  });
 });
 
 describe("global port-forward", () => {
