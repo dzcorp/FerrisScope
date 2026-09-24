@@ -11,6 +11,7 @@ import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
 import { resetEventMock } from "../test/tauri-event-mock";
 import { useAppStore } from "../store";
 import { ResourceTable, type TableCluster } from "./ResourceTable";
+import { TabDrawers } from "./TabDrawers";
 import type { ResourceKind } from "../types";
 
 const initial = useAppStore.getState();
@@ -324,21 +325,26 @@ describe("ResourceTable — pendingDetail resolution", () => {
       }
     });
     act(() => {
-      useAppStore.setState({ pendingDetail: entry(CID_B, "cm-x") });
+      useAppStore.setState({ pendingDetail: entry(CID_B, "cm-x"), kinds: [configMapsKind] });
     });
     await act(async () => {
       render(
-        <ResourceTable
-          mode="dark"
-          clusters={TWO}
-          viewScopeId="vctx:test"
-          kind={configMapsKind}
-        />,
+        <>
+          <ResourceTable
+            mode="dark"
+            clusters={TWO}
+            viewScopeId="vctx:test"
+            kind={configMapsKind}
+          />
+          <TabDrawers mode="dark" />
+        </>,
       );
     });
     await act(async () => {});
     expect(useAppStore.getState().pendingDetail).toBeNull();
-    const close = screen.getByRole("button", { name: "Close (Esc)" });
+    const d = useAppStore.getState().drawer;
+    expect(d?.kind === "detail" && d.uid).toBe("u9");
+    const close = screen.getByRole("button", { name: "Close" });
     const panel = close.closest("header")?.parentElement;
     expect(panel).not.toBeNull();
     expect(panel?.style.animation).toBe("");

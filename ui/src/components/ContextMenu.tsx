@@ -9,6 +9,7 @@ import { tokens, FF_MONO, type ThemeMode, R_LG, FS_MD, FS_XS } from "../theme";
 import { placeMenuAtCursor, rootZoom } from "../lib/zoom";
 
 import { useResolvedTheme } from "../store";
+import { useEscLayer } from "../lib/escStack";
 export type MenuItem =
   | {
       kind: "item";
@@ -52,22 +53,18 @@ export function ContextMenu({ mode, position, items, onClose, rowName }: Props) 
     );
   }, [position]);
 
+  useEscLayer(true, onClose);
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
       if (!ref.current) return;
       if (!ref.current.contains(e.target as Node)) onClose();
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
     const onScroll = () => onClose();
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onClose);
     return () => {
       document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onClose);
     };

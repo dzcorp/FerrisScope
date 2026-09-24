@@ -3,6 +3,7 @@ import { useResolvedTheme } from "../../store";
 import { FF_MONO, FONT_SANS, type ThemeMode, R_LG, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
 import { Btn, ErrorBlock, Icons } from "../ui";
 import type { ModelInfo, ProviderKind } from "../../types";
+import { useEscLayer } from "../../lib/escStack";
 
 type Props = {
   mode: ThemeMode;
@@ -82,19 +83,15 @@ export function ModelPickerPopover({
   // keeping it duplicated rather than extracting a hook because each
   // popover has its own escape-handling needs (the sessions one closes
   // a rename input first, this one doesn't).
+  useEscLayer(true, onClose);
   useEffect(() => {
     const onMouseDown = (e: MouseEvent) => {
       if (!ref.current) return;
       if (!ref.current.contains(e.target as Node)) onClose();
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
     document.addEventListener("mousedown", onMouseDown);
-    document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("mousedown", onMouseDown);
-      document.removeEventListener("keydown", onKey);
     };
   }, [onClose]);
 

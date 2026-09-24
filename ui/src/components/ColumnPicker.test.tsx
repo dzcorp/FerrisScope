@@ -90,4 +90,16 @@ describe("ColumnPicker", () => {
     fireEvent.click(getByRole("button", { name: "Customize columns" }));
     expect(queryByRole("button", { name: "Reset" })).toBeNull();
   });
+
+  it("portals the menu to the body so it layers above the tray; clicks inside keep it open", () => {
+    const { getByRole, container } = renderPicker({ available: ["zone"] });
+    fireEvent.click(getByRole("button", { name: "Customize columns" }));
+    const menu = getByRole("menu");
+    expect(container.contains(menu)).toBe(false);
+    expect(menu.style.position).toBe("fixed");
+    fireEvent.mouseDown(getByRole("menuitemcheckbox", { name: "zone" }));
+    expect(getByRole("menu")).toBeTruthy();
+    fireEvent.mouseDown(document.body);
+    expect(document.querySelector("[role=menu]")).toBeNull();
+  });
 });

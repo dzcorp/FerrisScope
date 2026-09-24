@@ -4,6 +4,7 @@ import { FF_MONO, FONT_SANS, type ThemeMode, R_LG, FS_MD, FS_XS } from "../../th
 import { Btn, Icons } from "../ui";
 import type { AiSettingsWire, ProviderKind } from "../../types";
 import { PROVIDER_ORDER } from "../../lib/providers";
+import { useEscLayer } from "../../lib/escStack";
 
 type Props = {
   mode: ThemeMode;
@@ -37,19 +38,15 @@ export function ProviderPickerPopover({
   const t = useResolvedTheme().tokens;
   const ref = useRef<HTMLDivElement | null>(null);
 
+  useEscLayer(true, onClose);
   useEffect(() => {
     const onMouseDown = (e: MouseEvent) => {
       if (!ref.current) return;
       if (!ref.current.contains(e.target as Node)) onClose();
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
     document.addEventListener("mousedown", onMouseDown);
-    document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("mousedown", onMouseDown);
-      document.removeEventListener("keydown", onKey);
     };
   }, [onClose]);
 

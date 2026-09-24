@@ -4,17 +4,15 @@
 // other open tab still uses.
 
 import { confirm } from "./dialog";
+import { describeLive, liveDockTabs } from "./dockClose";
 import type { ClusterLabel } from "./clusterName";
 import { selectActiveClusterIds, useAppStore, type ClusterTab } from "../store";
 
-/// Live terminal/chat dock sessions a tab is holding. For the active tab these
-/// live in the top-level mirror; for a background tab, in its stashed slice.
-function tabLiveSessions(tab: ClusterTab): number {
+/// Dock tabs holding live work. For the active tab these live in the
+/// top-level mirror; for a background tab, in its stashed slice.
+function tabLiveWork(tab: ClusterTab) {
   const s = useAppStore.getState();
-  const dockTabs =
-    s.activeTabId === tab.id ? s.dockTabs : tab.slice.dockTabs;
-  return dockTabs.filter((d) => d.kind === "terminal" || d.kind === "chat")
-    .length;
+  return liveDockTabs(s.activeTabId === tab.id ? s.dockTabs : tab.slice.dockTabs);
 }
 
 /// Close a cluster tab. When the tab is holding live terminal/chat sessions,
@@ -28,13 +26,11 @@ export async function closeClusterTab(tabId: string): Promise<void> {
   const s = useAppStore.getState();
   const tab = s.openTabs.find((t) => t.id === tabId);
   if (!tab) return;
-  const live = tabLiveSessions(tab);
-  if (live > 0) {
+  const live = tabLiveWork(tab);
+  if (live.length > 0) {
     const ok = await confirm({
       title: "Close cluster tab?",
-      body: `This tab has ${live} live ${
-        live === 1 ? "session" : "sessions"
-      } (terminals / chats) that will be closed. This can't be undone.`,
+      body: `This ends ${describeLive(live)}. This can't be undone.`,
       confirmLabel: "Close tab",
       cancelLabel: "Keep open",
       tone: "danger",
@@ -51,15 +47,13 @@ export async function closeClusterTab(tabId: string): Promise<void> {
 export async function goToFleet(): Promise<void> {
   const s = useAppStore.getState();
   if (s.openTabs.length === 0 && s.activeTabId === null) return;
-  const live = s.openTabs.reduce((n, t) => n + tabLiveSessions(t), 0);
-  if (live > 0) {
+  const live = s.openTabs.flatMap(tabLiveWork);
+  if (live.length > 0) {
     const ok = await confirm({
       title: "Return to Fleet?",
       body: `This closes all ${s.openTabs.length} open ${
         s.openTabs.length === 1 ? "cluster" : "clusters"
-      } and ${live} live ${
-        live === 1 ? "session" : "sessions"
-      } (terminals / chats). This can't be undone.`,
+      } and ends ${describeLive(live)}. This can't be undone.`,
       confirmLabel: "Close all",
       cancelLabel: "Stay",
       tone: "danger",

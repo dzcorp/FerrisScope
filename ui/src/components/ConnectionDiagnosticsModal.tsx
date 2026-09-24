@@ -6,6 +6,7 @@ import type { Tokens } from "../theme";
 import { FS_MD, FS_SM } from "../theme";
 import { Section, Chip, Btn } from "./ui";
 import { Copyable, Mono, Mute } from "./detail/primitives";
+import { useEscLayer } from "../lib/escStack";
 
 type LoadState =
   | { status: "loading" }
@@ -47,14 +48,7 @@ export function ConnectionDiagnosticsModal({
     };
   }, [contextId]);
 
-  // Esc closes.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  useEscLayer(true, onClose);
 
   return createPortal(
     <div

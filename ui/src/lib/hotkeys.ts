@@ -110,6 +110,39 @@ export function hotkeyIntent(
   return null;
 }
 
+export type TabHotkey = { kind: "next" } | { kind: "prev" } | { kind: "index"; index: number };
+
+/// Cluster-tab switching: Ctrl+Tab / Ctrl+Shift+Tab cycle (Ctrl, not Cmd, on
+/// every platform — Cmd+Tab belongs to the OS), Mod+1..8 jump to a tab and
+/// Mod+9 to the last one, as in browsers.
+export function tabHotkey(e: HotkeyEvent): TabHotkey | null {
+  if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === "Tab") {
+    return e.shiftKey ? { kind: "prev" } : { kind: "next" };
+  }
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && /^Digit[1-9]$/.test(e.code)) {
+    const n = Number(e.code.slice(5));
+    return { kind: "index", index: n === 9 ? -1 : n - 1 };
+  }
+  return null;
+}
+
+/// Resolve a tab hotkey to the id to activate, or null for a no-op.
+export function resolveTabHotkey(
+  hk: TabHotkey,
+  tabIds: string[],
+  activeId: string | null,
+): string | null {
+  if (tabIds.length === 0) return null;
+  if (hk.kind === "index") {
+    const id = hk.index === -1 ? tabIds[tabIds.length - 1] : tabIds[hk.index];
+    return id ?? null;
+  }
+  const cur = activeId == null ? -1 : tabIds.indexOf(activeId);
+  const step = hk.kind === "next" ? 1 : -1;
+  const next = cur === -1 ? (step === 1 ? 0 : tabIds.length - 1) : (cur + step + tabIds.length) % tabIds.length;
+  return tabIds[next] ?? null;
+}
+
 /// Chord intents swallow the browser default (Cmd+F find-on-page, Ctrl+-
 /// browser zoom, …); Esc intents don't — Esc's default is harmless and
 /// inputs may want it.

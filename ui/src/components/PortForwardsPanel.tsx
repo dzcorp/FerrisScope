@@ -19,6 +19,7 @@ import {
 import { Btn } from "./ui/Btn";
 import { NewForwardForm } from "./forwards/NewForwardForm";
 import { toast } from "../lib/dialog";
+import { useEscLayer } from "../lib/escStack";
 
 type Props = { mode: ThemeMode };
 
@@ -44,14 +45,7 @@ export function PortForwardsPanel({ mode }: Props) {
   // Whether the manual "new forward" form is expanded.
   const [showNew, setShowNew] = useState(false);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, close]);
+  useEscLayer(open, close);
 
   // Reconcile global state from the backend each time the panel opens — the
   // helper may have changed status (running / failed) since last seen.

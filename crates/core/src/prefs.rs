@@ -314,8 +314,8 @@ pub struct UiState {
     pub dock_size_right: Option<u32>,
     #[serde(default)]
     pub dock_size_bottom: Option<u32>,
-    /// Open cluster tabs (refs only — live session contents such as terminals
-    /// and chats are ephemeral and never persisted). Reopened on launch under
+    /// Open cluster tabs (refs only — each tab's dock tabs and drawers live in
+    /// `session.json`, keyed by tab id). Reopened on launch under
     /// `StartupScope::LatestView` (full set) / `LatestCluster` (active tab
     /// only); ignored under `Fleet`. Empty for pre-tab-model prefs files; the
     /// frontend migrates the single `selected_context` into one tab in that

@@ -24,17 +24,8 @@ import { compareApiGroups } from "../lib/crdGroups";
 import { resourceKindLabel } from "../lib/resourceKinds";
 import { ErrorBlock, Icons, Tooltip, resolveKindIcon } from "./ui";
 import { OpenClustersStrip } from "./OpenClustersStrip";
+import { CATEGORY_ORDER, groupKinds } from "../lib/kindOrder";
 
-const CATEGORY_ORDER: Category[] = [
-  "Workloads",
-  "Cluster",
-  "Network",
-  "Config",
-  "Storage",
-  "Access",
-  "Apps",
-  "CustomResources",
-];
 
 const W_COLLAPSED = 56;
 const W_OPEN = 220;
@@ -218,27 +209,7 @@ export function Rail({}: Props) {
     };
   }, [activeClusterKey, reconnectEpoch, setKinds, setKindClusters]);
 
-  const grouped = useMemo(() => {
-    const map = new Map<Category, ResourceKind[]>();
-    for (const k of kinds) {
-      const arr = map.get(k.category) ?? [];
-      arr.push(k);
-      map.set(k.category, arr);
-    }
-    // Dynamic CRD-derived kinds are already merged into `kinds` (spliced
-    // by the discovery effect below) — don't re-append them here. Just
-    // sort the CustomResources bucket so the dynamic entries appear in
-    // alphabetical order under the built-in CustomResourceDefinition row.
-    const cr = map.get("CustomResources");
-    if (cr && cr.length > 1) {
-      const builtin = cr.filter((k) => !k.id.startsWith("crd:"));
-      const dynamic = cr
-        .filter((k) => k.id.startsWith("crd:"))
-        .sort((a, b) => a.kind.localeCompare(b.kind));
-      map.set("CustomResources", [...builtin, ...dynamic]);
-    }
-    return map;
-  }, [kinds]);
+  const grouped = useMemo(() => groupKinds(kinds), [kinds]);
 
   // When pinned, the rail reserves the full open width so main content stops
   // beside it instead of underneath. Auto-hide and collapsed both keep the

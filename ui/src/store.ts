@@ -89,7 +89,81 @@ import type {
   ThemeOverrides,
 } from "./theme";
 
+import type { CompareTarget } from "./components/ComparePanel";
+import type { InspectTarget } from "./components/inspect";
+import type { ObserveTab, ObserveTarget } from "./components/LogPanel";
+
 type Status = "idle" | "loading" | "ready" | "error";
+
+/// The right-hand drawer a cluster tab is showing. One at a time; every
+/// variant is plain data so it can be parked in the tray and persisted.
+export type Drawer =
+  | ({ kind: "detail" } & DetailRef & {
+      /// Inner tab + scroll captured on minimise, re-applied when the panel
+      /// mounts fresh (after an app restart).
+      view?: DetailView;
+      /// This panel's own browser-style history (most recent last / first).
+      back?: DetailRef[];
+      forward?: DetailRef[];
+    })
+  | {
+      kind: "logs";
+      targets: ObserveTarget[];
+      initialTab?: ObserveTab;
+      defaultContainer?: string | null;
+    }
+  | { kind: "compare"; target: CompareTarget }
+  | { kind: "inspect"; target: InspectTarget };
+
+export type DetailView = { tab?: string; scrollTop?: number };
+
+/// One object a detail drawer can show.
+export type DetailRef = {
+  kindId: string;
+  clusterId: string;
+  uid: string;
+  namespace: string | null;
+  name: string;
+};
+
+export const DETAIL_HISTORY_CAP = 50;
+
+export function detailRef(d: DetailRef): DetailRef {
+  return { kindId: d.kindId, clusterId: d.clusterId, uid: d.uid, namespace: d.namespace, name: d.name };
+}
+
+/// A minimised drawer, parked in the right-edge tray. `id` is the drawer's
+/// instance id, kept across minimise/restore so its component stays mounted.
+export type TrayItem = { id: string; drawer: Drawer };
+
+export const TRAY_CAP = 12;
+
+/// Identity of a drawer's subject, so re-minimising the same object replaces
+/// its tray entry instead of duplicating it.
+export function drawerKey(d: Drawer): string {
+  switch (d.kind) {
+    case "detail":
+      return `detail|${d.clusterId}|${d.kindId}|${d.namespace ?? ""}|${d.name}`;
+    case "logs":
+      return `logs|${d.targets
+        .map((x) => `${x.clusterId}/${x.kindId}/${x.namespace}/${x.name}`)
+        .join(",")}`;
+    case "compare":
+      return `compare|${d.target.kindId}|${[d.target.a, d.target.b]
+        .map((x) => `${x.clusterId}/${x.namespace ?? ""}/${x.name}`)
+        .join(",")}`;
+    case "inspect":
+      return `inspect|${d.target.kindId}|${d.target.subjects.map((x) => x.sid).join(",")}`;
+  }
+}
+
+/// Park `d` in `tray`: replaces an entry for the same subject and moves it to
+/// the end; the oldest entries fall off past `TRAY_CAP`.
+export function trayWith(tray: TrayItem[], d: Drawer, id: string = crypto.randomUUID()): TrayItem[] {
+  const key = drawerKey(d);
+  const next = [...tray.filter((i) => drawerKey(i.drawer) !== key), { id, drawer: d }];
+  return next.slice(-TRAY_CAP);
+}
 
 export type DockTabKind = "terminal" | "yaml" | "chat";
 // Where the dock anchors. "bottom" is the original full-width strip that hosts
@@ -217,14 +291,12 @@ export type DetailEntry = {
 /// of the same names are the *live working copy* of the currently-active tab;
 /// inactive tabs keep their last-stashed copy in `ClusterTab.slice`. Keeping the
 /// top-level mirror means existing consumers (ResourceTable, DetailPanel, Dock,
-/// AppHeader) read `s.detailHistory` etc. unchanged — only `switchTab` and the
+/// AppHeader) read `s.selection` etc. unchanged — only `switchTab` and the
 /// Dock's cross-tab mount pool need to know about slices.
 export type ScopeSlice = {
   selectedKindId: string | null;
   selectedNamespaces: Set<string>;
   selection: Map<string, SelectionMeta>;
-  detailHistory: DetailEntry[];
-  detailIndex: number;
   pendingDetail: DetailEntry | null;
   tableFilter: string;
   filterEditing: boolean;
@@ -232,8 +304,20 @@ export type ScopeSlice = {
   focusedClusterId: string | null;
   kindClusters: Record<string, string[]>;
   dockTabs: DockTab[];
-  dockActiveId: string | null;
+  dockActive: Record<DockPlacement, string | null>;
   dockMin: Record<DockPlacement, boolean>;
+  drawer: Drawer | null;
+  drawerId: string | null;
+  tray: TrayItem[];
+  /// Table scroll offset per kind, saved when the tab's view unmounts.
+  tableScroll: Record<string, number>;
+};
+
+/// A tab's scope anchor (see `ClusterTab`).
+export type TabAnchors = {
+  selectedContext: string | null;
+  selectedVirtualContextId: string | null;
+  scopeExtras: string[];
 };
 
 /// One open cluster tab. The anchor (`selectedContext` xor
@@ -310,11 +394,14 @@ type AppState = {
   paletteOpen: boolean;
   nsModalOpen: boolean;
   settingsOpen: boolean;
-  /// A drawer owned by `ResourceTable` (row detail panel, per-row logs) is
-  /// open. App mounts the compare/observe/inspect drawers itself but cannot
-  /// see these two, and it needs to know: they close themselves on Esc, so
-  /// App must not ALSO consume that Esc and wipe the selection underneath.
-  rowDrawerOpen: boolean;
+  /// Live mirror of the active tab's drawer and tray (see `ScopeSlice`).
+  drawer: Drawer | null;
+  drawerId: string | null;
+  tray: TrayItem[];
+  tableScroll: Record<string, number>;
+  /// Every kind seen by discovery this session, by id. `kinds` follows the
+  /// active scope; a hidden tab resolves its selected CRD kind from here.
+  kindCache: Record<string, ResourceKind>;
   /// Pending deep-link target for the next time the Settings panel is
   /// open / re-opened. Consumed by the panel on mount, then cleared via
   /// `consumeSettingsTarget()` so re-opening the panel without a new
@@ -327,7 +414,9 @@ type AppState = {
   // Active tab id is global (not per-placement) — only one tab is "focused"
   // at a time across the whole UI, matching how a single editor cursor
   // semantics works in IDE-style apps.
-  dockActiveId: string | null;
+  // Active tab per placement — the two docks are independent, so focusing a
+  // terminal must not change which chat the right dock shows.
+  dockActive: Record<DockPlacement, string | null>;
   // Per-placement minimise state. Minimising the bottom strip leaves the
   // right chat panel intact and vice versa.
   dockMin: Record<DockPlacement, boolean>;
@@ -384,13 +473,6 @@ type AppState = {
   notifications: Notification[];
   notificationsSeenAt: number;
   notificationsOpen: boolean;
-
-  // Detail-panel browser-style history. Each link click in the detail panel
-  // appends to this stack at `detailIndex+1` (truncating any forward branch),
-  // mirroring browser back/forward. Cleared on rail kind-switch, cluster
-  // switch, and explicit panel close — never persisted across those.
-  detailHistory: DetailEntry[];
-  detailIndex: number;
 
   // Per-(cluster, kind) table view state. Hydrated once at startup from
   // `<config>/table_views.json`; the table writes back through
@@ -559,7 +641,28 @@ type AppState = {
 
   setSelectedNamespaces: (ns: Set<string>) => void;
 
-  setRowDrawerOpen: (v: boolean) => void;
+  openDrawer: (d: Drawer) => void;
+  closeDrawer: () => void;
+  /// Park the open drawer in the tray. `view` records a detail's inner
+  /// tab/scroll so a later restore lands in the same place.
+  minimizeDrawer: (view?: DetailView) => void;
+  /// Write slice fields to a tab: the mirror when it's active (or null), its
+  /// stashed slice otherwise.
+  patchTab: (tabId: string | null, patch: Partial<ScopeSlice>) => void;
+  /// Record where a detail drawer instance was (inner tab, scroll) as it
+  /// unmounts, so it reopens there. Ignored if the instance now shows a
+  /// different object (`key`) or is gone.
+  saveDrawerView: (tabId: string | null, instanceId: string, key: string, view: DetailView) => void;
+  /// Reopen a tray item; the drawer showing now is parked in its place.
+  restoreTrayItem: (id: string) => void;
+  closeTrayItem: (id: string) => void;
+  closeAllTrayItems: () => void;
+  /// Apply restored per-tab dock/drawer state (from session.json) to the
+  /// open tabs it belongs to. Tabs that already have dock tabs are left
+  /// alone — the operator got there first.
+  hydrateSession: (
+    slices: Record<string, Pick<ScopeSlice, "dockTabs" | "dockActive" | "dockMin" | "drawer" | "tray">>,
+  ) => void;
   openPalette: () => void;
   closePalette: () => void;
   setTableFilter: (q: string) => void;
@@ -638,15 +741,11 @@ type AppState = {
     name: string,
     clusterId?: string | null,
   ) => void;
-  pushDetailEntry: (
-    kindId: string,
-    namespace: string | null,
-    name: string,
-    clusterId?: string | null,
-  ) => void;
-  detailBack: () => void;
-  detailForward: () => void;
-  closeDetail: () => void;
+  /// Follow a link inside the open detail drawer: its own history grows,
+  /// the table is left alone.
+  navigateDrawerDetail: (to: DetailRef) => void;
+  drawerDetailBack: () => void;
+  drawerDetailForward: () => void;
   consumePendingDetail: () => void;
 
   patchSettings: (patch: Partial<AppState["settings"]>) => void;
@@ -668,8 +767,6 @@ function emptyScopeSlice(): ScopeSlice {
     selectedKindId: null,
     selectedNamespaces: new Set<string>(),
     selection: new Map<string, SelectionMeta>(),
-    detailHistory: [],
-    detailIndex: -1,
     pendingDetail: null,
     tableFilter: "",
     filterEditing: false,
@@ -678,8 +775,12 @@ function emptyScopeSlice(): ScopeSlice {
     // re-discovering CRDs on the new scope's members.
     kindClusters: {},
     dockTabs: [],
-    dockActiveId: null,
+    dockActive: { bottom: null, right: null },
     dockMin: { bottom: false, right: false },
+    drawer: null,
+    drawerId: null,
+    tray: [],
+    tableScroll: {},
   };
 }
 
@@ -690,16 +791,18 @@ function captureScopeSlice(s: AppState): ScopeSlice {
     selectedKindId: s.selectedKindId,
     selectedNamespaces: s.selectedNamespaces,
     selection: s.selection,
-    detailHistory: s.detailHistory,
-    detailIndex: s.detailIndex,
     pendingDetail: s.pendingDetail,
     tableFilter: s.tableFilter,
     filterEditing: s.filterEditing,
     focusedClusterId: s.focusedClusterId,
     kindClusters: s.kindClusters,
     dockTabs: s.dockTabs,
-    dockActiveId: s.dockActiveId,
+    dockActive: s.dockActive,
     dockMin: s.dockMin,
+    drawer: s.drawer,
+    drawerId: s.drawerId,
+    tray: s.tray,
+    tableScroll: s.tableScroll,
   };
 }
 
@@ -811,6 +914,33 @@ export function selectClustersToDisconnect(
   return mine.filter((c) => !othersUse.has(c));
 }
 
+function sameJson(a: unknown, b: unknown): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
+
+export function placementOf(t: DockTab): DockPlacement {
+  return t.placement ?? "bottom";
+}
+
+type DockSliceFields = Pick<ScopeSlice, "dockTabs" | "dockActive" | "dockMin">;
+
+/// Remove `ids` from a dock slice. A placement whose active tab closed falls
+/// back to its last survivor; an emptied placement drops its minimised flag so
+/// the next tab added there opens visible.
+export function removeDockTabs(s: DockSliceFields, ids: string[]): DockSliceFields {
+  const dockTabs = s.dockTabs.filter((t) => !ids.includes(t.id));
+  const dockActive = { ...s.dockActive };
+  const dockMin = { ...s.dockMin };
+  for (const p of ["bottom", "right"] as const) {
+    const left = dockTabs.filter((t) => placementOf(t) === p);
+    if (!left.some((t) => t.id === dockActive[p])) {
+      dockActive[p] = left[left.length - 1]?.id ?? null;
+    }
+    if (left.length === 0) dockMin[p] = false;
+  }
+  return { dockTabs, dockActive, dockMin };
+}
+
 /// Apply `fn` to the dock tab with `id` wherever it lives — the active tab's
 /// live top-level `dockTabs`, or a background tab's stashed slice. A hidden
 /// tab's terminal/chat may still patch its own state (e.g. a chat streaming in
@@ -884,12 +1014,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   paletteOpen: false,
   nsModalOpen: false,
   settingsOpen: false,
-  rowDrawerOpen: false,
+  drawer: null,
+  drawerId: null,
+  tray: [],
+  tableScroll: {},
+  kindCache: {},
   settingsTarget: null,
   addMenuOpen: false,
 
   dockTabs: [],
-  dockActiveId: null,
+  dockActive: { bottom: null, right: null },
   dockMin: { bottom: false, right: false },
   dockSize: { bottom: null, right: null },
 
@@ -907,8 +1041,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   notificationsSeenAt: Date.now(),
   notificationsOpen: false,
 
-  detailHistory: [],
-  detailIndex: -1,
 
   metricsByCluster: {},
 
@@ -952,31 +1084,45 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ contextsStatus: "loading", contextsError: null }),
   setContexts: (cs) =>
     set((s) => {
-      // An active virtual context stays selected while at least one member
-      // still resolves against the refreshed context list — a temporarily
-      // missing kubeconfig shouldn't kick the operator back to the fleet.
-      const activeVctx = s.selectedVirtualContextId
-        ? s.virtualContexts.find((v) => v.id === s.selectedVirtualContextId)
-        : undefined;
-      const vctxAlive =
-        !!activeVctx && activeVctx.members.some((m) => cs.some((c) => c.id === m));
-      const selectedContext =
-        s.selectedContext && cs.some((c) => c.id === s.selectedContext)
-          ? s.selectedContext
-          : null;
-      // Ad-hoc extras only make sense while their anchor scope survives;
-      // individually, an extra whose context vanished is pruned.
-      const anchorAlive = vctxAlive || selectedContext !== null;
-      return {
-        contexts: cs,
-        contextsStatus: "ready",
-        contextsError: null,
-        selectedContext,
-        selectedVirtualContextId: vctxAlive ? s.selectedVirtualContextId : null,
-        scopeExtras: anchorAlive
-          ? s.scopeExtras.filter((id) => cs.some((c) => c.id === id))
-          : [],
+      const alive = (id: string) => cs.some((c) => c.id === id);
+      // A tab dies when its anchor no longer resolves: a context that left
+      // the kubeconfig, or a virtual context with no surviving member. An
+      // empty list is treated as transient (kubeconfig mid-rewrite) and
+      // prunes nothing; a tab holding terminals or chats is never closed
+      // here — that goes through the confirm path.
+      const tabAlive = (
+        tab: Pick<ClusterTab, "selectedContext" | "selectedVirtualContextId">,
+        dockTabs: DockTab[],
+      ) => {
+        if (cs.length === 0 || dockTabs.length > 0) return true;
+        if (tab.selectedVirtualContextId) {
+          const v = s.virtualContexts.find((vc) => vc.id === tab.selectedVirtualContextId);
+          return !!v && v.members.some(alive);
+        }
+        return tab.selectedContext === null || alive(tab.selectedContext);
       };
+      const pruneExtras = (extras: string[]) =>
+        extras.every(alive) ? extras : extras.filter(alive);
+      const stashed = stashActive(s).map((tab) => {
+        const scopeExtras = pruneExtras(tab.scopeExtras);
+        return scopeExtras === tab.scopeExtras ? tab : { ...tab, scopeExtras };
+      });
+      const dead = stashed.filter((tab) => !tabAlive(tab, tab.slice.dockTabs)).map((tab) => tab.id);
+      const mirror = { selectedContext: s.selectedContext, selectedVirtualContextId: s.selectedVirtualContextId };
+      const mirrorAlive = tabAlive(mirror, s.dockTabs);
+      const base = {
+        contexts: cs,
+        contextsStatus: "ready" as const,
+        contextsError: null,
+        // Mirror without a tab (legacy / transitional state) follows the same rule.
+        selectedContext: mirrorAlive ? s.selectedContext : null,
+        selectedVirtualContextId: mirrorAlive ? s.selectedVirtualContextId : null,
+        scopeExtras: mirrorAlive ? pruneExtras(s.scopeExtras) : [],
+      };
+      if (s.activeTabId === null) {
+        return { ...base, openTabs: stashed.filter((tab) => !dead.includes(tab.id)) };
+      }
+      return { ...base, ...focusAfterClose(s, stashed, dead) };
     }),
   setContextsError: (err) =>
     set({ contextsStatus: "error", contextsError: err }),
@@ -1136,8 +1282,20 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setKindsLoading: () => set({ kindsStatus: "loading", kindsError: null }),
   setKinds: (ks, discoveryPending = false) =>
-    set((s) => ({
-      kinds: ks,
+    set((s) => {
+      // Reuse the cached object for an unchanged kind, so a rediscovery on
+      // tab switch doesn't hand every table a "new" kind.
+      const stable = ks.map((k) => {
+        const prev = s.kindCache[k.id];
+        return prev && sameJson(prev, k) ? prev : k;
+      });
+      const kindsSame =
+        stable.length === s.kinds.length && stable.every((k, i) => k === s.kinds[i]);
+      return {
+      kinds: kindsSame ? s.kinds : stable,
+      kindCache: stable.every((k) => s.kindCache[k.id] === k)
+        ? s.kindCache
+        : { ...s.kindCache, ...Object.fromEntries(stable.map((k) => [k.id, k])) },
       kindsStatus: "ready",
       kindsError: null,
       selectedKindId:
@@ -1146,17 +1304,17 @@ export const useAppStore = create<AppState>((set, get) => ({
           (discoveryPending && isDynamicKindId(s.selectedKindId)))
           ? s.selectedKindId
           : ks[0]?.id ?? null,
-    })),
+      };
+    }),
   setKindsError: (err) => set({ kindsStatus: "error", kindsError: err }),
-  setKindClusters: (m) => set({ kindClusters: m }),
+  // Discovery republishes on every scope change; unchanged content keeps
+  // the old reference so tables keyed on it don't resubscribe.
+  setKindClusters: (m) =>
+    set((s) => (sameJson(s.kindClusters, m) ? {} : { kindClusters: m })),
   selectKind: (id) =>
     set({
       selectedKindId: id,
       selection: new Map<string, SelectionMeta>(),
-      // Explicit kind switch via the rail / palette is a context change —
-      // back/forward history from the previous flow no longer makes sense.
-      detailHistory: [],
-      detailIndex: -1,
       pendingDetail: null,
       // `tableFilter` deliberately survives kind switches. Same operator
       // intent often spans kinds ("find anything called 'auth'") and the
@@ -1230,8 +1388,83 @@ export const useAppStore = create<AppState>((set, get) => ({
       selection: new Map<string, SelectionMeta>(),
     }),
 
-  setRowDrawerOpen: (v: boolean) =>
-    set((st) => (st.rowDrawerOpen === v ? st : { rowDrawerOpen: v })),
+  openDrawer: (d) =>
+    set((s) =>
+      // Same instance for the same subject, and for a detail replacing a
+      // detail of the same kind (clicking the next row keeps the panel's
+      // inner tab, as it always has).
+      s.drawer &&
+      (drawerKey(s.drawer) === drawerKey(d) ||
+        (s.drawer.kind === "detail" && d.kind === "detail" && s.drawer.kindId === d.kindId))
+        ? { drawer: d }
+        : { drawer: d, drawerId: crypto.randomUUID() },
+    ),
+  closeDrawer: () => set({ drawer: null, drawerId: null }),
+  minimizeDrawer: (view) =>
+    set((s) => {
+      if (!s.drawer) return {};
+      const d = view && s.drawer.kind === "detail" ? { ...s.drawer, view } : s.drawer;
+      return { drawer: null, drawerId: null, tray: trayWith(s.tray, d, s.drawerId ?? undefined) };
+    }),
+  saveDrawerView: (tabId, instanceId, key, view) => {
+    const s = get();
+    const own = tabId === null || tabId === s.activeTabId ? s : s.openTabs.find((t) => t.id === tabId)?.slice;
+    if (!own) return;
+    const withView = (d: Drawer): Drawer | null =>
+      d.kind === "detail" && drawerKey(d) === key ? { ...d, view } : null;
+    if (own.drawerId === instanceId && own.drawer) {
+      const d = withView(own.drawer);
+      if (d) get().patchTab(tabId, { drawer: d });
+      return;
+    }
+    const i = own.tray.findIndex((t) => t.id === instanceId);
+    const d = i >= 0 ? withView(own.tray[i]!.drawer) : null;
+    if (d) get().patchTab(tabId, { tray: own.tray.map((t, j) => (j === i ? { ...t, drawer: d } : t)) });
+  },
+  patchTab: (tabId, patch) =>
+    set((s) => {
+      if (tabId === null || tabId === s.activeTabId) return patch;
+      return {
+        openTabs: s.openTabs.map((t) =>
+          t.id === tabId ? { ...t, slice: { ...t.slice, ...patch } } : t,
+        ),
+      };
+    }),
+  restoreTrayItem: (id) => {
+    const s = get();
+    const item = s.tray.find((i) => i.id === id);
+    if (!item) return;
+    const rest = s.tray.filter((i) => i.id !== id);
+    const d = item.drawer;
+    // Same instance id: the parked component is already mounted, so this
+    // only swaps visibility.
+    set({
+      tray: s.drawer ? trayWith(rest, s.drawer, s.drawerId ?? undefined) : rest,
+      drawer: d,
+      drawerId: item.id,
+    });
+  },
+  closeTrayItem: (id) => set((s) => ({ tray: s.tray.filter((i) => i.id !== id) })),
+  closeAllTrayItems: () => set({ tray: [] }),
+  hydrateSession: (slices) =>
+    set((s) => {
+      const fresh = (sl: Pick<ScopeSlice, "dockTabs" | "drawer" | "tray">) =>
+        sl.dockTabs.length === 0 && sl.drawer === null && sl.tray.length === 0;
+      // A drawer needs an instance id, or minimising it would remount it.
+      const withId = (r: (typeof slices)[string]) => ({
+        ...r,
+        drawerId: r.drawer ? crypto.randomUUID() : null,
+      });
+      const active = s.activeTabId ? slices[s.activeTabId] : undefined;
+      return {
+        openTabs: s.openTabs.map((tab) => {
+          const r = slices[tab.id];
+          if (!r || tab.id === s.activeTabId || !fresh(tab.slice)) return tab;
+          return { ...tab, slice: { ...tab.slice, ...withId(r) } };
+        }),
+        ...(active && fresh(s) ? withId(active) : {}),
+      };
+    }),
   openPalette: () => set({ paletteOpen: true }),
   closePalette: () => set({ paletteOpen: false }),
   setTableFilter: (q) => set({ tableFilter: q }),
@@ -1269,77 +1502,46 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   addDockTab: (tab) =>
     set((s) => {
-      const placement = tab.placement ?? "bottom";
+      const placement = placementOf(tab);
       return {
         dockTabs: [...s.dockTabs, tab],
-        dockActiveId: tab.id,
-        // Restoring a minimised dock when a new tab is added applies only
-        // to the placement that received the tab — leave the other one alone.
+        dockActive: { ...s.dockActive, [placement]: tab.id },
+        // Only the placement that received the tab is restored.
         dockMin: { ...s.dockMin, [placement]: false },
         addMenuOpen: false,
       };
     }),
-  closeDockTab: (id) => {
-    const s = get();
-    // Defensive: a dock tab owned by a backgrounded cluster tab (closed e.g.
-    // via a background lifecycle) lives in that tab's slice, not the live
-    // top-level. Remove it there and fix that slice's active id.
-    if (!s.dockTabs.some((t) => t.id === id)) {
-      set({
-        openTabs: s.openTabs.map((tab) => {
-          if (!tab.slice.dockTabs.some((t) => t.id === id)) return tab;
-          const rest = tab.slice.dockTabs.filter((t) => t.id !== id);
-          return {
-            ...tab,
-            slice: {
-              ...tab.slice,
-              dockTabs: rest,
-              dockActiveId:
-                tab.slice.dockActiveId === id
-                  ? (rest[rest.length - 1]?.id ?? null)
-                  : tab.slice.dockActiveId,
-            },
-          };
-        }),
-      });
-      return;
-    }
-    const closing = s.dockTabs.find((t) => t.id === id);
-    const closingPlacement = closing?.placement ?? "bottom";
-    const next = s.dockTabs.filter((t) => t.id !== id);
-    // When the closed tab was active, prefer the next tab in the same
-    // placement so focus stays where the operator was working.
-    const samePlacementSurvivor = [...next]
-      .reverse()
-      .find((t) => (t.placement ?? "bottom") === closingPlacement);
-    const last = next[next.length - 1];
-    set({
-      dockTabs: next,
-      dockActiveId:
-        next.length === 0
-          ? null
-          : s.dockActiveId === id
-            ? (samePlacementSurvivor?.id ?? last?.id ?? null)
-            : s.dockActiveId,
-    });
-  },
+  closeDockTab: (id) =>
+    set((s) => {
+      if (s.dockTabs.some((t) => t.id === id)) return removeDockTabs(s, [id]);
+      // A tab owned by a backgrounded cluster tab lives in that tab's slice.
+      return {
+        openTabs: s.openTabs.map((tab) =>
+          tab.slice.dockTabs.some((t) => t.id === id)
+            ? { ...tab, slice: { ...tab.slice, ...removeDockTabs(tab.slice, [id]) } }
+            : tab,
+        ),
+      };
+    }),
   closeAllDockTabs: () =>
     set({
       dockTabs: [],
-      dockActiveId: null,
+      dockActive: { bottom: null, right: null },
       dockMin: { bottom: false, right: false },
     }),
   closeDockTabsByPlacement: (placement) =>
+    set((s) =>
+      removeDockTabs(
+        s,
+        s.dockTabs.filter((t) => placementOf(t) === placement).map((t) => t.id),
+      ),
+    ),
+  setDockActiveId: (id) =>
     set((s) => {
-      const next = s.dockTabs.filter((t) => (t.placement ?? "bottom") !== placement);
-      const stillActive = next.some((t) => t.id === s.dockActiveId);
-      return {
-        dockTabs: next,
-        dockActiveId: stillActive ? s.dockActiveId : (next[next.length - 1]?.id ?? null),
-        dockMin: { ...s.dockMin, [placement]: false },
-      };
+      const tab = s.dockTabs.find((t) => t.id === id);
+      if (!tab) return {};
+      return { dockActive: { ...s.dockActive, [placementOf(tab)]: id } };
     }),
-  setDockActiveId: (id) => set({ dockActiveId: id }),
   setDockMin: (placement, min) =>
     set((s) => ({ dockMin: { ...s.dockMin, [placement]: min } })),
   setDockSize: (placement, size) =>
@@ -1548,8 +1750,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? prefs.ui.selected_kind_id
         : null;
 
-      // Reconstruct the open cluster tabs (refs only — live slices like
-      // terminals/chats can't survive a restart). "fleet" ignores the saved
+      // Reconstruct the open cluster tabs (refs only — dock tabs and drawers
+      // come from session.json via `hydrateSession`). "fleet" ignores the saved
       // set; "latest_cluster" keeps only the active tab; "latest_view" reopens
       // everything. A tab whose anchor no longer resolves is dropped (lenient
       // while the kubeconfig list is still loading — `s.contexts` empty).
@@ -1594,7 +1796,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         return [
           {
-            id: crypto.randomUUID(),
+            // Reuse the saved active tab's id so its session.json entry
+            // (dock tabs, drawers) reattaches.
+            id: prefs.ui.active_tab || crypto.randomUUID(),
             selectedContext,
             selectedVirtualContextId,
             scopeExtras,
@@ -1637,26 +1841,41 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       const activeTab = openTabs.find((tb) => tb.id === activeTabId) ?? null;
 
+      // A tab opened while prefs were still loading wins: keep it active and
+      // append only the restored tabs it doesn't duplicate.
+      const sameAnchor = (a: ClusterTab, b: ClusterTab) =>
+        a.selectedContext === b.selectedContext &&
+        a.selectedVirtualContextId === b.selectedVirtualContextId;
+      const tabState: Partial<AppState> =
+        s.openTabs.length > 0
+          ? {
+              openTabs: [
+                ...stashActive(s),
+                ...openTabs.filter((tb) => !s.openTabs.some((o) => sameAnchor(o, tb))),
+              ],
+            }
+          : {
+              openTabs,
+              activeTabId,
+              // The top-level anchor mirror follows the active tab (which
+              // `active_tab` chose), not the legacy single-selection fields.
+              selectedVirtualContextId: activeTab ? activeTab.selectedVirtualContextId : null,
+              selectedContext: activeTab ? activeTab.selectedContext : null,
+              scopeExtras: activeTab ? activeTab.scopeExtras : [],
+              selectedKindId: activeTab ? activeTab.slice.selectedKindId : null,
+              selectedNamespaces: activeTab
+                ? activeTab.slice.selectedNamespaces
+                : new Set<string>(),
+            };
+
       return {
-      openTabs,
-      activeTabId,
+      ...tabState,
       themeMode,
       themeId,
       paletteId,
       themeOverrides,
       railMode: prefs.ui.rail_mode,
       virtualContexts,
-      // The top-level anchor mirror follows the active tab (which `active_tab`
-      // chose), not the legacy single-selection fields.
-      selectedVirtualContextId: activeTab
-        ? activeTab.selectedVirtualContextId
-        : null,
-      selectedContext: activeTab ? activeTab.selectedContext : null,
-      scopeExtras: activeTab ? activeTab.scopeExtras : [],
-      selectedKindId: activeTab ? activeTab.slice.selectedKindId : null,
-      selectedNamespaces: activeTab
-        ? activeTab.slice.selectedNamespaces
-        : new Set<string>(),
       dockSize: {
         right: prefs.ui.dock_size_right,
         bottom: prefs.ui.dock_size_bottom,
@@ -1749,86 +1968,49 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ notifications: [], notificationsSeenAt: Date.now() }),
 
   navigateToDetail: (kindId, namespace, name, clusterId = null) =>
+    set((s) => ({
+      // Switch kind in the same tick so the table re-mounts already knowing
+      // it should open this object's detail.
+      selectedKindId: kindId,
+      selection: new Map<string, SelectionMeta>(),
+      pendingDetail: { clusterId, kindId, namespace, name },
+      selectedNamespaces: namespacesIncluding(s.selectedNamespaces, namespace),
+    })),
+  navigateDrawerDetail: (to) =>
     set((s) => {
-      const entry: DetailEntry = { clusterId, kindId, namespace, name };
-      // Browser semantics: going back then sideways drops the forward branch.
-      const head = s.detailHistory.slice(0, s.detailIndex + 1);
-      const last = head[head.length - 1];
-      const dup =
-        !!last &&
-        last.kindId === entry.kindId &&
-        last.namespace === entry.namespace &&
-        last.name === entry.name &&
-        last.clusterId === entry.clusterId;
-      const nextHistory = dup ? head : [...head, entry];
+      const d = s.drawer;
+      if (d?.kind !== "detail") return {};
+      const back = [...(d.back ?? []), detailRef(d)].slice(-DETAIL_HISTORY_CAP);
+      return { drawer: { kind: "detail", ...to, back, forward: [] } };
+    }),
+  drawerDetailBack: () =>
+    set((s) => {
+      const d = s.drawer;
+      if (d?.kind !== "detail" || !d.back?.length) return {};
+      const prev = d.back[d.back.length - 1]!;
       return {
-        // Switch kind in the same tick so the table re-mounts already knowing
-        // it should auto-open this object's detail.
-        selectedKindId: kindId,
-        selection: new Map<string, SelectionMeta>(),
-        pendingDetail: entry,
-        detailHistory: nextHistory,
-        detailIndex: nextHistory.length - 1,
-        selectedNamespaces: namespacesIncluding(
-          s.selectedNamespaces,
-          namespace,
-        ),
+        drawer: {
+          kind: "detail",
+          ...prev,
+          back: d.back.slice(0, -1),
+          forward: [detailRef(d), ...(d.forward ?? [])],
+        },
       };
     }),
-  pushDetailEntry: (kindId, namespace, name, clusterId = null) =>
+  drawerDetailForward: () =>
     set((s) => {
-      const entry: DetailEntry = { clusterId, kindId, namespace, name };
-      const head = s.detailHistory.slice(0, s.detailIndex + 1);
-      const last = head[head.length - 1];
-      if (
-        last &&
-        last.kindId === entry.kindId &&
-        last.namespace === entry.namespace &&
-        last.name === entry.name &&
-        last.clusterId === entry.clusterId
-      ) {
-        return {};
-      }
-      const nextHistory = [...head, entry];
+      const d = s.drawer;
+      if (d?.kind !== "detail" || !d.forward?.length) return {};
+      const next = d.forward[0]!;
       return {
-        detailHistory: nextHistory,
-        detailIndex: nextHistory.length - 1,
+        drawer: {
+          kind: "detail",
+          ...next,
+          back: [...(d.back ?? []), detailRef(d)],
+          forward: d.forward.slice(1),
+        },
       };
     }),
-  detailBack: () =>
-    set((s) => {
-      if (s.detailIndex <= 0) return {};
-      const i = s.detailIndex - 1;
-      const e = s.detailHistory[i]!;
-      return {
-        detailIndex: i,
-        selectedKindId: e.kindId,
-        selection: new Map<string, SelectionMeta>(),
-        pendingDetail: { ...e },
-        selectedNamespaces: namespacesIncluding(
-          s.selectedNamespaces,
-          e.namespace,
-        ),
-      };
-    }),
-  detailForward: () =>
-    set((s) => {
-      if (s.detailIndex >= s.detailHistory.length - 1) return {};
-      const i = s.detailIndex + 1;
-      const e = s.detailHistory[i]!;
-      return {
-        detailIndex: i,
-        selectedKindId: e.kindId,
-        selection: new Map<string, SelectionMeta>(),
-        pendingDetail: { ...e },
-        selectedNamespaces: namespacesIncluding(
-          s.selectedNamespaces,
-          e.namespace,
-        ),
-      };
-    }),
-  closeDetail: () =>
-    set({ detailHistory: [], detailIndex: -1, pendingDetail: null }),
   consumePendingDetail: () => set({ pendingDetail: null }),
 
   patchSettings: (patch) =>

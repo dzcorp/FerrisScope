@@ -78,8 +78,6 @@ afterEach(() => {
       selectedContext: null,
       scopeExtras: [],
       pendingDetail: null,
-      detailHistory: [],
-      detailIndex: -1,
     });
   });
 });

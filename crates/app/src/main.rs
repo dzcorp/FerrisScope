@@ -264,6 +264,8 @@ fn main() {
             commands::set_table_view,
             commands::get_prefs,
             commands::set_prefs,
+            commands::get_session,
+            commands::set_session,
             commands::terminal_open_shell,
             commands::cloud_login_open,
             commands::terminal_open_exec,

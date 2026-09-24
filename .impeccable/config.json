@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "layout-transition",
+        "value": "*",
+        "files": [
+          "ui/src/components/PanelTray.tsx"
+        ],
+        "createdAt": "2026-09-24T10:55:58.662Z",
+        "reason": "Claude: mirrors the design reference rail peek (design/hv2-rail.jsx:41 'width .18s cubic-bezier(.2,.7,.2,1)'); small fixed-position element, layout cost is local"
+      }
+    ]
+  }
+}

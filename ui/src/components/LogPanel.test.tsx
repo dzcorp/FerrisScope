@@ -175,6 +175,26 @@ describe("LogPanel target resolution", () => {
     expect(utils.getByText("container: app")).toBeInTheDocument();
   });
 
+  it("outside click hides it to the tray instead of closing", async () => {
+    mockBackend({});
+    const onMinimize = vi.fn();
+    const onClose = vi.fn();
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <LogPanel
+          mode="dark"
+          targets={[podTarget("api-0", ["app"])]}
+          onClose={onClose}
+          onMinimize={onMinimize}
+        />,
+      );
+    });
+    fireEvent.click(utils.getByTestId("drawer-scrim"));
+    expect(onMinimize).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("single pod: 'Previous' toggle restarts the stream with previous:true and shows a banner", async () => {
     const m = mockBackend({});
     let utils!: ReturnType<typeof render>;

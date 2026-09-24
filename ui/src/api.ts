@@ -912,6 +912,9 @@ export const api = {
   // writes back through setPrefs.
   getPrefs: () => invoke<Prefs>("get_prefs"),
   setPrefs: (prefs: Prefs) => invoke<void>("set_prefs", { prefs }),
+  // Opaque per-tab UI snapshot (lib/session.ts owns the shape).
+  getSession: () => invoke<unknown>("get_session"),
+  setSession: (session: unknown) => invoke<void>("set_session", { session }),
 
   // ── Port forwarding ────────────────────────────────────────────────────
   // Bind a local TCP listener bridged to a pod's portforward subresource.

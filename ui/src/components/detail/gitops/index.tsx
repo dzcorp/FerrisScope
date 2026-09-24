@@ -57,6 +57,7 @@ import { ArgoHistory, ArgoOverview, AutoSyncControl, RollbackDialog, SyncResults
 import { FluxHistory } from "./flux";
 import { SyncDialog, resourceKey } from "./SyncDialog";
 import { useLiveStatus } from "./useLiveStatus";
+import { useTabSlice } from "../../../lib/tabScope";
 
 export { useGitOps, type GitOpsController } from "./useGitOps";
 
@@ -452,7 +453,7 @@ export function useNavigable(
   onNavigate?: DetailNavigate,
 ): boolean {
   const kinds = useAppStore((s) => s.kinds);
-  const kindClusters = useAppStore((s) => s.kindClusters);
+  const kindClusters = useTabSlice((v) => v.kindClusters);
   if (!reference?.local || !onNavigate) return false;
   const target = resolveResourceKind(
     kinds,
@@ -747,7 +748,7 @@ export function GitOpsActions({
   const reconcileRef = useRef<HTMLButtonElement | null>(null);
   const [menu, setMenu] = useState<MenuState>(null);
   const kinds = useAppStore((s) => s.kinds);
-  const kindClusters = useAppStore((s) => s.kindClusters);
+  const kindClusters = useTabSlice((v) => v.kindClusters);
   if (ctl.state.kind !== "ready") return null;
   const detail = ctl.state.detail;
   const actions = detail.actions;

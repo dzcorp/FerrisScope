@@ -26,6 +26,8 @@ import {
   type Tokens,
 } from "../theme";
 import { Btn, ErrorBlock, IconBtn, Icons, LoadingLine } from "./ui";
+import { useEscLayer } from "../lib/escStack";
+import { useDrawerEdge } from "../lib/drawerEdge";
 
 export type CompareSide = {
   clusterId: string;
@@ -107,9 +109,10 @@ type Props = {
   mode: ThemeMode;
   target: CompareTarget;
   onClose: () => void;
+  onMinimize?: () => void;
 };
 
-export function ComparePanel({ mode, target, onClose }: Props) {
+export function ComparePanel({ mode, target, onClose, onMinimize }: Props) {
   const resolved = useResolvedTheme();
   const t = resolved.tokens;
   const monoFont = resolved.typography.fontMono;
@@ -124,13 +127,10 @@ export function ComparePanel({ mode, target, onClose }: Props) {
   const leftState = swapped ? bState : aState;
   const rightState = swapped ? aState : bState;
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Outside click and Esc park the panel in the tray; only × closes it.
+  const hide = onMinimize ?? onClose;
+  useEscLayer(true, hide);
+  useDrawerEdge("min(1200px, 94vw)");
 
   const loading =
     leftState.status === "loading" || rightState.status === "loading";
@@ -144,7 +144,8 @@ export function ComparePanel({ mode, target, onClose }: Props) {
   return (
     <>
       <div
-        onClick={onClose}
+        data-testid="drawer-scrim"
+        onClick={hide}
         style={{
           position: "fixed",
           top: "var(--fs-titlebar-h, 0px)",
@@ -222,7 +223,7 @@ export function ComparePanel({ mode, target, onClose }: Props) {
           >
             ⇄ Swap
           </Btn>
-          <IconBtn t={t} size="lg" title="Close (Esc)" onClick={onClose}>
+          <IconBtn t={t} size="lg" title="Close" onClick={onClose}>
             {Icons.close}
           </IconBtn>
         </header>

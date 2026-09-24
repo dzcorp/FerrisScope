@@ -34,7 +34,7 @@ import {
   hexWithAlpha,
 } from "../theme";
 import { Btn, ErrorBlock, IconBtn, Icons, Select } from "./ui";
-import { MinimizedChatPill } from "./MinimizedChatPill";
+import { closeDockTabs } from "../lib/dockClose";
 import { api } from "../api";
 import type { DocApplyResult } from "../types";
 import { IS_WINDOWS, latinLetter } from "../lib/keyboard";
@@ -148,6 +148,14 @@ export function makeChatTab(
   };
 }
 
+/// First-launch size before the operator drags: width for the right dock,
+/// height for the bottom one.
+export function dockDefaultSize(placement: DockPlacement): number {
+  return placement === "right"
+    ? Math.max(320, Math.min(480, window.innerWidth - 280))
+    : Math.max(180, Math.min(320, window.innerHeight - 200));
+}
+
 type Props = {
   mode: ThemeMode;
   clusterName: string;
@@ -186,7 +194,7 @@ export function Dock({
   // bodies reconcile by key and never remount, keeping PTYs/chat channels live.
   const isLive = useAppStore((s) => s.activeTabId === clusterTabId);
   const liveTabs = useAppStore((s) => s.dockTabs);
-  const liveActive = useAppStore((s) => s.dockActiveId);
+  const liveActive = useAppStore((s) => s.dockActive[placement]);
   const liveMin = useAppStore((s) => s.dockMin);
   const slice = useAppStore((s) =>
     s.activeTabId === clusterTabId
@@ -194,14 +202,12 @@ export function Dock({
       : (s.openTabs.find((tt) => tt.id === clusterTabId)?.slice ?? null),
   );
   const allTabs = isLive ? liveTabs : (slice?.dockTabs ?? []);
-  const activeTabId = isLive ? liveActive : (slice?.dockActiveId ?? null);
+  const activeTabId = isLive ? liveActive : (slice?.dockActive[placement] ?? null);
   const dockMin = isLive
     ? liveMin
     : (slice?.dockMin ?? { bottom: false, right: false });
   const setDockMin = useAppStore((s) => s.setDockMin);
   const setActiveId = useAppStore((s) => s.setDockActiveId);
-  const closeTab = useAppStore((s) => s.closeDockTab);
-  const closeAllPlacement = useAppStore((s) => s.closeDockTabsByPlacement);
   const addTab = useAppStore((s) => s.addDockTab);
   const patchState = useAppStore((s) => s.patchDockTabState);
 
@@ -220,9 +226,7 @@ export function Dock({
   // looks reasonable on every screen size.
   const persistedSize = useAppStore((s) => s.dockSize[placement]);
   const setPersistedSize = useAppStore((s) => s.setDockSize);
-  const defaultSize = horizontal
-    ? Math.max(320, Math.min(480, window.innerWidth - 280))
-    : Math.max(180, Math.min(320, window.innerHeight - 200));
+  const defaultSize = dockDefaultSize(placement);
   const size = persistedSize ?? defaultSize;
   const onDragStart = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -247,27 +251,19 @@ export function Dock({
 
   if (tabs.length === 0) return null;
 
-  // The right-placement minimised strip parks against the right edge as a
-  // narrow vertical pill so it doesn't fight the bottom strip for screen real
-  // estate. Bottom keeps its original full-width behaviour.
+  const closeAllPlacement = () => void closeDockTabs(tabs.map((tt) => tt.id));
+
+  // The right dock's minimised form is its pill in PanelTray; the bottom one
+  // collapses to a full-width strip here.
   //
   // CRITICAL: when minimised we still render the main panel below (with
   // `display: none`) so React keeps every tab's component tree mounted.
   // Unmounting tears down a chat's `Channel<ChatEvent>` and its native-tool
   // lifecycle (debug pods, etc. — see `agent_native::on_chat_close`), which
   // the operator emphatically does NOT want when they only hid the dock.
-  // Same reason terminals stay mounted on tab switch (line 608 below).
-  const minimisedStrip = !isMin
+  // Same reason terminals stay mounted on tab switch.
+  const minimisedStrip = !isMin || horizontal
     ? null
-    : horizontal
-    ? (
-        <MinimizedChatPill
-          t={t}
-          count={tabs.length}
-          onRestore={() => setDockMin(placement, false)}
-          onClose={() => closeAllPlacement(placement)}
-        />
-      )
     : (
         <div
           style={{
@@ -302,7 +298,7 @@ export function Dock({
           >
             Restore
           </Btn>
-          <IconBtn t={t} title="Close dock" onClick={() => closeAllPlacement(placement)}>
+          <IconBtn t={t} title="Close dock" onClick={closeAllPlacement}>
             {Icons.close}
           </IconBtn>
         </div>
@@ -456,22 +452,20 @@ export function Dock({
                 >
                   {tab.title}
                 </span>
-                {tabs.length > 1 && (
-                  <span
-                    style={{ display: "flex", marginLeft: 2 }}
-                    // The tab itself is the click target for switching, so the
-                    // close button must not also trigger it.
-                    onClick={(e) => e.stopPropagation()}
+                <span
+                  style={{ display: "flex", marginLeft: 2 }}
+                  // The tab itself is the click target for switching, so the
+                  // close button must not also trigger it.
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <IconBtn
+                    t={t}
+                    title="Close tab"
+                    onClick={() => void closeDockTabs([tab.id])}
                   >
-                    <IconBtn
-                      t={t}
-                      title="Close tab"
-                      onClick={() => closeTab(tab.id)}
-                    >
-                      {Icons.close}
-                    </IconBtn>
-                  </span>
-                )}
+                    {Icons.close}
+                  </IconBtn>
+                </span>
               </div>
             );
           })}
@@ -563,7 +557,7 @@ export function Dock({
           <IconBtn
             t={t}
             title={horizontal ? "Close all chats" : "Close dock"}
-            onClick={() => closeAllPlacement(placement)}
+            onClick={closeAllPlacement}
           >
             {Icons.close}
           </IconBtn>

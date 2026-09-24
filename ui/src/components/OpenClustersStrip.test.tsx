@@ -64,6 +64,27 @@ describe("OpenClustersStrip", () => {
         .openTabs.some((tb) => tb.selectedContext === "default::alpha"),
     ).toBe(false);
   });
+
+  it("rows are keyboard reachable: Enter switches, Delete closes", () => {
+    openTwo();
+    render(<OpenClustersStrip t={t} open />);
+    const alpha = screen.getByLabelText("default::alpha");
+    expect(alpha.getAttribute("tabindex")).toBe("0");
+    fireEvent.keyDown(alpha, { key: "Enter" });
+    expect(useAppStore.getState().selectedContext).toBe("default::alpha");
+    fireEvent.keyDown(screen.getByLabelText("default::beta"), { key: "Delete" });
+    expect(useAppStore.getState().openTabs).toHaveLength(1);
+  });
+
+  it("middle-click closes, even on the collapsed rail", () => {
+    openTwo();
+    render(<OpenClustersStrip t={t} open={false} />);
+    fireEvent(
+      screen.getByLabelText("default::alpha"),
+      new MouseEvent("auxclick", { bubbles: true, button: 1 }),
+    );
+    expect(useAppStore.getState().openTabs).toHaveLength(1);
+  });
 });
 
 describe("OpenClustersStrip short cluster names", () => {
