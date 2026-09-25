@@ -271,7 +271,8 @@ fn cache_is_fresh(path: &std::path::Path, now: std::time::SystemTime) -> bool {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
-        .and_then(|at| now.duration_since(at).ok())
+        // An mtime ahead of `now` (clock skew, fine-grained FS timestamps) is age zero.
+        .map(|at| now.duration_since(at).unwrap_or_default())
         .is_some_and(|age| age < REFRESH_TTL)
 }
 
@@ -538,6 +539,7 @@ fn parse_limits(j: Option<&ModelLimitJson>) -> Option<ModelLimits> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn cache_freshness_follows_file_age() {
@@ -547,14 +549,26 @@ mod tests {
         assert!(!cache_is_fresh(&path, now), "missing cache is stale");
 
         std::fs::write(&path, b"{}").unwrap();
-        assert!(cache_is_fresh(&path, now));
         let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(now - std::time::Duration::from_mins(1))
+            .unwrap();
+        assert!(cache_is_fresh(&path, now));
         file.set_modified(now - REFRESH_TTL - std::time::Duration::from_secs(1))
             .unwrap();
         assert!(!cache_is_fresh(&path, now));
     }
 
-    use super::*;
+    #[test]
+    fn cache_written_after_now_is_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = std::time::SystemTime::now();
+        std::fs::write(&path, b"{}").unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(now + std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(cache_is_fresh(&path, now));
+    }
 
     #[test]
     fn sort_for_default_promotes_priority_matches() {
