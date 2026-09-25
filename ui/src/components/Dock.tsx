@@ -7,11 +7,12 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { WebLinksAddon } from "@xterm/addon-web-links";
-import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
-import "@xterm/xterm/css/xterm.css";
+import type { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
+import type { SearchAddon, ISearchOptions } from "@xterm/addon-search";
+import { loadXterm } from "../lib/xterm";
+import { usePublishedSize } from "../lib/layoutVars";
+import { RAIL_EDGE, RAIL_EDGE_TRANSITION } from "../lib/railEdge";
 // js-yaml 5 ships flat named exports with no default; namespace import keeps
 // the `jsYaml.loadAll` call site intact.
 import * as jsYaml from "js-yaml";
@@ -160,8 +161,6 @@ type Props = {
   mode: ThemeMode;
   clusterName: string;
   clusterId: string | null;
-  // Inset from the left so the dock doesn't sit under the rail.
-  leftInset: number;
   // Which placement this Dock instance owns. App.tsx mounts a Dock pair per
   // open cluster tab — one per placement — and each instance only sees its own
   // tabs.
@@ -182,7 +181,6 @@ export function Dock({
   mode,
   clusterName,
   clusterId,
-  leftInset,
   placement,
   clusterTabId,
 }: Props) {
@@ -228,22 +226,42 @@ export function Dock({
   const setPersistedSize = useAppStore((s) => s.setDockSize);
   const defaultSize = dockDefaultSize(placement);
   const size = persistedSize ?? defaultSize;
+  // Publish what this dock covers so the table can scroll its rows out from
+  // underneath: the bottom panel (or its minimised strip) by height, the
+  // right panel by width. The right dock's minimised pill lives in PanelTray.
+  const [coverRef, cover] = usePublishedSize<HTMLDivElement>(
+    horizontal ? "--fs-dock-right" : "--fs-dock-bottom",
+    horizontal ? "width" : "height",
+    isLive && tabs.length > 0 && !(horizontal && isMin),
+  );
+  // Dragging resizes the panel element directly, once per frame, and commits
+  // to the store on release: the store's dock size re-renders the whole app
+  // shell (it feeds prefs), which made every mouse move expensive.
   const onDragStart = (e: React.MouseEvent) => {
     e.preventDefault();
+    const panel = cover;
     const start = horizontal ? e.clientX : e.clientY;
     const startSize = size;
+    let next = startSize;
+    let raf = 0;
     const onMove = (ev: MouseEvent) => {
       const delta = horizontal
         ? start - ev.clientX
         : start - ev.clientY;
-      const next = horizontal
+      next = horizontal
         ? Math.max(320, Math.min(window.innerWidth - 280, startSize + delta))
         : Math.max(180, Math.min(window.innerHeight - 200, startSize + delta));
-      setPersistedSize(placement, next);
+      if (raf || !panel) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        panel.style[horizontal ? "width" : "height"] = `${next}px`;
+      });
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      if (raf) cancelAnimationFrame(raf);
+      if (next !== startSize) setPersistedSize(placement, next);
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
@@ -266,9 +284,11 @@ export function Dock({
     ? null
     : (
         <div
+          ref={coverRef}
           style={{
             position: "fixed",
-            left: leftInset,
+            left: RAIL_EDGE,
+            transition: RAIL_EDGE_TRANSITION,
             right: 0,
             bottom: 0,
             background: t.headerAlt,
@@ -330,7 +350,8 @@ export function Dock({
       }
     : {
         position: "fixed",
-        left: leftInset,
+        left: RAIL_EDGE,
+        transition: RAIL_EDGE_TRANSITION,
         right: 0,
         bottom: 0,
         height: size,
@@ -348,7 +369,7 @@ export function Dock({
   return (
     <>
       {minimisedStrip}
-      <div style={panelStyle}>
+      <div ref={isMin && !horizontal ? undefined : coverRef} style={panelStyle}>
       <div
         onMouseDown={onDragStart}
         style={
@@ -824,6 +845,7 @@ function DockTerminal({
             /* older WebKitGTK without the FontFaceSet API — proceed */
           }
         }
+        const { Terminal, FitAddon, WebLinksAddon, SearchAddon } = await loadXterm();
         // Layout settle so host has its real size before xterm measures.
         await new Promise<void>((r) => requestAnimationFrame(() => r()));
         await new Promise<void>((r) => requestAnimationFrame(() => r()));

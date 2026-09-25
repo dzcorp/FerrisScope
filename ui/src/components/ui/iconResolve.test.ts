@@ -193,7 +193,7 @@ describe("resolveKindIcon", () => {
       resolveKindIcon("Binding", "rabbitmq.com", "CustomResources"),
     ).toBe(CrdIcons.Binding);
     expect(resolveKindIcon("Vhost", "rabbitmq.com", "CustomResources")).toBe(
-      CrdIcons.VirtualHost,
+      CrdIcons.Globe,
     );
     expect(resolveKindIcon("User", "rabbitmq.com", "CustomResources")).toBe(
       CrdIcons.User,
@@ -255,7 +255,7 @@ describe("resolveKindIcon", () => {
       resolveKindIcon("Endpoint", "envoyxds.io", "CustomResources"),
     ).toBe(CrdIcons.Endpoint);
     expect(resolveKindIcon("Route", "envoyxds.io", "CustomResources")).toBe(
-      CrdIcons.EnvoyRoute,
+      KindIcons.HTTPRoute,
     );
     expect(
       resolveKindIcon("TLSSecret", "envoyxds.io", "CustomResources"),
@@ -403,5 +403,35 @@ describe("resolveKindIcon", () => {
         "CustomResources",
       ),
     ).toBe(CrdIcons.ProvisioningRequest);
+  });
+});
+
+describe("universal concept mapping", () => {
+  const r = (kind: string, group: string) =>
+    resolveKindIcon(kind, group, "CustomResources");
+
+  it("maps cross-ecosystem concepts by kind name, whatever the group", () => {
+    expect(r("ScaledObject", "keda.sh")).toBe(CrdIcons.Scale);
+    expect(r("ScaledJob", "keda.sh")).toBe(CrdIcons.ScaledJob);
+    expect(r("Instrumentation", "opentelemetry.io")).toBe(CrdIcons.Syringe);
+    expect(r("OpAMPBridge", "opentelemetry.io")).toBe(CrdIcons.Bridge);
+    expect(r("CapacityBuffer", "autoscaling.x-k8s.io")).toBe(CrdIcons.Battery);
+    expect(r("ExternalSecret", "external-secrets.io")).toBe(CrdIcons.ExternalSecret);
+    expect(r("ClusterSecretStore", "external-secrets.io")).toBe(CrdIcons.VaultSecret);
+    expect(r("SealedSecret", "bitnami.com")).toBe(CrdIcons.SealedSecret);
+    expect(r("VirtualMachineInstance", "kubevirt.io")).toBe(CrdIcons.VirtualMachine);
+    expect(r("NodePool", "karpenter.sh")).toBe(CrdIcons.NodePool);
+    expect(r("MachineDeployment", "cluster.x-k8s.io")).toBe(KindIcons.Deployment);
+    expect(r("IngressRoute", "traefik.io")).toBe(KindIcons.HTTPRoute);
+  });
+
+  it("keeps ecosystem group fallbacks semantic", () => {
+    expect(r("TrafficSelector", "networking.gke.io")).toBe(CrdIcons.Cloud);
+    expect(r("PodMonitoring", "monitoring.googleapis.com")).toBe(CrdIcons.PodMonitor);
+    expect(r("Kiali", "kiali.io")).toBe(CrdIcons.Topology);
+  });
+
+  it("has a glyph for the built-in PodTemplate kind", () => {
+    expect(r("PodTemplate", "")).toBe(KindIcons.PodTemplate);
   });
 });

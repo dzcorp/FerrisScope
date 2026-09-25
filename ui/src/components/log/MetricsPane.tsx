@@ -64,7 +64,7 @@ export function MetricsPane({
     () => [...new Set(pods.map((p) => p.clusterId))].sort(),
     [pods],
   );
-  useMetricsSubscriptions(clusterIds);
+  useMetricsSubscriptions(clusterIds, "pods");
   const metricsByCluster = useAppStore((s) => s.metricsByCluster);
   const contexts = useAppStore((s) => s.contexts);
 

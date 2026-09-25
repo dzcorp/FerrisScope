@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, cleanup, act, screen } from "@testing-library/react";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
-import { resetEventMock } from "../test/tauri-event-mock";
+import { emitMock, resetEventMock } from "../test/tauri-event-mock";
 import { useAppStore } from "../store";
 import { ResourceTable, type TableCluster } from "./ResourceTable";
 import { TabDrawers } from "./TabDrawers";
@@ -101,6 +101,7 @@ describe("ResourceTable — multi-cluster merge", () => {
     expect(useAppStore.getState().tableCount).toEqual({
       filtered: 3,
       total: 3,
+      loading: false,
     });
   });
 
@@ -123,6 +124,7 @@ describe("ResourceTable — multi-cluster merge", () => {
     expect(useAppStore.getState().tableCount).toEqual({
       filtered: 1,
       total: 1,
+      loading: false,
     });
   });
 
@@ -147,6 +149,7 @@ describe("ResourceTable — multi-cluster merge", () => {
     expect(useAppStore.getState().tableCount).toEqual({
       filtered: 1,
       total: 1,
+      loading: false,
     });
     // …and the failed member is called out by display name.
     const strip = screen.getByRole("alert");
@@ -344,7 +347,7 @@ describe("ResourceTable — pendingDetail resolution", () => {
     expect(useAppStore.getState().pendingDetail).toBeNull();
     const d = useAppStore.getState().drawer;
     expect(d?.kind === "detail" && d.uid).toBe("u9");
-    const close = screen.getByRole("button", { name: "Close" });
+    const close = await screen.findByRole("button", { name: "Close" }, { timeout: 5000 });
     const panel = close.closest("header")?.parentElement;
     expect(panel).not.toBeNull();
     expect(panel?.style.animation).toBe("");
@@ -415,6 +418,7 @@ describe("cluster focus", () => {
     expect(useAppStore.getState().tableCount).toEqual({
       filtered: 3,
       total: 3,
+      loading: false,
     });
 
     await act(async () => {
@@ -423,6 +427,7 @@ describe("cluster focus", () => {
     expect(useAppStore.getState().tableCount).toEqual({
       filtered: 2,
       total: 3,
+      loading: false,
     });
   });
 
@@ -473,5 +478,49 @@ describe("cluster focus", () => {
       screen.getByText("No configmaps match the current filters"),
     ).toBeTruthy();
     expect(screen.getByText(/cluster prod-us/)).toBeTruthy();
+  });
+});
+
+describe("initial sync loading hint", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("shows once the sync outlasts the delay and clears on init_done", async () => {
+    vi.useFakeTimers();
+    setMockInvoke((cmd) =>
+      cmd === "subscribe_resource"
+        ? { rows: [{ uid: "u1", name: "cm-a", namespace: "default" }], init_done: false }
+        : undefined,
+    );
+    await act(async () => {
+      render(
+        <ResourceTable mode="dark" clusters={ONE} viewScopeId={CID_A} kind={configMapsKind} />,
+      );
+    });
+    await act(async () => {});
+    expect(useAppStore.getState().tableCount?.loading).toBe(false);
+
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(useAppStore.getState().tableCount?.loading).toBe(true);
+
+    await act(async () => {
+      emitMock("resource://default::prod-eu/configmaps/all", [{ kind: "init_done" }]);
+    });
+    expect(useAppStore.getState().tableCount?.loading).toBe(false);
+  });
+
+  it("never shows for a sync that finished in the subscribe snapshot", async () => {
+    vi.useFakeTimers();
+    mockSubscribe({ [CID_A]: [{ uid: "u1", name: "cm-a", namespace: "default" }] });
+    await act(async () => {
+      render(
+        <ResourceTable mode="dark" clusters={ONE} viewScopeId={CID_A} kind={configMapsKind} />,
+      );
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(useAppStore.getState().tableCount?.loading).toBe(false);
   });
 });

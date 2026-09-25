@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import {
   useActiveClusterEpoch,
@@ -25,10 +25,14 @@ import { resourceKindLabel } from "../lib/resourceKinds";
 import { ErrorBlock, Icons, Tooltip, resolveKindIcon } from "./ui";
 import { OpenClustersStrip } from "./OpenClustersStrip";
 import { CATEGORY_ORDER, groupKinds } from "../lib/kindOrder";
+import { RAIL_COLLAPSED_W, RAIL_EASE, RAIL_OPEN_W, useRailEdge } from "../lib/railEdge";
 
 
-const W_COLLAPSED = 56;
-const W_OPEN = 220;
+/// Dwell before an auto-hide rail expands under the pointer.
+export const RAIL_HOVER_INTENT_MS = 80;
+
+const W_COLLAPSED = RAIL_COLLAPSED_W;
+const W_OPEN = RAIL_OPEN_W;
 
 type Props = {
   mode: ThemeMode;
@@ -78,11 +82,24 @@ export function Rail({}: Props) {
 
   const [hover, setHover] = useState(false);
   const [crHover, setCrHover] = useState(false);
+  // Hover intent: a pointer sweeping past the collapsed rail shouldn't expand
+  // and collapse it (each flip animates and re-lays out the rail + dock).
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(hoverTimer.current), []);
+  const onRailEnter = () => {
+    clearTimeout(hoverTimer.current);
+    hoverTimer.current = setTimeout(() => setHover(true), RAIL_HOVER_INTENT_MS);
+  };
+  const onRailLeave = () => {
+    clearTimeout(hoverTimer.current);
+    setHover(false);
+  };
   const [customError, setCustomError] = useState<string | null>(null);
   const open =
     railMode === "pinned" ||
     (railMode === "auto" && hover) ||
     (railMode === "collapsed" && crHover);
+  useRailEdge(open);
 
   useEffect(() => {
     setKindsLoading();
@@ -220,14 +237,16 @@ export function Rail({}: Props) {
 
   return (
     <div
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseEnter={onRailEnter}
+      onMouseLeave={onRailLeave}
       style={{
         position: "relative",
         flexShrink: 0,
         width: reservedWidth,
-        transition: "width .18s cubic-bezier(.2,.7,.2,1)",
+        transition: `width ${RAIL_EASE}`,
         zIndex: 4,
+        // Read by `.fs-rail-item:hover` (index.css).
+        ["--fs-rail-hover" as string]: t.railHover,
       }}
     >
       <div style={{ width: reservedWidth, height: "100%" }} />
@@ -246,7 +265,7 @@ export function Rail({}: Props) {
             open && !isPinned ? "4px 0 16px rgba(15,20,30,0.08)" : "none",
           display: "flex",
           flexDirection: "column",
-          transition: "width .18s cubic-bezier(.2,.7,.2,1), box-shadow .18s",
+          transition: `width ${RAIL_EASE}, box-shadow .18s`,
           overflow: "hidden",
         }}
       >
@@ -588,7 +607,7 @@ function RailGroup({
               kind={k}
               category={category}
               active={selectedId === k.id}
-              onClick={() => onSelect(k.id)}
+              onSelect={onSelect}
             />
           ))
         )}
@@ -673,7 +692,7 @@ function CustomResourcesBody({
           kind={k}
           category="CustomResources"
           active={selectedId === k.id}
-          onClick={() => onSelect(k.id)}
+          onSelect={onSelect}
         />
       ))}
       {groupNames.map((g) => {
@@ -742,7 +761,7 @@ function CustomResourcesBody({
                     kind={k}
                     category="CustomResources"
                     active={selectedId === k.id}
-                    onClick={() => onSelect(k.id)}
+                    onSelect={onSelect}
                   />
                 ))}
               </div>
@@ -754,106 +773,106 @@ function CustomResourcesBody({
   );
 }
 
-function RailItem({
+// Memoised: the rail re-renders on every expand/collapse and selection
+// change; only items whose props moved should follow. The element tree is
+// the same open or closed (the tooltip just switches off), so an expand never
+// remounts the list, and hover is CSS (`.fs-rail-item`), not state.
+const RailItem = memo(function RailItem({
   t,
   open,
   kind,
   category,
   active,
-  onClick,
+  onSelect,
 }: {
   t: ReturnType<typeof tokens>;
   open: boolean;
   kind: ResourceKind;
   category: Category;
   active: boolean;
-  onClick: () => void;
+  onSelect: (id: string) => void;
 }) {
-  const [hover, setHover] = useState(false);
   // Theme can opt out of rail icons (e.g. a label-only style). When the rail
   // is collapsed we keep the icon regardless — collapsed mode would
   // otherwise be a column of empty buttons. So this only takes effect once
   // the rail is open.
   const showIcons = useResolvedTheme().display.showRailIcons;
   const renderIcon = showIcons || !open;
-  const icon = resolveKindIcon(kind.kind, kind.group, category);
+  const icon = useMemo(
+    () => resolveKindIcon(kind.kind, kind.group, category),
+    [kind.kind, kind.group, category],
+  );
   const label = resourceKindLabel(kind);
   const tooltip = `${label} (${kind.group ? `${kind.group}/` : ""}${kind.version})`;
-  const btn = (
-    <button
-      type="button"
-      title={tooltip}
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 11,
-        padding: "7px 10px",
-        borderRadius: R_MD,
-        border: "none",
-        cursor: "pointer",
-        fontFamily: "inherit",
-        background: active ? t.accentSoft : hover ? t.railHover : "transparent",
-        color: active ? t.accent : t.textDim,
-        width: "100%",
-        minHeight: 32,
-        position: "relative",
-        textAlign: "left",
-        transition: "background .12s, color .12s",
-      }}
-    >
-      {active && (
-        <div
-          style={{
-            position: "absolute",
-            left: -8,
-            top: 6,
-            bottom: 6,
-            width: 2,
-            borderRadius: R_SM,
-            background: t.accent,
-          }}
-        />
-      )}
-      {renderIcon && (
-        <div
-          style={{
-            width: 16,
-            height: 16,
-            flexShrink: 0,
-            display: "flex",
-            color: active ? t.accent : t.textDim,
-          }}
-        >
-          {icon}
-        </div>
-      )}
-      <div
+  return (
+    <Tooltip label={tooltip} side="right" disabled={open}>
+      <button
+        type="button"
+        className="fs-rail-item"
+        data-active={active || undefined}
+        onClick={() => onSelect(kind.id)}
         style={{
-          flex: 1,
-          fontSize: FS_MD,
-          fontWeight: active ? 600 : 500,
-          letterSpacing: -0.1,
-          opacity: open ? 1 : 0,
-          transition: "opacity .15s",
-          whiteSpace: "nowrap",
-          color: active ? t.accent : t.text,
-          minWidth: 0,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
+          display: "flex",
+          alignItems: "center",
+          gap: 11,
+          padding: "7px 10px",
+          borderRadius: R_MD,
+          border: "none",
+          cursor: "pointer",
+          fontFamily: "inherit",
+          background: active ? t.accentSoft : undefined,
+          color: active ? t.accent : t.textDim,
+          width: "100%",
+          minHeight: 32,
+          position: "relative",
+          textAlign: "left",
+          transition: "background .12s, color .12s",
         }}
       >
-        {label}
-      </div>
-    </button>
-  );
-  return open ? (
-    btn
-  ) : (
-    <Tooltip label={tooltip} side="right">
-      {btn}
+        {active && (
+          <div
+            style={{
+              position: "absolute",
+              left: -8,
+              top: 6,
+              bottom: 6,
+              width: 2,
+              borderRadius: R_SM,
+              background: t.accent,
+            }}
+          />
+        )}
+        {renderIcon && (
+          <div
+            style={{
+              width: 16,
+              height: 16,
+              flexShrink: 0,
+              display: "flex",
+              color: active ? t.accent : t.textDim,
+            }}
+          >
+            {icon}
+          </div>
+        )}
+        <div
+          style={{
+            flex: 1,
+            fontSize: FS_MD,
+            fontWeight: active ? 600 : 500,
+            letterSpacing: -0.1,
+            opacity: open ? 1 : 0,
+            transition: "opacity .15s",
+            whiteSpace: "nowrap",
+            color: active ? t.accent : t.text,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {label}
+        </div>
+      </button>
     </Tooltip>
   );
-}
+});

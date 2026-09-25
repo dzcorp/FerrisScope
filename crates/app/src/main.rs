@@ -33,6 +33,10 @@ const UI_SCALE_BASELINE: f64 = 1.1;
 // arenas aren't returned to the OS — the resident set looks like a leak
 // even when no Rust object is actually retained. mimalloc tracks pages
 // per thread and decommits them aggressively. Drop-in, no API changes.
+/// Keeps the models.dev download off the network while the first cluster
+/// connects and loads.
+const CATALOGUE_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -371,10 +375,11 @@ fn main() {
 
             // Load the models.dev catalogue used by the agent's
             // auto-compaction trigger. Two-step: hydrate from the
-            // on-disk cache (instant; works offline) then kick a
-            // background refresh from the network. Failures here are
-            // best-effort — the agent falls back to per-provider
-            // default context windows when the catalogue is empty.
+            // on-disk cache (instant; works offline), then refresh a
+            // stale cache once startup traffic (cluster connect, first
+            // LISTs) is done. Failures here are best-effort — the agent
+            // falls back to per-provider default context windows when
+            // the catalogue is empty.
             tauri::async_runtime::spawn(async move {
                 let cache_root =
                     match directories::ProjectDirs::from("dev", "ferrisscope", "ferrisscope") {
@@ -382,7 +387,8 @@ fn main() {
                         None => return,
                     };
                 ferrisscope_agent::provider::catalogue::load_from_disk(cache_root.clone()).await;
-                ferrisscope_agent::provider::catalogue::refresh(cache_root).await;
+                tokio::time::sleep(CATALOGUE_REFRESH_DELAY).await;
+                ferrisscope_agent::provider::catalogue::refresh_if_stale(cache_root).await;
             });
 
             // Load persisted sources, start the file-system watcher, and
@@ -444,6 +450,9 @@ fn main() {
                 });
             });
 
+            if let Err(e) = ferrisscope_core::search::reset_indexes() {
+                tracing::warn!(error = %e, "search index: startup reset failed");
+            }
             // Background GC for the per-cluster search indices. Single
             // task for the whole app; idempotent against indices coming
             // and going as the operator connects / disconnects clusters.

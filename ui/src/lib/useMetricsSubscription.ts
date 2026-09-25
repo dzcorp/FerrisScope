@@ -2,6 +2,7 @@ import { logErr } from "./log";
 import { useEffect } from "react";
 import { api, onMetrics } from "../api";
 import { useAppStore } from "../store";
+import type { MetricsNeed } from "../types";
 
 // Subscribe to cluster metrics for `clusterId` for the lifetime of the
 // component that calls this hook. The backend refcounts subscribers so
@@ -21,7 +22,7 @@ import { useAppStore } from "../store";
 // Pass `clusterId = null` to skip the subscription (e.g. when the consuming
 // view is rendered without an active cluster). The hook will tear down a
 // prior subscription cleanly across cluster switches.
-export function useMetricsSubscription(clusterId: string | null) {
+export function useMetricsSubscription(clusterId: string | null, need: MetricsNeed) {
   const setMetrics = useAppStore((s) => s.setMetrics);
   useEffect(() => {
     if (!clusterId) return;
@@ -32,7 +33,7 @@ export function useMetricsSubscription(clusterId: string | null) {
         unlisten = await onMetrics(clusterId, (snap) => {
           if (!cancelled) setMetrics(clusterId, snap);
         });
-        const initial = await api.subscribeMetrics(clusterId);
+        const initial = await api.subscribeMetrics(clusterId, need);
         if (!cancelled && initial) setMetrics(clusterId, initial);
       } catch {
         // Best-effort: unavailable metrics-server is not a hard error.
@@ -45,16 +46,16 @@ export function useMetricsSubscription(clusterId: string | null) {
       // subscription is refcounted and another consumer (gauges vs. pods
       // table) may still be displaying it. Snapshots drop on scope switch
       // (`scopeResetSlice`) and when the last context deselects (App.tsx).
-      api.unsubscribeMetrics(clusterId).catch(logErr("metrics-sub"));
+      api.unsubscribeMetrics(clusterId, need).catch(logErr("metrics-sub"));
     };
-  }, [clusterId, setMetrics]);
+  }, [clusterId, need, setMetrics]);
 }
 
 // N-cluster variant for merged (virtual context) views: one effect that
 // holds a metrics subscription per member. Pass an empty array to skip.
 // The array's CONTENTS key the effect (not its identity), so callers may
 // rebuild the array each render as long as the ids are stable.
-export function useMetricsSubscriptions(clusterIds: string[]) {
+export function useMetricsSubscriptions(clusterIds: string[], need: MetricsNeed) {
   const setMetrics = useAppStore((s) => s.setMetrics);
   const key = clusterIds.join(String.fromCharCode(0));
   useEffect(() => {
@@ -73,7 +74,7 @@ export function useMetricsSubscriptions(clusterIds: string[]) {
             return;
           }
           unlistens.push(un);
-          const initial = await api.subscribeMetrics(cid);
+          const initial = await api.subscribeMetrics(cid, need);
           if (!cancelled && initial) setMetrics(cid, initial);
         } catch {
           // Best-effort: unavailable metrics-server is not a hard error.
@@ -84,8 +85,8 @@ export function useMetricsSubscriptions(clusterIds: string[]) {
       cancelled = true;
       for (const u of unlistens) u();
       for (const cid of ids) {
-        api.unsubscribeMetrics(cid).catch(logErr("metrics-sub"));
+        api.unsubscribeMetrics(cid, need).catch(logErr("metrics-sub"));
       }
     };
-  }, [key, setMetrics]);
+  }, [key, need, setMetrics]);
 }

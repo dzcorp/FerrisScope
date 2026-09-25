@@ -7,9 +7,10 @@ import {
   getTheme,
   resolveTheme,
   statusBucket,
+  statusIsAmbient,
   statusIsTransient,
   statusDot,
-  statusFill,
+  tintPair,
   tokens,
   vibrantSurface,
   vibrancyAlpha,
@@ -140,6 +141,15 @@ describe("statusBucket — known buckets", () => {
   });
 });
 
+describe("statusIsAmbient", () => {
+  it("hides the label only for common, self-explanatory states", () => {
+    for (const s of ["Running", "Terminating", "Succeeded"]) expect(statusIsAmbient(s)).toBe(true);
+    for (const s of ["Pending", "Failed", "CrashLoopBackOff", "Completed", "Unknown"]) {
+      expect(statusIsAmbient(s)).toBe(false);
+    }
+  });
+});
+
 describe("statusIsTransient", () => {
   it("flags pod-startup and termination phases", () => {
     expect(statusIsTransient("Pending")).toBe(true);
@@ -155,7 +165,7 @@ describe("statusIsTransient", () => {
   });
 });
 
-describe("statusDot + statusFill use token colors", () => {
+describe("statusDot + tintPair use token colors", () => {
   const t = tokens("dark");
   it("dot color matches the bucket token", () => {
     expect(statusDot("Running", t)).toBe(t.good);
@@ -166,18 +176,18 @@ describe("statusDot + statusFill use token colors", () => {
   });
 
   it("fill bg derives from the bucket token in both modes", () => {
-    const dark = statusFill("Running", t, "dark");
+    const dark = tintPair(t.good, true);
     const lt = tokens("light");
-    const light = statusFill("Running", lt, "light");
+    const light = tintPair(lt.good, false);
     // Both modes emit rgba() bg with the palette's `good` channel.
     expect(dark.bg).toMatch(/^rgba\(16, ?185, ?129/);
     expect(light.bg).toMatch(/^rgba\(16, ?185, ?129/);
   });
 
   it("dark mode fg keeps the bucket color vivid; light mode darkens it", () => {
-    const dark = statusFill("Failed", t, "dark");
+    const dark = tintPair(t.bad, true);
     const lt = tokens("light");
-    const light = statusFill("Failed", lt, "light");
+    const light = tintPair(lt.bad, false);
     // Dark passes the bucket color through unchanged.
     expect(dark.fg).toBe(t.bad);
     // Light mixes toward black for contrast on the tinted pill.
@@ -192,7 +202,7 @@ describe("statusDot + statusFill use token colors", () => {
       ...tokens("light"),
       bad: "#a1260d",
     };
-    const f = statusFill("Failed", vscodeLight, "light");
+    const f = tintPair(statusDot("Failed", vscodeLight), false);
     expect(f.bg).toMatch(/^rgba\(161, ?38, ?13/);
   });
 });

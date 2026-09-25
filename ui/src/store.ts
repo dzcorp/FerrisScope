@@ -440,8 +440,9 @@ type AppState = {
   // header breadcrumb can render "Pods · 232" without lifting the table's
   // local row state. `filtered` reflects the namespace filter + tableFilter;
   // equal to `total` when no filter is active. `null` when no table is
-  // mounted.
-  tableCount: { filtered: number; total: number } | null;
+  // mounted. `loading` = the initial sync is still running (past a short
+  // delay); the header animates next to the count.
+  tableCount: { filtered: number; total: number; loading: boolean } | null;
   // Active per-table text filter. Lifted out of ResourceTable so the
   // breadcrumb input can drive it from a single global place — no second
   // filter box on the table chrome. Empty string = no filter.
@@ -667,7 +668,9 @@ type AppState = {
   closePalette: () => void;
   setTableFilter: (q: string) => void;
   clearTableFilter: () => void;
-  setTableCount: (c: { filtered: number; total: number } | null) => void;
+  setTableCount: (
+    c: { filtered: number; total: number; loading: boolean } | null,
+  ) => void;
   /// Open the inline filter input in the breadcrumb. Idempotent.
   openFilterEditor: () => void;
   closeFilterEditor: () => void;

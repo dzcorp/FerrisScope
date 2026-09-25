@@ -21,7 +21,7 @@ import {
   clusterAccent,
   vibrantSurface,
 } from "../theme";
-import { BrandMark, IconBtn, Icons, Kbd } from "./ui";
+import { BrandMark, IconBtn, Icons, Kbd, LoadingLine, Tooltip } from "./ui";
 import { MOD_KEY, IS_MAC } from "../lib/keyboard";
 import { headerPaddingLeft, dragRegionProps } from "../lib/macChrome";
 import { HeaderToast } from "./HeaderToast";
@@ -294,6 +294,13 @@ export function AppHeader({
                     ? tableCount.total
                     : `${tableCount.filtered}/${tableCount.total}`}
                 </span>
+              )}
+              {tableCount?.loading && (
+                <Tooltip label="Still loading — rows keep arriving">
+                  <span data-testid="count-loading" role="status" aria-label="Loading">
+                    <LoadingLine t={t} inline width={28} />
+                  </span>
+                </Tooltip>
               )}
               {/* Filter chip / inline input — same anchor point, two
                   states. When `filterEditing` is true: a small input

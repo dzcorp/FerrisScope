@@ -8,7 +8,9 @@
 //! dedicated probe so the UI can flip the cluster into an unavailable state
 //! instead of pretending the last cached snapshot is current.
 //!
-//! Probes [`PROBE_INTERVAL`] every tick. The first failure starts a timer;
+//! Probes [`PROBE_INTERVAL`] every tick, skipping the request when a watch
+//! delivered events since the last tick ([`AliveBeacon`]) — that traffic
+//! already proves the apiserver answers. The first failure starts a timer;
 //! [`UNHEALTHY_AFTER`] of consecutive failures flips status to `Unavailable`
 //! and broadcasts the event exactly once. After that the probe goes dormant
 //! — recovery is operator-driven (manual reconnect rebuilds the
@@ -18,6 +20,7 @@
 //! after the apiserver comes back. The clean recovery is to drop the entry
 //! and reconnect — and once we're tearing down anyway, an in-flight retry
 //! loop just races the teardown.
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -86,7 +89,35 @@ pub struct ClusterHealthEvent {
 pub struct ClusterHealth {
     tx: broadcast::Sender<ClusterHealthEvent>,
     last: Arc<Mutex<ClusterHealthEvent>>,
+    beacon: AliveBeacon,
     task: JoinHandle<()>,
+}
+
+/// Marked by anything that just heard from the apiserver (watch events).
+#[derive(Clone, Debug)]
+pub struct AliveBeacon {
+    epoch: Instant,
+    /// Milliseconds after `epoch` of the last mark; 0 = never.
+    at_ms: Arc<AtomicU64>,
+}
+
+impl AliveBeacon {
+    fn new() -> Self {
+        Self {
+            epoch: Instant::now(),
+            at_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn mark(&self) {
+        let ms = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.at_ms.store(ms.max(1), Ordering::Relaxed);
+    }
+
+    fn seen_within(&self, window: Duration) -> bool {
+        let at = self.at_ms.load(Ordering::Relaxed);
+        at != 0 && u128::from(at) + window.as_millis() >= self.epoch.elapsed().as_millis()
+    }
 }
 
 impl Drop for ClusterHealth {
@@ -107,9 +138,11 @@ impl ClusterHealth {
             reason: None,
         }));
 
+        let beacon = AliveBeacon::new();
         let task = tokio::spawn({
             let tx = tx.clone();
             let last = last.clone();
+            let beacon = beacon.clone();
             async move {
                 tracing::info!(
                     probe_interval_secs = PROBE_INTERVAL.as_secs(),
@@ -134,7 +167,11 @@ impl ClusterHealth {
                     // wedged cluster while a real LIST hangs (etcd
                     // dead, watch broken, LB in front of dead replicas).
                     // See `liveness_probe` doc.
-                    let probe = tokio::time::timeout(PROBE_TIMEOUT, liveness_probe(&client)).await;
+                    let probe = if beacon.seen_within(PROBE_INTERVAL) {
+                        Ok(Ok(()))
+                    } else {
+                        tokio::time::timeout(PROBE_TIMEOUT, liveness_probe(&client)).await
+                    };
                     match probe {
                         Ok(Ok(_info)) => {
                             // Recovery path: only emit if we'd previously
@@ -200,7 +237,19 @@ impl ClusterHealth {
             }
         });
 
-        Arc::new(Self { tx, last, task })
+        Arc::new(Self {
+            tx,
+            last,
+            beacon,
+            task,
+        })
+    }
+
+    /// Handle for reporting apiserver traffic; holds no reference to the
+    /// probe itself.
+    #[must_use]
+    pub fn beacon(&self) -> AliveBeacon {
+        self.beacon.clone()
     }
 
     #[must_use]
@@ -210,5 +259,24 @@ impl ClusterHealth {
 
     pub async fn snapshot(&self) -> ClusterHealthEvent {
         self.last.lock().await.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn beacon_counts_only_recent_marks() {
+        let beacon = AliveBeacon::new();
+        assert!(!beacon.seen_within(PROBE_INTERVAL), "never marked");
+        beacon.clone().mark();
+        assert!(beacon.seen_within(PROBE_INTERVAL), "clones share the mark");
+
+        let stale = AliveBeacon {
+            epoch: Instant::now().checked_sub(Duration::from_mins(1)).unwrap(),
+            at_ms: Arc::new(AtomicU64::new(1)),
+        };
+        assert!(!stale.seen_within(PROBE_INTERVAL));
     }
 }

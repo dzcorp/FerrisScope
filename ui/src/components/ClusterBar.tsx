@@ -622,7 +622,7 @@ function ClusterGauges({ clusterId }: { mode: ThemeMode; clusterId: string }) {
   // are part of the always-on cluster bar today, but isolating the
   // subscription here means future variants of the bar that hide the
   // gauges (e.g. a compact mode) don't pay for metrics polling either.
-  useMetricsSubscription(clusterId);
+  useMetricsSubscription(clusterId, "cluster");
   const metrics = useAppStore((s) => s.metricsByCluster[clusterId] ?? null);
   if (!metrics || !metrics.available || !metrics.cluster) return null;
   const c = metrics.cluster;

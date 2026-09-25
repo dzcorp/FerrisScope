@@ -1,27 +1,21 @@
 import { logErr } from "../lib/log";
+import { useAgeLabel } from "../lib/age";
 import {
-  createContext,
   memo,
   useCallback,
-  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
-  type ReactNode,
 } from "react";
 import {
   columnResizingFeature,
   columnSizingFeature,
   columnVisibilityFeature,
-  createSortedRowModel,
   flexRender,
   rowSortingFeature,
-  sortFn_alphanumeric,
-  sortFn_datetime,
-  sortFn_text,
   tableFeatures,
   useTable,
   type ColumnDef as TanColumnDef,
@@ -30,6 +24,9 @@ import {
   type Row as TanRow,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { syncTracker, useDelayedFlag } from "../lib/delayedFlag";
+import { naturalComparator } from "../lib/naturalSort";
+import { createIncrementalSorter } from "../lib/incrementalSort";
 import { api, onResourceDelta } from "../api";
 import {
   selectClusterDegraded,
@@ -53,6 +50,7 @@ import type {
 import {
   tokens,
   statusBucket,
+  statusIsAmbient,
   clusterAccent,
   FF_MONO,
   FONT_MONO,
@@ -122,9 +120,9 @@ type LoadState =
 // the table's whole type surface with it.
 //
 // We sort and resize; we do not filter, paginate, group, or expand through
-// TanStack (row filtering happens upstream in `filtered`), so those features
-// stay out. `sortFns` is likewise absent: every column passes a comparator
-// function rather than one of the built-in string ids.
+// TanStack (row filtering happens upstream in `filtered`). Sorting keeps only
+// its state and header toggles: rows arrive pre-sorted (`manualSorting`) from
+// an incremental sorter, so a delta flush doesn't re-sort every row.
 export const TABLE_FEATURES = tableFeatures({
   rowSortingFeature,
   columnSizingFeature,
@@ -133,19 +131,6 @@ export const TABLE_FEATURES = tableFeatures({
   // but because `row.getVisibleCells()` lives in this feature, and the row
   // renderer is built on it.
   columnVisibilityFeature,
-  sortedRowModel: createSortedRowModel(),
-  // Every column that isn't cpu/mem sorts with `sortFn: "auto"`, and in v9
-  // "auto" is *name* resolution: it samples the rows, decides on
-  // "alphanumeric" / "text" / "datetime", then looks that name up in this
-  // registry. An unregistered name silently degrades to `basic` (plain
-  // `<`/`>`), which would order "pod-10" before "pod-2" — a quiet regression
-  // in the table's most-used interaction. Registered individually rather than
-  // via the whole `sortFns` object so the unused ones still tree-shake.
-  sortFns: {
-    alphanumeric: sortFn_alphanumeric,
-    text: sortFn_text,
-    datetime: sortFn_datetime,
-  },
 });
 export type TableFeats = typeof TABLE_FEATURES;
 
@@ -162,12 +147,6 @@ const CLUSTER_COL: ColumnDef = {
   kind: "text",
 };
 const EMPTY_CLUSTER_IDS: string[] = [];
-
-// "Now" flows through context so only components that *subscribe* (the
-// age cell) re-render on each 1 Hz tick. The table, rows, and other
-// cells are unaffected. This is what lets us keep "1s → 2s → 3s" live
-// updates without re-rendering 30+ rows × 10 cells per second.
-const NowContext = createContext<number>(Date.now());
 
 // Module-level style objects. Inline-style allocation per render was a
 // big share of scroll cost on large tables (30 rows × 10 cells = 300
@@ -248,33 +227,14 @@ const AgeCell = memo(function AgeCell({
   value: unknown;
   color: string;
 }) {
-  const now = useContext(NowContext);
-  return (
-    <span style={{ ...AGE_CELL_STYLE, color }}>{formatAge(value, now)}</span>
-  );
+  return <span style={{ ...AGE_CELL_STYLE, color }}>{useAgeLabel(value)}</span>;
 });
-
-// Owns the `now` state and feeds it to descendants via context. Only
-// AgeCell subscribers re-render on each tick — table, rows, and other
-// cells are unaffected. 1 Hz so the seconds bucket displays "live"
-// (1s → 2s → 3s); the cost is bounded to AgeCell instances, not the
-// rest of the table.
-const NOW_TICK_MS = 1000;
 
 // How long an unresolved cross-kind navigation (palette hit, detail link)
 // waits for its row before giving up with a "not found" toast. Generous —
 // a slow member of a virtual context can take a few seconds to finish its
 // initial LIST.
 const PENDING_DETAIL_TIMEOUT_MS = 6_000;
-
-function NowProvider({ children }: { children: ReactNode }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const tick = setInterval(() => setNow(Date.now()), NOW_TICK_MS);
-    return () => clearInterval(tick);
-  }, []);
-  return <NowContext.Provider value={now}>{children}</NowContext.Provider>;
-}
 
 // Store selector for the per-cluster metrics record, gated on `isPods`.
 // A connected cluster keeps its metrics entry ticking ~1 Hz (ClusterGauges
@@ -318,6 +278,10 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   const t = useResolvedTheme().tokens;
   const [rows, setRows] = useState<ScopedRow[]>([]);
   const [load, setLoad] = useState<LoadState>({ kind: "loading" });
+  // Initial sync still running on some (cluster, scope) pair. Distinct from
+  // `load`, which turns ready on the first row.
+  const [syncing, setSyncing] = useState(false);
+  const loadingHint = useDelayedFlag(syncing);
   // Per-cluster subscribe failures (cluster id → error). Non-empty while at
   // least one member is serving rows → slim partial-data strip; every member
   // failed → full-pane `load.kind === "error"` instead.
@@ -440,7 +404,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // browsing ConfigMaps, Deployments, etc. The subscription is refcounted
   // server-side so concurrent consumers (cluster bar gauges, MetricsTab)
   // share one polling task per cluster.
-  useMetricsSubscriptions(isPods ? clusterIds : EMPTY_CLUSTER_IDS);
+  useMetricsSubscriptions(isPods ? clusterIds : EMPTY_CLUSTER_IDS, "pods");
 
   // Keyed by scoped id (`${clusterId}::${uid}`) so rows from different
   // clusters can never collide once tables merge across a virtual context.
@@ -511,7 +475,19 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
 
     setSubErrors({});
 
-    const onDelta = (cid: string, delta: ResourceDelta) => {
+    // The full fan: clusters × namespace scopes. One listener + one
+    // subscribe per pair; each pair is an independent backend slot.
+    const pairs = clusterIds.flatMap((cid) =>
+      subscribeScopes.map((scope) => ({ cid, scope })),
+    );
+    // Initial syncs still running, by index into `pairs`.
+    setSyncing(true);
+    const sync = syncTracker(pairs.length, () => {
+      if (!cancelled) setSyncing(false);
+    });
+    const syncDone = sync.done;
+
+    const onDelta = (cid: string, delta: ResourceDelta, pair: number) => {
       // Belt: closure-captured `cancelled` neutralises a listener whose
       // effect has been torn down. Suspenders: the rowsRef identity check
       // guards the case where a stale listener somehow outlives both
@@ -521,6 +497,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       if (applyScopedDelta(localMap, cid, delta)) {
         scheduleFlush();
       }
+      if (delta.kind === "init_done") syncDone(pair);
       if (delta.kind !== "delete") {
         // First row counts as visual confirmation a watcher is alive even
         // before the initial sync formally completes; init_done flips the
@@ -530,19 +507,13 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       }
     };
 
-    // The full fan: clusters × namespace scopes. One listener + one
-    // subscribe per pair; each pair is an independent backend slot.
-    const pairs = clusterIds.flatMap((cid) =>
-      subscribeScopes.map((scope) => ({ cid, scope })),
-    );
-
     (async () => {
       // Register listeners FIRST (before subscribe) so deltas emitted
       // during the snapshot round-trip aren't missed. Listeners run in
       // parallel; each owns its own (cluster, scope) event channel.
       const listenerHandles = await Promise.all(
-        pairs.map(({ cid, scope }) =>
-          onResourceDelta(cid, kind.id, scope, (delta) => onDelta(cid, delta)),
+        pairs.map(({ cid, scope }, i) =>
+          onResourceDelta(cid, kind.id, scope, (delta) => onDelta(cid, delta, i)),
         ),
       );
       // If cleanup ran while we were awaiting registration, the cleanup
@@ -567,6 +538,9 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         }),
       );
       if (cancelled) return;
+      settled.forEach((s, i) => {
+        if (s.result === null || s.result.init_done) syncDone(i);
+      });
 
       const ok = settled.filter(
         (s): s is { cid: string; result: SubscribeResult; error: null } =>
@@ -619,11 +593,11 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         setLoad({ kind: "ready" });
       }
     })().catch((e) => {
-      if (!cancelled) setLoad({ kind: "error", message: String(e) });
+      if (!cancelled) {
+        setSyncing(false);
+        setLoad({ kind: "error", message: String(e) });
+      }
     });
-
-    // The 1 Hz "now" tick lives inside `<NowProvider>` and only re-renders
-    // <AgeCell> subscribers — the parent table no longer rebuilds for it.
 
     return () => {
       cancelled = true;
@@ -738,9 +712,13 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // count doesn't linger after navigating away from a kind.
   useEffect(() => {
     if (!active) return;
-    setTableCount({ filtered: filtered.length, total: rows.length });
+    setTableCount({
+      filtered: filtered.length,
+      total: rows.length,
+      loading: loadingHint,
+    });
     return () => setTableCount(null);
-  }, [active, filtered.length, rows.length, setTableCount]);
+  }, [active, filtered.length, rows.length, loadingHint, setTableCount]);
 
   // Hide the namespace column when the operator has filtered to exactly one
   // namespace — every row would say the same thing. The cluster bar already
@@ -827,9 +805,8 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
 
   // Refs so the cell renderer can read fresh values without triggering a
   // columns-memo recompute (which invalidates TanStack's entire row model
-  // and reallocates 2800-row internal structures on every change). `now`
-  // doesn't need a ref — it's delivered to the age cell directly via
-  // NowContext, so the parent doesn't need to re-render on its tick at all.
+  // and reallocates 2800-row internal structures on every change). Age
+  // cells keep their own clock (`useAgeLabel`).
   const podMetricsRef = useRef(podMetricsByCluster);
   podMetricsRef.current = podMetricsByCluster;
   const modeRef = useRef(mode);
@@ -897,10 +874,8 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         header: c.header,
         size: defaultWidth(c),
         enableSorting: true,
-        // `sortFn` (v8 called it `sortingFn`) reads from the ref so a metrics
-        // tick doesn't force a columns rebuild; the comparator is invoked at
-        // sort time and picks up the current podMetrics ref then.
-        sortFn: sortingFnFor<ScopedRow>(c, podMetricsRef, isPods),
+        // Sorting happens before TanStack (`sortedData`); the accessor still
+        // decides which direction a first header click picks.
         accessorFn: accessorFor(c),
         cell: (ctx) =>
           renderCell(
@@ -933,9 +908,35 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     // through refs.
   }, [visibleColumns, isPods]);
 
+  // Per-column comparators outlive delta flushes so their per-row sort-key
+  // caches do too. They read metrics through the ref; sorting by CPU / Mem
+  // rebuilds the order when a new snapshot lands.
+  const comparators = useMemo(
+    () =>
+      new Map(
+        visibleColumns.map((c) => [c.id, rowComparatorFor<ScopedRow>(c, podMetricsRef, isPods)]),
+      ),
+    [visibleColumns, isPods],
+  );
+  const primarySort = sorting[0];
+  const sortsByMetrics = isPods && (primarySort?.id === "cpu" || primarySort?.id === "mem");
+  const metricsSortKey = sortsByMetrics ? podMetricsByCluster : null;
+  const compareRows = useMemo(
+    () =>
+      tableComparator<ScopedRow>(
+        primarySort ? (comparators.get(primarySort.id) ?? null) : null,
+        primarySort?.desc ?? false,
+        metricsSortKey,
+      ),
+    [comparators, primarySort?.id, primarySort?.desc, metricsSortKey],
+  );
+  const sortRows = useMemo(() => createIncrementalSorter<ScopedRow>(), []);
+  const sortedData = useMemo(() => sortRows(filtered, compareRows), [sortRows, filtered, compareRows]);
+
   const table = useTable({
     features: TABLE_FEATURES,
-    data: filtered,
+    data: sortedData,
+    manualSorting: true,
     columns,
     state: { sorting, columnSizing },
     onSortingChange: setSorting,
@@ -1262,7 +1263,6 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   }, [setSelection]);
 
   return (
-   <NowProvider>
     <div
       ref={tableShellRef}
       tabIndex={-1}
@@ -1495,7 +1495,15 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
           // paddingRight mirrors the header so columns stay aligned and the
           // auto-fit (which measures this element's content box) fills the
           // reduced width. The reserved strip reads as table right-padding.
-          style={{ flex: 1, overflow: "auto", minHeight: 0, paddingRight: COLMENU_W }}
+          // paddingBottom lets the last rows scroll out from under an open
+          // bottom dock (published by Dock).
+          style={{
+            flex: 1,
+            overflow: "auto",
+            minHeight: 0,
+            paddingRight: COLMENU_W,
+            paddingBottom: "var(--fs-dock-bottom, 0px)",
+          }}
           onClick={(e) => {
             // Delegated row click. Per-row onClick props were the biggest
             // source of GC pressure on large tables — every render
@@ -1792,7 +1800,6 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         />
       )}
     </div>
-   </NowProvider>
   );
 }
 
@@ -2405,15 +2412,33 @@ function rightAlign(id: string): boolean {
 
 // Lazily-allocated canvas for measureText. Way faster than DOM-based
 // measurement (no layout, no reflow) and accurate enough for the cell
-// font we control. Reused across all table instances.
-let _measureCtx: CanvasRenderingContext2D | null = null;
-function measureText(text: string, font: string): number {
-  if (!_measureCtx && typeof document !== "undefined") {
-    _measureCtx = document.createElement("canvas").getContext("2d");
+// font we control. Reused across all table instances. `undefined` = not
+// tried yet, `null` = unsupported (don't retry per call).
+let _measureCtx: CanvasRenderingContext2D | null | undefined;
+// Auto-fit re-measures the same sample on every delta flush; widths are
+// memoised per (font, text). Cleared wholesale when full — cheap to refill.
+const MEASURE_CACHE_MAX = 20_000;
+const measureCache = new Map<string, number>();
+export function measureText(text: string, font: string): number {
+  const key = `${font}\u0000${text}`;
+  const hit = measureCache.get(key);
+  if (hit !== undefined) return hit;
+  if (_measureCtx === undefined) {
+    _measureCtx =
+      typeof document === "undefined"
+        ? null
+        : document.createElement("canvas").getContext("2d");
   }
-  if (!_measureCtx) return text.length * 7; // SSR / unsupported fallback
-  if (_measureCtx.font !== font) _measureCtx.font = font;
-  return _measureCtx.measureText(text).width;
+  let width: number;
+  if (!_measureCtx) {
+    width = text.length * 7; // SSR / unsupported fallback
+  } else {
+    if (_measureCtx.font !== font) _measureCtx.font = font;
+    width = _measureCtx.measureText(text).width;
+  }
+  if (measureCache.size >= MEASURE_CACHE_MAX) measureCache.clear();
+  measureCache.set(key, width);
+  return width;
 }
 
 // Cell font strings used by canvas measureText for column-width fitting.
@@ -2455,10 +2480,9 @@ function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
   // by 8 container dots overflow a column sized for the bare text.
   // Mirror the rendering math from `renderCell`'s `phase` branch.
   if (c.kind === "phase") {
-    // Dense StatusPill chrome: 1px×6px padding + 4px gap + 5px inner
-    // dot ≈ 21px around the text glyphs.
-    const PILL_FONT = `600 10.5px system-ui, -apple-system, Segoe UI, sans-serif`;
-    const PILL_CHROME = 21;
+    // Dense StatusPill: 3px bar + 5px gap before the text glyphs.
+    const PILL_FONT = `500 11px system-ui, -apple-system, Segoe UI, sans-serif`;
+    const PILL_CHROME = 8;
     const PHASE_WRAP_GAP = 8; // PHASE_WRAP's gap between pill and dots
     const DOT_SIZE = 7; // size prop on ContainerDots in ResourceTable
     const DOT_GAP = 3;
@@ -2467,9 +2491,9 @@ function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
     let maxRendered = 0;
     for (const r of sample) {
       const phase = typeof r[c.id] === "string" ? String(r[c.id]) : "";
-      // Ambient (Running / Terminating) suppresses the pill on pod
+      // Ambient (Running / Terminating / Succeeded) suppresses the label on pod
       // rows — see `renderCell`'s `phase` branch.
-      const ambient = phase === "Running" || phase === "Terminating";
+      const ambient = statusIsAmbient(phase);
       const states = Array.isArray(r.container_states)
         ? (r.container_states as Array<Record<string, unknown>>)
         : [];
@@ -2642,12 +2666,14 @@ function accessorFor(c: ColumnDef) {
   };
 }
 
-// `phase` sorts by status bucket so CrashLoopBackOff floats above Running
-// when ascending — what the operator usually wants. Pods' CPU/Mem are
-// metrics-server values, joined here so the sort matches what's rendered.
-// Takes the metrics *ref* (not a snapshot) — the comparator runs at sort
-// time, long after the columns were built, and must see live values.
-export function sortingFnFor<RowData extends ResourceRow = ResourceRow>(
+type RowCompare<R> = (a: R, b: R) => number;
+
+// One column's ascending order. `phase` sorts by status bucket so
+// CrashLoopBackOff floats above Running — what the operator usually wants.
+// Pods' CPU/Mem are metrics-server values, joined here so the sort matches
+// what's rendered; they read the metrics *ref* so a comparator built earlier
+// sees live values.
+export function rowComparatorFor<RowData extends ResourceRow = ResourceRow>(
   c: ColumnDef,
   podMetricsRef: {
     readonly current: Record<
@@ -2656,39 +2682,53 @@ export function sortingFnFor<RowData extends ResourceRow = ResourceRow>(
     > | null;
   },
   isPods: boolean,
-) {
+): RowCompare<RowData> {
   if (c.kind === "phase") {
-    return (a: TanRow<TableFeats, RowData>, b: TanRow<TableFeats, RowData>) => {
-      const av = phaseRank(String(a.original[c.id] ?? ""));
-      const bv = phaseRank(String(b.original[c.id] ?? ""));
-      return av - bv;
-    };
+    return (a, b) => phaseRank(String(a[c.id] ?? "")) - phaseRank(String(b[c.id] ?? ""));
   }
   if (isPods && (c.id === "cpu" || c.id === "mem")) {
     // The ref holds clusterId → ("ns/name" → metric); each row joins
     // through its own origin cluster so a merged view sorts correctly.
-    const metricFor = (
-      r: TanRow<TableFeats, RowData>,
-    ): { cpu_milli: number; mem_mib: number } | null => {
-      const byCluster = podMetricsRef.current;
-      if (!byCluster) return null;
-      const cid = typeof r.original.__clusterId === "string"
-        ? r.original.__clusterId
-        : "";
-      const key = `${r.original.namespace ?? ""}/${r.original.name ?? ""}`;
-      return byCluster[cid]?.[key] ?? null;
+    const valueOf = (r: RowData): number => {
+      const cid = typeof r.__clusterId === "string" ? r.__clusterId : "";
+      const m = podMetricsRef.current?.[cid]?.[`${r.namespace ?? ""}/${r.name ?? ""}`];
+      if (!m) return -1;
+      return c.id === "cpu" ? m.cpu_milli : m.mem_mib;
     };
-    return (a: TanRow<TableFeats, RowData>, b: TanRow<TableFeats, RowData>) => {
-      const av = metricFor(a);
-      const bv = metricFor(b);
-      const an = av ? (c.id === "cpu" ? av.cpu_milli : av.mem_mib) : -1;
-      const bn = bv ? (c.id === "cpu" ? bv.cpu_milli : bv.mem_mib) : -1;
-      return an - bn;
-    };
+    return (a, b) => valueOf(a) - valueOf(b);
   }
-  // Fall back to TanStack's auto sort (string locale-aware / numeric on
-  // accessor-typed columns).
-  return "auto" as const;
+  if (c.kind === undefined || c.kind === "text") {
+    // Natural order ("pod-2" < "pod-10"), keyed once per row object.
+    return naturalComparator<RowData>((r) => {
+      const v = cellRaw(c, r);
+      return v == null ? "" : String(v);
+    });
+  }
+  const read = accessorFor(c) as (r: RowData) => number | string;
+  return (a, b) => {
+    const x = read(a);
+    const y = read(b);
+    return x < y ? -1 : x > y ? 1 : 0;
+  };
+}
+
+const byNameThenId = (() => {
+  const byName = naturalComparator<ScopedRow>((r) => String(r.name ?? ""));
+  return (a: ScopedRow, b: ScopedRow): number =>
+    byName(a, b) || (a.__sid < b.__sid ? -1 : a.__sid > b.__sid ? 1 : 0);
+})();
+
+/// The table's total order: the sorted column (reversed when descending),
+/// then name and id so rows with equal keys never swap between updates.
+/// `version` only changes the comparator's identity — pass what the column
+/// reads outside the row (the metrics snapshot) so a new one re-sorts.
+export function tableComparator<R extends ScopedRow>(
+  primary: RowCompare<R> | null,
+  desc: boolean,
+  _version: unknown = null,
+): RowCompare<R> {
+  if (!primary) return byNameThenId;
+  return (a, b) => (desc ? primary(b, a) : primary(a, b)) || byNameThenId(a, b);
 }
 
 // Severity ordering used for `phase` sorts. Bad first when ascending
@@ -2784,7 +2824,7 @@ export function renderCell(
   switch (c.kind) {
     case "phase": {
       // For pods, ContainerDots already carry the per-container state — so
-      // we drop the redundant pod-level dot and only render a labelled
+      // we drop the redundant pod-level bar and only render a labelled
       // StatusPill when the phase is non-ambient (Pending, CrashLoopBackOff,
       // OOMKilled, Init, Completed, etc.). When everything is healthy the
       // cell shows just the dots and reads quietly per P1.
@@ -2802,7 +2842,7 @@ export function renderCell(
               : "main",
           ready: typeof s.ready === "boolean" ? s.ready : undefined,
         }));
-        const ambient = phase === "Running" || phase === "Terminating";
+        const ambient = statusIsAmbient(phase);
         return (
           <span style={PHASE_WRAP}>
             {!ambient && (
@@ -2817,8 +2857,8 @@ export function renderCell(
       return <StatusPill status={phase} t={t} mode={mode} dense />;
     }
     case "age":
-      // Self-contained subscriber to NowContext — re-renders once per
-      // 1 Hz tick without dragging the whole row through reconciliation.
+      // Own clock (`useAgeLabel`): re-renders only when its label changes,
+      // without dragging the whole row through reconciliation.
       return <AgeCell value={value} color={t.textMuted} />;
     case "number": {
       // Special-case the columns whose number means something:
@@ -2926,21 +2966,6 @@ export function renderCell(
 function formatMi(mb: number): string {
   // Mirrors design/data.jsx fmtMi.
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} Gi` : `${mb} Mi`;
-}
-
-function formatAge(value: unknown, nowMs: number): string {
-  if (typeof value !== "string") return "—";
-  const t = Date.parse(value);
-  if (Number.isNaN(t)) return "—";
-  let s = Math.max(0, Math.floor((nowMs - t) / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  s -= m * 60;
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  return `${d}d`;
 }
 
 /// The row action opens logs for the one row under the cursor. Pod rows

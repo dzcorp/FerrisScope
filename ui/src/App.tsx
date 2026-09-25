@@ -1,5 +1,7 @@
 import { logErr, reportErr } from "./lib/log";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -40,7 +42,7 @@ import { Rail } from "./components/Rail";
 import { FleetLanding } from "./components/FleetLanding";
 import { CommandPalette } from "./components/CommandPalette";
 import { NamespaceModal } from "./components/NamespaceModal";
-import { SettingsPanel } from "./components/SettingsPanel";
+import { loadSettingsPanel, prefetchPanels } from "./lib/lazyPanels";
 import { BulkBar, type BulkAction } from "./components/BulkBar";
 import {
   buildGenericBulkActions,
@@ -93,8 +95,7 @@ const sessionSaver = createSaver(
 );
 registerFlushOnClose(sessionSaver);
 
-const RAIL_COLLAPSED_W = 56;
-const RAIL_OPEN_W = 220;
+const SettingsPanel = lazy(loadSettingsPanel);
 
 // Top-level shell. Owns the global keyboard layer (P3 + R-13) and renders
 // every overlay (palette, settings, namespace modal, bulk bar, dock).
@@ -110,6 +111,9 @@ export default function App() {
     () => Object.keys(nsClusters).sort(),
     [nsClusters],
   );
+
+  // Warm the lazily-loaded panels once startup has settled.
+  useEffect(() => prefetchPanels(), []);
 
   const themeMode = useAppStore((s) => s.themeMode);
   const themeId = useAppStore((s) => s.themeId);
@@ -918,12 +922,6 @@ export default function App() {
     // sibling useEffect above (and pre-applied from prefs in Rust setup()).
   }, [resolved, themeMode]);
 
-  const leftInset = selectedContext
-    ? railMode === "pinned"
-      ? RAIL_OPEN_W
-      : RAIL_COLLAPSED_W
-    : 0;
-
   return (
     <div
       style={{
@@ -1031,7 +1029,6 @@ export default function App() {
               clusterTabId={tab.id}
               clusterName={primary.name}
               clusterId={primary.id}
-              leftInset={leftInset}
               placement="bottom"
             />
             <Dock
@@ -1039,7 +1036,6 @@ export default function App() {
               clusterTabId={tab.id}
               clusterName={primary.name}
               clusterId={primary.id}
-              leftInset={leftInset}
               placement="right"
             />
           </div>
@@ -1138,7 +1134,9 @@ export default function App() {
       )}
 
       {settingsOpen && (
-        <SettingsPanel mode={themeMode} onClose={closeSettings} />
+        <Suspense fallback={null}>
+          <SettingsPanel mode={themeMode} onClose={closeSettings} />
+        </Suspense>
       )}
 
       <PanelTray />

@@ -93,7 +93,7 @@ describe("TabDrawers", () => {
     expect(screen.queryByTestId("log-api")).toBeNull();
   });
 
-  it("a detail keeps its state through minimise, another panel, and restore", () => {
+  it("a detail keeps its state through minimise, another panel, and restore", async () => {
     mount();
     act(() =>
       useAppStore.getState().openDrawer({
@@ -105,7 +105,7 @@ describe("TabDrawers", () => {
         name: "api-0",
       }),
     );
-    fireEvent.click(screen.getByTestId("detail-api-0"));
+    fireEvent.click(await screen.findByTestId("detail-api-0"));
     fireEvent.click(screen.getByTestId("detail-api-0"));
     act(() => useAppStore.getState().minimizeDrawer());
     act(() => useAppStore.getState().openDrawer(logs("web")));

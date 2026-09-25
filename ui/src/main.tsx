@@ -6,6 +6,9 @@ import "./index.css";
 // clipboard actions (and any other consumer) route through the Tauri
 // clipboard plugin on webkit2gtk. Must run before any clipboard use.
 import "./lib/monacoClipboard";
+import { startBreathe } from "./lib/breathe";
+
+startBreathe();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

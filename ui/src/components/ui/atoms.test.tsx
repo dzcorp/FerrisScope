@@ -263,6 +263,31 @@ describe("Field (settings row)", () => {
 });
 
 describe("ContainerDots", () => {
+  it("snaps every dot and separator to even pixels so rings stay centred", () => {
+    for (const size of [7, 8, 9]) {
+      const { container, unmount } = render(
+        <ContainerDots
+          t={t}
+          size={size}
+          containers={[
+            { name: "i", status: "PodInitializing", kind: "init" },
+            { name: "s", status: "Running", kind: "sidecar" },
+            { name: "m", status: "Pending", kind: "main" },
+          ]}
+        />,
+      );
+      const sized = Array.from(container.querySelectorAll<HTMLElement>("span")).filter(
+        (s) => s.style.height !== "",
+      );
+      expect(sized.length).toBe(5);
+      for (const el of sized) {
+        expect(parseInt(el.style.height, 10) % 2).toBe(0);
+        if (el.style.width !== "1px") expect(parseInt(el.style.width, 10) % 2).toBe(0);
+      }
+      unmount();
+    }
+  });
+
   it("nothing rendered when there are no containers", () => {
     const { container } = render(<ContainerDots t={t} containers={[]} />);
     expect(container.firstChild).toBeNull();
@@ -282,6 +307,29 @@ describe("ContainerDots", () => {
     // 3 dots → 3 spans inside the wrapper (each wrapped in a Tooltip).
     const dots = container.querySelectorAll("span > span");
     expect(dots.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("transient containers stay solid and still (the status bar breathes)", () => {
+    const { container } = render(
+      <ContainerDots
+        t={t}
+        containers={[
+          { name: "i1", status: "PodInitializing", kind: "init" },
+          { name: "m1", status: "ContainerCreating", kind: "main" },
+          { name: "s1", status: "Waiting", kind: "sidecar" },
+          { name: "m2", status: "Running", kind: "main" },
+        ]}
+      />,
+    );
+    const dots = Array.from(container.querySelectorAll<HTMLElement>("span")).filter(
+      (s) => s.style.width !== "" && s.style.width !== "1px",
+    );
+    expect(dots).toHaveLength(4);
+    for (const d of dots) {
+      expect(d.style.background).not.toBe("transparent");
+      expect(d.style.border).toBe("");
+    }
+    expect(container.querySelectorAll(".fs-breathe")).toHaveLength(0);
   });
 
   it("containers without a kind fall back to all-main (no collapse)", () => {

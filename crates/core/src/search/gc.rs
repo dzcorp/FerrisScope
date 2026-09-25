@@ -28,6 +28,16 @@ pub(super) fn run(
         "DELETE FROM rows WHERE deleted_at IS NULL AND updated_at < ?1",
         rusqlite::params![stale_cutoff],
     )?;
+    if tombstones_purged + stale_purged > 0 {
+        // FTS5 only drops deleted postings when their segment is merged;
+        // optimize folds everything into one segment, then the freed pages
+        // go back to the filesystem.
+        conn.execute("INSERT INTO rows_fts(rows_fts) VALUES('optimize')", [])?;
+        // Frees one page per step.
+        let mut vacuum = conn.prepare("PRAGMA incremental_vacuum")?;
+        let mut steps = vacuum.query([])?;
+        while steps.next()?.is_some() {}
+    }
     Ok(GcStats {
         tombstones_purged,
         stale_purged,
@@ -49,8 +59,8 @@ mod tests {
 
     fn seed(conn: &Connection, uid: &str, updated_at: i64, deleted_at: Option<i64>) {
         conn.execute(
-            "INSERT INTO rows (kind_id, uid, namespace, name, blob, updated_at, deleted_at)
-             VALUES ('pods', ?1, 'default', ?1, '{}', ?2, ?3)",
+            "INSERT INTO rows (kind_id, uid, namespace, name, labels, updated_at, deleted_at)
+             VALUES ('pods', ?1, 'default', ?1, '', ?2, ?3)",
             rusqlite::params![uid, updated_at, deleted_at],
         )
         .unwrap();
@@ -76,6 +86,39 @@ mod tests {
         assert_eq!(stats.tombstones_purged, 1);
         assert_eq!(stats.stale_purged, 1);
         assert_eq!(count(&conn), 2);
+    }
+
+    #[test]
+    fn purge_shrinks_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::search::db::open_and_init(&dir.path().join("idx.db")).unwrap();
+        let pages =
+            |c: &Connection| -> i64 { c.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap() };
+        let now = unix_ms();
+        conn.execute_batch("BEGIN").unwrap();
+        for i in 0..3000 {
+            conn.execute(
+                "INSERT INTO rows (kind_id, uid, namespace, name, labels, updated_at, deleted_at)
+                 VALUES ('pods', ?1, 'default', ?2, 'app=payments-api tier=backend', ?3, ?4)",
+                rusqlite::params![
+                    format!("u{i}"),
+                    format!("payments-api-{i:05}"),
+                    now,
+                    now - 48 * 3_600_000
+                ],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("COMMIT").unwrap();
+        let before = pages(&conn);
+
+        let stats = run(&conn, Duration::from_hours(24), Duration::from_hours(168)).unwrap();
+        assert_eq!(stats.tombstones_purged, 3000);
+        let free: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(free, 0, "freed pages returned");
+        assert!(pages(&conn) < before / 2, "{} !< {before}/2", pages(&conn));
     }
 
     #[test]

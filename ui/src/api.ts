@@ -75,6 +75,7 @@ import type {
   LogPodTarget,
   ResolvedLogPods,
   TerminalEvent,
+  MetricsNeed,
   MetricsSnapshot,
   MutatingWebhookConfigurationDetail,
   NamespaceDetail,
@@ -849,10 +850,11 @@ export const api = {
   // Metrics-server snapshots — pods (cpu_milli + mem_mib) keyed by uid, plus
   // a cluster aggregate. Returns the cached snapshot if metrics are already
   // running for the cluster. Future updates flow over `metrics://{cluster}`.
-  subscribeMetrics: (clusterId: string) =>
-    invoke<MetricsSnapshot | null>("subscribe_metrics", { clusterId }),
-  unsubscribeMetrics: (clusterId: string) =>
-    invoke<void>("unsubscribe_metrics", { clusterId }),
+  // Pass the same `need` to the matching unsubscribe.
+  subscribeMetrics: (clusterId: string, need: MetricsNeed) =>
+    invoke<MetricsSnapshot | null>("subscribe_metrics", { clusterId, need }),
+  unsubscribeMetrics: (clusterId: string, need: MetricsNeed) =>
+    invoke<void>("unsubscribe_metrics", { clusterId, need }),
 
   // Fleet probes — per-context summary cards. Cached to disk; only re-probed
   // hourly unless `force=true`.

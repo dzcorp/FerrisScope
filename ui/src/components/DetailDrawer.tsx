@@ -7,11 +7,14 @@ import { resolveResourceKind } from "../lib/resourceKinds";
 import { findDetailRow, useDetailRow } from "../lib/detailWatch";
 import { toast } from "../lib/dialog";
 import { logErr } from "../lib/log";
-import { DetailPanel } from "./DetailPanel";
+import { lazy, Suspense } from "react";
+import { loadDetailPanel } from "../lib/lazyPanels";
 import { makeTerminalTab } from "./Dock";
 import { openNodeDebugTab } from "./ResourceTable";
 
 type DetailDrawer = Extract<Drawer, { kind: "detail" }>;
+
+const DetailPanel = lazy(loadDetailPanel);
 
 /// Hosts a detail drawer outside the table: it stays mounted while parked,
 /// watches its own object, and follows links within its own back/forward
@@ -78,6 +81,7 @@ export function DetailDrawer({
   };
 
   return (
+    <Suspense fallback={null}>
     <DetailPanel
       // A different kind means different tabs and sections: start fresh.
       // Same-kind navigation keeps the panel and its inner tab.
@@ -129,5 +133,6 @@ export function DetailDrawer({
             : undefined
       }
     />
+    </Suspense>
   );
 }

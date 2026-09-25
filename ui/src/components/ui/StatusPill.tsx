@@ -1,6 +1,6 @@
 import {
   statusDot,
-  statusFill,
+  statusIsAmbient,
   statusIsTransient,
   type ThemeMode,
   type Tokens,
@@ -15,71 +15,60 @@ type Props = {
   compact?: boolean;
 };
 
-// Status badge — one rule per bucket per P5. Compact mode renders ambient
-// statuses (Running, Terminating) as a bare dot since the color carries
-// enough meaning in dense tables.
-const AMBIENT = new Set(["Running", "Terminating"]);
+// Status label: a short bar in the bucket color plus the status in body text.
+// Transient statuses breathe (`.fs-breathe`). Compact mode drops the text for
+// ambient statuses (`statusIsAmbient`).
 
-export function StatusPill({ status, t, mode, dense, compact }: Props) {
-  const transient = statusIsTransient(status);
-  const dot = statusDot(status, t);
+export function StatusPill({ status, t, dense, compact }: Props) {
+  const bar = (
+    <span
+      data-status-bar=""
+      className={statusIsTransient(status) ? "fs-breathe" : undefined}
+      style={{
+        display: "inline-block",
+        flexShrink: 0,
+        width: 3,
+        // em so the bar follows each theme's type scale.
+        height: "0.95em",
+        borderRadius: 2,
+        background: statusDot(status, t),
+      }}
+    />
+  );
 
-  if (compact && AMBIENT.has(status)) {
-    const dotSize = dense ? 7 : 8;
+  if (compact && statusIsAmbient(status)) {
     return (
       <Tooltip label={status}>
         <span
+          role="img"
+          aria-label={status}
           style={{
             display: "inline-flex",
             alignItems: "center",
             height: dense ? 14 : 18,
+            fontSize: dense ? "var(--fs-fs-sm, 11px)" : "var(--fs-fs-md, 12.5px)",
           }}
         >
-          <span
-            className={transient ? "fs-pulse-dot" : undefined}
-            style={{
-              width: dotSize,
-              height: dotSize,
-              borderRadius: "50%",
-              background: dot,
-              display: "inline-block",
-            }}
-          />
+          {bar}
         </span>
       </Tooltip>
     );
   }
 
-  const fill = statusFill(status, t, mode);
   return (
     <span
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: dense ? 4 : 6,
-        padding: dense ? "1px 6px" : "2px 8px",
-        borderRadius: dense ? 3 : 10,
-        background: fill.bg,
-        color: fill.fg,
-        fontSize: dense ? 10.5 : 11,
-        fontWeight: 600,
-        letterSpacing: dense ? 0 : -0.1,
+        gap: dense ? 5 : 7,
+        color: t.text,
+        fontSize: dense ? "var(--fs-fs-sm, 11px)" : "var(--fs-fs-md, 12.5px)",
+        fontWeight: 500,
         lineHeight: 1.4,
         whiteSpace: "nowrap",
       }}
     >
-      <span
-        className={transient ? "fs-pulse-dot" : undefined}
-        style={{
-          width: dense ? 5 : 6,
-          height: dense ? 5 : 6,
-          // Status dot is always a perfect circle — not theme-radius-aware.
-          // (A 4-6px square with theme corners scales to look like a rounded
-          // square, especially under the .fs-pulse-dot 1.35× scale animation.)
-          borderRadius: "50%",
-          background: dot,
-        }}
-      />
+      {bar}
       {status}
     </span>
   );

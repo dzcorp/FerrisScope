@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use rusqlite::Connection;
 
 use super::{Result, SearchHit};
@@ -16,9 +18,9 @@ const TRIGRAM_MIN: usize = 3;
 const MAX_RESULTS: i64 = 200;
 
 /// FTS5 column weights, in the order columns appear in the `rows_fts`
-/// schema: `name`, `namespace`, `kind_id`, `blob`. A name match should
-/// dominate a blob mention, otherwise a Pod literally called `mysql-0`
-/// can lose to a ConfigMap that merely references mysql in an env var.
+/// schema: `name`, `namespace`, `kind_id`, `labels`. A name match should
+/// dominate a label mention, otherwise a Pod literally called `mysql-0`
+/// can lose to everything labelled `app=mysql`.
 /// Kind weight is mild but non-zero so typing `pod` still surfaces Pods.
 const BM25_WEIGHTS: &str = "10.0, 3.0, 2.0, 1.0";
 
@@ -64,29 +66,56 @@ pub(super) fn run(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Se
         .unwrap_or(MAX_RESULTS)
         .clamp(1, MAX_RESULTS);
 
-    let fts_tokens: Vec<String> = trimmed
+    // Trigram FTS needs 3+ chars; shorter tokens still narrow the result as
+    // substring filters on name / namespace instead of being dropped.
+    let (long, short): (Vec<&str>, Vec<&str>) = trimmed
         .split_whitespace()
-        .filter(|t| t.chars().count() >= TRIGRAM_MIN)
-        .map(escape_fts_phrase)
-        .collect();
+        .partition(|t| t.chars().count() >= TRIGRAM_MIN);
 
-    if fts_tokens.is_empty() {
-        return like_fallback(conn, trimmed, limit);
+    if long.is_empty() {
+        return like_fallback(conn, &short, limit);
     }
-    let match_query = fts_tokens.join(" ");
+    let match_query = long
+        .iter()
+        .map(|t| escape_fts_phrase(t))
+        .collect::<Vec<_>>()
+        .join(" ");
 
-    let sql = format!(
+    let mut sql = format!(
         "SELECT r.kind_id, r.uid, r.namespace, r.name,
                 bm25(rows_fts, {BM25_WEIGHTS}) * ({KIND_BIAS_CASE}) AS score
          FROM rows_fts
          JOIN rows r ON r.rowid = rows_fts.rowid
          WHERE rows_fts MATCH ?1
-           AND r.deleted_at IS NULL
-         ORDER BY score
-         LIMIT ?2"
+           AND r.deleted_at IS NULL"
     );
-    let mut stmt = conn.prepare_cached(&sql)?;
-    let mut rows = stmt.query(rusqlite::params![match_query, limit])?;
+    let mut params: Vec<rusqlite::types::Value> = vec![match_query.into()];
+    push_like_filters(&mut sql, &mut params, &short);
+    params.push(limit.into());
+    let _ = write!(sql, " ORDER BY score LIMIT ?{}", params.len());
+    collect_hits(conn, &sql, params)
+}
+
+/// `AND (name LIKE ? OR namespace LIKE ?)` per token, each bound as the
+/// next positional parameter.
+fn push_like_filters(sql: &mut String, params: &mut Vec<rusqlite::types::Value>, tokens: &[&str]) {
+    for t in tokens {
+        params.push(format!("%{}%", escape_like(t)).into());
+        let n = params.len();
+        let _ = write!(
+            sql,
+            " AND (r.name LIKE ?{n} ESCAPE '\\' OR r.namespace LIKE ?{n} ESCAPE '\\')"
+        );
+    }
+}
+
+fn collect_hits(
+    conn: &Connection,
+    sql: &str,
+    params: Vec<rusqlite::types::Value>,
+) -> Result<Vec<SearchHit>> {
+    let mut stmt = conn.prepare_cached(sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
         out.push(parse_hit(row)?);
@@ -109,23 +138,20 @@ fn escape_fts_phrase(token: &str) -> String {
 /// Bias by kind first (Events / ReplicaSets / Endpoints last), then by
 /// recency — without BM25 we have no real relevance signal, so the kind
 /// bias is doing all the work of demoting noisy rows for 2-char queries.
-fn like_fallback(conn: &Connection, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
-    let pattern = format!("%{}%", escape_like(query));
-    let sql = format!(
-        "SELECT r.kind_id, r.uid, r.namespace, r.name, 0.0 AS score
+fn like_fallback(conn: &Connection, tokens: &[&str], limit: i64) -> Result<Vec<SearchHit>> {
+    let mut sql = "SELECT r.kind_id, r.uid, r.namespace, r.name, 0.0 AS score
          FROM rows r
-         WHERE r.deleted_at IS NULL
-           AND (r.name LIKE ?1 ESCAPE '\\' OR r.namespace LIKE ?1 ESCAPE '\\')
-         ORDER BY ({KIND_BIAS_CASE}) DESC, r.updated_at DESC
-         LIMIT ?2"
+         WHERE r.deleted_at IS NULL"
+        .to_owned();
+    let mut params = Vec::new();
+    push_like_filters(&mut sql, &mut params, tokens);
+    params.push(limit.into());
+    let _ = write!(
+        sql,
+        " ORDER BY ({KIND_BIAS_CASE}) DESC, r.updated_at DESC LIMIT ?{}",
+        params.len()
     );
-    let mut stmt = conn.prepare_cached(&sql)?;
-    let mut rows = stmt.query(rusqlite::params![pattern, limit])?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next()? {
-        out.push(parse_hit(row)?);
-    }
-    Ok(out)
+    collect_hits(conn, &sql, params)
 }
 
 fn escape_like(s: &str) -> String {
@@ -149,11 +175,11 @@ mod tests {
     use super::*;
     use crate::search::db::open_in_memory_for_tests;
 
-    fn seed(conn: &Connection, kind: &str, uid: &str, name: &str, blob: &str) {
+    fn seed(conn: &Connection, kind: &str, uid: &str, name: &str, labels: &str) {
         conn.execute(
-            "INSERT INTO rows (kind_id, uid, namespace, name, blob, updated_at, deleted_at)
+            "INSERT INTO rows (kind_id, uid, namespace, name, labels, updated_at, deleted_at)
              VALUES (?1, ?2, 'default', ?3, ?4, 1, NULL)",
-            rusqlite::params![kind, uid, name, blob],
+            rusqlite::params![kind, uid, name, labels],
         )
         .unwrap();
     }
@@ -165,23 +191,17 @@ mod tests {
     #[test]
     fn substring_match_via_trigram() {
         let conn = open_in_memory_for_tests();
-        seed(&conn, "pods", "u1", "payments-api-7f9c4", "{}");
-        seed(&conn, "pods", "u2", "frontend-0", "{}");
+        seed(&conn, "pods", "u1", "payments-api-7f9c4", "");
+        seed(&conn, "pods", "u2", "frontend-0", "");
         let hits = run(&conn, "ments-api", 10).unwrap();
         assert_eq!(names(&hits), vec!["payments-api-7f9c4"]);
     }
 
     #[test]
-    fn name_match_outranks_blob_mention() {
+    fn name_match_outranks_label_mention() {
         let conn = open_in_memory_for_tests();
-        seed(
-            &conn,
-            "configmaps",
-            "u1",
-            "app-config",
-            r#"{"note":"mysql url"}"#,
-        );
-        seed(&conn, "pods", "u2", "mysql-0", "{}");
+        seed(&conn, "configmaps", "u1", "app-config", "app=mysql");
+        seed(&conn, "pods", "u2", "mysql-0", "");
         let hits = run(&conn, "mysql", 10).unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].name, "mysql-0");
@@ -190,7 +210,7 @@ mod tests {
     #[test]
     fn deleted_rows_are_excluded_from_both_paths() {
         let conn = open_in_memory_for_tests();
-        seed(&conn, "pods", "u1", "mysql-0", "{}");
+        seed(&conn, "pods", "u1", "mysql-0", "");
         conn.execute("UPDATE rows SET deleted_at = 5 WHERE uid = 'u1'", [])
             .unwrap();
         assert!(run(&conn, "mysql", 10).unwrap().is_empty());
@@ -201,7 +221,7 @@ mod tests {
     #[test]
     fn fts_meta_characters_do_not_break_the_query() {
         let conn = open_in_memory_for_tests();
-        seed(&conn, "pods", "u1", "api-0", "{}");
+        seed(&conn, "pods", "u1", "api-0", "");
         // Each of these would be FTS5 syntax if unescaped.
         for q in ["app:foo", "a*b(c)", "name-\"quoted\"", "x OR y NOT z"] {
             run(&conn, q, 10).unwrap_or_else(|e| panic!("query {q:?} failed: {e}"));
@@ -211,8 +231,8 @@ mod tests {
     #[test]
     fn like_fallback_serves_short_queries_and_escapes_wildcards() {
         let conn = open_in_memory_for_tests();
-        seed(&conn, "pods", "u1", "db-0", "{}");
-        seed(&conn, "pods", "u2", "frontend-0", "{}");
+        seed(&conn, "pods", "u1", "db-0", "");
+        seed(&conn, "pods", "u2", "frontend-0", "");
         let hits = run(&conn, "db", 10).unwrap();
         assert_eq!(names(&hits), vec!["db-0"]);
         // `%` must match literally, not as a wildcard.
@@ -220,9 +240,29 @@ mod tests {
     }
 
     #[test]
+    fn short_tokens_narrow_a_long_query_instead_of_being_dropped() {
+        let conn = open_in_memory_for_tests();
+        seed(&conn, "pods", "u1", "db-payments-0", "");
+        seed(&conn, "pods", "u2", "api-payments-0", "");
+        assert_eq!(
+            names(&run(&conn, "payments db", 10).unwrap()),
+            vec!["db-payments-0"]
+        );
+        assert_eq!(run(&conn, "payments", 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn several_short_tokens_all_apply() {
+        let conn = open_in_memory_for_tests();
+        seed(&conn, "pods", "u1", "db-0", "");
+        seed(&conn, "pods", "u2", "db-1", "");
+        assert_eq!(names(&run(&conn, "db 1", 10).unwrap()), vec!["db-1"]);
+    }
+
+    #[test]
     fn short_query_returns_empty_without_erroring() {
         let conn = open_in_memory_for_tests();
-        seed(&conn, "pods", "u1", "a", "{}");
+        seed(&conn, "pods", "u1", "a", "");
         assert!(run(&conn, "a", 10).unwrap().is_empty());
         assert!(run(&conn, "  ", 10).unwrap().is_empty());
     }
@@ -230,8 +270,8 @@ mod tests {
     #[test]
     fn kind_bias_demotes_events_below_workloads() {
         let conn = open_in_memory_for_tests();
-        seed(&conn, "events", "u1", "mysql-0.17f1", "{}");
-        seed(&conn, "pods", "u2", "mysql-0", "{}");
+        seed(&conn, "events", "u1", "mysql-0.17f1", "");
+        seed(&conn, "pods", "u2", "mysql-0", "");
         let hits = run(&conn, "mysql-0", 10).unwrap();
         assert_eq!(hits[0].kind_id, "pods");
     }
@@ -240,7 +280,7 @@ mod tests {
     fn limit_is_clamped() {
         let conn = open_in_memory_for_tests();
         for i in 0..5 {
-            seed(&conn, "pods", &format!("u{i}"), &format!("api-{i}"), "{}");
+            seed(&conn, "pods", &format!("u{i}"), &format!("api-{i}"), "");
         }
         assert_eq!(run(&conn, "api", 2).unwrap().len(), 2);
         // limit 0 clamps to 1 rather than erroring or returning everything.

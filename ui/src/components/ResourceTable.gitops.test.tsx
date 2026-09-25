@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
-import { renderCell, sortingFnFor } from "./ResourceTable";
+import { renderCell, rowComparatorFor } from "./ResourceTable";
 import { tokens } from "../theme";
 
 describe("GitOps table status columns", () => {
@@ -37,15 +37,12 @@ describe("GitOps table status columns", () => {
   });
 
   it("sorts failures and drift before healthy resources", () => {
-    const compare = sortingFnFor(
+    const compare = rowComparatorFor(
       { id: "health", header: "Health", kind: "phase" },
       { current: null },
       false,
     );
-    if (typeof compare !== "function")
-      throw new Error("expected status comparator");
-    const row = (health: string) =>
-      ({ original: { health } }) as unknown as Parameters<typeof compare>[0];
+    const row = (health: string) => ({ uid: health, health });
     expect(compare(row("Degraded"), row("Healthy"))).toBeLessThan(0);
     expect(compare(row("OutOfSync"), row("Synced"))).toBeLessThan(0);
     expect(compare(row("Stalled"), row("Ready"))).toBeLessThan(0);
