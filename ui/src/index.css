@@ -379,6 +379,15 @@ textarea,
   display: none;
 }
 
+/* Rail items highlight on hover in CSS, not React state (a re-render per
+   pointer move over the list). The active item paints its own background. */
+.fs-rail-item {
+  background: transparent;
+}
+.fs-rail-item:not([data-active]):hover {
+  background: var(--fs-rail-hover, rgba(127, 127, 127, 0.08));
+}
+
 /* Left rail: hide chrome until hover so the icon column stays clean. */
 .fs-rail-scroll {
   scrollbar-width: none;

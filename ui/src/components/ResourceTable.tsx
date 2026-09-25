@@ -1495,7 +1495,15 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
           // paddingRight mirrors the header so columns stay aligned and the
           // auto-fit (which measures this element's content box) fills the
           // reduced width. The reserved strip reads as table right-padding.
-          style={{ flex: 1, overflow: "auto", minHeight: 0, paddingRight: COLMENU_W }}
+          // paddingBottom lets the last rows scroll out from under an open
+          // bottom dock (published by Dock).
+          style={{
+            flex: 1,
+            overflow: "auto",
+            minHeight: 0,
+            paddingRight: COLMENU_W,
+            paddingBottom: "var(--fs-dock-bottom, 0px)",
+          }}
           onClick={(e) => {
             // Delegated row click. Per-row onClick props were the biggest
             // source of GC pressure on large tables — every render

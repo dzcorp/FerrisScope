@@ -6,13 +6,13 @@
 // per-field selector behaviour: an unrelated slice change commits zero
 // additional renders.
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, cleanup, act, fireEvent, screen } from "@testing-library/react";
 import type { ResourceKind } from "../types";
 import { Profiler, type ProfilerOnRenderCallback } from "react";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
 import { useAppStore } from "../store";
-import { Rail } from "./Rail";
+import { Rail, RAIL_HOVER_INTENT_MS } from "./Rail";
 
 afterEach(() => {
   cleanup();
@@ -282,5 +282,54 @@ describe("Rail CRD group expand/collapse + domain sort", () => {
       fireEvent.click(header(c, "gke.io"));
     });
     expect(kindVisible(c, "Managed")).toBe(false); // and can be hidden back
+  });
+});
+
+describe("Rail expand / collapse", () => {
+  const pod: ResourceKind = { id: "pods", kind: "Pod", group: "", version: "v1", plural: "pods", namespaced: true, category: "Workloads", columns: [] };
+
+  async function renderAuto() {
+    setMockInvoke((cmd) => {
+      if (cmd === "list_resource_kinds") return [pod];
+      if (cmd === "list_custom_resource_kinds") return [];
+      return undefined;
+    });
+    act(() => useAppStore.setState({ railMode: "auto", selectedContext: null, selectedVirtualContextId: null, scopeExtras: [] }));
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(<Rail mode="dark" />);
+    });
+    const item = () => utils.container.querySelector<HTMLElement>(".fs-rail-item")!;
+    const railRoot = utils.container.firstElementChild as HTMLElement;
+    return { item, railRoot };
+  }
+  const railWidth = () => document.documentElement.style.getPropertyValue("--fs-rail-w");
+
+  it("expands after the hover-intent dwell without remounting items", async () => {
+    const { item, railRoot } = await renderAuto();
+    const before = item();
+    expect(railWidth()).toBe("56px");
+
+    vi.useFakeTimers();
+    fireEvent.mouseEnter(railRoot);
+    act(() => vi.advanceTimersByTime(RAIL_HOVER_INTENT_MS));
+    vi.useRealTimers();
+    expect(railWidth()).toBe("220px");
+    expect(item()).toBe(before);
+
+    fireEvent.mouseLeave(railRoot);
+    expect(railWidth()).toBe("56px");
+    expect(item()).toBe(before);
+  });
+
+  it("ignores a pointer that only passes through", async () => {
+    const { railRoot } = await renderAuto();
+    vi.useFakeTimers();
+    fireEvent.mouseEnter(railRoot);
+    act(() => vi.advanceTimersByTime(RAIL_HOVER_INTENT_MS - 10));
+    fireEvent.mouseLeave(railRoot);
+    act(() => vi.advanceTimersByTime(RAIL_HOVER_INTENT_MS * 2));
+    vi.useRealTimers();
+    expect(railWidth()).toBe("56px");
   });
 });

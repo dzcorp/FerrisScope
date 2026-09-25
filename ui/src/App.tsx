@@ -95,13 +95,10 @@ const sessionSaver = createSaver(
 );
 registerFlushOnClose(sessionSaver);
 
-const RAIL_COLLAPSED_W = 56;
-const RAIL_OPEN_W = 220;
+const SettingsPanel = lazy(loadSettingsPanel);
 
 // Top-level shell. Owns the global keyboard layer (P3 + R-13) and renders
 // every overlay (palette, settings, namespace modal, bulk bar, dock).
-const SettingsPanel = lazy(loadSettingsPanel);
-
 export default function App() {
   const [, setInfo] = useState<AppInfo | null>(null);
   const [, setReady] = useState(false);
@@ -925,12 +922,6 @@ export default function App() {
     // sibling useEffect above (and pre-applied from prefs in Rust setup()).
   }, [resolved, themeMode]);
 
-  const leftInset = selectedContext
-    ? railMode === "pinned"
-      ? RAIL_OPEN_W
-      : RAIL_COLLAPSED_W
-    : 0;
-
   return (
     <div
       style={{
@@ -1038,7 +1029,6 @@ export default function App() {
               clusterTabId={tab.id}
               clusterName={primary.name}
               clusterId={primary.id}
-              leftInset={leftInset}
               placement="bottom"
             />
             <Dock
@@ -1046,7 +1036,6 @@ export default function App() {
               clusterTabId={tab.id}
               clusterName={primary.name}
               clusterId={primary.id}
-              leftInset={leftInset}
               placement="right"
             />
           </div>
