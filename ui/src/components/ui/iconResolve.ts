@@ -158,7 +158,7 @@ const CRD_OVERRIDES: Record<string, Record<string, string>> = {
     ClusterCleanupPolicy: "CleanupPolicy",
     PolicyException: "PolicyException",
     UpdateRequest: "ProvisioningRequest",
-    GlobalContextEntry: "GlobalContextEntry",
+    GlobalContextEntry: "Globe",
   },
   "policies.kyverno.io": {
     ValidatingPolicy: "ValidatingWebhookConfiguration",
@@ -196,7 +196,7 @@ const CRD_OVERRIDES: Record<string, Record<string, string>> = {
     SuperStream: "SuperStream",
     TopicPermission: "Permission",
     User: "User",
-    Vhost: "VirtualHost",
+    Vhost: "Globe",
   },
 
   // VictoriaMetrics (operator.victoriametrics.com)
@@ -231,7 +231,7 @@ const CRD_OVERRIDES: Record<string, Record<string, string>> = {
     Cluster: "EnvoyCluster",
     Endpoint: "Endpoint",
     Listener: "Listener",
-    Route: "EnvoyRoute",
+    Route: "HTTPRoute",
     TLSSecret: "TLSSecret",
   },
 
@@ -309,6 +309,16 @@ const CRD_OVERRIDES: Record<string, Record<string, string>> = {
   },
   "monitoring.grafana.com": {
     PodLogs: "logs", // reuse Icons.logs
+  },
+  "monitoring.googleapis.com": {
+    PodMonitoring: "PodMonitor",
+    ClusterPodMonitoring: "PodMonitor",
+    NodeMonitoring: "ScrapeConfig",
+    ClusterNodeMonitoring: "ScrapeConfig",
+    Rules: "PrometheusRule",
+    ClusterRules: "PrometheusRule",
+    GlobalRules: "PrometheusRule",
+    OperatorConfig: "settings",
   },
   "autoscaling.x-k8s.io": {
     ProvisioningRequest: "ProvisioningRequest",
@@ -428,7 +438,7 @@ const TOKEN_RULES: TokenRule[] = [
     icon: "ImagePolicy",
   },
   { tokens: ["update", "request"], icon: "ProvisioningRequest" },
-  { tokens: ["global", "context"], icon: "GlobalContextEntry" },
+  { tokens: ["global", "context"], icon: "Globe" },
   { tokens: ["report"], icon: "Report" },
   { tokens: ["allowlist"], icon: "Allowlist" },
   { tokens: ["whitelist"], icon: "Allowlist" },
@@ -444,8 +454,8 @@ const TOKEN_RULES: TokenRule[] = [
   { tokens: ["stream"], icon: "SuperStream" },
   { tokens: ["topic", "permission"], icon: "Permission" },
   { tokens: ["permission"], icon: "Permission" },
-  { tokens: ["vhost"], icon: "VirtualHost" },
-  { tokens: ["virtual", "host"], icon: "VirtualHost" },
+  { tokens: ["vhost"], icon: "Globe" },
+  { tokens: ["virtual", "host"], icon: "Globe" },
   { tokens: ["user"], icon: "User" },
 
   // Istio extras (config / extensions / telemetry)
@@ -548,6 +558,43 @@ const TOKEN_RULES: TokenRule[] = [
   { tokens: ["manifest"], icon: "Order" },
 
   // Failover / leader / quorum / replication topology
+  // Universal concepts shared across ecosystems (KEDA, OpenTelemetry,
+  // Karpenter, External Secrets, Cluster API, KubeVirt, Traefik, Knative…).
+  // Kept ahead of the broad pool / secret / node fallbacks below.
+  { tokens: ["scaled", "job"], icon: "ScaledJob" },
+  { tokens: ["scaled"], icon: "Scale" },
+  { tokens: ["autoscaler"], icon: "Scale" },
+  { tokens: ["scaler"], icon: "Scale" },
+  { tokens: ["scaling"], icon: "Scale" },
+  { tokens: ["instrumentation"], icon: "Syringe" },
+  { tokens: ["injection"], icon: "Syringe" },
+  { tokens: ["bridge"], icon: "Bridge" },
+  { tokens: ["buffer"], icon: "Battery" },
+  { tokens: ["capacity"], icon: "Battery" },
+  { tokens: ["collector"], icon: "Sink" },
+  { tokens: ["target", "allocator"], icon: "Endpoint" },
+  { tokens: ["external", "secret"], icon: "ExternalSecret" },
+  { tokens: ["push", "secret"], icon: "ExternalSecret" },
+  { tokens: ["secret", "store"], icon: "VaultSecret" },
+  { tokens: ["sealed", "secret"], icon: "SealedSecret" },
+  { tokens: ["virtual", "machine"], icon: "VirtualMachine" },
+  { tokens: ["node", "pool"], icon: "NodePool" },
+  { tokens: ["node", "claim"], icon: "Node" },
+  { tokens: ["node", "class"], icon: "ComputeClass" },
+  { tokens: ["machine", "deployment"], icon: "Deployment" },
+  { tokens: ["machine", "set"], icon: "ReplicaSet" },
+  { tokens: ["machine", "pool"], icon: "NodePool" },
+  { tokens: ["health", "check"], icon: "Probe" },
+  { tokens: ["machine"], icon: "Node" },
+  { tokens: ["control", "plane"], icon: "Leader" },
+  { tokens: ["middleware"], icon: "EnvoyFilter" },
+  { tokens: ["ingress", "route"], icon: "HTTPRoute" },
+  { tokens: ["revision"], icon: "ReplicaSet" },
+  { tokens: ["connector"], icon: "Addon" },
+  { tokens: ["advertisement"], icon: "Provider" },
+  { tokens: ["pooler"], icon: "Pool" },
+  { tokens: ["kiali"], icon: "Topology" },
+
   { tokens: ["failover"], icon: "Failover" },
   { tokens: ["quorum"], icon: "Quorum" },
   { tokens: ["leader"], icon: "Leader" },
@@ -656,7 +703,7 @@ const TOKEN_RULES: TokenRule[] = [
   { tokens: ["mysql"], icon: "DatabaseInstance" },
   { tokens: ["mongo"], icon: "DatabaseInstance" },
   { tokens: ["redis"], icon: "DatabaseInstance" },
-  { tokens: ["kafka"], icon: "DatabaseInstance" },
+  { tokens: ["kafka"], icon: "Broker" },
   { tokens: ["elastic"], icon: "DatabaseInstance" },
 
   // Broader concept fallbacks — use existing K8s glyphs for shape parity
@@ -697,8 +744,20 @@ const GROUP_RULES: { match: string; icon: string }[] = [
   { match: "dragonflydb", icon: "DatabaseInstance" },
   { match: "ricoberger", icon: "VaultSecret" },
   { match: "grafana", icon: "logs" },
-  { match: "google.com", icon: "ManagedCertificate" },
-  { match: "gke", icon: "ManagedCertificate" },
+  { match: "keda", icon: "Scale" },
+  { match: "opentelemetry", icon: "Telemetry" },
+  { match: "karpenter", icon: "NodePool" },
+  { match: "external-secrets", icon: "ExternalSecret" },
+  { match: "gatekeeper", icon: "ValidatingWebhookConfiguration" },
+  { match: "cnpg", icon: "DatabaseInstance" },
+  { match: "strimzi", icon: "Broker" },
+  { match: "traefik", icon: "HTTPRoute" },
+  { match: "kubevirt", icon: "VirtualMachine" },
+  { match: "cluster.x-k8s", icon: "cluster" },
+  { match: "metallb", icon: "Pool" },
+  { match: "kiali", icon: "Topology" },
+  { match: "google.com", icon: "Cloud" },
+  { match: "gke", icon: "Cloud" },
 ];
 
 // Split a PascalCase / camelCase / dotted / underscored kind name into

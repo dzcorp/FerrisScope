@@ -60,13 +60,6 @@ export const Icons = {
     16,
     <path d="M12 3c4.4 0 8 1.3 8 3v12c0 1.7-3.6 3-8 3s-8-1.3-8-3V6c0-1.7 3.6-3 8-3Zm-8 5.2V11c0 1.7 3.6 3 8 3s8-1.3 8-3V8.2c-1.7 1.3-4.8 2-8 2s-6.3-.7-8-2Zm0 5V16c0 1.7 3.6 3 8 3s8-1.3 8-3v-2.8c-1.7 1.3-4.8 2-8 2s-6.3-.7-8-2Z" />,
   ),
-  access: filled(
-    16,
-    <>
-      <circle cx="12" cy="8" r="4" />
-      <path d="M4 21c0-4 3.6-7 8-7s8 3 8 7v1H4v-1z" />
-    </>,
-  ),
   cm: filled(
     16,
     <path
@@ -353,9 +346,7 @@ export const Icons = {
       <path d="M14 3h7v7h-2V6.4l-7.3 7.3-1.4-1.4L17.6 5H14z" />
     </>,
   ),
-  // Node + pod action glyphs. Two-tone variants (status accents on top of
-  // the neutral kind silhouette) — child fills override the SVG-level
-  // `currentColor` so the action chip reads at a glance.
+  // Node + pod action glyphs. Single-colour; the caller's tone colours them.
   nodeDrain: filled(
     16,
     <path d="M4 4h16v6H4V4Zm2 2v2h2V6H6Zm4 0v2h8V6h-8ZM11 11h2v5h3l-4 5-4-5h3v-5Z" />,
@@ -382,18 +373,14 @@ export const Icons = {
       <path d="m10.5 15.5-3.5-3.5 1.4-1.4 2.1 2.1 5.1-5.1 1.4 1.4-6.5 6.5Z" />
     </>,
   ),
+  // Evict pods — pod cube leaving to the right. Tone comes from the caller.
   podDrain: filled(
     16,
     <>
-      <path
-        fill="#F3F4F6"
-        d="M8 2 3.5 4.6v5.2L8 12.4l4.5-2.6V4.6L8 2Zm0 1.7 2.8 1.6L8 6.9 5.2 5.3 8 3.7Zm-3 2.9 2.2 1.3v3L5 9.6v-3Zm4.2 4.3v-3l2.3-1.3v3l-2.3 1.3Z"
-      />
-      <rect x="4" y="14" width="3" height="3" rx="0.5" fill="#F59E0B" />
-      <rect x="8" y="14" width="3" height="3" rx="0.5" fill="#F59E0B" />
-      <rect x="4" y="18" width="3" height="3" rx="0.5" fill="#F59E0B" />
-      <rect x="8" y="18" width="3" height="3" rx="0.5" fill="#F59E0B" />
-      <path fill="#F59E0B" d="M14 16h4v-2l5 4-5 4v-2h-4v-4Z" />
+      <g transform="translate(-1 3) scale(.75)">
+        <path d="M12 2 4 6.5v11L12 22l8-4.5v-11L12 2Zm0 2.3 5.5 3.1L12 10.5 6.5 7.4 12 4.3Zm-6 5 5 2.8v6.8l-5-2.8V9.3Zm7 9.6v-6.8l5-2.8v6.8l-5 2.8Z" />
+      </g>
+      <path d="M15.5 10.5H19V7.5l3.5 4.5-3.5 4.5v-3h-3.5v-3Z" />
     </>,
   ),
   // Apps — package box with a small "+" cap. Used as the category-rail icon
@@ -402,39 +389,10 @@ export const Icons = {
     16,
     <path d="M12 2 3 6.5 12 11l9-4.5L12 2Zm-9 6 9 4.5V22l-9-4.5V8Zm18 0v9.5L13 22V12.5L21 8Z" />,
   ),
-  // Cancel an in-progress drain on a node — same node-bars-and-dots base as
-  // cordon/uncordon, with a red filled square (stop) accent.
-  nodeDrainStop: filled(
-    16,
-    <>
-      <rect x="3" y="4" width="12" height="5" rx="1.2" fill="#F3F4F6" />
-      <rect x="3" y="11" width="12" height="5" rx="1.2" fill="#F3F4F6" />
-      <circle cx="12.5" cy="6.5" r="0.9" fill="#111827" />
-      <circle cx="10.2" cy="6.5" r="0.9" fill="#111827" />
-      <circle cx="12.5" cy="13.5" r="0.9" fill="#111827" />
-      <circle cx="10.2" cy="13.5" r="0.9" fill="#111827" />
-      <circle cx="18.5" cy="13.5" r="4.5" fill="#EF4444" />
-      <rect
-        x="16.4"
-        y="11.4"
-        width="4.2"
-        height="4.2"
-        rx="0.6"
-        fill="white"
-      />
-    </>,
-  ),
-  // Generic CRD fallback — hexagon (extension/plugin metaphor) with an inner
-  // square bracket cut. Distinct from the cluster glyph and from the
-  // CustomResourceDefinition square-frame, so unmatched custom resources read
-  // as "extension" rather than "unknown".
+  // Generic CRD fallback — hexagon with square brackets: "some extension".
   crdGeneric: filled(
     16,
-    <path
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M12 2 21 7v10l-9 5-9-5V7l9-5Zm0 2.3L5 8.2v7.6l7 3.9 7-3.9V8.2L12 4.3Zm-3 4.7h3v2h-1v6h1v2H9V9Zm5 0h3v10h-3v-2h1v-6h-1V9Z"
-    />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 2 21 7v10l-9 5-9-5V7l9-5ZM7.5 7.5H11v2H9.5v5H11v2H7.5v-9Zm9 0H13v2h1.5v5H13v2h3.5v-9Z" />,
   ),
 };
 
@@ -448,21 +406,43 @@ export const KindIcons: Record<string, ReactElement> = {
     16,
     <path d="M12 2 4 6.5v11L12 22l8-4.5v-11L12 2Zm0 2.3 5.5 3.1L12 10.5 6.5 7.4 12 4.3Zm-6 5 5 2.8v6.8l-5-2.8V9.3Zm7 9.6v-6.8l5-2.8v6.8l-5 2.8Z" />,
   ),
+  // Pod inside template brackets.
+  PodTemplate: filled(
+    16,
+    <>
+      <path d="M2 2h6v2H4v4H2V2Zm14 0h6v6h-2V4h-4V2ZM2 16h2v4h4v2H2v-6Zm18 0h2v6h-6v-2h4v-4Z" />
+      <g transform="translate(4.8 4.8) scale(.6)">
+        <path d="M12 2 4 6.5v11L12 22l8-4.5v-11L12 2Zm0 2.3 5.5 3.1L12 10.5 6.5 7.4 12 4.3Zm-6 5 5 2.8v6.8l-5-2.8V9.3Zm7 9.6v-6.8l5-2.8v6.8l-5 2.8Z" />
+      </g>
+    </>,
+  ),
+  // Rocket — ships a new rollout. Kept away from the sync arrows used by GitOps actions.
   Deployment: filled(
     16,
-    <path d="M12 4a8 8 0 0 1 7.4 5h-2.3A5.9 5.9 0 0 0 7.5 7.5L10 10H4V4l2.1 2.1A8 8 0 0 1 12 4Zm8 10v6l-2.1-2.1A8 8 0 0 1 4.6 15h2.3a5.9 5.9 0 0 0 9.6 1.5L14 14h6Z" />,
+    <>
+      <path fillRule="evenodd" clipRule="evenodd" d="M12 2c3 2 4.5 5.5 4.5 9.5V16h-9v-4.5C7.5 7.5 9 4 12 2Zm0 5.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6Z" />
+      <path d="M7.5 11.5 4 15v4.5l3.5-2.5v-5.5Zm9 0L20 15v4.5L16.5 17v-5.5ZM10 17.5h4l-.6 2.5-1.4 2.5-1.4-2.5-.6-2.5Z" />
+    </>,
   ),
+  // Stacked cards — N identical replicas.
   ReplicaSet: filled(
     16,
-    <path d="M5 4h9v9H5V4Zm5 7h9v9h-9v-9Zm-3 4h2v-2H7v2Zm8-8h2v2h-2V7Z" />,
+    <path d="M3 9h12v12H3V9Zm3-3h12v12h-1.5V7.5H6V6Zm3-3h12v12h-1.5V4.5H9V3Z" />,
   ),
+  // Pod on a persistent disk — stable identity plus storage.
   StatefulSet: filled(
     16,
-    <path d="M12 3c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3Zm-8 5.2c1.7 1.3 4.8 2 8 2s6.3-.7 8-2V11c0 1.7-3.6 3-8 3s-8-1.3-8-3V8.2Zm0 5c1.7 1.3 4.8 2 8 2s6.3-.7 8-2V16c0 1.7-3.6 3-8 3s-8-1.3-8-3v-2.8Zm0 5c1.7 1.3 4.8 2 8 2s6.3-.7 8-2V19c0 1.7-3.6 3-8 3s-8-1.3-8-3v-.8Z" />,
+    <>
+      <g transform="translate(3.6 -0.8) scale(.7)">
+        <path d="M12 2 4 6.5v11L12 22l8-4.5v-11L12 2Zm0 2.3 5.5 3.1L12 10.5 6.5 7.4 12 4.3Zm-6 5 5 2.8v6.8l-5-2.8V9.3Zm7 9.6v-6.8l5-2.8v6.8l-5 2.8Z" />
+      </g>
+      <path d="M4 17.8c0-1.3 3.6-2.3 8-2.3s8 1 8 2.3v2c0 1.3-3.6 2.3-8 2.3s-8-1-8-2.3v-2Z" />
+    </>,
   ),
+  // One pod per node — three nodes, each carrying a pod.
   DaemonSet: filled(
     16,
-    <path d="M11 2h2v3h3a4 4 0 0 1 4 4v6a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V9a4 4 0 0 1 4-4h3V2Zm-3 8a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm8 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm-6 6v2h4v-2h-4ZM2 10h2v4H2v-4Zm18 0h2v4h-2v-4Z" />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M2 5h6v14H2V5Zm3 2.2a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2ZM3.5 15h3v1.5h-3V15ZM9 5h6v14H9V5Zm3 2.2a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2ZM10.5 15h3v1.5h-3V15ZM16 5h6v14h-6V5Zm3 2.2a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2ZM17.5 15h3v1.5h-3V15Z" />,
   ),
   Job: filled(
     16,
@@ -508,7 +488,7 @@ export const KindIcons: Record<string, ReactElement> = {
   ),
   IngressClass: filled(
     16,
-    <path d="M12 2 21 7v10l-9 5-9-5V7l9-5Zm4.8 13.2A6 6 0 1 1 16.8 8l-1.7 1.2A3.8 3.8 0 1 0 15.1 14l1.7 1.2Z" />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 2 21 7v10l-9 5-9-5V7l9-5Zm4.8 13.2A6 6 0 1 1 16.8 8l-1.7 1.2A3.8 3.8 0 1 0 15.1 14l1.7 1.2Z" />,
   ),
   NetworkPolicy: filled(
     16,
@@ -520,7 +500,7 @@ export const KindIcons: Record<string, ReactElement> = {
   ),
   Secret: filled(
     16,
-    <path d="M7 10V7a5 5 0 0 1 10 0v3h2v12H5V10h2Zm2 0h6V7a3 3 0 0 0-6 0v3Zm2 5v3h2v-3h-2Z" />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M7 10V7a5 5 0 0 1 10 0v3h2v12H5V10h2Zm2 0h6V7a3 3 0 0 0-6 0v3Zm2 5v3h2v-3h-2Z" />,
   ),
   ResourceQuota: filled(
     16,
@@ -556,11 +536,17 @@ export const KindIcons: Record<string, ReactElement> = {
   ),
   ClusterRole: filled(
     16,
-    <path d="M12 2 20 5v7c0 4.4-3.2 8.3-8 10-4.8-1.7-8-5.6-8-10V5l8-3Zm0 4 1.5 3 3.3.5-2.4 2.3.6 3.2-3-1.5L9 15l.6-3.2-2.4-2.3 3.3-.5L12 6Z" />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 2 20 5v7c0 4.4-3.2 8.3-8 10-4.8-1.7-8-5.6-8-10V5l8-3Zm0 4 1.5 3 3.3.5-2.4 2.3.6 3.2-3-1.5L9 15l.6-3.2-2.4-2.3 3.3-.5L12 6Z" />,
   ),
+  // RoleBinding link plus the cluster-wide star.
   ClusterRoleBinding: filled(
     16,
-    <path d="M8.8 6.8a5 5 0 0 1 6.5-.5L14 7.8a3 3 0 0 0-3.8.4L8.1 10.3a3 3 0 0 0 4.2 4.2l1-1 1.4 1.4-1 1a5 5 0 0 1-7.1-7.1l2.2-2Zm6.4.8a5 5 0 0 1 2.2 8.3l-2.2 2.2a5 5 0 0 1-6.5.5l1.3-1.5a3 3 0 0 0 3.8-.4l2.1-2.1a3 3 0 0 0-4.2-4.2l-1 1-1.4-1.4 1-1a5 5 0 0 1 4.9-1.4ZM19 2l.9 1.8 2 .3-1.5 1.4.4 2-1.8-.9-1.8.9.4-2-1.5-1.4 2-.3L19 2Z" />,
+    <>
+      <g transform="translate(-1.5 2.5) scale(.85)">
+        <path d="M9.5 7.5 7.4 9.6a3 3 0 0 0 4.2 4.2l1.2-1.2 1.4 1.4-1.2 1.2a5 5 0 0 1-7.1-7.1L8.1 6a5 5 0 0 1 7.1 0l-1.4 1.4a3 3 0 0 0-4.3.1Zm5-1.4a5 5 0 0 1 3.6 8.5L15.9 17a5 5 0 0 1-7.1 0l1.4-1.4a3 3 0 0 0 4.3-.1l2.1-2.1a3 3 0 0 0-4.2-4.2l-1.2 1.2L9.8 9l1.2-1.2a5 5 0 0 1 3.5-1.7Z" />
+      </g>
+      <path d="M19 1.5l1.2 2.4 2.6.4-1.9 1.8.5 2.6-2.4-1.2-2.4 1.2.5-2.6-1.9-1.8 2.6-.4L19 1.5Z" />
+    </>,
   ),
   HorizontalPodAutoscaler: filled(
     16,
@@ -574,60 +560,75 @@ export const KindIcons: Record<string, ReactElement> = {
     16,
     <path d="M12 2 15 9h7l-5.7 4.2L18.5 21 12 16.6 5.5 21l2.2-7.8L2 9h7l3-7Z" />,
   ),
+  // Stacked cards with a reconcile loop — the legacy ReplicaSet.
   ReplicationController: filled(
     16,
-    <path d="M12 4a8 8 0 0 1 7.4 5h-2.3A6 6 0 0 0 6 12H4a8 8 0 0 1 8-8Zm0 16a8 8 0 0 1-7.4-5h2.3A6 6 0 0 0 18 12h2a8 8 0 0 1-8 8ZM4 4h6v2H6v4H4V4Zm16 16h-6v-2h4v-4h2v6Z" />,
+    <>
+      <path fillRule="evenodd" clipRule="evenodd" d="M3 9h12v12H3V9Zm6 2.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm0 1.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z" />
+      <path d="M6 6h12v12h-1.5V7.5H6V6Zm3-3h12v12h-1.5V4.5H9V3Z" />
+    </>,
   ),
+  // Hourglass — a lease runs out.
   Lease: filled(
     16,
-    <path d="M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20Zm-1 3v8l5.5 3.3 1-1.7L13 12V5h-2Z" />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M6 2h12v2h-1v3.5L13.5 12l3.5 4.5V20h1v2H6v-2h1v-3.5l3.5-4.5L7 7.5V4H6V2Zm3 2v2.8l3 3.7 3-3.7V4H9Z" />,
   ),
+  // Webhook hook with a spark — rewrites the object.
   MutatingWebhookConfiguration: filled(
     16,
-    <path d="M12 2a4 4 0 0 1 3.9 3h2.6L17 9.5l1.5 2.6L13.5 17h-3l-2.6-1.5L4 17.5 6.6 13a4 4 0 0 1 5.4-9Zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z" />,
+    <>
+      <path d="M15.5 2H18v12a6 6 0 0 1-12 0v-3.5H3.5l3.75-4.5L11 10.5H8.5V14a3.5 3.5 0 0 0 7 0V2Z" />
+      <path d="M11 .5l1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1 1-2.5Z" />
+    </>,
   ),
   ValidatingWebhookConfiguration: filled(
     16,
     <path d="M12 2 4 5v6c0 5 3.5 9.4 8 11 4.5-1.6 8-6 8-11V5l-8-3Zm-1.2 13.4-3.6-3.6L8.6 10.4l2.2 2.2 4.6-4.6 1.4 1.4-6 6Z" />,
   ),
+  // Gate cut out of a badge — the class every Gateway picks.
   GatewayClass: filled(
     16,
-    <path d="M3 5h18v3H3V5Zm2 5h14v3H5v-3Zm-2 5h18v4H3v-4Zm3 1.5v1h2v-1H6Zm4 0v1h2v-1h-2Zm4 0v1h2v-1h-2Z" />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M4 2h16a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm1 4v2h1.5v11h3v-6.5a2.5 2.5 0 0 1 5 0V19h3V8H19V6H5Z" />,
   ),
+  // Gate — the entry point for routed traffic.
   Gateway: filled(
     16,
-    <path d="M5 3h14a2 2 0 0 1 2 2v3H3V5a2 2 0 0 1 2-2Zm-2 7h18v4H3v-4Zm0 6h18v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3Zm3-10v2h2V6H6Zm5 0v2h2V6h-2Zm5 0v2h2V6h-2Z" />,
+    <path d="M2 4h20v3.5h-2V21h-4.5v-8.5a3.5 3.5 0 0 0-7 0V21H4V7.5H2V4Z" />,
   ),
+  // Signpost — routes requests by host and path.
   HTTPRoute: filled(
     16,
-    <path d="M2 7h6a4 4 0 0 1 0 8H7v4H4v-4H2V7Zm12 0h6v3h-6v9h-3V10h-3V7h6Zm-9 3v2h3a1 1 0 0 0 0-2H5Z" />,
+    <>
+      <path d="M11 2h2v20h-2V2Z" />
+      <path d="M13 4h6l3 3-3 3h-6V4Z" />
+      <path d="M11 12H5l-3 3 3 3h6v-6Z" />
+    </>,
   ),
+  // Request/response arrows — an RPC route.
   GRPCRoute: filled(
     16,
-    <path d="M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20Zm0 4a6 6 0 0 0-5.2 9 1 1 0 0 0 1.7-1A4 4 0 0 1 16 12h-2l3 3 3-3h-2a6 6 0 0 0-6-6Zm5.2 3a1 1 0 0 0-1.7 1 4 4 0 0 1-7.5 1H10L7 8l-3 3h2a6 6 0 0 0 11.2 0Z" />,
+    <path d="M3 7h13V4l5 4.5-5 4.5v-3H3V7Zm18 7H8v-3l-5 4.5L8 20v-3h13v-3Z" />,
   ),
   ReferenceGrant: filled(
     16,
     <path d="M9 4h11v8h-3v-3l-7 7-3-3 7-7H9V4ZM4 12h11v8H4v-8Zm2 2v4h7v-4H6Z" />,
   ),
-  // Helm release — ship's helm wheel (the project's namesake) drawn as a
-  // hub-and-spokes silhouette. Solid filled, monochrome, no strokes.
+  // Ship's helm wheel — the project's namesake.
   HelmRelease: filled(
     16,
     <>
-      <path d="M6 3.5 13 7v8l-7 3.5L3 17V7l3-3.5Zm1.2 1.8L5.4 7.4 9 9.2l1.8-1.8-3.6-2.1ZM5 9v6.8l6 3V12L5 9Zm8-1.8L9.4 9 13 10.8 16.6 9 13 7.2Z" />
-      <path d="M17.5 12a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9Zm-1 5.9-1.6-1.6-1.4 1.4 3 3 5-5-1.4-1.4-3.6 3.6Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M12 4.5a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15Zm0 2a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11Z" />
+      <circle cx="12" cy="12" r="2.8" />
+      <rect x="11" y="1.5" width="2" height="21" rx="1" transform="rotate(0 12 12)" />
+      <rect x="11" y="1.5" width="2" height="21" rx="1" transform="rotate(45 12 12)" />
+      <rect x="11" y="1.5" width="2" height="21" rx="1" transform="rotate(90 12 12)" />
+      <rect x="11" y="1.5" width="2" height="21" rx="1" transform="rotate(135 12 12)" />
     </>,
   ),
-  // Helm chart — package-box silhouette with a folded top flap, distinct
-  // from the helm-wheel HelmRelease so charts ≠ deployed releases at a
-  // glance. Same solid filled geometric style.
+  // Folded nautical chart — a Helm chart package.
   HelmChart: filled(
     16,
-    <>
-      <path d="M9 2.5 3 6l6 3.5L15 6 9 2.5Zm-6 5.4 6 3.5L15 8v2L9 13.5 3 10V7.9Zm0 4 6 3.5 6-3.5v2L9 17.5 3 14v-2.1Z" />
-      <path d="M16 10.5 12 12.8v5.4l4 2.3 4-2.3v-5.4l-4-2.3Zm0 1.7 2.3 1.3-2.3 1.3-2.3-1.3 2.3-1.3Zm-2.8 2.2 1.8 1v2.9l-1.8-1v-2.9Zm3.8 3.9v-2.9l1.8-1v2.9l-1.8 1Z" />
-    </>,
+    <path d="M2 5.5 7.5 3.7v14.8L2 20.3V5.5Zm6.5-1.8 7 1.8v14.8l-7-1.8V3.7Zm8 1.8L22 3.7v14.8l-5.5 1.8V5.5Z" />,
   ),
   // CRD definition itself — square frame with internal schema lines. Used
   // for the `CustomResourceDefinition` kind in the Cluster category. Per the
@@ -654,24 +655,21 @@ export const KindIcons: Record<string, ReactElement> = {
 // ──────────────────────────────────────────────────────────────────────────
 
 export const CrdIcons: Record<string, ReactElement> = {
-  // === cert-manager.io / acme.cert-manager.io ===
-  // Certificate — shield silhouette with a punched-out check (security cert).
+  // Rosette with a check — an issued certificate.
   Certificate: filled(
     16,
-    <path
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M12 2 4 5v6c0 5 3.5 9.4 8 11 4.5-1.6 8-6 8-11V5l-8-3Zm-1 13.5L7 11.6l1.4-1.4 2.6 2.6 4.6-4.6 1.4 1.4-6 6Z"
-    />,
+    <>
+      <path fillRule="evenodd" clipRule="evenodd" d="M12 2a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM8.8 9.2 10 8l1.2 1.2 3-3 1.2 1.2-4.2 4.2-2.4-2.4Z" />
+      <path d="M8.5 14.8 7 22l2.5-1.2L11 22.5l1-6.2-3.5-1.5Zm7 0L17 22l-2.5-1.2L13 22.5l-1-6.2 3.5-1.5Z" />
+    </>,
   ),
-  // Certificate request — shield with an upward arrow ("requesting").
+  // Rosette with an up arrow — a pending certificate request.
   CertificateRequest: filled(
     16,
-    <path
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M12 2 4 5v6c0 5 3.5 9.4 8 11 4.5-1.6 8-6 8-11V5l-8-3Zm-1 7V7h2v2h2.5L12 12.5 8.5 9H11Zm-3 5h8v2H8v-2Z"
-    />,
+    <>
+      <path fillRule="evenodd" clipRule="evenodd" d="M12 2a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm0 3.5 3 3h-2V12h-2V8.5H9l3-3Z" />
+      <path d="M8.5 14.8 7 22l2.5-1.2L11 22.5l1-6.2-3.5-1.5Zm7 0L17 22l-2.5-1.2L13 22.5l-1-6.2 3.5-1.5Z" />
+    </>,
   ),
   // Issuer — vertical key (the entity that signs certs).
   Issuer: filled(
@@ -712,18 +710,17 @@ export const CrdIcons: Record<string, ReactElement> = {
     />,
   ),
 
-  // === monitoring.coreos.com (prometheus-operator) ===
-  // Prometheus — flame silhouette (the project's mascot, simplified).
+  // Prometheus mark — flame over two bars in a disc.
   Prometheus: filled(
     16,
-    <path d="M12 2c1 3 3 4 3 7a3 3 0 0 1-6 0c0-1 .5-2 1-3-1 1-2 2.5-2 4a4.5 4.5 0 1 0 9 0c0-3.5-3-5-5-8Zm-5 14h10v2c0 1.1-1.3 2-3 2h-1v2h-2v-2h-1c-1.7 0-3-.9-3-2v-2Z" />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 3c.9 2.3 3.5 3.5 3.5 6.5a3.5 3.5 0 0 1-7 0c0-1.5.6-2.6 1.4-3.3.1 1 .5 1.8 1.2 2.2C10.8 8.2 11.2 6.3 12 5Zm-4 11h8v1.5H8V16Zm1.5 2.5h5V20h-5v-1.5Z" />,
   ),
-  // PrometheusAgent — flame with an arrow (lightweight remote-write agent).
+  // Flame forwarding samples — remote-write agent.
   PrometheusAgent: filled(
     16,
     <>
-      <path d="M10 2c1 2.5 2.5 3.5 2.5 6a2.5 2.5 0 0 1-5 0c0-.8.4-1.6.8-2.4-.8.8-1.6 2-1.6 3.4a3.8 3.8 0 1 0 7.6 0c0-3-2.5-4.4-4.3-7Zm-4 12h9v1.5c0 1-1.1 1.7-2.5 1.7H11v1.7H9v-1.7h-.5C7.1 17.2 6 16.5 6 15.5V14Z" />
-      <path d="M16 13l5 4-5 4v-3h-3v-2h3v-3Z" />
+      <path d="M9 2c1 2.6 4 4 4 7.5a4.5 4.5 0 0 1-9 0c0-1.8.8-3.1 1.8-4 .1 1.3.6 2.2 1.5 2.7C7 5.8 7.8 3.6 9 2ZM4.5 16h9v2h-9v-2ZM6 19h6v2H6v-2Z" />
+      <path d="M15 11h3.5V8.5L22 12l-3.5 3.5V13H15v-2Z" />
     </>,
   ),
   // PrometheusRule — scroll silhouette with rule lines.
@@ -740,25 +737,15 @@ export const CrdIcons: Record<string, ReactElement> = {
     16,
     <path d="M12 2a6 6 0 0 0-6 6v5l-2 3v1h16v-1l-2-3V8a6 6 0 0 0-6-6Zm-2 17a2 2 0 1 0 4 0h-4Z" />,
   ),
-  // AlertmanagerConfig — bell + small gear in the corner.
+  // Config document with a bell.
   AlertmanagerConfig: filled(
     16,
-    <>
-      <path d="M11 2a6 6 0 0 0-6 6v5l-2 3v1h13.5a4.5 4.5 0 0 1 4-4.5V8a6 6 0 0 0-6-6h-3.5Zm-2 17a2 2 0 1 0 4 0H9Z" />
-      <path d="M18 13.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm0 2a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Zm-.7-3 1.4 0 .2 1.5h-1.8l.2-1.5Zm0 8 .2-1.5h1.4l.2 1.5h-1.8Zm-3.6-3 .9-1.1 1.2.9-.9 1.1-1.2-.9Zm6.5-1.8.9 1.1-1.2.9-.9-1.1 1.2-.9Z" />
-    </>,
+    <path fillRule="evenodd" clipRule="evenodd" d="M5 2h10l4 4v16H5V2Zm7 6a3.5 3.5 0 0 0-3.5 3.5v3L7 16v1h10v-1l-1.5-1.5v-3A3.5 3.5 0 0 0 12 8Zm-1.2 10a1.2 1.2 0 0 0 2.4 0h-2.4Z" />,
   ),
-  // ServiceMonitor — service ring with an eye dot (watches services).
+  // ServiceMonitor — service tree with a watching eye at the root.
   ServiceMonitor: filled(
     16,
-    <>
-      <path
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M12 4a3 3 0 0 1 1 5.8V11h4a3 3 0 1 1-3 3H10a3 3 0 1 1-3-3h4V9.8A3 3 0 0 1 12 4Z"
-      />
-      <circle cx="12" cy="7" r="1.2" fill="white" />
-    </>,
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 4a3 3 0 0 1 1 5.8V11h4a3 3 0 1 1-3 3H10a3 3 0 1 1-3-3h4V9.8A3 3 0 0 1 12 4Zm0 1.8a1.2 1.2 0 1 0 0 2.4 1.2 1.2 0 0 0 0-2.4Z" />,
   ),
   // PodMonitor — pod hex with an eye dot (watches pods).
   PodMonitor: filled(
@@ -792,11 +779,13 @@ export const CrdIcons: Record<string, ReactElement> = {
     </>,
   ),
 
-  // === kustomize.toolkit.fluxcd.io ===
-  // Kustomization — stacked tiles with an offset top (overlay metaphor).
+  // Overlay frame over a base.
   Kustomization: filled(
     16,
-    <path d="M3 8h12v12H3V8Zm6-5h12v12h-3V11H9V3Zm2 2v4h4V5h-4Z" />,
+    <>
+      <path d="M3 3h12v12H3V3Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M9 9h12v12H9V9Zm2 2v8h8v-8h-8Z" />
+    </>,
   ),
 
   // === source.toolkit.fluxcd.io ===
@@ -828,14 +817,10 @@ export const CrdIcons: Record<string, ReactElement> = {
       d="M3 4h18v5H3V4Zm0 6h18v5H3v-5Zm0 6h18v4H3v-4Zm3-9h2v1H6V7Zm0 6h2v1H6v-1Zm0 5h2v1H6v-1Z"
     />,
   ),
-  // HelmRepository — helm wheel mini (related to HelmRelease but a *source*).
+  // Books on a shelf — a chart repository.
   HelmRepository: filled(
     16,
-    <path
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 2a7 7 0 1 1 0 14 7 7 0 0 1 0-14Zm-1 1.5h2v3.5h3.5v2H13v3.5h-2V12H7.5v-2H11V6.5Z"
-    />,
+    <path d="M3 4h3.5v14H3V4Zm4.5 2H11v12H7.5V6Zm4.3.9 3.2-.9 3.4 11.6-3.2.9-3.4-11.6ZM2 19h20v2H2v-2Z" />,
   ),
 
   // === image.toolkit.fluxcd.io ===
@@ -860,16 +845,14 @@ export const CrdIcons: Record<string, ReactElement> = {
       <path d="M11 18h2v2h-2v-2Zm-3 0h2v2H8v-2Zm6 0h2v2h-2v-2Z" />
     </>,
   ),
-  // ImageUpdateAutomation — frame with a circular arrow.
+  // Image with a refresh badge.
   ImageUpdateAutomation: filled(
     16,
     <>
-      <path
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M3 4h18v12H3V4Zm2 2v6l4-4 4 4 3-3 4 4V6H5Z"
-      />
-      <path d="M12 18a4 4 0 0 0 4 4v-1l2 1.5-2 1.5v-1a5 5 0 0 1-5-5h1Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M2 3h12v10H2V3Zm2 2v5l2.5-2.5L9 10l1.5-1.5L12 10V5H4Z" />
+      <g transform="translate(11.5 11) scale(.55)">
+        <path d="M12 4V1L7 5l5 4V6a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z" />
+      </g>
     </>,
   ),
 
@@ -891,10 +874,14 @@ export const CrdIcons: Record<string, ReactElement> = {
       <path d="M7.7 7.7 6.3 6.3a8 8 0 0 0 0 11.4l1.4-1.4a6 6 0 0 1 0-8.6Zm8.6 0a6 6 0 0 1 0 8.6l1.4 1.4a8 8 0 0 0 0-11.4l-1.4 1.4ZM4.9 4.9 3.5 3.5a12 12 0 0 0 0 17l1.4-1.4a10 10 0 0 1 0-14.2Zm14.2 0a10 10 0 0 1 0 14.2l1.4 1.4a12 12 0 0 0 0-17l-1.4 1.4Z" />
     </>,
   ),
-  // Receiver — antenna mast with side prongs.
+  // Satellite dish — receives inbound webhooks.
   Receiver: filled(
     16,
-    <path d="M11 2h2v9h-2V2ZM6.5 4 5 5.4l3 3v2.6l-4 4V21h16v-6l-4-4V8.4l3-3L17.5 4 15 6.5h-6L6.5 4Z" />,
+    <>
+      <path d="M3.5 8.5 15.5 20.5A8.5 8.5 0 0 1 3.5 8.5Z" />
+      <path d="M9 14 15 8l1 1-6 6-1-1Z" />
+      <circle cx="17" cy="7" r="2" />
+    </>,
   ),
 
   // === snapshot.storage.k8s.io ===
@@ -964,18 +951,10 @@ export const CrdIcons: Record<string, ReactElement> = {
     16,
     <path d="M3 3h7v7H3V3Zm11 0h7v7h-7V3Zm-11 11h7v7H3v-7Zm11 0h7v7h-7v-7Zm2 2v3h3v-3h-3Z" />,
   ),
-  // AppProject — folder containing apps (a project groups applications).
+  // AppProject — folder holding an app card.
   AppProject: filled(
     16,
-    <>
-      <path d="M3 5h7l2 2h9v13H3V5Z" />
-      <path
-        fill="white"
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M7 11h10v6H7v-6Zm2 2v2h6v-2H9Z"
-      />
-    </>,
+    <path fillRule="evenodd" clipRule="evenodd" d="M3 5h7l2 2h9v13H3V5Zm4 6v6h10v-6H7Zm2 2h6v2H9v-2Z" />,
   ),
   // Workflow — three connected nodes (a workflow DAG).
   Workflow: filled(
@@ -995,19 +974,15 @@ export const CrdIcons: Record<string, ReactElement> = {
     <path d="M2 13c0-3 2-5 4.5-5s4 5 6 5 4-5 6-5 3.5 2 3.5 5v3c0-3-1-4-2-4s-2 5-5 5-4-5-6-5-3 1-3 4v-3Z" />,
   ),
 
-  // === tekton.dev ===
-  // Pipeline — pipe segments connected.
+  // Three connected stages.
   Pipeline: filled(
     16,
-    <path d="M2 9h6v2h6v2H8v2h12v2H6v-2H2v-2h4V9Zm14-1V4h2v4h2v6h-2v-2h-2V8Z" />,
+    <path d="M2 9.5h5v5H2v-5Zm7.5 0h5v5h-5v-5Zm7.5 0h5v5h-5v-5ZM7 11.25h2.5v1.5H7v-1.5Zm7.5 0H17v1.5h-2.5v-1.5Z" />,
   ),
-  // PipelineRun — pipeline + play triangle.
+  // Stages followed by play.
   PipelineRun: filled(
     16,
-    <>
-      <path d="M2 8h6v2h4v2H8v2H2v-2h4v-2H2V8Z" />
-      <path d="M14 4l9 8-9 8V4Zm2 4.6v6.8L19.8 12 16 8.6Z" />
-    </>,
+    <path d="M2 9.5h5v5H2v-5Zm7 0h5v5H9v-5ZM7 11.25h2v1.5H7v-1.5Zm8.5-4.75L22 12l-6.5 5.5v-11Z" />,
   ),
   // Task — checkbox (a task is a unit of work).
   Task: filled(
@@ -1051,20 +1026,23 @@ export const CrdIcons: Record<string, ReactElement> = {
   Backup: filled(
     16,
     <>
-      <path d="M3 4h18v4H3V4Zm1 6h16v12H4V10Zm5 4v3h2v3h2v-3h2v-3l-3-3-3 3Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M3 4h18v4H3V4Zm1 6h16v12H4V10Zm8 1.5L8.5 15H11v4h2v-4h2.5L12 11.5Z" />
     </>,
   ),
   // Restore — archive box with arrow down (out of storage).
   Restore: filled(
     16,
     <>
-      <path d="M3 4h18v4H3V4Zm1 6h16v12H4V10Zm5 3h2v3h2v-3h2l-3 3-3-3v-3Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M3 4h18v4H3V4Zm1 6h16v12H4V10Zm7 2v4H8.5l3.5 3.5 3.5-3.5H13v-4h-2Z" />
     </>,
   ),
-  // Schedule — clock (cron-like recurring backup).
+  // Calendar — recurring schedule.
   Schedule: filled(
     16,
-    <path d="M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20Zm-1 4v6.5l5 3 1-1.7-4-2.3V6h-2Z" />,
+    <>
+      <path fillRule="evenodd" clipRule="evenodd" d="M3 5h18v16H3V5Zm2 5v9h14v-9H5Z" />
+      <path d="M7 2h2v5H7V2Zm8 0h2v5h-2V2ZM7 12h4v4H7v-4Z" />
+    </>,
   ),
   // BackupStorageLocation — archive + pin marker.
   BackupStorageLocation: filled(
@@ -1083,11 +1061,18 @@ export const CrdIcons: Record<string, ReactElement> = {
     </>,
   ),
 
-  // === argoproj.io / Argo CD/Workflows extras (and istio) ===
-  // VirtualService — Y-shaped route fork.
+  // Forking route — one host split across destinations.
   VirtualService: filled(
     16,
-    <path d="M11 2h2v6h-2V2Zm-7 9 8-3 8 3-2 1.5-3-1.1V18l-3 3-3-3v-6.6L6 12.5 4 11Z" />,
+    <>
+      <path d="M11 12h2v10h-2V12Z" />
+      <g transform="rotate(-35 12 13)">
+        <path d="M11 13V7H8.5L12 2.5 15.5 7H13v6h-2Z" />
+      </g>
+      <g transform="rotate(35 12 13)">
+        <path d="M11 13V7H8.5L12 2.5 15.5 7H13v6h-2Z" />
+      </g>
+    </>,
   ),
   // DestinationRule — pin (where traffic lands).
   DestinationRule: filled(
@@ -1107,21 +1092,17 @@ export const CrdIcons: Record<string, ReactElement> = {
       d="M5 3h12v18H5V3Zm2 2v14h8V5H7Zm6 6v2h2v-2h-2Z"
     />,
   ),
-  // AuthorizationPolicy — shield with a check.
+  // Shield with a person — who may call what.
   AuthorizationPolicy: filled(
     16,
-    <path
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M12 2 4 5v6c0 5 3.5 9.4 8 11 4.5-1.6 8-6 8-11V5l-8-3Zm-1 13.5L7 11.6l1.4-1.4 2.6 2.6 4.6-4.6 1.4 1.4-6 6Z"
-    />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 2 4 5v6c0 5 3.5 9.4 8 11 4.5-1.6 8-6 8-11V5l-8-3Zm0 4.8a2.2 2.2 0 1 0 0 4.4 2.2 2.2 0 0 0 0-4.4ZM8 16.5c0-2.2 1.8-3.8 4-3.8s4 1.6 4 3.8V17H8v-.5Z" />,
   ),
-  // PeerAuthentication — two locks (mTLS between peers).
+  // PeerAuthentication — two padlocks (mTLS between peers).
   PeerAuthentication: filled(
     16,
     <>
-      <path d="M3 11V8a4 4 0 0 1 8 0v3h1v9H2v-9h1Zm2 0h4V8a2 2 0 0 0-4 0v3Z" />
-      <path d="M13 11V8a4 4 0 0 1 8 0v3h1v9H12v-9h1Zm2 0h4V8a2 2 0 0 0-4 0v3Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M2 11V8a3.5 3.5 0 0 1 7 0v3h1.5v9h-10v-9H2Zm2 0h3V8a1.5 1.5 0 0 0-3 0v3Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M15 11V8a3.5 3.5 0 0 1 7 0v3h1.5v9h-10v-9H15Zm2 0h3V8a1.5 1.5 0 0 0-3 0v3Z" />
     </>,
   ),
 
@@ -1144,17 +1125,10 @@ export const CrdIcons: Record<string, ReactElement> = {
     </>,
   ),
 
-  // === cilium.io ===
-  // CiliumNetworkPolicy — shield over a network mesh.
+  // CiliumNetworkPolicy — shield with a 2×2 endpoint grid cut out.
   CiliumNetworkPolicy: filled(
     16,
-    <>
-      <path d="M12 2 4 5v6c0 5 3.5 9.4 8 11 4.5-1.6 8-6 8-11V5l-8-3Z" />
-      <path
-        fill="white"
-        d="M9 9h2v2H9V9Zm4 0h2v2h-2V9Zm-2 4h2v2h-2v-2Z"
-      />
-    </>,
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 2 4 5v6c0 5 3.5 9.4 8 11 4.5-1.6 8-6 8-11V5l-8-3ZM8.5 7.5H11V10H8.5V7.5Zm4.5 0h2.5V10H13V7.5ZM8.5 12H11v2.5H8.5V12Zm4.5 0h2.5v2.5H13V12Z" />,
   ),
   // CiliumIdentity — ID badge.
   CiliumIdentity: filled(
@@ -1178,13 +1152,11 @@ export const CrdIcons: Record<string, ReactElement> = {
     </>,
   ),
 
-  // === Database CRDs (varied groups: golem.io, acid.zalan.do, ...) ===
-  // DatabaseInstance / generic DB — cylinder with disc bands.
+  // DatabaseInstance — stack of discs.
   DatabaseInstance: filled(
     16,
-    <path d="M12 2c4.4 0 8 1.3 8 3v14c0 1.7-3.6 3-8 3s-8-1.3-8-3V5c0-1.7 3.6-3 8-3Zm-6 6.2V11c0 1.7 3.6 3 8 3s8-1.3 8-3V8.2c-1.7 1.3-4.8 2-8 2s-6.3-.7-8-2Zm0 5V16c0 1.7 3.6 3 8 3s8-1.3 8-3v-2.8c-1.7 1.3-4.8 2-8 2s-6.3-.7-8-2Z" />,
+    <path d="M12 3c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3Zm-8 5.2c1.7 1.3 4.8 2 8 2s6.3-.7 8-2V11c0 1.7-3.6 3-8 3s-8-1.3-8-3V8.2Zm0 5c1.7 1.3 4.8 2 8 2s6.3-.7 8-2V16c0 1.7-3.6 3-8 3s-8-1.3-8-3v-2.8Zm0 5c1.7 1.3 4.8 2 8 2s6.3-.7 8-2V19c0 1.7-3.6 3-8 3s-8-1.3-8-3v-.8Z" />,
   ),
-
   // === Kyverno (kyverno.io / policies.kyverno.io / reports.kyverno.io / wgpolicyk8s.io) ===
   // Report — document with bar-chart inside.
   Report: filled(
@@ -1213,20 +1185,12 @@ export const CrdIcons: Record<string, ReactElement> = {
       d="M12 2 4 5v6c0 5 3.5 9.4 8 11 4.5-1.6 8-6 8-11V5l-8-3Zm-4 9h8v2H8v-2Z"
     />,
   ),
-  // CleanupPolicy — broom (deletion policy).
+  // Broom — sweeps matching objects away.
   CleanupPolicy: filled(
     16,
-    <path d="M14 2h2v9h-2V2Zm-3 9h8l-1 11H4l-1-7 8-4Zm.5 2.4-5.6 2.8.4 2.8H17l.5-5.6h-6Z" />,
-  ),
-  // GlobalContextEntry — globe with a small pin/dot.
-  GlobalContextEntry: filled(
-    16,
     <>
-      <path
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-8 10a8 8 0 0 1 .6-3h3.5a32 32 0 0 0-.1 6H4.6A8 8 0 0 1 4 12Zm6.1 8a18 18 0 0 1-1.5-5h6.8a18 18 0 0 1-1.5 5h-3.8Zm-1.5-7a30 30 0 0 1 0-6h6.8a30 30 0 0 1 0 6H8.6Zm6.7-8h2.1a8 8 0 0 1 2.1 3h-3.5a18 18 0 0 0-.7-3Zm-6.7 0h-2.1a8 8 0 0 0-2.1 3h3.5a18 18 0 0 1 .7-3Zm10.8 9h-3.5a32 32 0 0 0 .1-6h3.4a8 8 0 0 1 0 6Z"
-      />
+      <path d="M11 2h2v8h-2V2ZM8 10h8v2.5H8V10Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M7 13h10l2.5 9h-15L7 13Zm2.2 3.5.2 4h1.4l-.1-4H9.2Zm4.3 0-.1 4h1.4l.2-4h-1.5Z" />
     </>,
   ),
   // EphemeralReport — clipboard with a clock face.
@@ -1244,24 +1208,20 @@ export const CrdIcons: Record<string, ReactElement> = {
     16,
     <path d="M4 4h16v3H4V4Zm0 5h12v3H4V9Zm0 5h8v3H4v-3Zm0 5h4v3H4v-3Z" />,
   ),
-  // Exchange — two arrows in opposite directions (router).
+  // Exchange — one input fanned out to several queues.
   Exchange: filled(
     16,
-    <path d="M3 7h13l-3-3 1.4-1.4L20 8l-5.6 5.4L13 12l3-3H3V7Zm18 10H8l3 3-1.4 1.4L4 16l5.6-5.4L11 12l-3 3h13v2Z" />,
+    <path d="M2 11h10v2H2v-2Zm10-6.5h2v15h-2v-15ZM14 4h4V2l4 3-4 3V6h-4V4Zm0 7h4V9l4 3-4 3v-2h-4v-2Zm0 7h4v-2l4 3-4 3v-2h-4v-2Z" />,
   ),
   // Binding — chain link.
   Binding: filled(
     16,
     <path d="M9 6h2v2h-1a3 3 0 1 0 0 6h1v2H10A5 5 0 0 1 10 6Zm5 0h2A5 5 0 0 1 16 16h-2v-2h1a3 3 0 1 0 0-6h-1V6Zm-5 4h6v2H9v-2Z" />,
   ),
-  // VirtualHost — globe with longitude/latitude lines.
-  VirtualHost: filled(
+  // Globe — global / host-wide scope.
+  Globe: filled(
     16,
-    <path
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-3.4 3a8 8 0 0 0-3.4 4h3.1a14 14 0 0 1 .3-4Zm2 0a14 14 0 0 0-.3 4h3.4a14 14 0 0 0-.3-4h-2.8Zm5 0a14 14 0 0 1 .3 4h3.1a8 8 0 0 0-3.4-4Zm3.6 6h-3.2a16 16 0 0 1-.3 4h3.5a8 8 0 0 0 0-4ZM8.5 11a16 16 0 0 0 .3 4h3.4a16 16 0 0 0 .3-4H8.5Zm-3.5 0a8 8 0 0 0 0 4h3.5a16 16 0 0 1-.3-4H5Zm3.6 6a8 8 0 0 0 3.4 4 14 14 0 0 1-.3-4H8.6Zm5 0a14 14 0 0 1-.3 4 8 8 0 0 0 3.4-4h-3.1Z"
-    />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 0a4.5 10 0 1 0 0 20 4.5 10 0 0 0 0-20Zm0 1.5a3 8.5 0 1 0 0 17 3 8.5 0 0 0 0-17ZM2 11.25h5.4v1.5H2v-1.5Zm14.6 0H22v1.5h-5.4v-1.5Zm-7.5 0h5.8v1.5H9.1v-1.5Z" />,
   ),
   // User — single person silhouette (rabbitmq users, generic identity).
   User: filled(
@@ -1271,13 +1231,12 @@ export const CrdIcons: Record<string, ReactElement> = {
       <path d="M4 21c0-4 3.6-7 8-7s8 3 8 7v1H4v-1z" />
     </>,
   ),
-  // Permission — key-with-tag.
+  // Permission — horizontal key.
   Permission: filled(
     16,
     <>
-      <circle cx="8" cy="12" r="4" />
-      <path d="M11 11h11v2h-2v3h-2v-3h-2v3h-2v-3h-3v-2Z" />
-      <circle cx="8" cy="12" r="1.4" fill="white" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M8 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 2.6a1.4 1.4 0 1 1 0 2.8 1.4 1.4 0 0 1 0-2.8Z" />
+      <path d="M11.5 11H22v2h-2v3h-2v-3h-2v3h-2v-3h-2.5v-2Z" />
     </>,
   ),
   // Federation — multi-cluster connected.
@@ -1291,15 +1250,15 @@ export const CrdIcons: Record<string, ReactElement> = {
       <path d="M11 6h2v5h-2V6ZM11.4 14.5l-7 4 1 1.7 7-4-1-1.7Zm1.2 0 7 4-1 1.7-7-4 1-1.7Z" />
     </>,
   ),
-  // Shovel — angled scoop arrow.
+  // Shovel — grip, shaft and pointed blade.
   Shovel: filled(
     16,
-    <path d="M3 21 14 10l-2-2 6-6 4 4-6 6-2-2L3 21Z" />,
+    <path d="M8.5 2h7v2.5H13V12h-2V4.5H8.5V2ZM7 12h10v4.5L12 22l-5-5.5V12Z" />,
   ),
-  // SuperStream — multi-line stream/flow.
+  // Parallel streams.
   SuperStream: filled(
     16,
-    <path d="M2 6c0-2 2-3 4-3s4 5 6 5 4-3 6-3 4 1 4 3-4 1-6 1-4 3-6 3-4-3-6-3-2 1-2-3Zm0 6c0-2 2-3 4-3s4 5 6 5 4-3 6-3 4 1 4 3-4 1-6 1-4 3-6 3-4-3-6-3-2 1-2-3Zm0 6c0-2 2-3 4-3s4 5 6 5 4-3 6-3 4 1 4 3-4 1-6 1-4 3-6 3-4-3-6-3-2 1-2-3Z" />,
+    <path d="M2 4h13V2l5 3-5 3V6H2V4Zm2 7h13V9l5 3-5 3v-2H4v-2Zm-2 7h11v-2l5 3-5 3v-2H2v-2Z" />,
   ),
   // RabbitmqCluster — cluster of three queue stacks.
   RabbitmqCluster: filled(
@@ -1307,11 +1266,15 @@ export const CrdIcons: Record<string, ReactElement> = {
     <path d="M2 4h6v3H2V4Zm0 5h6v3H2V9Zm0 5h6v3H2v-3Zm7-10h6v3H9V4Zm0 5h6v3H9V9Zm0 5h6v3H9v-3Zm7-10h6v3h-6V4Zm0 5h6v3h-6V9Zm0 5h6v3h-6v-3Z" />,
   ),
 
-  // === Istio extras (config.istio.io / networking.istio.io / telemetry / extensions) ===
-  // EnvoyFilter — funnel filter.
+  // Funnel with traffic dropping in.
   EnvoyFilter: filled(
     16,
-    <path d="M3 4h18v3l-7 8V21l-4-2v-4l-7-8V4Z" />,
+    <>
+      <path d="M3 8h18v2.5l-7 6.5V22l-4-2v-3L3 10.5V8Z" />
+      <circle cx="7" cy="4.5" r="1.5" />
+      <circle cx="12" cy="3.5" r="1.5" />
+      <circle cx="17" cy="4.5" r="1.5" />
+    </>,
   ),
   // Sidecar — main pod with a smaller adjacent pod (sidecar).
   Sidecar: filled(
@@ -1334,12 +1297,12 @@ export const CrdIcons: Record<string, ReactElement> = {
     16,
     <path d="M3 5h6v2a1.5 1.5 0 1 0 3 0V5h6v6h-2a1.5 1.5 0 1 0 0 3h2v6h-6v-2a1.5 1.5 0 1 0-3 0v2H3v-6h2a1.5 1.5 0 1 0 0-3H3V5Z" />,
   ),
-  // ProxyConfig — gear over a forward arrow.
+  // Traffic passing through a configured box.
   ProxyConfig: filled(
     16,
     <>
-      <path d="M2 11h12v2H2v-2Zm12-3 6 4-6 4V8Z" />
-      <path d="M21.5 4.5a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm-1 0V2h2v2.5h-2Zm0 6V8h2v2.5h-2Zm-2.5-3.5h2v2h-2v-2Zm5 0h2v2h-2v-2Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M8.5 6h7v12h-7V6Zm2 3v1.5h3V9h-3Zm0 4.5V15h3v-1.5h-3Z" />
+      <path d="M1.5 11H5V8.5L8 12l-3 3.5V13H1.5v-2Zm14.5 0h3.5V8.5l3 3.5-3 3.5V13H16v-2Z" />
     </>,
   ),
   // WorkloadEntry — pod hex with an outward arrow (external workload).
@@ -1390,15 +1353,10 @@ export const CrdIcons: Record<string, ReactElement> = {
     </>,
   ),
 
-  // === Envoy XDS (envoyxds.io) ===
-  // Endpoint — bullseye / target dot.
+  // Endpoint — bullseye.
   Endpoint: filled(
     16,
-    <>
-      <circle cx="12" cy="12" r="10" />
-      <circle cx="12" cy="12" r="6" fill="white" />
-      <circle cx="12" cy="12" r="3" />
-    </>,
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 4a6 6 0 1 1 0 12 6 6 0 0 1 0-12Zm0 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z" />,
   ),
   // Listener — speaker / inbound antenna.
   Listener: filled(
@@ -1420,11 +1378,6 @@ export const CrdIcons: Record<string, ReactElement> = {
       />
     </>,
   ),
-  // EnvoyRoute — fork (alternate shape from VirtualService).
-  EnvoyRoute: filled(
-    16,
-    <path d="M11 2h2v4h6v2l-3 3 3 3v2h-6v6h-2v-6H5v-2l3-3-3-3V6h6V2Z" />,
-  ),
   // TLSSecret — secret padlock with a small certificate seal corner.
   TLSSecret: filled(
     16,
@@ -1438,20 +1391,19 @@ export const CrdIcons: Record<string, ReactElement> = {
     </>,
   ),
 
-  // === GKE / Google Cloud (cloud.google.com / *.gke.io) ===
-  // ManagedCertificate — cloud silhouette with a shield.
+  // Cloud with a check — a provider-managed certificate.
   ManagedCertificate: filled(
     16,
-    <>
-      <path d="M6 8a5 5 0 0 1 9.6-2A4 4 0 0 1 19 10v.5a4 4 0 0 0-3 3.5H6a3 3 0 0 1 0-6Z" />
-      <path d="M16 12 11 13.5v3.3c0 2.6 2.1 4.7 5 5.2 2.9-.5 5-2.6 5-5.2v-3.3L16 12Z" />
-    </>,
+    <path fillRule="evenodd" clipRule="evenodd" d="M7 19a5 5 0 0 1-.9-9.9A6.5 6.5 0 0 1 18.6 9.5 4.8 4.8 0 0 1 18 19H7Zm1.8-5.3L10 12.5l1.2 1.2 3-3 1.2 1.2-4.2 4.2-2.4-2.4Z" />,
   ),
-  // BackendConfig — server/backend block with a small gear.
+  // Backend server with tuning sliders.
   BackendConfig: filled(
     16,
     <>
-      <path d="M3 4h18v6H3V4Zm3 2v2h2V6H6Zm0 8h12v6H3v-6h3Zm0 2v2h2v-2H6Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M3 3h18v7H3V3Zm2.5 2.5v2h2v-2h-2Zm4 0v2h2v-2h-2Z" />
+      <path d="M3 13.25h18v1.5H3v-1.5Zm0 5h18v1.5H3v-1.5Z" />
+      <circle cx="8" cy="14" r="2.2" />
+      <circle cx="16" cy="19" r="2.2" />
     </>,
   ),
   // FrontendConfig — front panel with controls.
@@ -1461,16 +1413,10 @@ export const CrdIcons: Record<string, ReactElement> = {
       <path d="M3 4h18v16H3V4Zm2 2v12h14V6H5Zm2 2h2v6H7V8Zm4 0h2v6h-2V8Zm4 0h2v6h-2V8Z" />
     </>,
   ),
-  // Allowlist — checklist (allowed items).
+  // Allowlist — checklist.
   Allowlist: filled(
     16,
-    <>
-      <path d="M3 5h2v2H3V5Zm0 6h2v2H3v-2Zm0 6h2v2H3v-2Zm5-12h13v2H8V5Zm0 6h13v2H8v-2Zm0 6h13v2H8v-2Z" />
-      <path
-        fill="white"
-        d="M3.4 5.6 4 6.2 4.6 5.6 4 5z"
-      />
-    </>,
+    <path d="M1.8 6 3.1 4.7 4.6 6.2 7.6 3.2 8.9 4.5 4.6 8.8 1.8 6Zm8.2-1.25h11v2.5H10v-2.5ZM1.8 12l1.3-1.3 1.5 1.5 3-3 1.3 1.3-4.3 4.3L1.8 12Zm8.2-1.25h11v2.5H10v-2.5ZM1.8 18l1.3-1.3 1.5 1.5 3-3 1.3 1.3-4.3 4.3L1.8 18Zm8.2-1.25h11v2.5H10v-2.5Z" />,
   ),
   // ComputeClass — CPU chip silhouette.
   ComputeClass: filled(
@@ -1485,25 +1431,19 @@ export const CrdIcons: Record<string, ReactElement> = {
       <circle cx="19" cy="5" r="3" />
     </>,
   ),
-  // Membership — multiple users (group).
+  // Membership — two people.
   Membership: filled(
     16,
     <>
       <circle cx="9" cy="8" r="3.5" />
-      <circle cx="17" cy="9" r="2.5" />
-      <path d="M2 21c0-3.5 3-6 7-6s7 2.5 7 6v1H2v-1Zm15 0c0-2.5 1.5-4.5 4-4.5s4 2 4 4.5v1h-8v-1Z" />
+      <circle cx="17.5" cy="9" r="2.5" />
+      <path d="M2 21c0-3.5 3-6 7-6s7 2.5 7 6v1H2v-1Zm15.5-7c2.5 0 4.5 2 4.5 4.8V21h-4.2c0-2.7-1-4.8-2.6-6.3.7-.4 1.5-.7 2.3-.7Z" />
     </>,
   ),
-  // Audit — eye over a clipboard.
+  // Audit — document with an eye.
   Audit: filled(
     16,
-    <>
-      <path d="M5 2h11l4 4v9h-2c-2.7 0-5 1.7-6 4H5V2Zm10 1.5V7h3.5L15 3.5Z" />
-      <path
-        fill="white"
-        d="M16 13c-3 0-5 3-5 3s2 3 5 3 5-3 5-3-2-3-5-3Zm0 1.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z"
-      />
-    </>,
+    <path fillRule="evenodd" clipRule="evenodd" d="M5 2h10l4 4v16H5V2Zm7 9c-3 0-5 3-5 3s2 3 5 3 5-3 5-3-2-3-5-3Zm0 1.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Z" />,
   ),
   // Topology — graph with nodes and edges.
   Topology: filled(
@@ -1518,25 +1458,14 @@ export const CrdIcons: Record<string, ReactElement> = {
     </>,
   ),
 
-  // === Vault / VaultSecrets (ricoberger.de) ===
-  // VaultSecret — safe with a dial.
+  // VaultSecret — safe with a dial and hinge.
   VaultSecret: filled(
     16,
     <>
-      <path
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M3 4h18v16H3V4Zm2 2v12h14V6H5Z"
-      />
-      <circle cx="13" cy="12" r="4" />
-      <path
-        fill="white"
-        d="M13 9.5V11h-1.5v2H13v1.5h1.5V13H16v-2h-1.5V9.5H13Z"
-      />
-      <path d="M7 10h2v4H7v-4Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M3 4h18v15H3V4Zm10 3.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Zm0 3a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM5.5 9H7v5H5.5V9Z" />
+      <path d="M5 19h3v2H5v-2Zm11 0h3v2h-3v-2Z" />
     </>,
   ),
-
   // ──────────────────────────────────────────────────────────────────────
   // Generic-word glyphs — universal concepts that appear in CRD names
   // across many vendors (catalog, failover, quorum, subscription, …).
@@ -1576,21 +1505,15 @@ export const CrdIcons: Record<string, ReactElement> = {
       <path d="M16 11.5a4.5 4.5 0 0 1 4.5 4.5h1.5a6 6 0 0 0-6-6v1.5Zm0 3a1.5 1.5 0 0 1 1.5 1.5H19a3 3 0 0 0-3-3v1.5Z" />
     </>,
   ),
-  // Topic — speech bubble with a hash mark.
+  // Topic — speech bubble with a hash.
   Topic: filled(
     16,
-    <>
-      <path d="M3 4h18v13H8l-4 4v-4H3V4Z" />
-      <path
-        fill="white"
-        d="M9 7h2l-.4 2H12l.4-2h2l-.4 2H16v2h-1.8l-.4 2H16v2h-2.2L13 17h-2l.4-2H9.6l-.4 2H7l.4-2H5v-2h2.8l.4-2H5V9h3.6L9 7Zm1.6 4-.4 2h2l.4-2h-2Z"
-      />
-    </>,
+    <path fillRule="evenodd" clipRule="evenodd" d="M3 4h18v13H8l-4 4v-4H3V4Zm6.5 2.5V8.5H7V10h2.5v1H7v1.5h2.5v2H11v-2h2v2h1.5v-2H17V11h-2.5v-1H17V8.5h-2.5v-2H13v2h-2v-2H9.5ZM11 10h2v1h-2v-1Z" />,
   ),
-  // Channel — pipe routing.
+  // Pipe with flow chevrons.
   Channel: filled(
     16,
-    <path d="M2 6h12a3 3 0 0 1 3 3v3h5v2h-5v3a3 3 0 0 1-3 3H2v-2h12a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H2V6Z" />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M6 7h12a5 5 0 0 1 0 10H6A5 5 0 0 1 6 7Zm1 2.5L9.5 12 7 14.5h2l2.5-2.5L9 9.5H7Zm5 0 2.5 2.5-2.5 2.5h2l2.5-2.5L14 9.5h-2Z" />,
   ),
   // Tenant — multi-floor building.
   Tenant: filled(
@@ -1619,55 +1542,54 @@ export const CrdIcons: Record<string, ReactElement> = {
       d="M5 2h11l4 4v16H5V2Zm10 1.5V7h3.5L15 3.5ZM7 9h4v2H7V9Zm6 0h5v2h-5V9Zm-6 4h4v2H7v-2Zm6 0h5v2h-5v-2Zm-6 4h4v2H7v-2Zm6 0h5v2h-5v-2Z"
     />,
   ),
-  // Model — diamond with inner facet.
+  // Model — faceted diamond.
   Model: filled(
     16,
-    <>
-      <path d="M12 2 22 12 12 22 2 12 12 2Z" />
-      <path
-        fill="white"
-        d="M12 6 6 12l6 6 6-6-6-6Zm0 2.5L15.5 12 12 15.5 8.5 12 12 8.5Z"
-      />
-    </>,
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 2 22 12 12 22 2 12 12 2Zm0 4-6 6 6 6 6-6-6-6Zm0 2.5 3.5 3.5-3.5 3.5L8.5 12 12 8.5Z" />,
   ),
-  // Mesh — woven grid.
+  // Lattice of connected nodes.
   Mesh: filled(
     16,
-    <path d="M3 3h2v18H3V3Zm4 0h2v18H7V3Zm4 0h2v18h-2V3Zm4 0h2v18h-2V3Zm4 0h2v18h-2V3ZM3 7v2h18V7H3Zm0 4v2h18v-2H3Zm0 4v2h18v-2H3Z" />,
+    <>
+      <path d="M4 11.25h16v1.5H4v-1.5Zm0-8h16v1.5H4v-1.5Zm0 16h16v1.5H4v-1.5ZM3.25 4h1.5v16h-1.5V4Zm8 0h1.5v16h-1.5V4Zm8 0h1.5v16h-1.5V4Z" />
+      <circle cx="4" cy="4" r="2.2" />
+      <circle cx="12" cy="4" r="2.2" />
+      <circle cx="20" cy="4" r="2.2" />
+      <circle cx="4" cy="12" r="2.2" />
+      <circle cx="12" cy="12" r="2.2" />
+      <circle cx="20" cy="12" r="2.2" />
+      <circle cx="4" cy="20" r="2.2" />
+      <circle cx="12" cy="20" r="2.2" />
+      <circle cx="20" cy="20" r="2.2" />
+    </>,
   ),
   // LoadBalancer — balance scales.
   LoadBalancer: filled(
     16,
     <path d="M11 2h2v3h7v2h-2.5l3 7H23a4 4 0 0 1-8 0h2.5l3-7H13v14h3v2H8v-2h3V7H4.5l3 7H10a4 4 0 0 1-8 0h2.5l3-7H4V5h7V2Z" />,
   ),
-  // Migration — left-arrow → right-arrow transition.
+  // Box moving into a new box.
   Migration: filled(
     16,
     <>
-      <path d="M2 6h6v2h2L8 12 4 8h2V6h-4Z" />
-      <path d="M2 12h12l-2-2 2-2 4 4-4 4-2-2 2-2H2v-0Z" />
-      <path d="M14 16h6v2H14v-2Zm6 0v2h-2l4-4 4 4h-2v0" />
+      <path d="M2 8h6v8H2V8Z" />
+      <path d="M9 11h2.5V8.5L15 12l-3.5 3.5V13H9v-2Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M16.5 7H22v10h-5.5V7Zm1.5 1.5v7h2.5v-7H18Z" />
     </>,
   ),
-  // Bundle — package box with cross strap.
+  // Gift box — several things packaged as one.
   Bundle: filled(
     16,
-    <path
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M3 4h18v16H3V4Zm2 2v12h6v-5H3v-2h8V6H5Zm8 0v5h8V6h-8Zm0 7v5h8v-5h-8Z"
-    />,
+    <>
+      <path d="M3 8h8v4H3V8Zm10 0h8v4h-8V8ZM4 13.5h7V21H4v-7.5Zm9 0h7V21h-7v-7.5Z" />
+      <ellipse cx="9" cy="5.3" rx="3" ry="1.7" transform="rotate(20 9 5.3)" />
+      <ellipse cx="15" cy="5.3" rx="3" ry="1.7" transform="rotate(-20 15 5.3)" />
+    </>,
   ),
-  // Dashboard — panel grid with charts.
+  // Dashboard — uneven panel grid.
   Dashboard: filled(
     16,
-    <>
-      <path d="M3 3h8v9H3V3Zm10 0h8v5h-8V3ZM3 14h8v7H3v-7Zm10-4h8v11h-8V10Z" />
-      <path
-        fill="white"
-        d="M5 9V7h1v2H5Zm2 0V5h1v4H7Zm2 0V6h1v3H9Zm6-4v1h4V5h-4Zm0 6h4v8h-4v-8ZM5 16v3h1v-3H5Zm2-2v5h1v-5H7Zm2 2v3h1v-3H9Z"
-      />
-    </>,
+    <path d="M3 3h8v10H3V3Zm10 0h8v6h-8V3ZM3 15h8v6H3v-6Zm10-4h8v10h-8V11Z" />,
   ),
   // Trace — timeline with span dots.
   Trace: filled(
@@ -1699,47 +1621,42 @@ export const CrdIcons: Record<string, ReactElement> = {
     16,
     <path d="M3 6 6 12 9 7l3 5 3-5 3 5 3-6v12H3V6Zm2 12h14v2H5v-2Z" />,
   ),
-  // Region — globe with pin marker.
+  // Globe with a location pin.
   Region: filled(
     16,
     <>
-      <path d="M9 3a8 8 0 1 0 4 14.9V11h6.9A8 8 0 0 0 9 3Zm0 2a6 6 0 0 1 5.7 4H9.3a14 14 0 0 1 .9-3.6A6.1 6.1 0 0 1 9 5Zm-1.7.5A14 14 0 0 0 6.3 9H3.3a6 6 0 0 1 4-3.5ZM3 11h3a14 14 0 0 0 .3 3H3.3A6 6 0 0 1 3 11Zm5.3 0h2.4a14 14 0 0 1-.3 3H8.6a14 14 0 0 1-.3-3Z" />
-      <path d="M19 11a4 4 0 0 0-4 4c0 3 4 7 4 7s4-4 4-7a4 4 0 0 0-4-4Zm0 2.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z" />
+      <g transform="translate(-.5 -.5) scale(.68)">
+        <path fillRule="evenodd" clipRule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 0a4.5 10 0 1 0 0 20 4.5 10 0 0 0 0-20Zm0 1.5a3 8.5 0 1 0 0 17 3 8.5 0 0 0 0-17ZM2 11.25h5.4v1.5H2v-1.5Zm14.6 0H22v1.5h-5.4v-1.5Zm-7.5 0h5.8v1.5H9.1v-1.5Z" />
+      </g>
+      <path d="M18 11a4 4 0 0 0-4 4c0 3 4 7 4 7s4-4 4-7a4 4 0 0 0-4-4Zm0 2.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z" />
     </>,
   ),
-  // Addon — outer card with inset puzzle nub (an extension that plugs in).
+  // Plug — an add-on that slots into the cluster.
   Addon: filled(
     16,
-    <path
-      fillRule="evenodd"
-      clipRule="evenodd"
-      d="M3 4h18v16H3V4Zm2 2v12h7v-3a2 2 0 1 1 4 0v3h3V6H5Zm0 5v2h3a1.5 1.5 0 1 0 0-3H5v1Z"
-    />,
+    <path d="M8 2h2v6H8V2Zm6 0h2v6h-2V2ZM6 8h12v4a6 6 0 0 1-12 0V8Zm5 10h2v4h-2v-4Z" />,
   ),
   // FunctionGlyph — curly braces (the universal "function" sigil).
   FunctionGlyph: filled(
     16,
     <path d="M9 3v2H7a2 2 0 0 0-2 2v3a2 2 0 0 1-2 2v2a2 2 0 0 1 2 2v3a2 2 0 0 0 2 2h2v-2H7v-3a4 4 0 0 0-1.5-3.1A4 4 0 0 0 7 9V6h2V3Zm6 0v2h2a2 2 0 0 1 2 2v3a2 2 0 0 0 2 2v2a2 2 0 0 0-2 2v3a2 2 0 0 1-2 2h-2v-2h2v-3a4 4 0 0 1 1.5-3.1A4 4 0 0 1 17 9V6h-2V3Z" />,
   ),
-  // Broker — central hub with in/out arrows (event broker / message broker).
+  // Broker — hub fanning out to four spokes.
   Broker: filled(
     16,
     <>
-      <circle cx="12" cy="12" r="4" />
-      <path d="M2 11h6v2H2v-2Zm14 0h6v2h-6v-2ZM11 2h2v6h-2V2Zm0 14h2v6h-2v-6Z" />
-      <path
-        fill="white"
-        d="M12 10v4M10 12h4"
-        stroke="white"
-        strokeWidth="0"
-      />
-      <circle cx="12" cy="12" r="1.4" fill="white" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 2.6a1.4 1.4 0 1 1 0 2.8 1.4 1.4 0 0 1 0-2.8Z" />
+      <path d="M4 11h4v2H4v-2Zm12 0h4v2h-4v-2ZM11 4h2v4h-2V4Zm0 12h2v4h-2v-4Z" />
+      <circle cx="3" cy="12" r="2" />
+      <circle cx="21" cy="12" r="2" />
+      <circle cx="12" cy="3" r="2" />
+      <circle cx="12" cy="21" r="2" />
     </>,
   ),
-  // Trigger — lightning bolt.
+  // Bolt in a badge — fires on an event.
   Trigger: filled(
     16,
-    <path d="M14 2 4 14h6l-2 8 10-12h-6l2-8Z" />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M5 2h14a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3Zm8 3-6 8h4l-1 6 6-8h-4l1-6Z" />,
   ),
   // Sink — funnel into a basin (a generic event sink).
   Sink: filled(
@@ -1749,20 +1666,22 @@ export const CrdIcons: Record<string, ReactElement> = {
       <path d="M3 19h18v2H3v-2Z" />
     </>,
   ),
-  // Source — outlet with output arrow.
+  // Source — origin dot emitting to the right.
   Source: filled(
     16,
     <>
-      <path d="M3 6h7a2 2 0 0 1 2 2v3h-2V8H3V6Zm0 10h7a2 2 0 0 0 2-2v-3h-2v3H3v2Z" />
-      <path d="M14 11h7l-3-3 1.4-1.4L25 11l-5.6 5.4L18 15l3-3h-7v-1Z" />
+      <path d="M6 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8Z" />
+      <path d="M11 11h6.5V7.5L22 12l-4.5 4.5V13H11v-2Z" />
     </>,
   ),
-  // CatalogSource (OLM) — book with arrow (sourced catalog).
+  // CatalogSource — catalog book feeding downward.
   CatalogSource: filled(
     16,
     <>
-      <path d="M2 4h8a2 2 0 0 1 2 2v12a2 2 0 0 0-2-2H2V4Zm10 0h8v8a4 4 0 0 0-4 0V6h-4V4Z" />
-      <path d="M14 16l5 4-5 4v-3h-3v-2h3v-3Z" />
+      <g transform="translate(0 -2) scale(.75)">
+        <path d="M2 4h8a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H2V4Zm12 0h8v14h-8a2 2 0 0 0-2 2V6a2 2 0 0 1 2-2Zm2 2v8l2-1.5L20 14V6h-4Z" />
+      </g>
+      <path d="M17 14h3v4h2.5l-4 4.5-4-4.5H17v-4Z" />
     </>,
   ),
   // ImageCatalog — picture frame stacked with an index card.
@@ -1776,14 +1695,83 @@ export const CrdIcons: Record<string, ReactElement> = {
   // InstallPlan — checklist with arrow.
   InstallPlan: filled(
     16,
-    <path d="M5 2h11l3 3v17H5V2Zm2 7 1.4-1.4 2.1 2.1 4.5-4.5L16.4 6.6 10.5 12.5 7 9Zm0 6h10v2H7v-2Zm0 4h7v2H7v-2Z" />,
+    <path fillRule="evenodd" clipRule="evenodd" d="M5 2h11l3 3v17H5V2Zm2 7 1.4-1.4 2.1 2.1 4.5-4.5L16.4 6.6 10.5 12.5 7 9Zm0 6h10v2H7v-2Zm0 4h7v2H7v-2Z" />,
   ),
-  // ClusterServiceVersion (OLM) — version tag on a service ring.
+  // Version tag.
   ClusterServiceVersion: filled(
     16,
+    <path fillRule="evenodd" clipRule="evenodd" d="M3 3h8.5l9.5 9.5-8.5 8.5L3 11.5V3Zm4.5 2.5a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z" />,
+  ),
+  // Cloud — provider-managed resource.
+  Cloud: filled(
+    16,
+    <path d="M7 19a5 5 0 0 1-.9-9.9A6.5 6.5 0 0 1 18.6 9.5 4.8 4.8 0 0 1 18 19H7Z" />,
+  ),
+  // Scale — a box with expand arrows (autoscaling target).
+  Scale: filled(
+    16,
     <>
-      <path d="M9 4a3 3 0 0 1 1 5.8V11h4a3 3 0 1 1-3 3H7a3 3 0 1 1-3-3h4V9.8A3 3 0 0 1 9 4Z" />
-      <path d="M14 4 22 4l-3 4 3 4h-8V4Zm2 2v4h4l-1.5-2L20 6h-4Z" />
+      <path d="M9 9h6v6H9V9Z" />
+      <path d="M14 2h8v8l-3-3-3 3-2-2 3-3-3-3Z" />
+      <path d="M10 22H2v-8l3 3 3-3 2 2-3 3 3 3Z" />
     </>,
+  ),
+  // Job with an up arrow — jobs spawned by load.
+  ScaledJob: filled(
+    16,
+    <>
+      <g transform="translate(-1.5 3) scale(.75)">
+        <path d="M8 3h8l1 2h3v17H4V5h3l1-2Zm2.2 11.6-2.8-2.8L6 13.2l4.2 4.2L18 9.6 16.6 8l-6.4 6.6Z" />
+      </g>
+      <path d="M18 4l4 4.5h-2.5V20h-3V8.5H14L18 4Z" />
+    </>,
+  ),
+  // Syringe — injected instrumentation.
+  Syringe: filled(
+    16,
+    <g transform="rotate(45 12 12)">
+        <path fillRule="evenodd" clipRule="evenodd" d="M8 1h8v2h-3v2h-2V3H8V1Zm0 5h8v11H8V6Zm2 2v5h4V8h-4Zm0 9h4v1.5h-4V17Zm1.25 1.5h1.5V23h-1.5v-4.5Z" />
+      </g>,
+  ),
+  // Bridge — deck on an arch.
+  Bridge: filled(
+    16,
+    <path d="M1 7h22v2.5H1V7Zm2 3.5h18V20h-3.5v-2.5a5.5 5.5 0 0 0-11 0V20H3v-9.5Z" />,
+  ),
+  // Battery — reserved headroom.
+  Battery: filled(
+    16,
+    <>
+      <path fillRule="evenodd" clipRule="evenodd" d="M2 6h17v12H2V6Zm2 2v8h13V8H4Zm1.5 1.5h6v5h-6v-5Z" />
+      <path d="M19.5 9.5H22v5h-2.5v-5Z" />
+    </>,
+  ),
+  // Lock with an incoming arrow — secret synced from an external store.
+  ExternalSecret: filled(
+    16,
+    <>
+      <g transform="translate(6 3) scale(.75)">
+        <path fillRule="evenodd" clipRule="evenodd" d="M7 10V7a5 5 0 0 1 10 0v3h2v12H5V10h2Zm2 0h6V7a3 3 0 0 0-6 0v3Zm2 5v3h2v-3h-2Z" />
+      </g>
+      <path d="M1 11h4.5V8.5L9 12l-3.5 3.5V13H1v-2Z" />
+    </>,
+  ),
+  // Envelope with a wax seal — encrypted secret.
+  SealedSecret: filled(
+    16,
+    <path fillRule="evenodd" clipRule="evenodd" d="M2 4h20v16H2V4Zm2 2 8 6 8-6H4Zm12 3.5a5 5 0 1 0 0 10 5 5 0 0 0 0-10Zm0 1.2a3.8 3.8 0 1 1 0 7.6 3.8 3.8 0 0 1 0-7.6Z" />,
+  ),
+  // Monitor with a guest inside — a virtual machine.
+  VirtualMachine: filled(
+    16,
+    <>
+      <path fillRule="evenodd" clipRule="evenodd" d="M2 3h20v14H2V3Zm2 2v10h16V5H4Zm5 2.5h6v5H9v-5Z" />
+      <path d="M9 17h6v2h3v2H6v-2h3v-2Z" />
+    </>,
+  ),
+  // Three stacked nodes — a pool that grows and shrinks.
+  NodePool: filled(
+    16,
+    <path fillRule="evenodd" clipRule="evenodd" d="M3 2h18v5.5H3V2Zm2 1.75v2h2v-2H5ZM3 9.25h18v5.5H3v-5.5ZM5 11v2h2v-2H5Zm-2 5.5h18V22H3v-5.5Zm2 1.75v2h2v-2H5Z" />,
   ),
 };
