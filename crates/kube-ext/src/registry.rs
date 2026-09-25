@@ -19,7 +19,6 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::watcher::{NsScope, ResourceWatcher};
-use ferrisscope_core::cluster::ListStrategy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Category {
@@ -114,7 +113,7 @@ pub trait KindSpec: Send + Sync + 'static {
 /// regardless of what the operator picked.
 pub struct ResourceKindEntry {
     pub meta: ResourceKind,
-    pub start: Box<dyn Fn(Client, NsScope, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync>,
+    pub start: Box<dyn Fn(Client, NsScope) -> Arc<ResourceWatcher> + Send + Sync>,
     /// Row projection for a one-shot LIST, same shape the watcher emits.
     /// `None` for synthetic kinds with no single backing object.
     pub project: Option<RowProjector>,
@@ -152,12 +151,12 @@ impl ResourceKindEntry {
     {
         Self {
             meta: S::meta(),
-            start: Box::new(|client, scope, strategy| {
+            start: Box::new(|client, scope| {
                 let api = match scope.namespace() {
                     Some(ns) => Api::<S::K>::namespaced(client, ns),
                     None => Api::all(client),
                 };
-                Arc::new(ResourceWatcher::start_with_api::<S>(api, strategy))
+                Arc::new(ResourceWatcher::start_with_api::<S>(api))
             }),
             project: Some(typed_projector::<S>()),
         }
@@ -173,9 +172,7 @@ impl ResourceKindEntry {
     {
         Self {
             meta: S::meta(),
-            start: Box::new(|client, _scope, strategy| {
-                Arc::new(ResourceWatcher::start::<S>(client, strategy))
-            }),
+            start: Box::new(|client, _scope| Arc::new(ResourceWatcher::start::<S>(client))),
             project: Some(typed_projector::<S>()),
         }
     }
@@ -251,21 +248,19 @@ impl ResourceKindEntry {
         let list_projector = projector.clone();
         let project: RowProjector =
             Arc::new(move |obj: &DynamicObject| Some(list_projector.project(obj)));
-        let start: Box<
-            dyn Fn(Client, NsScope, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync,
-        > = Box::new(move |client, scope, strategy| {
-            let effective = if namespaced { scope } else { NsScope::All };
-            let p = projector.clone();
-            Arc::new(ResourceWatcher::start_dynamic(
-                client,
-                ar.clone(),
-                namespaced,
-                log_id.clone(),
-                Arc::new(move |obj: &DynamicObject| p.project(obj)),
-                effective,
-                strategy,
-            ))
-        });
+        let start: Box<dyn Fn(Client, NsScope) -> Arc<ResourceWatcher> + Send + Sync> =
+            Box::new(move |client, scope| {
+                let effective = if namespaced { scope } else { NsScope::All };
+                let p = projector.clone();
+                Arc::new(ResourceWatcher::start_dynamic(
+                    client,
+                    ar.clone(),
+                    namespaced,
+                    log_id.clone(),
+                    Arc::new(move |obj: &DynamicObject| p.project(obj)),
+                    effective,
+                ))
+            });
         Self {
             meta,
             start,
@@ -305,20 +300,18 @@ impl ResourceKindEntry {
         let namespaced = crd.namespaced;
         let log_id = id.to_owned();
         let project_fn = wk.project;
-        let start: Box<
-            dyn Fn(Client, NsScope, ListStrategy) -> Arc<ResourceWatcher> + Send + Sync,
-        > = Box::new(move |client, scope, strategy| {
-            let effective = if namespaced { scope } else { NsScope::All };
-            Arc::new(ResourceWatcher::start_dynamic(
-                client,
-                ar.clone(),
-                namespaced,
-                log_id.clone(),
-                Arc::new(project_fn),
-                effective,
-                strategy,
-            ))
-        });
+        let start: Box<dyn Fn(Client, NsScope) -> Arc<ResourceWatcher> + Send + Sync> =
+            Box::new(move |client, scope| {
+                let effective = if namespaced { scope } else { NsScope::All };
+                Arc::new(ResourceWatcher::start_dynamic(
+                    client,
+                    ar.clone(),
+                    namespaced,
+                    log_id.clone(),
+                    Arc::new(project_fn),
+                    effective,
+                ))
+            });
         Self {
             meta,
             start,
@@ -662,10 +655,8 @@ pub struct DiscoveredPrinterColumn {
 pub fn helm_releases_entry() -> ResourceKindEntry {
     ResourceKindEntry {
         meta: crate::kinds::helm_releases::meta(),
-        start: Box::new(|client, scope, strategy| {
-            Arc::new(ResourceWatcher::start_helm_releases(
-                client, scope, strategy,
-            ))
+        start: Box::new(|client, scope| {
+            Arc::new(ResourceWatcher::start_helm_releases(client, scope))
         }),
         project: None,
     }
@@ -682,12 +673,8 @@ pub fn helm_charts_entry() -> ResourceKindEntry {
         // Charts is a cluster-wide aggregate by (chart_name, chart_version);
         // scoping the underlying secret watch to one namespace would hide
         // charts deployed elsewhere. Always `All`.
-        start: Box::new(|client, _scope, strategy| {
-            Arc::new(ResourceWatcher::start_helm_charts(
-                client,
-                NsScope::All,
-                strategy,
-            ))
+        start: Box::new(|client, _scope| {
+            Arc::new(ResourceWatcher::start_helm_charts(client, NsScope::All))
         }),
         project: None,
     }

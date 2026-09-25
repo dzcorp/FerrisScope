@@ -3,7 +3,8 @@
 //! Single FTS5+trigram index per connected cluster, fed by the same delta
 //! stream the resource table consumes. The header palette ("Cmd+K") queries
 //! this across whatever kinds the operator has touched (or that the
-//! connect-time bootstrap pre-loaded).
+//! connect-time bootstrap pre-loaded). Only name, namespace, kind and labels
+//! are indexed.
 //!
 //! Lazy by design — see `CLAUDE.md` "Hard architectural rules". Reflectors
 //! aren't started just to populate the index; everything that's already
@@ -13,7 +14,8 @@
 //! search bar isn't empty on a fresh cluster.
 //!
 //! Storage layout: one `<sha-of-cluster-id>.db` per cluster under
-//! `<config_dir>/search/`. SQLite owns the file; we never let two
+//! `<config_dir>/search/`, cleared at startup and recreated empty on every
+//! open — a per-session cache the bootstrap refills. SQLite owns the file; we never let two
 //! `SearchIndex` handles open the same file (`AppState` enforces the
 //! one-per-cluster invariant).
 
@@ -27,7 +29,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
@@ -72,18 +73,11 @@ pub(crate) enum WriteOp {
         uid: String,
         namespace: Option<String>,
         name: String,
-        blob: String,
+        labels: String,
     },
     Delete {
         kind_id: String,
         uid: String,
-    },
-    /// Tombstone every live row of `kind_id` whose uid is NOT in `keep_uids`.
-    /// Emitted after a complete bootstrap LIST so objects deleted while no
-    /// watcher was running stop matching searches.
-    Retain {
-        kind_id: String,
-        keep_uids: Vec<String>,
     },
 }
 
@@ -98,9 +92,6 @@ pub(crate) enum IndexCommand {
         tombstone_age: Duration,
         stale_age: Duration,
         reply: oneshot::Sender<Result<GcStats>>,
-    },
-    NewestUpdatedAt {
-        reply: oneshot::Sender<Result<Option<i64>>>,
     },
 }
 
@@ -128,47 +119,22 @@ impl SearchIndex {
         Ok(Arc::new(Self { tx }))
     }
 
-    /// Insert / update a row. Cheap and non-blocking. Drops silently if the
-    /// row's name is missing — without a name we have nothing useful to
-    /// index, and the projected row is a contract with the watcher (every
-    /// k8s object has a name; if we're missing one the watcher dropped it).
-    pub fn upsert(&self, kind_id: &str, uid: &str, row: &Value) {
-        let (namespace, name) = extract_ns_name(row);
-        let Some(name) = name else { return };
-        let blob = match serde_json::to_string(row) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::debug!(error = %e, "search index: skipping unserialisable row");
-                return;
-            }
-        };
-        self.upsert_raw(kind_id, uid, namespace.as_deref(), &name, &blob);
-    }
-
-    /// [`Self::upsert`] for a caller that already holds the row's encoded
-    /// JSON and its `namespace` / `name`.
-    ///
-    /// This is the watcher path. Rows arrive from the reflector already
-    /// serialised (`ferrisscope_kube_ext::RowJson`), so re-deriving the blob
-    /// with `serde_json::to_string` — as [`Self::upsert`] must, since it only
-    /// has a `Value` — would re-encode every row a second time on the
-    /// forwarder task: ~830 ns/row against ~13 ns for the memcpy this does
-    /// instead. [`Self::upsert`] stays for the connect-time bootstrap, which
-    /// LISTs into `Value`s and has no pre-encoded form to hand over.
-    pub fn upsert_raw(
+    /// Insert / update a row. Cheap and non-blocking. `labels` is the
+    /// [`label_terms`] rendering of the object's labels.
+    pub fn upsert(
         &self,
         kind_id: &str,
         uid: &str,
         namespace: Option<&str>,
         name: &str,
-        blob: &str,
+        labels: &str,
     ) {
         let _ = self.tx.send(IndexCommand::Write(WriteOp::Upsert {
             kind_id: kind_id.to_owned(),
             uid: uid.to_owned(),
-            namespace: namespace.map(str::to_owned),
+            namespace: namespace.filter(|n| !n.is_empty()).map(str::to_owned),
             name: name.to_owned(),
-            blob: blob.to_owned(),
+            labels: labels.to_owned(),
         }));
     }
 
@@ -179,17 +145,6 @@ impl SearchIndex {
         let _ = self.tx.send(IndexCommand::Write(WriteOp::Delete {
             kind_id: kind_id.to_owned(),
             uid: uid.to_owned(),
-        }));
-    }
-
-    /// Reconcile a kind against a complete listing: soft-delete every live
-    /// row of `kind_id` whose uid is not in `keep_uids`. Only call with the
-    /// uid set of a *complete* LIST — a truncated listing would tombstone
-    /// rows that still exist. Cheap and non-blocking like `upsert`.
-    pub fn retain(&self, kind_id: &str, keep_uids: Vec<String>) {
-        let _ = self.tx.send(IndexCommand::Write(WriteOp::Retain {
-            kind_id: kind_id.to_owned(),
-            keep_uids,
         }));
     }
 
@@ -204,19 +159,6 @@ impl SearchIndex {
                 limit,
                 reply,
             })
-            .map_err(|_| SearchError::WriterGone)?;
-        rx.await.map_err(|_| SearchError::WriterGone)?
-    }
-
-    /// Most recent `updated_at` across the live (non-tombstoned) rows in
-    /// milliseconds since the Unix epoch, or `None` if the index is empty.
-    /// Used by the connect-time bootstrap to skip a refresh LIST when the
-    /// existing data is recent enough — e.g. the operator briefly flipped
-    /// to the fleet view and came back within minutes.
-    pub async fn newest_updated_at(&self) -> Result<Option<i64>> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(IndexCommand::NewestUpdatedAt { reply })
             .map_err(|_| SearchError::WriterGone)?;
         rx.await.map_err(|_| SearchError::WriterGone)?
     }
@@ -250,109 +192,74 @@ impl SearchIndex {
     }
 }
 
-fn extract_ns_name(row: &Value) -> (Option<String>, Option<String>) {
-    let ns = row
-        .get("namespace")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    let name = row
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    (ns, name)
+/// Whether rows of `kind_id` belong in the index. Events are excluded: their
+/// names are generated, every occurrence is a new object, and they are never
+/// a useful palette target, so indexing them is pure write churn.
+pub fn indexes_kind(kind_id: &str) -> bool {
+    kind_id != "events"
+}
+
+/// Index text for an object's labels: `k=v` pairs, space separated, so a
+/// palette query like `app=web` matches through the trigram tokenizer.
+pub fn label_terms<'a>(labels: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    let mut out = String::new();
+    for (k, v) in labels {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(k);
+        out.push('=');
+        out.push_str(v);
+    }
+    out
+}
+
+/// Discard every index left by a previous session. Call once at startup,
+/// before any index opens; returns immediately (deletion runs on a
+/// background thread).
+pub fn reset_indexes() -> Result<()> {
+    db::reset()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    #[test]
-    fn extract_ns_name_reads_both_fields() {
-        let (ns, name) = extract_ns_name(&json!({ "namespace": "default", "name": "api-0" }));
-        assert_eq!(ns.as_deref(), Some("default"));
-        assert_eq!(name.as_deref(), Some("api-0"));
-    }
-
-    #[test]
-    fn extract_ns_name_treats_empty_and_missing_as_none() {
-        let (ns, name) = extract_ns_name(&json!({ "namespace": "", "name": "node-1" }));
-        assert_eq!(ns, None);
-        assert_eq!(name.as_deref(), Some("node-1"));
-        let (ns, name) = extract_ns_name(&json!({ "namespace": 7, "name": null }));
-        assert_eq!(ns, None);
-        assert_eq!(name, None);
-    }
-
-    /// A handle wired to a channel the test owns, so we can inspect the
-    /// `WriteOp` each entry point enqueues without standing up SQLite.
     fn probe() -> (SearchIndex, mpsc::UnboundedReceiver<IndexCommand>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (SearchIndex { tx }, rx)
     }
 
-    fn took_upsert(rx: &mut mpsc::UnboundedReceiver<IndexCommand>) -> WriteOp {
+    #[test]
+    fn events_are_not_indexed() {
+        assert!(!indexes_kind("events"));
+        assert!(indexes_kind("pods"));
+        assert!(indexes_kind(
+            "wkcrd:argocd_applications|argoproj.io|v1alpha1|applications|Application|ns"
+        ));
+    }
+
+    #[test]
+    fn label_terms_renders_pairs() {
+        assert_eq!(label_terms([]), "");
+        assert_eq!(
+            label_terms([("app", "web"), ("tier", "front")]),
+            "app=web tier=front"
+        );
+    }
+
+    #[test]
+    fn upsert_normalises_an_empty_namespace_to_none() {
+        let (idx, mut rx) = probe();
+        idx.upsert("nodes", "u1", Some(""), "node-1", "");
         match rx.try_recv() {
-            Ok(IndexCommand::Write(op)) => op,
-            _ => panic!("expected a queued write"),
-        }
-    }
-
-    /// The watcher path (`upsert_raw`, pre-encoded blob) and the bootstrap
-    /// path (`upsert`, re-encodes a `Value`) must enqueue the same row.
-    /// If these ever diverge, search results silently differ depending on
-    /// whether a kind was bootstrapped or watched.
-    #[test]
-    fn upsert_raw_matches_the_value_path() {
-        let row = json!({ "namespace": "default", "name": "api-0", "phase": "Running" });
-        let blob = serde_json::to_string(&row).unwrap();
-
-        let (idx, mut rx) = probe();
-        idx.upsert("pods", "u1", &row);
-        let via_value = took_upsert(&mut rx);
-
-        let (idx, mut rx) = probe();
-        idx.upsert_raw("pods", "u1", Some("default"), "api-0", &blob);
-        let via_raw = took_upsert(&mut rx);
-
-        let fields = |op: WriteOp| match op {
-            WriteOp::Upsert {
-                kind_id,
-                uid,
-                namespace,
-                name,
-                blob,
-            } => (kind_id, uid, namespace, name, blob),
-            _ => panic!("expected Upsert"),
-        };
-        assert_eq!(fields(via_value), fields(via_raw));
-    }
-
-    /// `upsert` drops nameless rows (nothing renderable to show as a hit).
-    /// `upsert_raw` takes `name` as a required argument instead — the
-    /// watcher does the skipping, so the two agree by construction.
-    #[test]
-    fn upsert_skips_a_row_with_no_name() {
-        let (idx, mut rx) = probe();
-        idx.upsert("pods", "u1", &json!({ "namespace": "default" }));
-        assert!(rx.try_recv().is_err(), "nameless row must not be queued");
-    }
-
-    /// A cluster-scoped row carries no namespace; it must still be indexed.
-    #[test]
-    fn upsert_raw_accepts_a_missing_namespace() {
-        let (idx, mut rx) = probe();
-        idx.upsert_raw("nodes", "u1", None, "node-1", r#"{"name":"node-1"}"#);
-        match took_upsert(&mut rx) {
-            WriteOp::Upsert {
+            Ok(IndexCommand::Write(WriteOp::Upsert {
                 namespace, name, ..
-            } => {
+            })) => {
                 assert_eq!(namespace, None);
                 assert_eq!(name, "node-1");
             }
-            _ => panic!("expected Upsert"),
+            _ => panic!("expected a queued upsert"),
         }
     }
 }

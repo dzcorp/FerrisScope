@@ -611,8 +611,8 @@ describe("table filter / count", () => {
     expect(useAppStore.getState().tableFilter).toBe("");
   });
   it("setTableCount accepts the count or null (filter disengaged)", () => {
-    useAppStore.getState().setTableCount({ filtered: 3, total: 10 });
-    expect(useAppStore.getState().tableCount).toEqual({ filtered: 3, total: 10 });
+    useAppStore.getState().setTableCount({ filtered: 3, total: 10, loading: true });
+    expect(useAppStore.getState().tableCount).toEqual({ filtered: 3, total: 10, loading: true });
     useAppStore.getState().setTableCount(null);
     expect(useAppStore.getState().tableCount).toBeNull();
   });

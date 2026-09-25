@@ -402,7 +402,7 @@ function useMetricsSnapshot(
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     api
-      .subscribeMetrics(clusterId)
+      .subscribeMetrics(clusterId, "volumes")
       .then((initial) => {
         if (cancelled) return;
         if (initial) setSnap(initial);
@@ -418,7 +418,7 @@ function useMetricsSnapshot(
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
-      api.unsubscribeMetrics(clusterId).catch(logErr("metrics"));
+      api.unsubscribeMetrics(clusterId, "volumes").catch(logErr("metrics"));
     };
   }, [clusterId]);
   return snap;
@@ -546,7 +546,7 @@ function PodMetrics({
     <>
       <PromPodHistory t={t} clusterId={clusterId} namespace={namespace} name={name} />
 
-      {snap && !snap.volumes_available && volumes.length === 0 ? (
+      {snap?.volumes_available === false && volumes.length === 0 ? (
         <div style={{ marginTop: 22 }}>
           <UnavailableBanner t={t}>
             kubelet stats/summary not reachable — volume usage requires
@@ -609,7 +609,7 @@ function PvcMetrics({
   const key = `${namespace}/${name}`;
   const v = snap?.pvcs[key] ?? null;
 
-  if (snap && !snap.volumes_available && !v) {
+  if (snap?.volumes_available === false && !v) {
     return (
       <UnavailableBanner t={t}>
         kubelet stats/summary not reachable — volume usage requires either
@@ -617,7 +617,7 @@ function PvcMetrics({
       </UnavailableBanner>
     );
   }
-  if (snap && snap.volumes_available && !v) {
+  if (snap?.volumes_available === true && !v) {
     // Cluster-wide stats work; this PVC just isn't mounted.
     return (
       <UnavailableBanner t={t}>

@@ -10,7 +10,7 @@ use ferrisscope_core::fleet::{self, ClusterProbe};
 use ferrisscope_core::health::{ClusterHealthEvent, ClusterHealthStatus};
 use ferrisscope_core::kubeconfig::{self, ContextInfo};
 use ferrisscope_core::logs::{LogEvent, LogStream};
-use ferrisscope_core::metrics::{MetricsService, MetricsSnapshot};
+use ferrisscope_core::metrics::{MetricsNeed, MetricsService, MetricsSnapshot};
 use ferrisscope_core::portforwards::{self, ForwardSpec, ForwardTarget, PortForwardsFile};
 use ferrisscope_core::prefs::{self, Prefs};
 use ferrisscope_core::prom_cache::{self, PromCacheEntry, PromSource};
@@ -584,6 +584,26 @@ pub(crate) async fn pin_cloud_identity_cmd(
 /// can also abort early via `cancel_connect`.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Client `connect_context` proved alive.
+enum Connected {
+    /// The cached entry (healthy, or lazily connected by this call).
+    Entry(Arc<crate::state::ClusterEntry>),
+    /// A fresh client replacing a wedged entry.
+    Fresh(Box<Cluster>),
+}
+
+impl Connected {
+    fn client(&self) -> kube::Client {
+        match self {
+            Self::Entry(entry) => entry.cluster.client(),
+            Self::Fresh(cluster) => cluster.client(),
+        }
+    }
+}
+
+/// Upper bound on the background watcher-connection prewarm.
+const PREWARM_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Connect to the named context and return basic cluster info as a
 /// proof of life. Used by the UI to confirm the kubeconfig works before
 /// any reflectors are spun up.
@@ -625,16 +645,39 @@ pub(crate) async fn connect_context(
     // background probe still fills in node count + version on a separate
     // round-trip after we return (so the cluster bar's placeholders flip
     // to real values without blocking the operator from clicking a kind).
+    // Probe through the shared entry unless it is wedged: its client is the
+    // one every later command uses, and it may already be connected (the
+    // eager namespaces watch), so the probe skips a TLS handshake and an
+    // exec-plugin run. A wedged entry is replaced by a fresh client below.
+    let st = state.inner();
+    let reuse = st
+        .get_existing(&name)
+        .await
+        .is_none_or(|e| !e.unavailable.load(Ordering::SeqCst));
+    let entry_id = name.clone();
     let work = async move {
         let started = std::time::Instant::now();
-        let cluster = if let Some((source_id, cfg)) = ssh_lookup {
-            Cluster::connect_ssh(&context_name, &cfg, &source_id)
-                .await
-                .map_err(|e| e.to_string())?
+        let connected = if reuse {
+            let entry = st.entry(&entry_id).await?;
+            // The next watcher is usually the table the operator is about to
+            // open; start its handshake alongside the probe.
+            let cluster = entry.cluster.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = timeout(PREWARM_TIMEOUT, cluster.prewarm_watcher_client()).await;
+            });
+            Connected::Entry(entry)
+        } else if let Some((source_id, cfg)) = ssh_lookup {
+            Connected::Fresh(Box::new(
+                Cluster::connect_ssh(&context_name, &cfg, &source_id)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            ))
         } else {
-            Cluster::connect(&context_name, source_path.as_deref())
-                .await
-                .map_err(|e| e.to_string())?
+            Connected::Fresh(Box::new(
+                Cluster::connect(&context_name, source_path.as_deref())
+                    .await
+                    .map_err(|e| e.to_string())?,
+            ))
         };
         let auth_done = started.elapsed();
         // Inner liveness budget. Smaller than the outer CONNECT_TIMEOUT so
@@ -653,7 +696,7 @@ pub(crate) async fn connect_context(
         let probe_started = std::time::Instant::now();
         tokio::time::timeout(
             LIVENESS_TIMEOUT,
-            ferrisscope_core::health::liveness_probe(&cluster.client()),
+            ferrisscope_core::health::liveness_probe(&connected.client()),
         )
         .await
         .map_err(|_| {
@@ -668,12 +711,13 @@ pub(crate) async fn connect_context(
             auth_ms = auth_done.as_millis() as u64,
             probe_ms = probe_started.elapsed().as_millis() as u64,
             total_ms = started.elapsed().as_millis() as u64,
+            reused_entry = matches!(connected, Connected::Entry(_)),
             "connect_context: Cluster::connect + liveness probe ok"
         );
-        Ok::<_, String>(cluster)
+        Ok::<_, String>(connected)
     };
 
-    let result: Result<Cluster, String> = tokio::select! {
+    let result: Result<Connected, String> = tokio::select! {
         biased;
         _ = rx => Err("cancelled".to_owned()),
         r = timeout(CONNECT_TIMEOUT, work) => match r {
@@ -701,17 +745,23 @@ pub(crate) async fn connect_context(
     }
 
     match result {
-        Ok(cluster) => {
+        Ok(connected) => {
             // Cache the connected cluster so the next `state.entry(...)` call
             // (e.g. inside `subscribe_resource` when the operator clicks a
             // kind) reuses this client instead of re-running `Cluster::connect`.
             // A wedged entry is swapped out here instead of winning, which is
             // what makes re-entering a dead cluster (tab switch, remount)
             // recover it — no fleet round trip, no app restart.
-            let (entry, displaced) = state.insert_connected(name.clone(), cluster).await;
-            if let Some(wedged) = displaced {
-                tear_down_displaced(&state, &name, &wedged).await;
-            }
+            let entry = match connected {
+                Connected::Entry(entry) => entry,
+                Connected::Fresh(cluster) => {
+                    let (entry, displaced) = state.insert_connected(name.clone(), *cluster).await;
+                    if let Some(wedged) = displaced {
+                        tear_down_displaced(&state, &name, &wedged).await;
+                    }
+                    entry
+                }
+            };
             // Health forwarder is wired separately via its own CAS so
             // it also runs on the lazy-connect path (eager namespaces
             // subscribe before connect_context). Cheap no-op if already
@@ -778,69 +828,20 @@ fn spawn_search_bootstrap(
     entry: Arc<crate::state::ClusterEntry>,
     index: Arc<ferrisscope_core::search::SearchIndex>,
 ) {
-    /// If the existing index has been refreshed within this window, the
-    /// LIST is skipped entirely. Tuned for tab-flipping ergonomics — fast
-    /// fleet round-trips reuse what's already on disk; longer absences
-    /// (after-lunch, next-morning) re-bootstrap so the inline preview in
-    /// search hits stays close to the live cluster state.
-    const FRESH_WINDOW: Duration = Duration::from_mins(5);
-
     tauri::async_runtime::spawn(async move {
         let started = std::time::Instant::now();
-
-        // Freshness gate. Failure to query (e.g. writer task already
-        // closed) is treated as "not fresh" so we still attempt the
-        // bootstrap — it's better to refresh on a transient hiccup than
-        // to silently skip and leave search hits stale.
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-            .unwrap_or(0);
-        let fresh_window_ms = i64::try_from(FRESH_WINDOW.as_millis()).unwrap_or(i64::MAX);
-        match index.newest_updated_at().await {
-            Ok(Some(ts)) if now_ms.saturating_sub(ts) < fresh_window_ms => {
-                tracing::info!(
-                    cluster_id = %cluster_id,
-                    age_ms = now_ms.saturating_sub(ts),
-                    "search index: fresh, skipping bootstrap"
-                );
-                return;
-            }
-            Ok(Some(ts)) => {
-                tracing::debug!(
-                    cluster_id = %cluster_id,
-                    age_ms = now_ms.saturating_sub(ts),
-                    "search index: stale, refreshing"
-                );
-            }
-            Ok(None) => {
-                tracing::debug!(
-                    cluster_id = %cluster_id,
-                    "search index: empty, running first-time bootstrap"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    cluster_id = %cluster_id,
-                    "search index: freshness query failed; bootstrapping anyway"
-                );
-            }
-        }
-
         let client = entry.cluster.client();
-        // Sink closures feed rows directly into the search-index writer.
-        // The writer batches internally so we don't need our own buffering
-        // at the bootstrap layer. `retain` fires per completely-listed kind
-        // and tombstones rows missing from the listing — objects deleted
-        // while nothing was watching stop matching searches.
-        let upsert = |kind_id: &str, uid: &str, row: &serde_json::Value| {
-            index.upsert(kind_id, uid, row);
+        // The writer batches internally, so the sink feeds it directly.
+        let upsert = |kind_id: &str, obj: &ferrisscope_kube_ext::bootstrap::IndexedObject| {
+            index.upsert(
+                kind_id,
+                &obj.uid,
+                obj.namespace.as_deref(),
+                &obj.name,
+                &obj.labels,
+            );
         };
-        let retain = |kind_id: &str, uids: Vec<String>| {
-            index.retain(kind_id, uids);
-        };
-        let n = ferrisscope_kube_ext::bootstrap::bootstrap_default(client, &upsert, &retain).await;
+        let n = ferrisscope_kube_ext::bootstrap::bootstrap_default(client, &upsert).await;
         tracing::info!(
             cluster_id = %cluster_id,
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -1215,7 +1216,6 @@ pub(crate) async fn subscribe_resource_with_entry(
     let watcher = if let Some(w) = &slot.watcher {
         w.clone()
     } else {
-        let strategy = entry.cluster.list_strategy();
         // Pull from the per-cluster watcher pool (round-robin across a
         // small fixed set of H2 connections) instead of minting a fresh
         // client per subscribe. Sharing the *single* shared client was
@@ -1223,13 +1223,14 @@ pub(crate) async fn subscribe_resource_with_entry(
         // per-kind cost ~30 connection pools per cluster on a
         // fully-browsed UI. The pool is the middle ground.
         let client = entry.cluster.watcher_client();
-        let w = (kind.start)(client, scope.clone(), strategy);
+        let w = (kind.start)(client, scope.clone());
         spawn_resource_forwarder(
             app.clone(),
             cluster_id.to_owned(),
             kind_id.to_owned(),
             scope.clone(),
             w.clone(),
+            entry.health.beacon(),
         );
         slot.watcher = Some(w.clone());
         started_watcher = true;
@@ -1578,11 +1579,8 @@ pub(crate) fn spawn_search_index_gc(handle: AppHandle) {
 /// invokes this when the operator switches contexts so we don't pay
 /// idle-watcher cost on the cluster they just left.
 ///
-/// The on-disk search index file is **kept** on context switch — the
-/// next reconnect reopens it and the bootstrap LIST refreshes the rows
-/// in place, so search results survive a fleet-switch round trip. Use
-/// `forget_cluster_search_index` (called from the kubeconfig source-removal
-/// path) to actually delete the file.
+/// The cluster's search index is deleted with it; the next connect
+/// bootstraps a fresh one.
 #[tauri::command]
 pub(crate) async fn drop_cluster_watchers(
     cluster_id: String,
@@ -1635,11 +1633,12 @@ pub(crate) async fn drop_cluster_watchers(
     let forwards_stopped = state.portforwards.stop_cluster_forwards(&cluster_id).await;
     let dropped = drop_all_kind_watchers(&state, &cluster_id).await;
     let removed = state.remove_cluster(&cluster_id).await.is_some();
-    // Drop the in-memory search-index handle. The writer task flushes its
-    // pending batch and exits, SQLite releases its WAL locks, the file
-    // stays on disk. Reconnecting calls `SearchIndex::open` which opens
-    // the existing file and the bootstrap LIST refreshes rows in place.
+    // Indexes are per-connection (a reconnect opens a fresh one), so the
+    // file goes with the handle.
     let index_closed = state.remove_search_index(&cluster_id).await.is_some();
+    if let Err(e) = ferrisscope_core::search::SearchIndex::drop_files(&cluster_id) {
+        tracing::debug!(error = %e, cluster_id = %cluster_id, "search index: drop_files failed");
+    }
     // The printer-column cache is keyed by cluster-independent `crd:` ids, so
     // an entry may be shared by other connected clusters — we can only safely
     // reclaim it once NO cluster remains connected (nothing can reference it
@@ -1816,6 +1815,7 @@ fn spawn_resource_forwarder(
     kind_id: String,
     scope: ferrisscope_kube_ext::NsScope,
     watcher: Arc<ferrisscope_kube_ext::ResourceWatcher>,
+    alive: ferrisscope_core::health::AliveBeacon,
 ) {
     // Take exclusive drain access. Single-consumer by design — the
     // previous broadcast-based pipe lost events under load and is gone.
@@ -1883,7 +1883,11 @@ fn spawn_resource_forwarder(
             // connects), and a reconnect can replace the handle — a captured
             // `Option` would keep this forwarder feeding nothing (or a dead
             // writer) for its whole lifetime.
-            let search_index = app.state::<AppState>().search_index_for(&cluster_id).await;
+            let search_index = if ferrisscope_core::search::indexes_kind(&kind_id) {
+                app.state::<AppState>().search_index_for(&cluster_id).await
+            } else {
+                None
+            };
 
             // Drain-and-emit in bounded chunks. One wake can have accumulated
             // far more than MAX_EMIT_DELTAS during init; `drain_capped` slices
@@ -1895,6 +1899,8 @@ fn spawn_resource_forwarder(
                 if drained.is_empty() {
                     break;
                 }
+                // Fresh watch traffic: the health probe can skip its LIST.
+                alive.mark();
 
                 let init_done_in_batch = drained.init_done;
                 let mut batch: Vec<ferrisscope_kube_ext::ResourceDelta> =
@@ -1909,13 +1915,7 @@ fn spawn_resource_forwarder(
                 for (uid, row) in drained.upserts {
                     if let (Some(index), Some(name)) = (search_index.as_ref(), row.name.as_deref())
                     {
-                        index.upsert_raw(
-                            &kind_id,
-                            &uid,
-                            row.namespace.as_deref(),
-                            name,
-                            row.json.get(),
-                        );
+                        index.upsert(&kind_id, &uid, row.namespace.as_deref(), name, &row.labels);
                     }
                     batch.push(ferrisscope_kube_ext::ResourceDelta::Upsert { row: row.json });
                 }
@@ -3007,9 +3007,11 @@ fn spawn_log_pod_forwarder(
 /// Increments the metrics slot refcount; starts the polling service on the
 /// first subscribe. Returns the cached snapshot if one exists so the UI can
 /// render immediately. Future snapshots arrive over `metrics://{cluster_id}`.
+/// `need` picks which costly parts get polled until the matching unsubscribe.
 #[tauri::command]
 pub(crate) async fn subscribe_metrics(
     cluster_id: String,
+    need: MetricsNeed,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<MetricsSnapshot>, String> {
@@ -3037,6 +3039,7 @@ pub(crate) async fn subscribe_metrics(
         s
     };
     slot.subscribers += 1;
+    svc.want(need);
     // Unwrap the Arc shape into the wire type. The Arc only lives between
     // the service and its subscribers; the Tauri boundary needs an owned
     // value to serialise.
@@ -3046,6 +3049,7 @@ pub(crate) async fn subscribe_metrics(
 #[tauri::command]
 pub(crate) async fn unsubscribe_metrics(
     cluster_id: String,
+    need: MetricsNeed,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // Non-creating lookup — see `unsubscribe_resource` for rationale.
@@ -3053,6 +3057,9 @@ pub(crate) async fn unsubscribe_metrics(
         return Ok(());
     };
     let mut slot = entry.metrics.lock().await;
+    if let Some(svc) = &slot.service {
+        svc.release(need);
+    }
     slot.subscribers = slot.subscribers.saturating_sub(1);
     if slot.subscribers == 0 {
         // Dropping the Arc aborts the polling task via MetricsService::Drop —
@@ -4418,7 +4425,7 @@ pub(crate) fn live_client_source(app: AppHandle, cluster_id: String) -> ClientSo
 async fn current_client(state: &AppState, cluster_id: &str) -> Result<kube::Client, String> {
     let entry = state.entry(cluster_id).await?;
     if !entry.unavailable.load(Ordering::SeqCst) {
-        return Ok(entry.cluster.client());
+        return Ok(entry.cluster.upgrade_client());
     }
     if state.remove_cluster_if_same(cluster_id, &entry).await {
         drop_entry_watchers(&entry).await;
@@ -4429,7 +4436,7 @@ async fn current_client(state: &AppState, cluster_id: &str) -> Result<kube::Clie
             "cluster {cluster_id} is unavailable — reconnect first"
         ));
     }
-    Ok(fresh.cluster.client())
+    Ok(fresh.cluster.upgrade_client())
 }
 
 #[tauri::command]

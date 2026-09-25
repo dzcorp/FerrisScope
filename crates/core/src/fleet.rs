@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
-use k8s_openapi::api::core::v1::{Node, Pod};
-use kube::api::{Api, ListParams};
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::Api;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::time::timeout;
@@ -166,18 +166,8 @@ async fn probe_inner(
         probe.server_version = Some(v.git_version);
     }
 
-    if let Ok(list) = Api::<Node>::all(client.clone())
-        .list(&ListParams::default())
-        .await
-    {
-        probe.nodes = Some(list.items.len() as u32);
-    }
-
-    if let Ok(list) = Api::<Pod>::all(client.clone())
-        .list(&ListParams::default())
-        .await
-    {
-        probe.pods = Some(list.items.len() as u32);
+    if let Some(n) = count_pods(&client).await {
+        probe.pods = Some(n);
     }
 
     if let Ok(node_metrics) = list_node_metrics(&client).await {
@@ -187,6 +177,7 @@ async fn probe_inner(
         probe.mem_used_mib = Some(mem_used);
     }
     if let Ok(node_caps) = list_node_capacity(&client).await {
+        probe.nodes = Some(u32::try_from(node_caps.len()).unwrap_or(u32::MAX));
         let cpu_cap: u64 = node_caps.values().map(|(c, _)| c).sum();
         let mem_cap: u64 = node_caps.values().map(|(_, m)| m).sum();
         if cpu_cap > 0 {
@@ -198,4 +189,12 @@ async fn probe_inner(
     }
 
     probe
+}
+
+/// Pod count without downloading every pod (see [`crate::cluster::count_objects`]).
+async fn count_pods(client: &kube::Client) -> Option<u32> {
+    let total = crate::cluster::count_objects(&Api::<Pod>::all(client.clone()))
+        .await
+        .ok()?;
+    Some(u32::try_from(total).unwrap_or(u32::MAX))
 }

@@ -1,5 +1,7 @@
 import { logErr, reportErr } from "./lib/log";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -40,7 +42,7 @@ import { Rail } from "./components/Rail";
 import { FleetLanding } from "./components/FleetLanding";
 import { CommandPalette } from "./components/CommandPalette";
 import { NamespaceModal } from "./components/NamespaceModal";
-import { SettingsPanel } from "./components/SettingsPanel";
+import { loadSettingsPanel, prefetchPanels } from "./lib/lazyPanels";
 import { BulkBar, type BulkAction } from "./components/BulkBar";
 import {
   buildGenericBulkActions,
@@ -98,6 +100,8 @@ const RAIL_OPEN_W = 220;
 
 // Top-level shell. Owns the global keyboard layer (P3 + R-13) and renders
 // every overlay (palette, settings, namespace modal, bulk bar, dock).
+const SettingsPanel = lazy(loadSettingsPanel);
+
 export default function App() {
   const [, setInfo] = useState<AppInfo | null>(null);
   const [, setReady] = useState(false);
@@ -110,6 +114,9 @@ export default function App() {
     () => Object.keys(nsClusters).sort(),
     [nsClusters],
   );
+
+  // Warm the lazily-loaded panels once startup has settled.
+  useEffect(() => prefetchPanels(), []);
 
   const themeMode = useAppStore((s) => s.themeMode);
   const themeId = useAppStore((s) => s.themeId);
@@ -1138,7 +1145,9 @@ export default function App() {
       )}
 
       {settingsOpen && (
-        <SettingsPanel mode={themeMode} onClose={closeSettings} />
+        <Suspense fallback={null}>
+          <SettingsPanel mode={themeMode} onClose={closeSettings} />
+        </Suspense>
       )}
 
       <PanelTray />

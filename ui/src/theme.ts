@@ -1053,6 +1053,14 @@ export function statusIsTransient(status: string): boolean {
   return TRANSIENT.has(status);
 }
 
+// Common states whose color alone says enough in dense views: the Pods table
+// and compact labels show only the bar / container dots, no text.
+const AMBIENT = new Set(["Running", "Terminating", "Succeeded"]);
+
+export function statusIsAmbient(status: string): boolean {
+  return AMBIENT.has(status);
+}
+
 // Hex color for the status dot — used by StatusPill, container dots, etc.
 export function statusDot(status: string, t: Tokens): string {
   switch (statusBucket(status)) {
@@ -1098,40 +1106,12 @@ export function readyDesiredColor(
   }
 }
 
-// Pill background + foreground for a status — softer than the dot.
-//
-// Both `bg` and `fg` derive from the active palette's bucket color, so a
-// palette that re-tones (e.g. VS Code's muted `good: "#89d185"`) flows
-// through to the pill. `bg` is the bucket color at low alpha; `fg` is the
-// bucket color itself in dark mode (already light enough to read on a
-// translucent dark surface) and a darkened mix in light mode (the same
-// color over a tinted background can lose contrast). The darkening is
-// done by overlaying a near-black at ~55% — cheap and deterministic.
-export function statusFill(
-  status: string,
-  t: Tokens,
-  mode: ThemeMode,
-): { bg: string; fg: string } {
-  const bucket = statusBucket(status);
-  const color =
-    bucket === "good"
-      ? t.good
-      : bucket === "warn"
-        ? t.warn
-        : bucket === "bad"
-          ? t.bad
-          : bucket === "info"
-            ? t.info
-            : t.unknown;
-  return tintPair(color, mode === "dark");
-}
-
 // Soft tinted background + legible foreground for an arbitrary accent/status
 // color. `bg` is the color at low alpha; `fg` is the raw color in dark mode
 // (already vivid on a dark surface) and a darkened mix in light mode — the
 // raw hue over its own pale tint loses contrast, amber being the worst case.
-// `statusFill` and the port-forward chip both build on this so every tinted
-// chip stays legible across all palettes and both modes.
+// The port-forward chip builds on this so it stays legible across all
+// palettes and both modes.
 export function tintPair(
   color: string,
   dark: boolean,

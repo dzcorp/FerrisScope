@@ -52,7 +52,7 @@ describe("Rail store subscription", () => {
     // `useAppStore()` would re-render the entire kind list on each.)
     act(() => {
       useAppStore.getState().setMetrics("c1", { pods: {}, cluster: null, pod_volumes: {}, pvcs: {}, available: false, volumes_available: false, fetched_at_unix_ms: 0 } as never);
-      useAppStore.getState().setTableCount({ filtered: 5, total: 9 });
+      useAppStore.getState().setTableCount({ filtered: 5, total: 9, loading: false });
     });
 
     expect(commits).toBe(baseline);

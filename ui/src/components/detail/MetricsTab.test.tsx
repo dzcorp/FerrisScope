@@ -263,6 +263,51 @@ describe("MetricsTab workload fallback (no Prometheus)", () => {
 // Pins the query text: the kube-state-metrics owner joins (authoritative)
 // and the pod-name-regex fallbacks (clusters with cAdvisor but no KSM).
 
+describe("MetricsTab PVC volume stats", () => {
+  async function renderPvc(snap: MetricsSnapshot) {
+    const calls: { cmd: string; args: unknown }[] = [];
+    setMockInvoke((cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "get_prometheus_target") throw new Error("no prom");
+      if (cmd === "subscribe_metrics") return snap;
+      return undefined;
+    });
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <MetricsTab mode="dark" clusterId={ctx.id} kind="pvc" namespace="default" name="data" />,
+      );
+    });
+    return { utils, calls };
+  }
+
+  it("asks for volume stats and releases them on unmount", async () => {
+    const { utils, calls } = await renderPvc({ ...snapshotWith({}), volumes_available: null });
+    expect(calls.find((c) => c.cmd === "subscribe_metrics")?.args).toEqual({
+      clusterId: ctx.id,
+      need: "volumes",
+    });
+    utils.unmount();
+    expect(calls.find((c) => c.cmd === "unsubscribe_metrics")?.args).toEqual({
+      clusterId: ctx.id,
+      need: "volumes",
+    });
+  });
+
+  it("shows loading until the first volume poll, then the real state", async () => {
+    const pending = await renderPvc({ ...snapshotWith({}), volumes_available: null });
+    expect(pending.utils.getByText("Loading volume metrics…")).toBeInTheDocument();
+    cleanup();
+
+    const denied = await renderPvc({ ...snapshotWith({}), volumes_available: false });
+    expect(denied.utils.getByText(/kubelet stats\/summary not reachable/)).toBeInTheDocument();
+    cleanup();
+
+    const unmounted = await renderPvc({ ...snapshotWith({}), volumes_available: true });
+    expect(unmounted.utils.getByText(/This PVC is not currently mounted/)).toBeInTheDocument();
+  });
+});
+
 describe("workload PromQL builders", () => {
   it("Deployment owner join chains pod → ReplicaSet → Deployment", () => {
     const j = workloadOwnerJoin("Deployment", "prod", "api");

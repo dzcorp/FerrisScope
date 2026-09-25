@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::db::open_and_init;
+use super::db::open_index;
 use super::{IndexCommand, Result, SearchError, WriteOp};
 
 /// Max writes coalesced into a single SQLite transaction.
@@ -16,9 +16,12 @@ const BATCH_MAX: usize = 500;
 /// on the lag between a row appearing in the table and showing up in
 /// search.
 const BATCH_WINDOW: Duration = Duration::from_millis(200);
+/// An upsert whose indexed fields are unchanged only rewrites the row to
+/// refresh `updated_at` (the stale-GC clock) once this much time has passed.
+const TOUCH_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 pub(super) async fn writer_loop(path: PathBuf, mut rx: mpsc::UnboundedReceiver<IndexCommand>) {
-    let conn = match tokio::task::spawn_blocking(move || open_and_init(&path)).await {
+    let conn = match tokio::task::spawn_blocking(move || open_index(&path)).await {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
             tracing::error!(error = %e, "search index: failed to open DB; writer exiting");
@@ -105,20 +108,6 @@ pub(super) async fn writer_loop(path: PathBuf, mut rx: mpsc::UnboundedReceiver<I
                 .unwrap_or_else(|e| Err(SearchError::Io(std::io::Error::other(e.to_string()))));
                 let _ = reply.send(result);
             }
-            Some(IndexCommand::NewestUpdatedAt { reply }) => {
-                if !buffer.is_empty() {
-                    flush(&conn, &mut buffer).await;
-                    window_start = None;
-                }
-                let conn_c = conn.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    let c = conn_c.lock_recover();
-                    newest_updated_at(&c)
-                })
-                .await
-                .unwrap_or_else(|e| Err(SearchError::Io(std::io::Error::other(e.to_string()))));
-                let _ = reply.send(result);
-            }
         }
     }
 
@@ -168,19 +157,32 @@ fn apply_writes(conn: &mut Connection, ops: &[WriteOp]) -> Result<()> {
                 uid,
                 namespace,
                 name,
-                blob,
+                labels,
             } => {
-                tx.execute(
-                    "INSERT INTO rows (kind_id, uid, namespace, name, blob, updated_at, deleted_at)
+                tx.prepare_cached(
+                    "INSERT INTO rows (kind_id, uid, namespace, name, labels, updated_at, deleted_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
                      ON CONFLICT(kind_id, uid) DO UPDATE SET
                         namespace = excluded.namespace,
                         name = excluded.name,
-                        blob = excluded.blob,
+                        labels = excluded.labels,
                         updated_at = excluded.updated_at,
-                        deleted_at = NULL",
-                    rusqlite::params![kind_id, uid, namespace, name, blob, now],
-                )?;
+                        deleted_at = NULL
+                     WHERE rows.deleted_at IS NOT NULL
+                        OR rows.name <> excluded.name
+                        OR rows.namespace IS NOT excluded.namespace
+                        OR rows.labels <> excluded.labels
+                        OR rows.updated_at < excluded.updated_at - ?7",
+                )?
+                .execute(rusqlite::params![
+                    kind_id,
+                    uid,
+                    namespace,
+                    name,
+                    labels,
+                    now,
+                    TOUCH_INTERVAL_MS
+                ])?;
             }
             WriteOp::Delete { kind_id, uid } => {
                 // Soft delete only — leaves the FTS row in place but the
@@ -191,31 +193,6 @@ fn apply_writes(conn: &mut Connection, ops: &[WriteOp]) -> Result<()> {
                      AND deleted_at IS NULL",
                     rusqlite::params![now, kind_id, uid],
                 )?;
-            }
-            WriteOp::Retain { kind_id, keep_uids } => {
-                // Stage the keep-set in a temp table so the reconcile is one
-                // indexed UPDATE regardless of listing size, instead of an
-                // unboundedly long `NOT IN (?, ?, …)` parameter list.
-                tx.execute_batch(
-                    "CREATE TEMP TABLE IF NOT EXISTS retain_keep (uid TEXT PRIMARY KEY);
-                     DELETE FROM retain_keep;",
-                )?;
-                {
-                    let mut ins =
-                        tx.prepare_cached("INSERT OR IGNORE INTO retain_keep (uid) VALUES (?1)")?;
-                    for uid in keep_uids {
-                        ins.execute(rusqlite::params![uid])?;
-                    }
-                }
-                // Soft delete, same as `Delete` — a re-upsert (object came
-                // back / listing raced a create) flips `deleted_at` to NULL.
-                tx.execute(
-                    "UPDATE rows SET deleted_at = ?1
-                     WHERE kind_id = ?2 AND deleted_at IS NULL
-                       AND uid NOT IN (SELECT uid FROM retain_keep)",
-                    rusqlite::params![now, kind_id],
-                )?;
-                tx.execute("DELETE FROM retain_keep", [])?;
             }
         }
     }
@@ -233,22 +210,8 @@ async fn drain_with_writer_gone(rx: &mut mpsc::UnboundedReceiver<IndexCommand>) 
             IndexCommand::Gc { reply, .. } => {
                 let _ = reply.send(Err(SearchError::WriterGone));
             }
-            IndexCommand::NewestUpdatedAt { reply } => {
-                let _ = reply.send(Err(SearchError::WriterGone));
-            }
         }
     }
-}
-
-fn newest_updated_at(conn: &Connection) -> Result<Option<i64>> {
-    // Live rows only — a tombstone-only DB shouldn't read as "fresh" to
-    // the bootstrap freshness gate.
-    let mut stmt =
-        conn.prepare_cached("SELECT MAX(updated_at) FROM rows WHERE deleted_at IS NULL")?;
-    let value: Option<i64> = stmt
-        .query_row([], |row| row.get::<_, Option<i64>>(0))
-        .unwrap_or(None);
-    Ok(value)
 }
 
 fn unix_ms() -> i64 {
@@ -270,7 +233,7 @@ mod tests {
             uid: uid.to_owned(),
             namespace: Some("default".to_owned()),
             name: name.to_owned(),
-            blob: format!("{{\"name\":\"{name}\"}}"),
+            labels: String::new(),
         }
     }
 
@@ -307,73 +270,50 @@ mod tests {
         assert_eq!(live_names(&conn, "pods"), vec!["api-0"]);
     }
 
-    #[test]
-    fn retain_tombstones_unlisted_rows_of_that_kind_only() {
-        let mut conn = open_in_memory_for_tests();
-        apply_writes(
-            &mut conn,
-            &[
-                upsert("pods", "u1", "api-0"),
-                upsert("pods", "u2", "gone-0"),
-                upsert("deployments", "u3", "api"),
-            ],
-        )
-        .unwrap();
-
-        apply_writes(
-            &mut conn,
-            &[WriteOp::Retain {
-                kind_id: "pods".into(),
-                keep_uids: vec!["u1".into()],
-            }],
-        )
-        .unwrap();
-
-        // gone-0 tombstoned, api-0 kept, the other kind untouched.
-        assert_eq!(live_names(&conn, "pods"), vec!["api-0"]);
-        assert_eq!(live_names(&conn, "deployments"), vec!["api"]);
+    fn updated_at(conn: &Connection, uid: &str) -> i64 {
+        conn.query_row("SELECT updated_at FROM rows WHERE uid = ?1", [uid], |r| {
+            r.get(0)
+        })
+        .unwrap()
     }
 
     #[test]
-    fn retain_with_empty_keep_set_tombstones_the_whole_kind() {
+    fn unchanged_upsert_skips_the_write_until_the_touch_interval() {
         let mut conn = open_in_memory_for_tests();
         apply_writes(&mut conn, &[upsert("pods", "u1", "api-0")]).unwrap();
-        apply_writes(
-            &mut conn,
-            &[WriteOp::Retain {
-                kind_id: "pods".into(),
-                keep_uids: vec![],
-            }],
+        conn.execute("UPDATE rows SET updated_at = updated_at - 1000", [])
+            .unwrap();
+        let before = updated_at(&conn, "u1");
+
+        apply_writes(&mut conn, &[upsert("pods", "u1", "api-0")]).unwrap();
+        assert_eq!(
+            updated_at(&conn, "u1"),
+            before,
+            "no-op upsert must not write"
+        );
+
+        conn.execute(
+            "UPDATE rows SET updated_at = updated_at - ?1",
+            [TOUCH_INTERVAL_MS],
         )
         .unwrap();
-        assert!(live_names(&conn, "pods").is_empty());
+        apply_writes(&mut conn, &[upsert("pods", "u1", "api-0")]).unwrap();
+        assert!(
+            updated_at(&conn, "u1") > before,
+            "stale row gets re-stamped"
+        );
     }
 
     #[test]
-    fn consecutive_retains_in_one_batch_use_their_own_keep_sets() {
+    fn label_change_is_written_and_searchable() {
         let mut conn = open_in_memory_for_tests();
-        apply_writes(
-            &mut conn,
-            &[upsert("pods", "u1", "api-0"), upsert("pods", "u2", "api-1")],
-        )
-        .unwrap();
-        // Same transaction — the temp keep-table must be cleared between
-        // ops, or the first op's u1 would leak into the second's keep set
-        // and api-0 would wrongly survive.
-        apply_writes(
-            &mut conn,
-            &[
-                WriteOp::Retain {
-                    kind_id: "pods".into(),
-                    keep_uids: vec!["u1".into(), "u2".into()],
-                },
-                WriteOp::Retain {
-                    kind_id: "pods".into(),
-                    keep_uids: vec!["u2".into()],
-                },
-            ],
-        )
-        .unwrap();
-        assert_eq!(live_names(&conn, "pods"), vec!["api-1"]);
+        apply_writes(&mut conn, &[upsert("pods", "u1", "api-0")]).unwrap();
+        let mut relabel = upsert("pods", "u1", "api-0");
+        if let WriteOp::Upsert { labels, .. } = &mut relabel {
+            *labels = "app=payments".to_owned();
+        }
+        apply_writes(&mut conn, &[relabel]).unwrap();
+        let hits = crate::search::query::run(&conn, "app=payments", 10).unwrap();
+        assert_eq!(hits.len(), 1);
     }
 }

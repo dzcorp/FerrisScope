@@ -25,7 +25,7 @@ beforeEach(() => {
 });
 
 function Harness({ clusterId }: { clusterId: string | null }) {
-  useMetricsSubscription(clusterId);
+  useMetricsSubscription(clusterId, "pods");
   return null;
 }
 
@@ -49,6 +49,7 @@ describe("useMetricsSubscription", () => {
     });
     expect(calls.find((c) => c.cmd === "subscribe_metrics")?.args).toEqual({
       clusterId: "ctx",
+      need: "pods",
     });
     expect(listenerCount("metrics://ctx")).toBe(1);
   });
@@ -98,9 +99,9 @@ describe("useMetricsSubscription", () => {
   });
 
   it("unmount drops the listener and fires unsubscribe_metrics", async () => {
-    const seen: string[] = [];
-    setMockInvoke((cmd) => {
-      seen.push(cmd);
+    const seen: { cmd: string; args: unknown }[] = [];
+    setMockInvoke((cmd, args) => {
+      seen.push({ cmd, args });
       if (cmd === "subscribe_metrics") return null;
       return undefined;
     });
@@ -113,7 +114,11 @@ describe("useMetricsSubscription", () => {
       utils!.unmount();
     });
     expect(listenerCount("metrics://ctx")).toBe(0);
-    expect(seen).toContain("unsubscribe_metrics");
+    // Same need as the subscribe, so the backend releases the right demand.
+    expect(seen.find((c) => c.cmd === "unsubscribe_metrics")?.args).toEqual({
+      clusterId: "ctx",
+      need: "pods",
+    });
   });
 
   it("subscribe failure is swallowed (best-effort metrics-server)", async () => {

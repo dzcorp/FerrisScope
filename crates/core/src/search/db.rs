@@ -6,11 +6,11 @@ use sha2::{Digest, Sha256};
 
 use super::{Result, SearchError};
 
-/// Schema version stamped into `PRAGMA user_version`. The index is a
-/// rebuildable cache (the connect-time bootstrap repopulates it), so we
-/// never migrate: a version mismatch drops the file and starts fresh.
-/// Bump this whenever `SCHEMA_SQL` changes shape.
-const SCHEMA_VERSION: i32 = 1;
+// Indexes are per-session caches: the directory is cleared at startup and
+// each index opens on an empty file that the connect-time bootstrap refills,
+// so no schema ever needs migrating and nothing stale outlives a session.
+const DIR: &str = "search";
+const TRASH_PREFIX: &str = "search.trash-";
 
 /// DDL applied on every `open_and_init`. `IF NOT EXISTS` everywhere so
 /// reopening an existing DB is a no-op.
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS rows (
     uid         TEXT NOT NULL,
     namespace   TEXT,
     name        TEXT NOT NULL,
-    blob        TEXT NOT NULL,
+    labels      TEXT NOT NULL,
     updated_at  INTEGER NOT NULL,
     deleted_at  INTEGER,
     PRIMARY KEY (kind_id, uid)
@@ -29,15 +29,18 @@ CREATE TABLE IF NOT EXISTS rows (
 CREATE INDEX IF NOT EXISTS idx_rows_updated  ON rows(updated_at);
 CREATE INDEX IF NOT EXISTS idx_rows_deleted  ON rows(deleted_at);
 
+-- Only identity + labels are indexed: they rarely change, so a pod's status
+-- churn never rewrites its trigrams (indexing the full row grew one
+-- cluster's index to 2.6 GB for 14k live rows).
 CREATE VIRTUAL TABLE IF NOT EXISTS rows_fts USING fts5(
-    name, namespace, kind_id, blob,
+    name, namespace, kind_id, labels,
     content='rows',
     tokenize='trigram'
 );
 
 CREATE TRIGGER IF NOT EXISTS rows_ai AFTER INSERT ON rows BEGIN
-    INSERT INTO rows_fts(rowid, name, namespace, kind_id, blob)
-    VALUES (new.rowid, new.name, new.namespace, new.kind_id, new.blob);
+    INSERT INTO rows_fts(rowid, name, namespace, kind_id, labels)
+    VALUES (new.rowid, new.name, new.namespace, new.kind_id, new.labels);
 END;
 
 -- Skip FTS churn when only `deleted_at` flipped (soft-delete / flapping-pod
@@ -47,33 +50,34 @@ CREATE TRIGGER IF NOT EXISTS rows_au AFTER UPDATE ON rows
 WHEN  old.name      <>     new.name
    OR old.namespace IS NOT new.namespace
    OR old.kind_id   <>     new.kind_id
-   OR old.blob      <>     new.blob
+   OR old.labels    <>     new.labels
 BEGIN
-    INSERT INTO rows_fts(rows_fts, rowid, name, namespace, kind_id, blob)
-    VALUES('delete', old.rowid, old.name, old.namespace, old.kind_id, old.blob);
-    INSERT INTO rows_fts(rowid, name, namespace, kind_id, blob)
-    VALUES (new.rowid, new.name, new.namespace, new.kind_id, new.blob);
+    INSERT INTO rows_fts(rows_fts, rowid, name, namespace, kind_id, labels)
+    VALUES('delete', old.rowid, old.name, old.namespace, old.kind_id, old.labels);
+    INSERT INTO rows_fts(rowid, name, namespace, kind_id, labels)
+    VALUES (new.rowid, new.name, new.namespace, new.kind_id, new.labels);
 END;
 
 CREATE TRIGGER IF NOT EXISTS rows_ad AFTER DELETE ON rows BEGIN
-    INSERT INTO rows_fts(rows_fts, rowid, name, namespace, kind_id, blob)
-    VALUES('delete', old.rowid, old.name, old.namespace, old.kind_id, old.blob);
+    INSERT INTO rows_fts(rows_fts, rowid, name, namespace, kind_id, labels)
+    VALUES('delete', old.rowid, old.name, old.namespace, old.kind_id, old.labels);
 END;
 ";
 
 /// Resolve the on-disk path for a given cluster's index file. Cluster ids
 /// can contain characters that aren't filesystem-safe (`:`, `/`, `@` for
-/// SSH-tunnel sources) so we hash to a fixed 32-char hex name. Collisions
-/// are astronomically unlikely with SHA-256 truncated to 128 bits, and the
-/// human-readable cluster name is already in the operator's UI — they
-/// never see this filename.
+/// SSH-tunnel sources) so we hash to a fixed 32-char hex name.
 pub(super) fn path_for(cluster_id: &str) -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("dev", "ferrisscope", "ferrisscope")
-        .ok_or(SearchError::ConfigDirUnavailable)?;
-    let mut p = dirs.config_dir().to_path_buf();
-    p.push("search");
+    let mut p = config_dir()?;
+    p.push(DIR);
     p.push(format!("{}.db", filename_for(cluster_id)));
     Ok(p)
+}
+
+fn config_dir() -> Result<PathBuf> {
+    let dirs = ProjectDirs::from("dev", "ferrisscope", "ferrisscope")
+        .ok_or(SearchError::ConfigDirUnavailable)?;
+    Ok(dirs.config_dir().to_path_buf())
 }
 
 fn filename_for(cluster_id: &str) -> String {
@@ -83,79 +87,95 @@ fn filename_for(cluster_id: &str) -> String {
     hex::encode(&bytes[..16])
 }
 
+/// Clear every index left by a previous session without blocking: the
+/// directory is renamed aside (constant time) and deleted on a background
+/// thread, along with trash from any earlier run that died mid-delete.
+/// Failures are logged; indexes open fresh regardless.
+pub(super) fn reset() -> Result<()> {
+    reset_in(&config_dir()?);
+    Ok(())
+}
+
+fn reset_in(config: &Path) -> Option<std::thread::JoinHandle<()>> {
+    let dir = config.join(DIR);
+    if dir.exists() {
+        let trash = config.join(format!(
+            "{TRASH_PREFIX}{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        if let Err(e) = std::fs::rename(&dir, &trash) {
+            tracing::warn!(error = %e, "search index: could not clear previous indexes");
+        }
+    }
+    let trash: Vec<PathBuf> = std::fs::read_dir(config)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(TRASH_PREFIX))
+        .map(|e| e.path())
+        .collect();
+    if trash.is_empty() {
+        return None;
+    }
+    std::thread::Builder::new()
+        .name("search-cleanup".into())
+        .spawn(move || {
+            for t in trash {
+                if let Err(e) = std::fs::remove_dir_all(&t) {
+                    tracing::warn!(error = %e, path = %t.display(), "search index: cleanup failed");
+                }
+            }
+        })
+        .ok()
+}
+
+fn remove_db_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    for suffix in ["-wal", "-shm"] {
+        let mut p = path.as_os_str().to_owned();
+        p.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(p));
+    }
+}
+
+/// Open an empty index at `path`, discarding whatever a previous connection
+/// left there (a reconnect re-bootstraps into it).
+pub(super) fn open_index(path: &Path) -> Result<Connection> {
+    remove_db_files(path);
+    open_and_init(path)
+}
+
 pub(super) fn open_and_init(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = open_checked_version(path)?;
-    // A second connection can exist briefly (reconnect re-opens the index
-    // while a just-aborted forwarder still holds the old handle). WAL
-    // tolerates that, but without a busy timeout a write colliding with the
-    // other connection's checkpoint returns SQLITE_BUSY immediately and the
-    // batch is dropped. 5 s is far beyond any real checkpoint pause.
+    let conn = Connection::open(path)?;
+    // A just-aborted forwarder can still hold the previous handle while a
+    // reconnect opens this one; without a busy timeout a write colliding
+    // with a checkpoint returns SQLITE_BUSY immediately and the batch drops.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    // WAL gives us reader / writer concurrency; without it, even a single
-    // bg query blocks all upserts. NORMAL sync trades a tiny crash-recovery
-    // window for ~10× write throughput vs FULL — and the search index is
-    // not durable state (we can re-bootstrap on next connect), so a worst-
-    // case lost batch is harmless.
+    // Must precede `journal_mode` and the first table; lets GC hand freed
+    // pages back with `incremental_vacuum`.
+    conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+    // WAL gives reader / writer concurrency. NORMAL sync trades a tiny
+    // crash-recovery window for ~10× write throughput; the index is a cache.
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
-    // Bound SQLite's page cache. Default is 2000 pages × 4 KiB = ~8 MiB
-    // per connection; with one connection per cluster this becomes
-    // 8 MiB × N open clusters of pure cache, on top of the FTS5 index's
-    // own working set. Negative values are interpreted as KiB by
-    // SQLite, so `-2048` caps the cache at 2 MiB — plenty for the
-    // single-writer access pattern we have (one writer task per
-    // index, queries via `spawn_blocking` that don't hold long
-    // transactions). Visible RSS win on the operator's machine
-    // proportional to the number of clusters they've connected to.
+    // Cap the page cache at 2 MiB (negative = KiB) instead of the ~8 MiB
+    // default, per open cluster.
     conn.pragma_update(None, "cache_size", -2048)?;
-    // Disable mmap. The default mmap_size on rusqlite is 0 on most
-    // platforms but be explicit — mmap'd page cache counts against
-    // the process's anonymous mappings on Linux and inflates RSS
-    // beyond what we'd see with the page cache alone.
+    // mmap'd pages would count as process RSS.
     conn.pragma_update(None, "mmap_size", 0)?;
+    // Keep a checkpointed WAL from lingering at its high-water size.
+    conn.pragma_update(None, "journal_size_limit", 4 * 1024 * 1024)?;
     conn.execute_batch(SCHEMA_SQL)?;
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    Ok(conn)
-}
-
-/// Open `path`, dropping and recreating the file when it carries a
-/// different schema version (or isn't a SQLite DB at all — a corrupt file
-/// fails the version read). No migrations: the index is a cache, the
-/// bootstrap rebuilds it, and stale-layout data is worth less than the
-/// migration code would cost.
-fn open_checked_version(path: &Path) -> Result<Connection> {
-    let fresh = !path.exists();
-    let conn = Connection::open(path)?;
-    if !fresh {
-        let version: std::result::Result<i32, _> =
-            conn.query_row("PRAGMA user_version", [], |row| row.get(0));
-        match version {
-            Ok(v) if v == SCHEMA_VERSION => {}
-            v => {
-                tracing::info!(
-                    path = %path.display(),
-                    found = ?v.ok(),
-                    expected = SCHEMA_VERSION,
-                    "search index: schema version mismatch, recreating DB"
-                );
-                drop(conn);
-                let _ = std::fs::remove_file(path);
-                let _ = std::fs::remove_file(path.with_extension("db-shm"));
-                let _ = std::fs::remove_file(path.with_extension("db-wal"));
-                return Ok(Connection::open(path)?);
-            }
-        }
-    }
     Ok(conn)
 }
 
 /// In-memory connection with the production schema applied — for unit tests
-/// of the query / gc / writer layers. Skips the file-oriented pragmas (WAL
-/// is meaningless in memory).
+/// of the query / gc / writer layers.
 #[cfg(test)]
 pub(super) fn open_in_memory_for_tests() -> Connection {
     let conn = Connection::open_in_memory().expect("in-memory sqlite");
@@ -167,67 +187,73 @@ pub(super) fn open_in_memory_for_tests() -> Connection {
 mod tests {
     use super::*;
 
-    fn seed_row(conn: &Connection) {
-        conn.execute(
-            "INSERT INTO rows (kind_id, uid, namespace, name, blob, updated_at, deleted_at)
-             VALUES ('pods', 'u1', 'default', 'api-0', '{}', 1, NULL)",
-            [],
-        )
-        .unwrap();
-    }
-
     fn row_count(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM rows", [], |r| r.get(0))
             .unwrap()
     }
 
     #[test]
-    fn reopen_at_the_same_version_keeps_data() {
+    fn open_index_always_starts_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("idx.db");
         {
-            let conn = open_and_init(&path).unwrap();
-            seed_row(&conn);
-        }
-        let conn = open_and_init(&path).unwrap();
-        assert_eq!(row_count(&conn), 1);
-        let v: i32 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            let conn = open_index(&path).unwrap();
+            conn.execute(
+                "INSERT INTO rows VALUES ('pods', 'u1', 'ns', 'api-0', '', 1, NULL)",
+                [],
+            )
             .unwrap();
-        assert_eq!(v, SCHEMA_VERSION);
+            assert_eq!(row_count(&conn), 1);
+        }
+        assert_eq!(row_count(&open_index(&path).unwrap()), 0);
     }
 
     #[test]
-    fn version_mismatch_drops_and_recreates() {
+    fn open_index_replaces_a_garbage_or_foreign_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("idx.db");
-        {
-            let conn = open_and_init(&path).unwrap();
-            seed_row(&conn);
-            // Simulate a DB written by a different (older / newer) build.
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
-                .unwrap();
-        }
-        let conn = open_and_init(&path).unwrap();
-        // Old data gone, fresh schema in place at the current version.
-        assert_eq!(row_count(&conn), 0);
-        let v: i32 = conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
+        let garbage = dir.path().join("garbage.db");
+        std::fs::write(&garbage, vec![0xAB; 8192]).unwrap();
+        assert_eq!(row_count(&open_index(&garbage).unwrap()), 0);
+
+        // An old-layout index (different `rows` columns) is discarded too.
+        let old = dir.path().join("old.db");
+        Connection::open(&old)
+            .unwrap()
+            .execute_batch("CREATE TABLE rows (kind_id TEXT, blob TEXT)")
             .unwrap();
-        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(row_count(&open_index(&old).unwrap()), 0);
     }
 
     #[test]
-    fn legacy_unstamped_db_is_recreated() {
+    fn fresh_db_uses_incremental_auto_vacuum() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("idx.db");
-        {
-            // Pre-versioning layout: schema without the stamp (user_version 0).
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(SCHEMA_SQL).unwrap();
-            seed_row(&conn);
-        }
-        let conn = open_and_init(&path).unwrap();
-        assert_eq!(row_count(&conn), 0);
+        let conn = open_index(&dir.path().join("idx.db")).unwrap();
+        let mode: i32 = conn
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, 2, "2 = INCREMENTAL");
+    }
+
+    #[test]
+    fn reset_moves_the_dir_aside_and_deletes_it_in_the_background() {
+        let config = tempfile::tempdir().unwrap();
+        let dir = config.path().join(DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.db"), b"old").unwrap();
+        let stale_trash = config.path().join(format!("{TRASH_PREFIX}1"));
+        std::fs::create_dir_all(&stale_trash).unwrap();
+        let unrelated = config.path().join("prefs.json");
+        std::fs::write(&unrelated, b"{}").unwrap();
+
+        let cleaner = reset_in(config.path()).expect("cleanup thread");
+        assert!(!dir.exists(), "moved aside before returning");
+        cleaner.join().unwrap();
+
+        let left: Vec<_> = std::fs::read_dir(config.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec!["prefs.json"]);
+        assert!(reset_in(config.path()).is_none(), "nothing left to do");
     }
 }

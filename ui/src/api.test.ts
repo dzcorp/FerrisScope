@@ -1000,13 +1000,20 @@ describe("fleet probes", () => {
 describe("metrics + prefs + table views", () => {
   it("subscribeMetrics / unsubscribeMetrics", async () => {
     const cap = captureNext(null);
-    await api.subscribeMetrics("ctx");
-    await api.unsubscribeMetrics("ctx");
+    await api.subscribeMetrics("ctx", "cluster");
+    await api.unsubscribeMetrics("ctx", "cluster");
+    await api.subscribeMetrics("ctx", "volumes");
+    await api.unsubscribeMetrics("ctx", "volumes");
     expect(cap.calls.map((c) => c.cmd)).toEqual([
       "subscribe_metrics",
       "unsubscribe_metrics",
+      "subscribe_metrics",
+      "unsubscribe_metrics",
     ]);
-    expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx" });
+    expect(cap.calls[0]?.args).toEqual({ clusterId: "ctx", need: "cluster" });
+    expect(cap.calls[1]?.args).toEqual({ clusterId: "ctx", need: "cluster" });
+    expect(cap.calls[2]?.args).toEqual({ clusterId: "ctx", need: "volumes" });
+    expect(cap.calls[3]?.args).toEqual({ clusterId: "ctx", need: "volumes" });
   });
 
   it("getPrefs / setPrefs round-trip the prefs object", async () => {

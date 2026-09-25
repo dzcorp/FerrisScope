@@ -263,5 +263,5 @@ async fn client_for(app: &AppHandle, cluster: &ChatClusterRef) -> Result<Client,
         .entry(&id)
         .await
         .map_err(|e| NativeToolError::msg(format!("connect cluster: {e}")))?;
-    Ok(entry.cluster.client())
+    Ok(entry.cluster.upgrade_client())
 }

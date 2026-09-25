@@ -61,6 +61,8 @@ describe("DetailDrawer", () => {
       useAppStore.getState().openDrawer({ kind: "detail", kindId: "deployments", clusterId: "c1", uid: "d-uid", namespace: "web", name: "api" }),
     );
     render(<Host />);
+    // The panel is lazily loaded.
+    await waitFor(() => expect(last?.target.name).toBe("api"));
     expect(last?.history?.prev).toBeNull();
 
     await act(async () => last!.onNavigate!("Pod", "web", "api-0", "c1"));

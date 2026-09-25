@@ -18,7 +18,7 @@ use hyper_util::client::legacy::{
     connect::{Connection, HttpConnector},
     Builder as LegacyBuilder,
 };
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use k8s_openapi::api::core::v1::Node;
 use kube::{
     api::{Api, ListParams},
@@ -40,22 +40,19 @@ use crate::{Error, Result};
 // --- Watch-connection liveness -------------------------------------------
 //
 // Root cause of "a Deployment deleted+recreated by external CI/CD never shows
-// up, but its Pod does": kube-rs negotiates **HTTP/1.1** to the apiserver
-// (kube-client's rustls connector enables ALPN `http/1.1` only — see
-// `ConfigExt::rustls_https_connector_with_connector`, config_ext.rs:248), so
-// every watch rides its **own** TCP connection with no multiplexing. A busy
-// Pods watch keeps its socket full of traffic; an idle Deployments watch sits
-// silent, and a NAT box / cloud L4 LB / conntrack table (AWS NLB ~350 s, GCP
-// ~600 s, conntrack ~5 min) silently evicts the idle flow half-open. The
-// default `HttpConnector` sets **no** SO_KEEPALIVE, so the kernel never probes;
-// kube's only backstop was the coarse 295 s `TimeoutConnector` read-timeout,
-// and the recreate is missed until then (if it fires at all).
+// up, but its Pod does": an idle watch connection sits silent, and a NAT box /
+// cloud L4 LB / conntrack table (AWS NLB ~350 s, GCP ~600 s, conntrack ~5 min)
+// silently evicts the idle flow half-open. The default `HttpConnector` sets
+// **no** SO_KEEPALIVE, so the kernel never probes; kube's only backstop was the
+// coarse 295 s `TimeoutConnector` read-timeout, and the recreate is missed
+// until then (if it fires at all).
 //
 // TCP keepalive fixes both halves: probing every [`TCP_KEEPALIVE_INTERVAL`]
 // keeps the NAT mapping warm (so the flow is never evicted), and on a path that
 // has actually died the probes go unanswered and error the socket within
 // ~[`TCP_KEEPALIVE_IDLE`] + retries — kube-rs's `default_backoff()` then
-// reconnects and re-LISTs, surfacing the recreate.
+// reconnects and re-LISTs, surfacing the recreate. The HTTP/2 PINGs below
+// cover the same failure at the stream-multiplexing layer.
 
 /// Idle time before the kernel sends the first TCP keepalive probe.
 const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
@@ -78,15 +75,26 @@ const TCP_KEEPALIVE_RETRIES: u32 = 3;
 #[cfg(target_os = "linux")]
 const TCP_USER_TIMEOUT: Duration = Duration::from_mins(1);
 
-/// HTTP/2 keepalive-while-idle. **Inert today** — kube 3.1 negotiates HTTP/1.1
-/// to the apiserver (above), so no H2 connection exists to ping. Kept as
-/// zero-cost future-proofing: if a future kube/feature enables H2 ALPN, these
-/// PINGs become the h2-equivalent of the TCP keepalive above. Interval must be
-/// `>` [`H2_KEEPALIVE_TIMEOUT`] so a missed ACK is acted on before the next.
+/// HTTP/2 keepalive-while-idle: the h2 equivalent of the TCP keepalive above.
+/// Interval must be `>` [`H2_KEEPALIVE_TIMEOUT`] so a missed ACK is acted on
+/// before the next.
 const H2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// PING-ACK deadline for [`H2_KEEPALIVE_INTERVAL`] (inert under HTTP/1.1).
+/// PING-ACK deadline for [`H2_KEEPALIVE_INTERVAL`].
 const H2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Protocols offered in the TLS handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Alpn {
+    /// `h2` then `http/1.1`: every request and watch multiplexes over one
+    /// connection, instead of kube's default of one TLS connection per
+    /// concurrent request (23 at startup on a large cluster, each a full
+    /// TCP + TLS handshake).
+    Http2,
+    /// `http/1.1` only. WebSocket upgrades (exec / attach / port-forward)
+    /// can't ride an h2 connection.
+    Http1,
+}
 
 /// Build a `kube::Client` equivalent to `ClientBuilder::try_from(config)`'s
 /// default stack, **plus** TCP keepalive on the socket (the watch-liveness fix —
@@ -113,7 +121,7 @@ const H2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// is `pub(crate)`, so we cannot set `ClientBuilder::with_valid_until` for
 /// exec-credential expiry. That clock is redundant here — every reconnect
 /// rebuilds `Config` (so auth is re-resolved) and reflectors re-LIST on 401.
-fn build_compressed_client(config: Config) -> Result<Client> {
+fn build_compressed_client(config: Config, alpn: Alpn) -> Result<Client> {
     let mut http = HttpConnector::new();
     http.enforce_http(false);
     // TCP keepalive — the operative liveness fix (see the const docs above).
@@ -142,21 +150,20 @@ fn build_compressed_client(config: Config) -> Result<Client> {
                     }
                 }
             }
-            finish_kube_client(connector, config)
+            finish_kube_client(connector, config, alpn)
         }
         Some(proxy_url) => Err(Error::Invalid(format!(
             "unsupported proxy scheme in {proxy_url} (only http proxies are supported)"
         ))),
-        None => finish_kube_client(http, config),
+        None => finish_kube_client(http, config, alpn),
     }
 }
 
 /// Assemble the kube tower stack over `connector` (which already carries TCP
-/// keepalive), adding the inert-today H2 keepalive and the gzip compression
-/// layers. Generic over the connector so the proxy and no-proxy paths share one
+/// keepalive), adding the H2 keepalive and the gzip compression layers. Generic over the connector so the proxy and no-proxy paths share one
 /// body (the connector types differ — `Tunnel<HttpConnector>` vs
 /// `HttpConnector`). Bounds mirror kube-client's `make_generic_builder<H>`.
-fn finish_kube_client<H>(connector: H, config: Config) -> Result<Client>
+fn finish_kube_client<H>(connector: H, config: Config, alpn: Alpn) -> Result<Client>
 where
     H: 'static + Clone + Send + Sync + Service<http::Uri>,
     H::Response: 'static + Connection + Read + Write + Send + Unpin,
@@ -167,16 +174,19 @@ where
     let auth_layer = config.auth_layer()?;
 
     // TLS via the public ConfigExt, then kube's connect/read/write timeouts.
-    let https = config.rustls_https_connector_with_connector(connector)?;
+    let https = match alpn {
+        Alpn::Http1 => config.rustls_https_connector_with_connector(connector)?,
+        Alpn::Http2 => h2_https_connector(&config, connector)?,
+    };
     let mut timeout = TimeoutConnector::new(https);
     timeout.set_connect_timeout(config.connect_timeout);
     timeout.set_read_timeout(config.read_timeout);
     timeout.set_write_timeout(config.write_timeout);
 
-    // H2 keepalive-while-idle. Inert under kube's HTTP/1.1 ALPN; the live
-    // liveness fix is the TCP keepalive on the connector. See const docs.
     let mut hyper_builder = LegacyBuilder::new(TokioExecutor::new());
     hyper_builder
+        // h2 keepalive PINGs panic without a timer.
+        .timer(TokioTimer::new())
         .http2_keep_alive_interval(H2_KEEPALIVE_INTERVAL)
         .http2_keep_alive_timeout(H2_KEEPALIVE_TIMEOUT)
         .http2_keep_alive_while_idle(true);
@@ -206,6 +216,25 @@ where
         .boxed();
 
     Ok(ClientBuilder::new(service, default_ns).build())
+}
+
+/// kube's `rustls_https_connector_with_connector` with `h2` added to ALPN.
+fn h2_https_connector<H>(config: &Config, connector: H) -> Result<hyper_rustls::HttpsConnector<H>> {
+    let mut builder = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(config.rustls_client_config()?)
+        .https_or_http();
+    if let Some(name) = &config.tls_server_name {
+        let name = name
+            .clone()
+            .try_into()
+            .map_err(|e| Error::Invalid(format!("invalid tls-server-name {name:?}: {e}")))?;
+        builder =
+            builder.with_server_name_resolver(hyper_rustls::FixedServerNameResolver::new(name));
+    }
+    Ok(builder
+        .enable_http1()
+        .enable_http2()
+        .wrap_connector(connector))
 }
 
 /// The exec-credential plugin command configured for `context_name`'s user, if
@@ -333,19 +362,6 @@ pub struct ClusterInfo {
     pub node_count: usize,
 }
 
-/// How the watcher should perform its initial sync. Chosen per cluster from
-/// the apiserver version: `WatchList` (KEP-3157, GA in 1.32, beta-on in 1.27)
-/// streams items one at a time, eliminating the "wait for the first page"
-/// stall; older apiservers fall back to paged LIST.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListStrategy {
-    /// `InitialListStrategy::StreamingList` — items arrive as a watch.
-    Streaming,
-    /// `InitialListStrategy::ListWatch` with a small page size so per-page
-    /// `InitApply` events still drip in fast.
-    Paged,
-}
-
 /// How many distinct watcher-Clients (HTTP/2 connection pools) to keep per
 /// cluster. Each watcher is round-robin assigned one of these clients
 /// instead of minting a fresh pool on every subscribe. Sharing across all
@@ -359,6 +375,8 @@ const WATCHER_CLIENT_POOL_SIZE: usize = 4;
 pub struct Cluster {
     pub context_name: String,
     client: Client,
+    /// HTTP/1.1-only twin of `client` for WebSocket upgrades.
+    upgrade: Client,
     /// Cloned Config so we can mint fresh `Client` instances for the
     /// watcher pool (see [`WATCHER_CLIENT_POOL_SIZE`]).
     config: Config,
@@ -368,10 +386,6 @@ pub struct Cluster {
     /// of them piling onto a single connection.
     watcher_pool: Mutex<Vec<Client>>,
     watcher_pool_cursor: AtomicUsize,
-    /// Cached after the first successful `info()` call. `None` until then —
-    /// callers that need it before info has run will see `Paged` (the
-    /// pessimistic / always-supported choice).
-    list_strategy: std::sync::OnceLock<ListStrategy>,
     /// SSH session backing this cluster, if any. Held purely so the session
     /// lives at least as long as the cluster — the kube `Client` opens TCP
     /// to a localhost port served by the SSH tunnel below, and dropping the
@@ -428,15 +442,16 @@ impl Cluster {
             ..Default::default()
         };
         let config = Config::from_custom_kubeconfig(kubeconfig, &options).await?;
-        let client = build_compressed_client(config.clone())
+        let client = build_compressed_client(config.clone(), Alpn::Http2)
             .map_err(|e| enrich_exec_error(e, exec_command))?;
+        let upgrade = build_compressed_client(config.clone(), Alpn::Http1)?;
         Ok(Self {
             context_name: context_name.to_owned(),
             client,
+            upgrade,
             config,
             watcher_pool: Mutex::new(Vec::with_capacity(WATCHER_CLIENT_POOL_SIZE)),
             watcher_pool_cursor: AtomicUsize::new(0),
-            list_strategy: std::sync::OnceLock::new(),
             ssh: None,
             tunnel: None,
         })
@@ -531,16 +546,17 @@ impl Cluster {
             ..Default::default()
         };
         let config = Config::from_custom_kubeconfig(kubeconfig, &options).await?;
-        let client = build_compressed_client(config.clone())
+        let client = build_compressed_client(config.clone(), Alpn::Http2)
             .map_err(|e| enrich_exec_error(e, exec_command))?;
+        let upgrade = build_compressed_client(config.clone(), Alpn::Http1)?;
 
         Ok(Self {
             context_name: context_name.to_owned(),
             client,
+            upgrade,
             config,
             watcher_pool: Mutex::new(Vec::with_capacity(WATCHER_CLIENT_POOL_SIZE)),
             watcher_pool_cursor: AtomicUsize::new(0),
-            list_strategy: std::sync::OnceLock::new(),
             ssh: Some(session),
             tunnel: Some(tunnel),
         })
@@ -552,43 +568,27 @@ impl Cluster {
     /// to the operator staring at the "Connecting…" spinner.
     pub async fn info(&self) -> Result<ClusterInfo> {
         let nodes: Api<Node> = Api::all(self.client.clone());
-        let lp = ListParams::default();
         let started = std::time::Instant::now();
-        let (version, list) = tokio::try_join!(self.client.apiserver_version(), nodes.list(&lp),)?;
+        let (version, node_count) =
+            tokio::try_join!(self.client.apiserver_version(), count_objects(&nodes))?;
         tracing::debug!(
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "cluster.info: version + nodes"
-        );
-        // Pick a strategy. Version is just a pre-filter — the live probe
-        // is what decides whether we actually use Streaming, because GKE
-        // / EKS / AKS happily ship 1.32+ apiservers with the WatchList
-        // feature gate disabled. Skip the probe entirely if version
-        // already excludes Streaming (saves the round-trip on older
-        // clusters).
-        let from_version = strategy_from_version(&version.git_version);
-        let strategy = if from_version == ListStrategy::Streaming
-            && probe_streaming_supported(&self.client).await
-        {
-            ListStrategy::Streaming
-        } else {
-            ListStrategy::Paged
-        };
-        let _ = self.list_strategy.set(strategy);
-        tracing::info!(
-            context = %self.context_name,
-            server_version = %version.git_version,
-            ?from_version,
-            ?strategy,
-            "cluster.info: list strategy chosen"
+            "cluster.info: version + node count"
         );
         Ok(ClusterInfo {
             server_version: version.git_version,
-            node_count: list.items.len(),
+            node_count,
         })
     }
 
     pub fn client(&self) -> Client {
         self.client.clone()
+    }
+
+    /// Client for exec / attach / port-forward: their WebSocket upgrade
+    /// needs HTTP/1.1, which [`Self::client`] doesn't negotiate.
+    pub fn upgrade_client(&self) -> Client {
+        self.upgrade.clone()
     }
 
     /// Local port the SSH tunnel is listening on, if this cluster was built
@@ -615,7 +615,7 @@ impl Cluster {
     /// or trigger flow-control penalties on this connection. Cheap on
     /// success — auth is already resolved on the Config.
     pub fn new_client(&self) -> Result<Client> {
-        build_compressed_client(self.config.clone())
+        build_compressed_client(self.config.clone(), Alpn::Http2)
     }
 
     /// Hand back a watcher-dedicated client from the round-robin pool.
@@ -626,137 +626,77 @@ impl Cluster {
     /// rather than failing the subscribe.
     pub fn watcher_client(&self) -> Client {
         let mut pool = self.watcher_pool.lock_recover();
-        if pool.len() < WATCHER_CLIENT_POOL_SIZE {
-            match build_compressed_client(self.config.clone()) {
+        let idx = self.watcher_pool_cursor.load(Ordering::Relaxed) % WATCHER_CLIENT_POOL_SIZE;
+        match self.pool_slot(&mut pool, idx) {
+            Some(c) => {
+                self.watcher_pool_cursor.fetch_add(1, Ordering::Relaxed);
+                c
+            }
+            None => self.client.clone(),
+        }
+    }
+
+    /// Open the connection of the client the next [`Self::watcher_client`]
+    /// call hands out, so that watcher's first LIST skips the TCP + TLS
+    /// handshake. Best-effort.
+    pub async fn prewarm_watcher_client(&self) {
+        let client = {
+            let mut pool = self.watcher_pool.lock_recover();
+            let idx = self.watcher_pool_cursor.load(Ordering::Relaxed) % WATCHER_CLIENT_POOL_SIZE;
+            self.pool_slot(&mut pool, idx)
+        };
+        if let Some(client) = client {
+            if let Err(e) = client.apiserver_version().await {
+                tracing::debug!(error = %e, "watcher client prewarm failed");
+            }
+        }
+    }
+
+    /// Slots fill in order, so `idx` is at most one past the end.
+    fn pool_slot(&self, pool: &mut Vec<Client>, idx: usize) -> Option<Client> {
+        if idx == pool.len() {
+            match build_compressed_client(self.config.clone(), Alpn::Http2) {
                 Ok(c) => pool.push(c),
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
                         "watcher_client: build failed, falling back to shared client"
                     );
-                    return self.client.clone();
+                    return None;
                 }
             }
         }
-        let idx = self.watcher_pool_cursor.fetch_add(1, Ordering::Relaxed) % pool.len();
-        pool[idx].clone()
-    }
-
-    /// Watcher initial-list strategy for this cluster. Currently always
-    /// `Paged` — see [`strategy_from_version`] for why we don't
-    /// auto-promote to `Streaming` based on apiserver version.
-    pub fn list_strategy(&self) -> ListStrategy {
-        self.list_strategy
-            .get()
-            .copied()
-            .unwrap_or(ListStrategy::Paged)
+        pool.get(idx).cloned()
     }
 }
 
-/// Cheap pre-filter: rule out apiservers that *can't* support `WatchList`
-/// regardless of feature gate. `WatchList` is alpha in 1.27, beta in 1.30,
-/// default-on in 1.32. Anything older is unambiguously `Paged`.
-///
-/// **A 1.32+ result is not authoritative** — managed Kubernetes (GKE,
-/// EKS, AKS) commonly disables the feature gate even on recent apiservers,
-/// so `Streaming` here is just a hint. `probe_streaming_supported` does
-/// the live check that decides for real.
-fn strategy_from_version(git_version: &str) -> ListStrategy {
-    let Some((major, minor)) = parse_major_minor(git_version) else {
-        return ListStrategy::Paged;
-    };
-    if (major, minor) >= (1, 32) {
-        ListStrategy::Streaming
-    } else {
-        ListStrategy::Paged
+/// Object count without downloading the objects: a one-item metadata page
+/// carries `remainingItemCount`. Falls back to a full metadata-only LIST
+/// when the apiserver omits it.
+pub(crate) async fn count_objects<K>(api: &Api<K>) -> kube::Result<usize>
+where
+    K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let page = api.list_metadata(&ListParams::default().limit(1)).await?;
+    let first = page_count(
+        page.items.len(),
+        page.metadata.remaining_item_count,
+        page.metadata.continue_.as_deref(),
+    );
+    match first {
+        Some(n) => Ok(n),
+        None => Ok(api.list_metadata(&ListParams::default()).await?.items.len()),
     }
 }
 
-/// Live probe: ask the apiserver for a watch with `sendInitialEvents=true`
-/// against a tiny resource (one namespace) and inspect the response. If
-/// the apiserver answers `422 Forbidden: sendInitialEvents is forbidden`
-/// the feature gate is off — fall back to `Paged`. Anything else (200 or
-/// even a different error) is treated as "supports it" / "not our
-/// problem"; the watcher will surface real errors during normal operation.
-///
-/// Bounded by a short timeout because a slow apiserver here would block
-/// connect's strategy-decision phase. We re-use `connect_context`'s
-/// existing 15s wall-clock budget for everything else, so the probe
-/// caps itself to keep that intact.
-async fn probe_streaming_supported(client: &Client) -> bool {
-    use http::Request;
-    use kube::client::Body;
-    use std::time::Duration;
-    use tokio::time::timeout;
-
-    // `limit=1` keeps the response small if the apiserver does honour the
-    // request; `timeoutSeconds=1` makes the apiserver close its side
-    // promptly so we don't have to drop a long-lived stream.
-    let uri = "/api/v1/namespaces?\
-        watch=true&\
-        sendInitialEvents=true&\
-        allowWatchBookmarks=true&\
-        resourceVersionMatch=NotOlderThan&\
-        resourceVersion=0&\
-        limit=1&\
-        timeoutSeconds=1";
-    let req = match Request::builder().method("GET").uri(uri).body(Vec::new()) {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
-
-    let send_fut = client.send(req.map(Body::from));
-    let resp = match timeout(Duration::from_secs(2), send_fut).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            tracing::debug!(error = %e, "streaming probe: send failed");
-            return false;
-        }
-        Err(_) => {
-            tracing::debug!("streaming probe: timed out");
-            return false;
-        }
-    };
-    let status = resp.status();
-    if status.is_success() {
-        // 200 means apiserver accepted the request and is opening the
-        // watch stream. Drop it — we just wanted the verdict.
-        return true;
+/// Total from the first page of a paged LIST, or `None` when more pages
+/// exist but the apiserver didn't say how many items they hold.
+fn page_count(items: usize, remaining: Option<i64>, continue_: Option<&str>) -> Option<usize> {
+    match (remaining, continue_) {
+        (Some(r), _) => Some(items + usize::try_from(r).unwrap_or(0)),
+        (None, None | Some("")) => Some(items),
+        (None, Some(_)) => None,
     }
-    // 422 Invalid + the magic "sendInitialEvents is forbidden" marker is
-    // the unambiguous "feature gate disabled" answer. Other errors
-    // (auth, RBAC, etc.) we treat as "don't downgrade" — the user-facing
-    // watcher will surface the same problem with better context.
-    if status.as_u16() == 422 {
-        // Body usually contains the marker string. We don't bother
-        // parsing the JSON — substring check is enough.
-        let body = resp.into_body();
-        use http_body_util::BodyExt;
-        if let Ok(collected) = body.collect().await {
-            let bytes = collected.to_bytes();
-            let s = std::str::from_utf8(&bytes).unwrap_or("");
-            if s.contains("sendInitialEvents") {
-                tracing::info!(
-                    "streaming probe: apiserver reports WatchList feature \
-                     gate disabled; using Paged"
-                );
-                return false;
-            }
-        }
-    }
-    // Default to "supported" so we don't mask other errors as a
-    // capability fail. The watcher's own error handling will catch
-    // real apiserver problems.
-    true
-}
-
-fn parse_major_minor(s: &str) -> Option<(u32, u32)> {
-    // Strip a leading 'v' if present, then split on '.' / '-' / '+'.
-    let s = s.strip_prefix('v').unwrap_or(s);
-    let mut parts = s.split(['.', '-', '+']);
-    let major: u32 = parts.next()?.parse().ok()?;
-    let minor: u32 = parts.next()?.parse().ok()?;
-    Some((major, minor))
 }
 
 /// Parse a kubeconfig `cluster.server` URL into `(host, port, scheme)`. The
@@ -1017,18 +957,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strategy_from_version_handles_common_shapes() {
-        assert_eq!(strategy_from_version("v1.32.0"), ListStrategy::Streaming);
-        assert_eq!(strategy_from_version("v1.33.4"), ListStrategy::Streaming);
-        assert_eq!(strategy_from_version("v1.31.5"), ListStrategy::Paged);
-        assert_eq!(
-            strategy_from_version("v1.30.4-gke.1234"),
-            ListStrategy::Paged
-        );
-        assert_eq!(strategy_from_version("1.27.0"), ListStrategy::Paged);
-        assert_eq!(strategy_from_version("v2.0.0"), ListStrategy::Streaming);
-        assert_eq!(strategy_from_version("garbage"), ListStrategy::Paged);
-        assert_eq!(strategy_from_version(""), ListStrategy::Paged);
+    fn page_count_uses_remaining_item_count() {
+        assert_eq!(page_count(1, Some(3075), Some("tok")), Some(3076));
+        assert_eq!(page_count(0, None, None), Some(0));
+        assert_eq!(page_count(1, None, Some("")), Some(1));
+        assert_eq!(page_count(1, None, Some("tok")), None);
+        assert_eq!(page_count(1, Some(-5), Some("tok")), Some(1));
     }
 
     #[test]
@@ -1074,15 +1008,148 @@ mod tests {
         // keepalive — the principal risk is whether this type stack assembles
         // (and that the rustls connector builds without a process crypto
         // provider, since our hand-rolled path skips kube's `try_from`).
-        let config = Config::new("https://127.0.0.1:6443".parse().unwrap());
-        assert!(build_compressed_client(config).is_ok());
+        for alpn in [Alpn::Http2, Alpn::Http1] {
+            let config = Config::new("https://127.0.0.1:6443".parse().unwrap());
+            assert!(build_compressed_client(config, alpn).is_ok());
+        }
     }
 
     #[tokio::test]
     async fn build_compressed_client_assembles_http_proxy_config() {
         let mut config = Config::new("https://127.0.0.1:6443".parse().unwrap());
         config.proxy_url = Some("http://127.0.0.1:3128".parse().unwrap());
-        assert!(build_compressed_client(config).is_ok());
+        assert!(build_compressed_client(config, Alpn::Http2).is_ok());
+    }
+
+    /// One-connection TLS "apiserver" answering `/version`, offering both
+    /// protocols over ALPN. Returns its URL and the protocol it negotiated.
+    async fn tls_apiserver() -> (String, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+        use hyper::{body::Incoming, service::service_fn, Response};
+        use hyper_util::rt::TokioIo;
+        use tokio_rustls::rustls::{
+            self,
+            pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+        };
+
+        let certs = vec![CertificateDer::from_pem_slice(TEST_CERT).unwrap()];
+        let key = PrivateKeyDer::from_pem_slice(TEST_KEY).unwrap();
+        let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+        tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(tcp).await.unwrap();
+            let alpn = stream
+                .get_ref()
+                .1
+                .alpn_protocol()
+                .unwrap_or_default()
+                .to_vec();
+            let h2 = alpn == b"h2";
+            let _ = tx.send(alpn);
+            let svc = service_fn(|_req: hyper::Request<Incoming>| async {
+                Ok::<_, std::convert::Infallible>(Response::new(http_body_util::Full::new(
+                    &br#"{"major":"1","minor":"30","gitVersion":"v1.30.0","gitCommit":"","gitTreeState":"","buildDate":"","goVersion":"","compiler":"","platform":""}"#[..],
+                )))
+            });
+            let io = TokioIo::new(stream);
+            if h2 {
+                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await;
+            } else {
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, svc)
+                    .await;
+            }
+        });
+        (format!("https://localhost:{port}"), rx)
+    }
+
+    // Test-only `localhost` leaf signed by a throwaway CA (key not kept).
+    const TEST_CA: &[u8] = include_bytes!("testdata/ca.cert.pem");
+    const TEST_CERT: &[u8] = include_bytes!("testdata/localhost.cert.pem");
+    const TEST_KEY: &[u8] = include_bytes!("testdata/localhost.key.pem");
+
+    #[tokio::test]
+    async fn clients_negotiate_their_protocol_against_a_tls_apiserver() {
+        use tokio_rustls::rustls::pki_types::{pem::PemObject, CertificateDer};
+        let root = CertificateDer::from_pem_slice(TEST_CA).unwrap().to_vec();
+        // kube's HTTP/1.1 connector offers no ALPN, so nothing is negotiated.
+        for (alpn, want) in [(Alpn::Http2, &b"h2"[..]), (Alpn::Http1, &b""[..])] {
+            let (url, negotiated) = tls_apiserver().await;
+            let mut config = Config::new(url.parse().unwrap());
+            config.root_cert = Some(vec![root.clone()]);
+            let client = build_compressed_client(config, alpn).unwrap();
+            // A real round trip: h2 also starts its keepalive timer here.
+            let version = client.apiserver_version().await.expect("round trip");
+            assert_eq!(version.git_version, "v1.30.0");
+            assert_eq!(negotiated.await.unwrap(), want, "{alpn:?}");
+        }
+    }
+
+    fn offline_cluster(url: &str) -> Cluster {
+        let config = Config::new(url.parse().unwrap());
+        Cluster {
+            context_name: "test".to_owned(),
+            client: build_compressed_client(config.clone(), Alpn::Http2).unwrap(),
+            upgrade: build_compressed_client(config.clone(), Alpn::Http1).unwrap(),
+            config,
+            watcher_pool: Mutex::new(Vec::new()),
+            watcher_pool_cursor: AtomicUsize::new(0),
+            ssh: None,
+            tunnel: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn watcher_pool_round_robins_and_prewarm_fills_the_next_slot() {
+        // Nothing listens here; the prewarm request fails fast and is ignored.
+        let cluster = offline_cluster("https://127.0.0.1:1");
+        let pool_len = || cluster.watcher_pool.lock().unwrap().len();
+
+        cluster.prewarm_watcher_client().await;
+        assert_eq!(pool_len(), 1, "slot for the next watcher opened");
+        let _ = cluster.watcher_client();
+        assert_eq!(pool_len(), 1, "first watcher gets the prewarmed slot");
+
+        for _ in 1..WATCHER_CLIENT_POOL_SIZE {
+            let _ = cluster.watcher_client();
+        }
+        assert_eq!(pool_len(), WATCHER_CLIENT_POOL_SIZE);
+        cluster.prewarm_watcher_client().await;
+        let _ = cluster.watcher_client();
+        assert_eq!(
+            pool_len(),
+            WATCHER_CLIENT_POOL_SIZE,
+            "wraps instead of growing"
+        );
+        assert_eq!(
+            cluster.watcher_pool_cursor.load(Ordering::Relaxed),
+            WATCHER_CLIENT_POOL_SIZE + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn h2_client_honours_tls_server_name() {
+        let mut config = Config::new("https://127.0.0.1:6443".parse().unwrap());
+        config.tls_server_name = Some("apiserver.internal".to_owned());
+        assert!(build_compressed_client(config.clone(), Alpn::Http2).is_ok());
+        config.tls_server_name = Some("bad name".to_owned());
+        assert!(matches!(
+            build_compressed_client(config, Alpn::Http2),
+            Err(Error::Invalid(_))
+        ));
     }
 
     #[test]
@@ -1092,7 +1159,7 @@ mod tests {
         let mut config = Config::new("https://127.0.0.1:6443".parse().unwrap());
         config.proxy_url = Some("socks5://127.0.0.1:1080".parse().unwrap());
         assert!(matches!(
-            build_compressed_client(config),
+            build_compressed_client(config, Alpn::Http2),
             Err(Error::Invalid(_))
         ));
     }

@@ -19,7 +19,6 @@ import {
   R_MD,
   R_SM,
   statusDot,
-  statusIsTransient,
   type Tokens,
 } from "../../theme";
 import { useAppStore } from "../../store";
@@ -1074,7 +1073,8 @@ export function SectionHeader({
 // footgun, so we downgrade those to the warn bucket. Completed init dots are
 // dimmed (they're chronological gutter, not active state).
 //
-// Transient states pulse (fs-pulse-dot) so the operator can see motion.
+// Every shape is solid; the pod's status bar carries the in-progress breathe
+// (one element per row keeps it cheap — see lib/breathe.ts).
 export type ContainerLite = {
   name: string;
   status: string;
@@ -1121,6 +1121,10 @@ export function TabButton({
   );
 }
 
+function evenPx(n: number): number {
+  return n - (n % 2);
+}
+
 export function ContainerDots({
   containers,
   t,
@@ -1162,17 +1166,11 @@ export function ContainerDots({
     // Init + sidecar share a thin-and-tall footprint (size-2 × size+2); main
     // is the largest (size+2 × size+2). Init and sidecar are distinguished
     // by corner radius: init uses a literal 2 px (stepwise), sidecar uses a
-    // full capsule (persistent). At size=7 (table) → 5×9; at size=8 → 6×10;
-    // at size=9 (detail) → 7×11.
-    let w: number;
-    let h: number;
-    if (kind === "main") {
-      w = size + 2;
-      h = size + 2;
-    } else {
-      w = Math.max(4, size - 2);
-      h = size + 2;
-    }
+    // full capsule (persistent). Snapped to even pixels so a ring's hole sits
+    // centred: size=7 (table) → 4×8 / 8×8; size=8 → 6×10 / 10×10;
+    // size=9 (detail) → 6×10 / 10×10.
+    const h = evenPx(size + 2);
+    const w = kind === "main" ? h : evenPx(Math.max(4, size - 2));
     const base: CSSProperties = {
       width: w,
       height: h,
@@ -1192,25 +1190,21 @@ export function ContainerDots({
         ...base,
         // borderRadius = w (≥ h/2) gives a pure capsule at any (w, h).
         borderRadius: w,
-        background: col,
         // Match the main dot's subtle inset ring so the capsule reads as
         // part of the same shape family, not a flat sticker.
         boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.18)",
+        background: col,
       };
     return {
       ...base,
       borderRadius: "50%",
-      background: col,
       // INSET ring so the outline can never get clipped by an
-      // `overflow: hidden` parent (table cells truncate that way). The
-      // previous outer-spread shadow was sometimes only visible on the
-      // upper-right of the dot when the rest got cropped by the cell.
+      // `overflow: hidden` parent (table cells truncate that way).
       boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.18)",
+      background: col,
     };
   };
 
-  const className = (c: ContainerLite) =>
-    statusIsTransient(c.status) ? "fs-pulse-dot" : undefined;
 
   const tip = (kind: "init" | "main" | "sidecar", c: ContainerLite) =>
     `${kind}: ${c.name} — ${c.status}`;
@@ -1221,7 +1215,7 @@ export function ContainerDots({
       style={{
         display: "inline-block",
         width: 1,
-        height: size + 2,
+        height: evenPx(size + 2),
         background: t.border,
         margin: `0 ${gap + 1}px`,
         verticalAlign: "middle",
@@ -1253,20 +1247,20 @@ export function ContainerDots({
     >
       {inits.map((c, i) => (
         <Tooltip key={`i${i}`} label={tip("init", c)}>
-          <span className={className(c)} style={dotFor(c, "init")} />
+          <span style={dotFor(c, "init")} />
         </Tooltip>
       ))}
       {sidecarLeftSep && sep("sep-i-s")}
       {initMainSep && sep("sep-i-m")}
       {sidecars.map((c, i) => (
         <Tooltip key={`s${i}`} label={tip("sidecar", c)}>
-          <span className={className(c)} style={dotFor(c, "sidecar")} />
+          <span style={dotFor(c, "sidecar")} />
         </Tooltip>
       ))}
       {sidecarRightSep && sep("sep-s-m")}
       {mains.map((c, i) => (
         <Tooltip key={`m${i}`} label={tip("main", c)}>
-          <span className={className(c)} style={dotFor(c, "main")} />
+          <span style={dotFor(c, "main")} />
         </Tooltip>
       ))}
     </span>

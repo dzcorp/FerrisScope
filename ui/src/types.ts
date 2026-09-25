@@ -630,6 +630,10 @@ export type VolumeMetric = {
   capacity_inodes: number;
 };
 
+/// What a metrics subscriber reads. Cluster totals are always polled;
+/// `pods` adds the per-pod map, `volumes` the kubelet volume stats.
+export type MetricsNeed = "cluster" | "pods" | "volumes";
+
 export type MetricsSnapshot = {
   pods: Record<string, PodMetric>;
   cluster: ClusterMetrics | null;
@@ -640,8 +644,9 @@ export type MetricsSnapshot = {
   pvcs: Record<string, VolumeMetric>;
   /// metrics-server (CPU / memory) availability.
   available: boolean;
-  /// kubelet stats/summary (volumes) availability.
-  volumes_available: boolean;
+  /// kubelet stats/summary (volumes) availability; `null` until a
+  /// subscriber that asked for volumes gets its first volume poll.
+  volumes_available: boolean | null;
   fetched_at_unix_ms: number;
 };
 

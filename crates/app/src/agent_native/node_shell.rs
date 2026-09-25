@@ -475,7 +475,8 @@ async fn client_for_id(app: &AppHandle, cluster_id: &str) -> Result<Client, Nati
         .entry(cluster_id)
         .await
         .map_err(|e| NativeToolError::msg(format!("connect cluster: {e}")))?;
-    Ok(entry.cluster.client())
+    // Also carries the exec session.
+    Ok(entry.cluster.upgrade_client())
 }
 
 /// Build the debug-pod manifest. Mirrors what `kubectl debug node/<n>` emits:

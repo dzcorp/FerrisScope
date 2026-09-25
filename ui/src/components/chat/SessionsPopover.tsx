@@ -423,8 +423,7 @@ function StatusDot({
       style={{
         width: 8,
         height: 8,
-        // Always-round status dot — theme radius would distort under the
-        // .fs-pulse-dot scale animation.
+        // Always-round status dot, independent of theme radius.
         borderRadius: "50%",
         flexShrink: 0,
         background: color ?? "transparent",

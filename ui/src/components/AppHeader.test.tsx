@@ -288,3 +288,45 @@ describe("AppHeader short cluster names", () => {
     });
   });
 });
+
+describe("AppHeader count loading hint", () => {
+  function renderWithKind() {
+    const ctx = { id: "default::alpha", name: "alpha", source: "default" } as never;
+    act(() => {
+      useAppStore.setState({ contexts: [ctx], virtualContexts: [], openTabs: [], activeTabId: null });
+      useAppStore.getState().openTab({ kind: "context", contextId: "default::alpha" });
+    });
+    return render(
+      <AppHeader
+        mode="dark"
+        context={ctx}
+        selectedKindLabel="Pods"
+        unreadNotifications={0}
+        activeForwards={0}
+        onHome={noop}
+        onPalette={noop}
+        onToggleTheme={noop}
+        onOpenNotifications={noop}
+        onOpenSettings={noop}
+        onOpenForwards={noop}
+      />,
+    );
+  }
+
+  afterEach(() => useAppStore.getState().setTableCount(null));
+
+  it("animates next to the count while the initial sync runs", () => {
+    act(() => useAppStore.getState().setTableCount({ filtered: 312, total: 312, loading: true }));
+    const { getByTestId } = renderWithKind();
+    const hint = getByTestId("count-loading");
+    expect(hint.parentElement?.textContent).toContain("312");
+    expect(hint.getAttribute("role")).toBe("status");
+    expect(hint.querySelector(".fs-line-loader")).not.toBeNull();
+  });
+
+  it("is absent once the sync is done", () => {
+    act(() => useAppStore.getState().setTableCount({ filtered: 312, total: 312, loading: false }));
+    const { queryByTestId } = renderWithKind();
+    expect(queryByTestId("count-loading")).toBeNull();
+  });
+});

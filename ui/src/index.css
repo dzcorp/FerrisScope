@@ -53,22 +53,23 @@ textarea,
   background: var(--fs-console-selection, rgba(110, 120, 140, 0.4));
 }
 
+/* Any running animation makes WebKitGTK repaint every frame (~5% CPU idle),
+   so loops stay opacity-only and stepped: 4 repaints per cycle, not 60/s. */
 @keyframes fs-pulse-dot-kf {
   0%,
   100% {
-    transform: scale(1);
     opacity: 1;
   }
   50% {
-    transform: scale(1.35);
     opacity: 0.55;
   }
 }
 
 .fs-pulse-dot {
-  animation: fs-pulse-dot-kf 1.4s ease-in-out infinite;
-  transform-origin: center;
+  animation: fs-pulse-dot-kf 1.4s steps(4, jump-none) infinite;
 }
+
+/* `.fs-breathe` is stepped from JS (lib/breathe.ts), not animated here. */
 
 /* P3: animations are short and only on user action (R-14). */
 @keyframes fs-fade-in {

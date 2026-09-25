@@ -57,11 +57,10 @@ async fn reflector_emits_pods_for_namespace_and_clears_on_unsubscribe() {
         .expect("apply pod");
 
     let client = build_client(&cluster).await;
-    let strategy = ferrisscope_core::cluster::ListStrategy::Paged;
 
     // Look up the pods kind via the registry — same path the app uses.
     let entry = lookup("pods").expect("pods kind registered");
-    let watcher = (entry.start)(client.clone(), NsScope::All, strategy);
+    let watcher = (entry.start)(client.clone(), NsScope::All);
 
     // Drain the coalescing channel until we see our pod. The dirty
     // channel collapses by uid, so a single drain may carry many
@@ -114,9 +113,8 @@ async fn two_clusters_have_independent_reflector_state() {
     let entry = lookup("pods").unwrap();
     let client_a = build_client(&a).await;
     let client_b = build_client(&b).await;
-    let strategy = ferrisscope_core::cluster::ListStrategy::Paged;
-    let wa = (entry.start)(client_a, NsScope::All, strategy);
-    let wb = (entry.start)(client_b, NsScope::All, strategy);
+    let wa = (entry.start)(client_a, NsScope::All);
+    let wb = (entry.start)(client_b, NsScope::All);
 
     let ra = wa.take_drainer();
     let rb = wb.take_drainer();

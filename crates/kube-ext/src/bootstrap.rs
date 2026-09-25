@@ -1,23 +1,19 @@
 //! Connect-time search-index bootstrap.
 //!
-//! Issues a one-shot paginated `LIST` (no watcher, no reflector) for a fixed
-//! allowlist of well-known kinds and feeds the projected rows into a
-//! caller-supplied upsert sink. Runs once per cluster connect — see
+//! Issues a one-shot paginated metadata-only `LIST` (no watcher, no
+//! reflector) for a fixed allowlist of well-known kinds and feeds each
+//! object's identity + labels — all the index stores — into a caller-supplied
+//! upsert sink. Metadata-only keeps Secret / ConfigMap payloads and full pod
+//! specs off the wire. Runs once per cluster connect — see
 //! `crates/app/src/commands.rs::spawn_search_bootstrap`.
 //!
 //! Intentionally watcher-free: the lazy-reflector rule (`CLAUDE.md`)
 //! still owns live data; this only seeds the search index so the header
 //! palette has something useful to match against on a freshly-connected
-//! cluster.
-//!
-//! Each *complete* listing also drives a reconcile (`retain` sink): rows of
-//! that kind missing from the LIST are tombstoned, so objects deleted while
-//! the app wasn't watching stop matching searches. Truncated listings (the
-//! per-kind cap fired) skip the reconcile — tombstoning everything past the
-//! cap would lie harder than keeping a few stale rows.
+//! cluster. The index is empty when this runs (it is recreated per
+//! connection), so there is nothing stale to reconcile.
 
 use kube::{api::Api, api::ListParams, Client, ResourceExt};
-use serde_json::Value;
 
 use crate::registry::KindSpec;
 
@@ -30,14 +26,29 @@ const PAGE_LIMIT: u32 = 500;
 /// browses is indexed live by the watcher path anyway.
 pub const MAX_BOOTSTRAP_ROWS: usize = 5_000;
 
-/// Outcome of one kind's bootstrap LIST.
-pub struct BootstrapKind {
-    /// uids fed to the upsert sink, in listing order.
-    pub uids: Vec<String>,
-    /// `false` when the per-kind cap stopped the listing early — the uid
-    /// set is then a prefix, not the full population, and MUST NOT be used
-    /// to reconcile deletions.
-    pub complete: bool,
+/// What the bootstrap hands the index for one object.
+pub struct IndexedObject {
+    pub uid: String,
+    pub namespace: Option<String>,
+    pub name: String,
+    /// [`ferrisscope_core::search::label_terms`] of the object's labels.
+    pub labels: String,
+}
+
+impl IndexedObject {
+    /// `None` for an object without a uid or name — nothing to key or show.
+    fn from_meta<K: ResourceExt>(obj: &K) -> Option<Self> {
+        let uid = obj.uid()?;
+        let name = obj.meta().name.clone().filter(|n| !n.is_empty())?;
+        Some(Self {
+            uid,
+            namespace: obj.namespace().filter(|n| !n.is_empty()),
+            name,
+            labels: ferrisscope_core::search::label_terms(
+                obj.labels().iter().map(|(k, v)| (k.as_str(), v.as_str())),
+            ),
+        })
+    }
 }
 
 /// Whether a listing that just consumed a page should fetch another, and
@@ -52,44 +63,32 @@ fn next_page(seen: usize, continue_token: Option<&str>) -> Option<String> {
     }
 }
 
-/// Paginated LIST for `S`, feeding each row into `upsert(kind_id, uid, &row)`.
-/// Errors are returned to the caller; the caller logs and moves on to the
-/// next kind so a single failed list (auth, quota) doesn't poison the whole
-/// bootstrap.
+/// Paginated metadata-only LIST for `S`, feeding each object into
+/// `upsert(kind_id, &obj)`. Errors are returned to the caller; the caller
+/// logs and moves on to the next kind so a single failed list (auth, quota)
+/// doesn't poison the whole bootstrap.
+/// Returns the number of objects fed.
 pub async fn bootstrap_kind<S: KindSpec>(
     client: Client,
-    upsert: &(dyn Fn(&str, &str, &Value) + Sync),
-) -> Result<BootstrapKind, kube::Error> {
+    upsert: &(dyn Fn(&str, &IndexedObject) + Sync),
+) -> Result<usize, kube::Error> {
     let api: Api<S::K> = Api::all(client);
     let kind_id = S::meta().id;
-    let mut uids: Vec<String> = Vec::new();
+    let mut seen = 0;
     let mut token: Option<String> = None;
     loop {
         let mut lp = ListParams::default().limit(PAGE_LIMIT);
         if let Some(t) = &token {
             lp = lp.continue_token(t);
         }
-        let list = api.list(&lp).await?;
-        let returned_continue = list.metadata.continue_.clone();
-        for obj in &list.items {
-            let Some(uid) = obj.uid() else { continue };
-            let mut row = S::project(obj);
-            if let Value::Object(ref mut map) = row {
-                map.insert("uid".to_owned(), Value::String(uid.clone()));
-            }
-            upsert(kind_id, &uid, &row);
-            uids.push(uid);
+        let list = api.list_metadata(&lp).await?;
+        for obj in list.items.iter().filter_map(IndexedObject::from_meta) {
+            upsert(kind_id, &obj);
+            seen += 1;
         }
-        token = next_page(uids.len(), returned_continue.as_deref());
+        token = next_page(seen, list.metadata.continue_.as_deref());
         if token.is_none() {
-            // Complete unless the apiserver still had pages to give when
-            // the cap stopped us.
-            let truncated = uids.len() >= MAX_BOOTSTRAP_ROWS
-                && returned_continue.as_deref().is_some_and(|t| !t.is_empty());
-            return Ok(BootstrapKind {
-                uids,
-                complete: !truncated,
-            });
+            return Ok(seen);
         }
     }
 }
@@ -98,14 +97,9 @@ pub async fn bootstrap_kind<S: KindSpec>(
 /// deployments, nodes, services, namespaces, configmaps, secrets,
 /// ingresses) sequentially. Per-kind errors are logged but never abort
 /// the run — a 403 on Secrets shouldn't block Pod search.
-///
-/// `retain(kind_id, uids)` fires once per kind whose listing came back
-/// complete; the sink is expected to tombstone that kind's rows missing
-/// from `uids`. Failed or truncated listings skip it.
 pub async fn bootstrap_default(
     client: Client,
-    upsert: &(dyn Fn(&str, &str, &Value) + Sync),
-    retain: &(dyn Fn(&str, Vec<String>) + Sync),
+    upsert: &(dyn Fn(&str, &IndexedObject) + Sync),
 ) -> usize {
     use crate::kinds::{
         config_maps::ConfigMapSpec, deployments::DeploymentSpec, ingresses::IngressSpec,
@@ -115,23 +109,12 @@ pub async fn bootstrap_default(
 
     async fn run<S: KindSpec>(
         client: Client,
-        upsert: &(dyn Fn(&str, &str, &Value) + Sync),
-        retain: &(dyn Fn(&str, Vec<String>) + Sync),
+        upsert: &(dyn Fn(&str, &IndexedObject) + Sync),
     ) -> usize {
         let kind_id = S::meta().id;
         match bootstrap_kind::<S>(client, upsert).await {
-            Ok(res) => {
-                let n = res.uids.len();
-                tracing::debug!(kind = kind_id, n, complete = res.complete, "bootstrap: ok");
-                if res.complete {
-                    retain(kind_id, res.uids);
-                } else {
-                    tracing::info!(
-                        kind = kind_id,
-                        n,
-                        "bootstrap: listing truncated at cap, skipping deletion reconcile"
-                    );
-                }
+            Ok(n) => {
+                tracing::debug!(kind = kind_id, n, "bootstrap: ok");
                 n
             }
             Err(e) => {
@@ -142,14 +125,14 @@ pub async fn bootstrap_default(
     }
 
     let mut total = 0;
-    total += run::<NamespaceSpec>(client.clone(), upsert, retain).await;
-    total += run::<NodeSpec>(client.clone(), upsert, retain).await;
-    total += run::<PodSpec>(client.clone(), upsert, retain).await;
-    total += run::<DeploymentSpec>(client.clone(), upsert, retain).await;
-    total += run::<ServiceSpec>(client.clone(), upsert, retain).await;
-    total += run::<ConfigMapSpec>(client.clone(), upsert, retain).await;
-    total += run::<SecretSpec>(client.clone(), upsert, retain).await;
-    total += run::<IngressSpec>(client, upsert, retain).await;
+    total += run::<NamespaceSpec>(client.clone(), upsert).await;
+    total += run::<NodeSpec>(client.clone(), upsert).await;
+    total += run::<PodSpec>(client.clone(), upsert).await;
+    total += run::<DeploymentSpec>(client.clone(), upsert).await;
+    total += run::<ServiceSpec>(client.clone(), upsert).await;
+    total += run::<ConfigMapSpec>(client.clone(), upsert).await;
+    total += run::<SecretSpec>(client.clone(), upsert).await;
+    total += run::<IngressSpec>(client, upsert).await;
     total
 }
 
@@ -162,6 +145,41 @@ mod tests {
         assert_eq!(next_page(10, Some("tok")), Some("tok".to_owned()));
         assert_eq!(next_page(10, Some("")), None);
         assert_eq!(next_page(10, None), None);
+    }
+
+    #[test]
+    fn indexed_object_takes_identity_and_labels_from_metadata() {
+        use k8s_openapi::api::core::v1::Secret;
+        use kube::core::{ObjectMeta, PartialObjectMeta};
+
+        let meta =
+            |uid: Option<&str>, name: Option<&str>, ns: Option<&str>| PartialObjectMeta::<Secret> {
+                types: None,
+                metadata: ObjectMeta {
+                    uid: uid.map(str::to_owned),
+                    name: name.map(str::to_owned),
+                    namespace: ns.map(str::to_owned),
+                    labels: Some(
+                        [
+                            ("app".to_owned(), "api".to_owned()),
+                            ("tier".to_owned(), "web".to_owned()),
+                        ]
+                        .into(),
+                    ),
+                    ..ObjectMeta::default()
+                },
+                _phantom: std::marker::PhantomData,
+            };
+
+        let obj = IndexedObject::from_meta(&meta(Some("u1"), Some("tls"), Some("prod"))).unwrap();
+        assert_eq!((obj.uid.as_str(), obj.name.as_str()), ("u1", "tls"));
+        assert_eq!(obj.namespace.as_deref(), Some("prod"));
+        assert_eq!(obj.labels, "app=api tier=web");
+
+        assert!(IndexedObject::from_meta(&meta(None, Some("tls"), None)).is_none());
+        assert!(IndexedObject::from_meta(&meta(Some("u1"), Some(""), None)).is_none());
+        let cluster = IndexedObject::from_meta(&meta(Some("u1"), Some("n1"), Some(""))).unwrap();
+        assert_eq!(cluster.namespace, None);
     }
 
     #[test]

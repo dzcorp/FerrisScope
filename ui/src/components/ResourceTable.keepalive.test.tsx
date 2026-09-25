@@ -2,7 +2,7 @@
 // or re-shown table, even while the rail republishes kinds for the new scope.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, cleanup, act } from "@testing-library/react";
+import { render, cleanup, act, waitFor } from "@testing-library/react";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
 import { resetEventMock } from "../test/tauri-event-mock";
 import { useAppStore } from "../store";
@@ -111,7 +111,8 @@ describe("ResourceTable keep-alive across tab switches", () => {
     await act(async () => {
       st().openDrawer({ kind: "detail", kindId: "crd:widgets", clusterId: "a", uid: "u1", namespace: "default", name: "w1" });
     });
-    expect(detailMounts).toHaveBeenCalledTimes(1);
+    // First open loads the lazy DetailPanel chunk — slow under a busy suite.
+    await waitFor(() => expect(detailMounts).toHaveBeenCalledTimes(1), { timeout: 5000 });
     const baseline = calls.length;
 
     for (const target of [tb!, ta!, tb!, ta!]) {

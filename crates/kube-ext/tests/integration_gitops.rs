@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use ferrisscope_core::cluster::ListStrategy;
 use ferrisscope_kube_ext::{
     fetch::{
         apply_resource, discover_crds, get_well_known_detail, merge_patch_resource, ApplyResult,
@@ -144,7 +143,7 @@ async fn gitops_discovery_details_watches_and_actions() {
             .unwrap();
         assert_eq!(d["meta"]["name"], name);
         assert!(d["sections"].as_array().unwrap().len() >= 3);
-        let watcher = (entry.start)(client.clone(), NsScope::One(ns.into()), ListStrategy::Paged);
+        let watcher = (entry.start)(client.clone(), NsScope::One(ns.into()));
         timeout(Duration::from_secs(30), async {
             while watcher.snapshot().is_empty() {
                 sleep(Duration::from_millis(50)).await;

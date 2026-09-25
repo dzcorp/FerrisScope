@@ -54,7 +54,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ferrisscope_core::cluster::ListStrategy;
+use futures::stream::BoxStream;
 use futures::StreamExt;
 use kube::runtime::watcher::InitialListStrategy;
 use kube::{
@@ -120,13 +120,13 @@ impl Serialize for RowJson {
     }
 }
 
-/// A projected row plus the two fields the search index needs, hoisted out
+/// A projected row plus the fields the search index needs, hoisted out
 /// while the `Value` tree is still in hand.
 ///
-/// Pulling `namespace` / `name` here means the forwarder never has to parse
-/// [`RowJson`] back into a `Value` to feed the index — which would undo the
-/// whole point of caching the encoded form. All three fields are refcounted,
-/// so cloning a `Row` into the dirty channel is three atomic increments.
+/// Pulling them here means the forwarder never has to parse [`RowJson`] back
+/// into a `Value` to feed the index — which would undo the whole point of
+/// caching the encoded form. Every field is refcounted, so cloning a `Row`
+/// into the dirty channel is a few atomic increments.
 #[derive(Clone, Debug)]
 pub struct Row {
     pub json: RowJson,
@@ -134,6 +134,8 @@ pub struct Row {
     /// `None` for a projection with no (or an empty) `name` — the search
     /// index skips those, since a hit with no name is unrenderable.
     pub name: Option<Arc<str>>,
+    /// [`ferrisscope_core::search::label_terms`] of the object's labels.
+    pub labels: Arc<str>,
 }
 
 impl Row {
@@ -144,6 +146,12 @@ impl Row {
         projected: Value,
         labels: Option<&BTreeMap<String, String>>,
     ) -> Result<Self, serde_json::Error> {
+        let terms = ferrisscope_core::search::label_terms(
+            labels
+                .into_iter()
+                .flatten()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+        );
         let v = with_labels(with_uid(uid.to_owned(), projected), labels);
         let field = |key: &str| -> Option<Arc<str>> {
             v.get(key)
@@ -157,6 +165,7 @@ impl Row {
             json: RowJson::from_value(&v)?,
             namespace,
             name,
+            labels: Arc::from(terms),
         })
     }
 }
@@ -440,31 +449,123 @@ impl ResourceDrainer {
     }
 }
 
-/// Build a kube-rs watcher Config that matches the cluster's chosen
-/// strategy. Streaming uses `InitialListStrategy::StreamingList` (one watch
-/// stream, no paging — items arrive individually as the apiserver pushes
-/// them). Paged uses kube-rs's default 500-item page size: on the hot path
-/// (operator opens Pods on a typical cluster with ≤ a few hundred pods) the
-/// whole list comes back in one round trip, matching `kubectl get pods -A`
-/// wall-clock; kube-rs still drains the page through per-item `InitApply`
-/// events so rows render progressively from the in-memory buffer. Smaller
-/// page sizes were tried (50) but added 2-3 sequential round trips that
-/// were visible to the operator on small clusters and didn't help large
-/// ones (where streaming list, on 1.32+, is the right tool).
-fn watcher_config(strategy: ListStrategy) -> watcher::Config {
-    let mut cfg = watcher::Config::default();
-    if strategy == ListStrategy::Streaming {
-        cfg.initial_list_strategy = InitialListStrategy::StreamingList;
+/// Paged initial LIST, never `StreamingList`: the apiserver gzips LIST
+/// responses but not watch streams, so on a slow link paging moved pods ~2×
+/// faster (measured ~10 KB vs ~26 KB per pod). 500 items per page keeps a
+/// typical cluster to one round trip; [`adaptive_watcher`] shrinks pages when
+/// the link can't deliver one inside the apiserver's request timeout.
+fn watcher_config() -> watcher::Config {
+    watcher::Config::default()
+}
+
+/// Floor for [`shrunk_page_size`].
+const MIN_PAGE_SIZE: u32 = 50;
+
+/// Page size to retry a failed paged initial LIST with, or `None` to keep
+/// the current config. A page the link can't deliver inside the apiserver's
+/// 60 s request timeout fails identically on every retry, so a transport
+/// failure halves the page (API errors such as 403 / 410 are not size
+/// related and keep it).
+fn shrunk_page_size(cfg: &watcher::Config, err: &kube::Error) -> Option<u32> {
+    if cfg.initial_list_strategy != InitialListStrategy::ListWatch
+        || matches!(err, kube::Error::Api(_))
+    {
+        return None;
     }
-    cfg
+    let current = cfg.page_size?;
+    (current > MIN_PAGE_SIZE).then(|| (current / 2).max(MIN_PAGE_SIZE))
+}
+
+/// `watcher(api, cfg).default_backoff()` that restarts with a smaller page
+/// size when the initial LIST fails on transport (see [`shrunk_page_size`]).
+/// Errors are still yielded so callers log them.
+fn adaptive_watcher<K>(
+    api: Api<K>,
+    cfg: watcher::Config,
+) -> BoxStream<'static, watcher::Result<watcher::Event<K>>>
+where
+    K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug + Send + 'static,
+{
+    let inner = watcher(api.clone(), cfg.clone()).default_backoff().boxed();
+    futures::stream::unfold((api, cfg, inner), |(api, mut cfg, mut inner)| async move {
+        let item = inner.next().await?;
+        if let Err(watcher::Error::InitialListFailed(e)) = &item {
+            if let Some(size) = shrunk_page_size(&cfg, e) {
+                tracing::info!(
+                    from = ?cfg.page_size,
+                    to = size,
+                    "watcher: initial list failed, retrying with smaller pages"
+                );
+                cfg.page_size = Some(size);
+                inner = watcher(api.clone(), cfg.clone()).default_backoff().boxed();
+            }
+        }
+        Some((item, (api, cfg, inner)))
+    })
+    .boxed()
+}
+
+/// Items in the preview LIST — see [`preview_rows`].
+const PREVIEW_LIMIT: u32 = 100;
+
+/// Initial lists whose first page lands sooner than this never preview.
+const PREVIEW_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// A small one-shot LIST fired while a big initial list is still on its
+/// first (500-item) page, so the table paints within one small round trip
+/// instead of waiting for the whole page on a slow link.
+async fn preview_rows<S: KindSpec>(api: Api<S::K>) -> Vec<(String, Row)> {
+    tokio::time::sleep(PREVIEW_AFTER).await;
+    let params = kube::api::ListParams::default().limit(PREVIEW_LIMIT);
+    let list = match api.list(&params).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::debug!(error = %e, kind = S::meta().id, "watcher: preview list failed");
+            return Vec::new();
+        }
+    };
+    list.items
+        .into_iter()
+        .filter_map(|obj| {
+            let uid = obj.uid()?;
+            let row = Row::build(&uid, S::project(&obj), Some(obj.labels())).ok()?;
+            Some((uid, row))
+        })
+        .collect()
+}
+
+/// Seed the cache with preview rows the real list hasn't delivered yet.
+/// Preview rows never enter the init-seen set, so the `InitDone` reconcile
+/// drops any the real list doesn't confirm; after `InitDone` the preview is
+/// stale and ignored. Returns the number of rows applied.
+fn apply_preview(
+    rows: Vec<(String, Row)>,
+    cache: &Mutex<HashMap<String, RowJson>>,
+    dirty: &DirtyChannel,
+    init_done: &AtomicBool,
+) -> usize {
+    if init_done.load(Ordering::SeqCst) {
+        return 0;
+    }
+    let mut cache = cache.lock_recover();
+    let mut applied = 0;
+    for (uid, row) in rows {
+        if cache.contains_key(&uid) {
+            continue;
+        }
+        cache.insert(uid.clone(), row.json.clone());
+        dirty.record_upsert(uid, row);
+        applied += 1;
+    }
+    applied
 }
 
 /// Helm release secrets carry the whole chart (up to ~1 MiB each); the
 /// default 500-item page could buffer hundreds of MiB per LIST.
 const HELM_LIST_PAGE_SIZE: u32 = 25;
 
-fn helm_watcher_config(strategy: ListStrategy) -> watcher::Config {
-    let mut cfg = watcher_config(strategy);
+fn helm_watcher_config() -> watcher::Config {
+    let mut cfg = watcher_config();
     cfg.field_selector = Some(format!(
         "type={}",
         crate::kinds::helm_releases::HELM_SECRET_TYPE
@@ -520,15 +621,15 @@ impl ResourceWatcher {
     /// `NsScope::One(ns)` go through [`Self::start_with_api`] so the
     /// caller can construct an `Api::namespaced` against a `S::K` that
     /// is statically known to be namespaced.
-    pub fn start<S: KindSpec>(client: Client, strategy: ListStrategy) -> Self {
-        Self::start_with_api::<S>(Api::all(client), strategy)
+    pub fn start<S: KindSpec>(client: Client) -> Self {
+        Self::start_with_api::<S>(Api::all(client))
     }
 
     /// Typed watcher backed by a caller-built [`Api`]. Same machinery
     /// as [`Self::start`], parameterised over the API construction so a
     /// namespaced caller (whose `S::K` carries `NamespaceResourceScope`)
     /// can pass `Api::namespaced(client, ns)`.
-    pub fn start_with_api<S: KindSpec>(api: Api<S::K>, strategy: ListStrategy) -> Self {
+    pub fn start_with_api<S: KindSpec>(api: Api<S::K>) -> Self {
         let dirty = Arc::new(DirtyChannel::new());
         // Project on apply, store only the projected row. A typed reflector
         // store would keep full `Arc<S::K>` per object — on a 5000-pod
@@ -536,8 +637,9 @@ impl ResourceWatcher {
         // (the UI consumes the projected row, not the Pod struct).
         let cache: Arc<Mutex<HashMap<String, RowJson>>> = Arc::new(Mutex::new(HashMap::new()));
 
-        let cfg = watcher_config(strategy);
-        let stream = watcher(api, cfg).default_backoff();
+        let cfg = watcher_config();
+        let preview_api = api.clone();
+        let stream = adaptive_watcher(api, cfg);
 
         let init_done = Arc::new(AtomicBool::new(false));
         let init_done_task = init_done.clone();
@@ -553,7 +655,7 @@ impl ResourceWatcher {
             // `RUST_LOG=ferrisscope=info` (or `=debug` for the fine-
             // grained per-event lines).
             let started = std::time::Instant::now();
-            tracing::info!(kind = S::meta().id, ?strategy, "watcher: task starting");
+            tracing::info!(kind = S::meta().id, "watcher: task starting");
             tokio::pin!(stream);
             let mut applied = 0u64;
             let mut suppressed = 0u64;
@@ -566,7 +668,31 @@ impl ResourceWatcher {
             // state — so without this we'd carry ghost rows until the next
             // teardown.
             let mut init_seen: Option<HashSet<String>> = None;
-            while let Some(event) = stream.next().await {
+            // Dropped (cancelling its request) once the real list delivers.
+            let mut preview = Some(Box::pin(preview_rows::<S>(preview_api)));
+            loop {
+                let event = tokio::select! {
+                    rows = async {
+                        match preview.as_mut() {
+                            Some(p) => p.await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        preview = None;
+                        let n = apply_preview(rows, &cache_task, &dirty_task, &init_done_task);
+                        tracing::info!(
+                            kind = S::meta().id,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            rows = n,
+                            "watcher: preview applied"
+                        );
+                        continue;
+                    }
+                    event = stream.next() => match event {
+                        Some(event) => event,
+                        None => break,
+                    },
+                };
                 let (obj, is_init_apply) = match event {
                     Ok(watcher::Event::Apply(o)) => (o, false),
                     Ok(watcher::Event::InitApply(o)) => (o, true),
@@ -588,6 +714,7 @@ impl ResourceWatcher {
                         continue;
                     }
                     Ok(watcher::Event::InitDone) => {
+                        preview = None;
                         init_done_task.store(true, Ordering::SeqCst);
                         let reconciled =
                             reconcile_init_seen(&mut init_seen, &cache_task, &dirty_task);
@@ -608,6 +735,8 @@ impl ResourceWatcher {
                     }
                 };
                 let Some(uid) = obj.uid() else { continue };
+                // The real list is flowing; a preview would only duplicate it.
+                preview = None;
                 if is_init_apply {
                     if let Some(seen) = init_seen.as_mut() {
                         seen.insert(uid.clone());
@@ -701,7 +830,6 @@ impl ResourceWatcher {
         log_id: String,
         project: Arc<dyn Fn(&DynamicObject) -> Value + Send + Sync>,
         scope: NsScope,
-        strategy: ListStrategy,
     ) -> Self {
         let dirty = Arc::new(DirtyChannel::new());
         // `Api::all_with` for cluster-wide watches; `namespaced_with` for a
@@ -714,8 +842,8 @@ impl ResourceWatcher {
         };
         let cache: Arc<Mutex<HashMap<String, RowJson>>> = Arc::new(Mutex::new(HashMap::new()));
 
-        let cfg = watcher_config(strategy);
-        let stream = watcher(api, cfg).default_backoff();
+        let cfg = watcher_config();
+        let stream = adaptive_watcher(api, cfg);
 
         let init_done = Arc::new(AtomicBool::new(false));
         let init_done_task = init_done.clone();
@@ -727,7 +855,6 @@ impl ResourceWatcher {
             let started = std::time::Instant::now();
             tracing::info!(
                 kind = %log_id_task,
-                ?strategy,
                 "dynamic watcher: task starting"
             );
             tokio::pin!(stream);
@@ -866,7 +993,7 @@ impl ResourceWatcher {
     ///
     /// Bespoke rather than a `KindSpec`: many secrets map to one row, and the
     /// row lives inside the secret's `data.release` blob.
-    pub fn start_helm_releases(client: Client, scope: NsScope, strategy: ListStrategy) -> Self {
+    pub fn start_helm_releases(client: Client, scope: NsScope) -> Self {
         use crate::kinds::helm_releases::{
             decode_release_summary, project_row, synthetic_uid, LatestChange, ReleaseIndex,
         };
@@ -879,7 +1006,7 @@ impl ResourceWatcher {
             None => Api::all(client),
         };
         let store: Arc<Mutex<ReleaseIndex<Value>>> = Arc::new(Mutex::new(ReleaseIndex::default()));
-        let stream = watcher(api, helm_watcher_config(strategy)).default_backoff();
+        let stream = adaptive_watcher(api, helm_watcher_config());
 
         let init_done = Arc::new(AtomicBool::new(false));
         let init_done_task = init_done.clone();
@@ -898,7 +1025,7 @@ impl ResourceWatcher {
 
         let task = tokio::spawn(async move {
             let started = std::time::Instant::now();
-            tracing::info!(kind = "helm_releases", ?strategy, "helm watcher: starting");
+            tracing::info!(kind = "helm_releases", "helm watcher: starting");
             tokio::pin!(stream);
             let mut applied = 0u64;
             let mut unchanged = 0u64;
@@ -1031,7 +1158,7 @@ impl ResourceWatcher {
     /// A second watch (rather than sharing the releases watcher) because
     /// there's no reflector-sharing path; it only runs while the catalog is
     /// open.
-    pub fn start_helm_charts(client: Client, scope: NsScope, strategy: ListStrategy) -> Self {
+    pub fn start_helm_charts(client: Client, scope: NsScope) -> Self {
         use crate::fetch::HELM_CLUSTER_SOURCE;
         use crate::helm::{search_repo_cached, HelmRepoChart};
         use crate::kinds::helm_charts::{project_cluster_row, project_repo_row, synthetic_uid};
@@ -1079,7 +1206,7 @@ impl ResourceWatcher {
         };
         let cluster: Arc<Mutex<ClusterCharts>> = Arc::new(Mutex::new(ClusterCharts::default()));
         let repo_charts: Arc<Mutex<Arc<Vec<HelmRepoChart>>>> = Arc::new(Mutex::new(Arc::default()));
-        let stream = watcher(api, helm_watcher_config(strategy)).default_backoff();
+        let stream = adaptive_watcher(api, helm_watcher_config());
 
         let init_done = Arc::new(AtomicBool::new(false));
         let init_done_task = init_done.clone();
@@ -1091,11 +1218,7 @@ impl ResourceWatcher {
         // aborts it (and kills a running `helm search`).
         let task = tokio::spawn(async move {
             let started = std::time::Instant::now();
-            tracing::info!(
-                kind = "helm_charts",
-                ?strategy,
-                "helm-chart watcher: starting"
-            );
+            tracing::info!(kind = "helm_charts", "helm-chart watcher: starting");
 
             let load_repos = async {
                 let entries = search_repo_cached().await;
@@ -1404,6 +1527,78 @@ mod tests {
     /// `name` off a drained row — the field the coalescing tests assert on.
     fn name_of(r: &Row) -> &str {
         r.name.as_deref().unwrap_or("")
+    }
+
+    #[test]
+    fn preview_fills_gaps_only_until_init_done() {
+        let cache = Mutex::new(HashMap::from([("real".to_owned(), row("fresh").json)]));
+        let chan = DirtyChannel::new();
+        let init_done = AtomicBool::new(false);
+        let preview = vec![
+            ("real".to_owned(), row("stale")),
+            ("new".to_owned(), row("preview")),
+        ];
+        assert_eq!(apply_preview(preview, &cache, &chan, &init_done), 1);
+        let c = cache.lock().unwrap();
+        assert_eq!(c["real"], row("fresh").json, "the real list's row wins");
+        assert!(c.contains_key("new"));
+        drop(c);
+        let batch = chan.drain();
+        assert_eq!(batch.upserts.len(), 1);
+        assert_eq!(name_of(&batch.upserts["new"]), "preview");
+
+        init_done.store(true, Ordering::SeqCst);
+        let late = vec![("late".to_owned(), row("late"))];
+        assert_eq!(apply_preview(late, &cache, &chan, &init_done), 0);
+        assert!(!cache.lock().unwrap().contains_key("late"));
+    }
+
+    #[test]
+    fn unconfirmed_preview_rows_are_dropped_at_init_done() {
+        // A pod deleted between the preview and the real list: it never enters
+        // init_seen, so the reconcile removes it.
+        let cache = Mutex::new(HashMap::new());
+        let chan = DirtyChannel::new();
+        let preview = vec![
+            ("gone".to_owned(), row("gone")),
+            ("kept".to_owned(), row("kept")),
+        ];
+        apply_preview(preview, &cache, &chan, &AtomicBool::new(false));
+        chan.drain();
+        let mut seen = Some(HashSet::from(["kept".to_owned()]));
+        assert_eq!(reconcile_init_seen(&mut seen, &cache, &chan), 1);
+        assert!(chan.drain().deletes.contains("gone"));
+    }
+
+    #[test]
+    fn transport_failures_halve_paged_lists_down_to_the_floor() {
+        let transport = || kube::Error::Service("error reading a body from connection".into());
+        let mut cfg = watcher_config();
+        let mut sizes = vec![cfg.page_size.unwrap()];
+        while let Some(n) = shrunk_page_size(&cfg, &transport()) {
+            cfg.page_size = Some(n);
+            sizes.push(n);
+        }
+        assert_eq!(sizes, [500, 250, 125, 62, 50]);
+    }
+
+    #[test]
+    fn api_errors_and_streaming_lists_keep_their_config() {
+        let transport = kube::Error::Service("reset".into());
+        let forbidden = kube::Error::Api(Box::new(kube::core::Status {
+            code: 403,
+            ..Default::default()
+        }));
+        assert_eq!(shrunk_page_size(&watcher_config(), &forbidden), None);
+        let mut streaming = watcher_config();
+        streaming.initial_list_strategy = InitialListStrategy::StreamingList;
+        assert_eq!(shrunk_page_size(&streaming, &transport), None);
+        let helm = helm_watcher_config();
+        assert_eq!(
+            shrunk_page_size(&helm, &transport),
+            None,
+            "already below the floor"
+        );
     }
 
     #[test]

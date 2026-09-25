@@ -8,11 +8,11 @@
 //! knows when to fire.
 //!
 //! Strategy mirrors opencode's approach:
-//! - Fetch once at app startup; cache to disk under the FerrisScope
-//!   config dir at `agent/models.json`.
+//! - Cache to disk under the FerrisScope config dir at
+//!   `agent/models_dev.json`.
 //! - On startup, read the on-disk cache immediately (so the catalogue
-//!   is usable straight away even offline), then kick off a background
-//!   refresh that runs the fetch and overwrites the cache on success.
+//!   is usable straight away even offline); refetch only when the cache
+//!   is older than [`REFRESH_TTL`] (the payload is ~5 MB, ~0.5 MB gzipped).
 //! - Lookup is `(ProviderKind, model_id) -> Option<ModelLimits>`,
 //!   strictly. Callers fall back to `meta::for_kind(kind).
 //!   default_context_window` on `None`.
@@ -32,6 +32,7 @@ use tokio::sync::RwLock;
 
 const CATALOGUE_URL: &str = "https://models.dev/api.json";
 const CACHE_FILENAME: &str = "models_dev.json";
+pub const REFRESH_TTL: std::time::Duration = std::time::Duration::from_hours(24);
 
 #[derive(Debug, Clone, Copy)]
 pub struct ModelLimits {
@@ -264,6 +265,26 @@ pub async fn load_from_disk(cache_root: PathBuf) {
     g.models_by_provider = next_models;
     g.fetched_unix_ms = chrono::Utc::now().timestamp_millis();
     tracing::debug!(count = g.by_id.len(), "models.dev: loaded from disk cache");
+}
+
+fn cache_is_fresh(path: &std::path::Path, now: std::time::SystemTime) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| now.duration_since(at).ok())
+        .is_some_and(|age| age < REFRESH_TTL)
+}
+
+/// [`refresh`] unless the on-disk cache is younger than [`REFRESH_TTL`].
+pub async fn refresh_if_stale(cache_root: PathBuf) {
+    if cache_is_fresh(
+        &cache_root.join(CACHE_FILENAME),
+        std::time::SystemTime::now(),
+    ) {
+        tracing::debug!("models.dev: cache fresh, skipping refresh");
+        return;
+    }
+    refresh(cache_root).await;
 }
 
 /// Refresh the catalogue from the network. Best-effort: errors log and
@@ -517,6 +538,22 @@ fn parse_limits(j: Option<&ModelLimitJson>) -> Option<ModelLimits> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cache_freshness_follows_file_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = std::time::SystemTime::now();
+        assert!(!cache_is_fresh(&path, now), "missing cache is stale");
+
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(cache_is_fresh(&path, now));
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(now - REFRESH_TTL - std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(!cache_is_fresh(&path, now));
+    }
+
     use super::*;
 
     #[test]

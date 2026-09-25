@@ -7,11 +7,10 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { WebLinksAddon } from "@xterm/addon-web-links";
-import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
-import "@xterm/xterm/css/xterm.css";
+import type { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
+import type { SearchAddon, ISearchOptions } from "@xterm/addon-search";
+import { loadXterm } from "../lib/xterm";
 // js-yaml 5 ships flat named exports with no default; namespace import keeps
 // the `jsYaml.loadAll` call site intact.
 import * as jsYaml from "js-yaml";
@@ -824,6 +823,7 @@ function DockTerminal({
             /* older WebKitGTK without the FontFaceSet API — proceed */
           }
         }
+        const { Terminal, FitAddon, WebLinksAddon, SearchAddon } = await loadXterm();
         // Layout settle so host has its real size before xterm measures.
         await new Promise<void>((r) => requestAnimationFrame(() => r()));
         await new Promise<void>((r) => requestAnimationFrame(() => r()));

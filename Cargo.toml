@@ -77,6 +77,8 @@ tower-http = { version = "0.7", features = [
 # kube hasn't picked up would fail to typecheck. Bump in lockstep with kube.
 hyper = "1"
 hyper-util = { version = "=0.1.20", features = ["client-legacy", "http2", "tokio"] }
+# Same version kube-client uses; we only add the `http2` ALPN it leaves off.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12", "logging", "native-tokio"] }
 hyper-timeout = "=0.5.2"
 
 # Serde
@@ -128,7 +130,7 @@ base64 = "0.23"
 # transitive hyper-rustls already brings in `ring`, and we install it as the
 # process-wide default in `main.rs`. Having only one provider in the binary
 # also keeps binary size sensible and avoids the aws-lc-rs C/C++ build.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "json", "gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 eventsource-stream = "0.2"
 async-trait = "0.1"
