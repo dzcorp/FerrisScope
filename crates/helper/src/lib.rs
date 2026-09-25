@@ -268,9 +268,10 @@ async fn listen(endpoint: &str, state: Arc<HelperState>) -> Result<()> {
 /// idempotent, so the crash path (connection dropped → `Continue`) cleans up
 /// the same way.
 ///
-/// Windows only: the named-pipe name is an unguessable per-spawn UUID and the SD
-/// + token gate access, so unlike the unix socket we don't loop-accept — a
-/// failed handshake (`Rejected`) just exits, same as a closed connection.
+/// Windows only: the named-pipe name is an unguessable per-spawn UUID and the
+/// security descriptor and token gate access, so unlike the unix socket we don't
+/// loop-accept — a failed handshake (`Rejected`) just exits, same as a closed
+/// connection.
 #[cfg(windows)]
 async fn serve_until_disconnect<S>(
     stream: S,

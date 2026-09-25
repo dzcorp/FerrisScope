@@ -161,6 +161,7 @@ fn host_entry(local_ip: Ipv4Addr, svc_name: &str, namespace: &str) -> HostEntry 
 /// ports bind in-process. Windows imposes no low-port restriction (and has no
 /// fd passing), so nothing needs the helper there.
 #[must_use]
+#[cfg(any(unix, test))]
 fn needs_privileged_bind(port: u16) -> bool {
     cfg!(unix) && (1..1024).contains(&port)
 }
