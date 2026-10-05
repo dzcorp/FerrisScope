@@ -3,6 +3,8 @@
 use std::sync::Arc;
 
 use ferrisscope_agent::provider::anthropic::AnthropicProvider;
+use ferrisscope_agent::provider::gateway::OpencodeGatewayProvider;
+use ferrisscope_agent::provider::gemini::GeminiProvider;
 use ferrisscope_agent::provider::meta::{self, ProviderFlavor};
 use ferrisscope_agent::provider::openai_codex::{CredentialSink, OpenAICodexProvider};
 use ferrisscope_agent::provider::openai_compat::OpenAICompatibleProvider;
@@ -10,18 +12,18 @@ use ferrisscope_agent::session::{SessionError, SessionEvent, SessionStore};
 use ferrisscope_agent::types::{ChatMessage, MessageRole, ToolSchema};
 use ferrisscope_agent::{
     classify_tool, AgentSettings, ChatProvider, CompletionEvent, CompletionRequest, Credential,
-    FinishReason, ProviderError, ProviderKind, ReasoningEffort, ToolCall,
+    FinishReason, ProviderError, ProviderKind, ToolCall,
 };
+use tauri::Manager as _;
 use tokio::sync::Mutex;
 
 use crate::state::AppState;
 
 use super::{
-    assemble_system_prompt, build_cluster_context_block, build_view_context_block,
-    classify_usage_limit, context_limits_for, execute_tool_call, is_context_overflow_error,
-    is_transient_error, maybe_run_compaction, maybe_spill, redact_secrets,
-    repair_orphan_tool_calls, run_compaction_internal, tools_to_schemas, transient_retry_delay_ms,
-    ChatEvent, ChatRuntime, PersistedSettings,
+    classify_usage_limit, compose_system_prompt, context_limits_for, execute_tool_call,
+    is_context_overflow_error, is_transient_error, load_persisted, maybe_run_compaction,
+    maybe_spill, redact_secrets, repair_orphan_tool_calls, run_compaction_internal,
+    tools_to_schemas, transient_retry_delay_ms, ChatEvent, ChatRuntime,
 };
 
 /// Hard cap on tool-call rounds within a single user turn. Defends against
@@ -40,17 +42,13 @@ const MAX_TOOL_ROUNDS: u32 = 500;
 ///
 /// The synthetic message uses `name: Some("auto_continue")` so future
 /// reload heuristics (auto-title, etc.) can recognise it.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn autocontinue_if_idle(
     runtime: &Arc<Mutex<ChatRuntime>>,
     store: &SessionStore,
     provider: &Arc<dyn ChatProvider>,
     cluster_id: &str,
     session_id: &str,
-    app_state: &AppState,
-    persisted: &PersistedSettings,
-    cred: &Credential,
-    kind: ProviderKind,
+    ctx: TurnContext,
 ) {
     // Eligibility check + push happen under one lock so a concurrent
     // `chat_send_message` either lands first (and our spawn no-ops) or
@@ -62,11 +60,12 @@ pub(crate) async fn autocontinue_if_idle(
         tool_call_id: None,
         name: Some(AUTO_CONTINUE_NAME.to_string()),
         reasoning_content: None,
+        thinking_blocks: vec![],
         images: vec![],
     };
     let should_spawn = {
         let mut g = runtime.lock().await;
-        if g.cancel.is_some() {
+        if !g.turn.claim() {
             return;
         }
         // Last message must be Assistant (otherwise either the chat is
@@ -81,7 +80,10 @@ pub(crate) async fn autocontinue_if_idle(
                 g.messages.push(user_message.clone());
                 true
             }
-            _ => false,
+            _ => {
+                g.turn.release();
+                false
+            }
         }
     };
     if !should_spawn {
@@ -99,46 +101,50 @@ pub(crate) async fn autocontinue_if_idle(
         )
         .await;
 
-    // System prompt rebuild — the active cluster could have changed since
-    // the last turn (agent may have called `fs_configuration_use_context`
-    // mid-session). View context reuses the last snapshot from the
-    // operator's most recent send; autocontinue is synthetic so there's
-    // nothing fresher to use.
-    let (cluster_ctx, view_snapshot) = {
-        let rt = runtime.lock().await;
-        (rt.cluster.clone(), rt.last_view_context.clone())
-    };
-    let cluster_block = build_cluster_context_block(&cluster_ctx, app_state).await;
-    let active_cluster = cluster_ctx.active().await;
-    let view_block =
-        build_view_context_block(view_snapshot.as_ref(), &active_cluster, app_state).await;
-    let system_prompt = assemble_system_prompt(
-        &cluster_block,
-        &view_block,
-        persisted.settings.system_prompt_override.as_deref(),
-    );
-    let is_oauth = matches!(cred, Credential::OAuth { .. });
-    let provider_options_default = resolve_provider_options(kind, &persisted.settings, is_oauth);
+    spawn_turn_loop(runtime, store, provider, ctx, cluster_id, session_id).await;
+}
 
-    let runtime_clone = runtime.clone();
-    let store_clone = store.clone();
-    let cluster_id_owned = cluster_id.to_string();
-    let session_id_owned = session_id.to_string();
-    let provider_clone = provider.clone();
-    let join = tokio::spawn(async move {
-        run_turn_loop(
-            runtime_clone,
-            store_clone,
-            provider_clone,
-            system_prompt,
-            cluster_id_owned,
-            session_id_owned,
-            provider_options_default,
-        )
-        .await;
-    });
-    let abort = join.abort_handle();
-    runtime.lock().await.cancel = Some(abort);
+/// What the turn loop needs, beyond the chat itself, to rebuild its request
+/// inputs every round: the app handle (for `AppState`) and the credential's
+/// provider kind and mode.
+pub(crate) struct TurnContext {
+    pub(crate) app: tauri::AppHandle,
+    pub(crate) kind: ProviderKind,
+    pub(crate) is_oauth: bool,
+}
+
+impl TurnContext {
+    pub(crate) fn new(app: tauri::AppHandle, kind: ProviderKind, cred: &Credential) -> Self {
+        Self {
+            app,
+            kind,
+            is_oauth: matches!(cred, Credential::OAuth { .. }),
+        }
+    }
+}
+
+/// Start the turn loop and record its abort handle under one lock hold. The
+/// loop's first act is to take that lock, so it can't finish (and clear the
+/// gate) before the handle is stored — a stale handle would otherwise leave
+/// every later send queued behind a loop that no longer exists.
+pub(crate) async fn spawn_turn_loop(
+    runtime: &Arc<Mutex<ChatRuntime>>,
+    store: &SessionStore,
+    provider: &Arc<dyn ChatProvider>,
+    ctx: TurnContext,
+    cluster_id: &str,
+    session_id: &str,
+) {
+    let mut g = runtime.lock().await;
+    let join = tokio::spawn(run_turn_loop(
+        runtime.clone(),
+        store.clone(),
+        provider.clone(),
+        ctx,
+        cluster_id.to_string(),
+        session_id.to_string(),
+    ));
+    g.turn.start(join.abort_handle());
 }
 
 /// Synthetic user-message body injected after compaction so the agent
@@ -167,6 +173,16 @@ pub(crate) fn build_provider(
     session_id: Option<String>,
     on_refresh: Option<CredentialSink>,
 ) -> Result<Box<dyn ChatProvider>, String> {
+    // The OpenCode gateways serve each model on its native wire; one provider
+    // routes per model and carries the session headers.
+    if kind.is_opencode_gateway() {
+        return Ok(Box::new(OpencodeGatewayProvider::new(
+            kind,
+            cred,
+            base_url_override,
+            session_id,
+        )));
+    }
     let m = meta::for_kind(kind);
     let oauth_mode = matches!(cred, Credential::OAuth { .. });
     let flavor = match (m.flavor, kind, oauth_mode) {
@@ -182,12 +198,16 @@ pub(crate) fn build_provider(
             base_url_override,
             session_id.clone(),
         )),
-        ProviderFlavor::AnthropicMessages => {
-            Box::new(AnthropicProvider::new(cred, base_url_override, kind))
-        }
+        ProviderFlavor::AnthropicMessages => Box::new(
+            AnthropicProvider::new(cred, base_url_override, kind)
+                .with_session(session_id.as_deref()),
+        ),
         ProviderFlavor::OpenAiResponses => {
             Box::new(OpenAICodexProvider::new(cred, session_id, on_refresh))
         }
+        ProviderFlavor::GeminiGenerate => Box::new(
+            GeminiProvider::new(cred, base_url_override).with_session(session_id.as_deref()),
+        ),
     };
     Ok(provider)
 }
@@ -196,121 +216,77 @@ pub(crate) fn session_err_to_string(e: SessionError) -> String {
     e.to_string()
 }
 
-/// Map the universal `ReasoningSettings` onto `kind`'s native request
-/// shape. Each provider takes whichever knobs it understands and
-/// silently drops the rest. Returning `None` when the operator hasn't
-/// asked for anything keeps the request body free of empty objects
-/// that some servers reject.
+/// Request fields for the operator's reasoning choice for `kind`, as applied
+/// to `model`: the provider's own effort names, token budget where it takes
+/// one, and the right wire shape (see `ferrisscope_agent::provider::reasoning`).
+/// `None` when nothing was chosen or the model can't act on it, which keeps the
+/// request body free of empty objects some servers reject.
 ///
-/// `is_oauth_codex` distinguishes OpenAI's two paths: API-key mode
-/// hits Chat Completions which accepts `reasoning_effort`, while OAuth
-/// mode hits the Codex Responses endpoint which rejects it (400
-/// "Unsupported parameter") and only takes `reasoning: { effort }`.
+/// `is_oauth_codex` distinguishes OpenAI's two paths: API-key mode hits Chat
+/// Completions (`reasoning_effort`), OAuth mode the Codex Responses endpoint,
+/// which rejects that and only takes `reasoning: { effort }`.
 pub(crate) fn resolve_provider_options(
     kind: ProviderKind,
+    model: &str,
     settings: &AgentSettings,
     is_oauth_codex: bool,
 ) -> Option<serde_json::Value> {
-    let r = &settings.reasoning;
-    if !r.is_active() {
-        return None;
+    ferrisscope_agent::provider::reasoning::lower(
+        kind,
+        model,
+        &settings.effective_reasoning(kind),
+        is_oauth_codex,
+    )
+}
+
+/// Runs [`run_turn_rounds`] and tells the UI when a turn is in progress, which
+/// covers the stretches no assistant bubble is open (tools running, an
+/// approval pending, a retry backoff) so the Stop button stays available. An
+/// aborted turn never reaches the closing report; `chat_cancel_streaming` and
+/// `close_chat_runtime` send it themselves.
+pub(crate) async fn run_turn_loop(
+    runtime: Arc<Mutex<ChatRuntime>>,
+    store: SessionStore,
+    provider: Arc<dyn ChatProvider>,
+    ctx: TurnContext,
+    cluster_id: String,
+    session_id: String,
+) {
+    let _ = runtime
+        .lock()
+        .await
+        .channel
+        .send(ChatEvent::TurnState { running: true });
+    run_turn_rounds(
+        runtime.clone(),
+        store,
+        provider,
+        ctx,
+        cluster_id,
+        session_id,
+    )
+    .await;
+    // A send that landed as the loop wound down may already own the next
+    // turn; that one reports its own end.
+    let g = runtime.lock().await;
+    if !g.turn.busy() {
+        let _ = g.channel.send(ChatEvent::TurnState { running: false });
     }
-    let effort_label = r.effort.map(|e| match e {
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-    });
-    let mut out = serde_json::Map::new();
-    match kind {
-        // Anthropic Messages: `thinking: { type, budget_tokens }`.
-        // Effort is ignored — Anthropic doesn't have an `effort` field;
-        // when only `effort` is set we use the Sonnet-recommended
-        // 16k mid budget, scaling with the effort knob.
-        // Anthropic Messages: `thinking: { type, budget_tokens }`.
-        // Effort is ignored — Anthropic doesn't have an `effort` field;
-        // when only `effort` is set we use the Sonnet-recommended
-        // 16k mid budget, scaling with the effort knob. Kimi For Coding
-        // shares the wire (verified: accepts `budget_tokens`, thinking
-        // is always-on there regardless).
-        ProviderKind::Anthropic | ProviderKind::CustomAnthropic | ProviderKind::KimiCoding => {
-            let budget = r.budget_tokens.or_else(|| {
-                effort_label.map(|e| match e {
-                    "low" => 4096,
-                    "medium" => 16384,
-                    "high" => 32768,
-                    _ => 16384,
-                })
-            });
-            if let Some(b) = budget {
-                out.insert(
-                    "thinking".to_string(),
-                    serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": b,
-                    }),
-                );
-            }
-        }
-        // OpenAI: shape depends on which endpoint we'll hit.
-        // - Chat Completions (API key): `reasoning_effort` top-level.
-        // - Codex Responses (OAuth): `reasoning: { effort }` only —
-        //   unknown top-level params 400 there.
-        ProviderKind::OpenAI => {
-            if let Some(label) = effort_label {
-                if is_oauth_codex {
-                    out.insert(
-                        "reasoning".to_string(),
-                        serde_json::json!({ "effort": label }),
-                    );
-                } else {
-                    out.insert("reasoning_effort".to_string(), serde_json::json!(label));
-                }
-            }
-        }
-        // OpenRouter exposes a unified `reasoning` field that takes
-        // both effort and max_tokens — it forwards to whichever
-        // upstream provider the model maps to.
-        ProviderKind::OpenRouter => {
-            let mut node = serde_json::Map::new();
-            if let Some(label) = effort_label {
-                node.insert("effort".to_string(), serde_json::json!(label));
-            }
-            if let Some(b) = r.budget_tokens {
-                node.insert("max_tokens".to_string(), serde_json::json!(b));
-            }
-            if !node.is_empty() {
-                out.insert("reasoning".to_string(), serde_json::Value::Object(node));
-            }
-        }
-        // DeepSeek r1 / reasoner models accept `reasoning_effort` as a
-        // top-level OpenAI-compat extension. Other OpenAI-compat
-        // providers (Groq, Mistral, Together, Z.AI, MiniMax, Ollama,
-        // OpenCode Zen) don't have a public reasoning-control standard;
-        // we still emit `reasoning_effort` because OpenAI-compat servers
-        // typically tolerate unknown fields. Non-reasoning models
-        // ignore it. OpenCode Zen specifically proxies to the underlying
-        // vendor so this passes through to the appropriate native field
-        // for the selected model.
-        ProviderKind::Deepseek
-        | ProviderKind::Groq
-        | ProviderKind::Mistral
-        | ProviderKind::Together
-        | ProviderKind::Zai
-        | ProviderKind::Minimax
-        | ProviderKind::Moonshot
-        | ProviderKind::Ollama
-        | ProviderKind::OpencodeZen
-        | ProviderKind::CustomOpenAi => {
-            if let Some(label) = effort_label {
-                out.insert("reasoning_effort".to_string(), serde_json::json!(label));
-            }
-        }
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Object(out))
-    }
+}
+
+/// Provider options for one round: the chat's own override if it has one,
+/// otherwise the operator's reasoning choice lowered for `model` — the model
+/// the chat is on at this round, since it can be switched mid-turn.
+fn options_for_round(
+    chat_override: Option<&serde_json::Value>,
+    kind: ProviderKind,
+    model: &str,
+    settings: &AgentSettings,
+    is_oauth: bool,
+) -> Option<serde_json::Value> {
+    chat_override
+        .cloned()
+        .or_else(|| resolve_provider_options(kind, model, settings, is_oauth))
 }
 
 /// Multi-turn agent loop. Invokes the provider, streams the assistant
@@ -321,14 +297,13 @@ pub(crate) fn resolve_provider_options(
 /// them rather than aborting the in-flight turn) — if so, the round
 /// counter resets and we run another sub-turn so the model can address
 /// the new question.
-pub(crate) async fn run_turn_loop(
+async fn run_turn_rounds(
     runtime: Arc<Mutex<ChatRuntime>>,
     store: SessionStore,
     provider: Arc<dyn ChatProvider>,
-    system_prompt: String,
+    ctx: TurnContext,
     cluster_id: String,
     session_id: String,
-    provider_options_default: Option<serde_json::Value>,
 ) {
     let mut round: u32 = 0;
     // Independent cap for context-overflow recoveries. We don't burn a
@@ -349,8 +324,9 @@ pub(crate) async fn run_turn_loop(
         if round >= MAX_TOOL_ROUNDS {
             // Round cap hit. Atomically clear cancel under the same lock
             // we'd use to claim a queued user message, then notify the UI.
-            runtime.lock().await.cancel = None;
-            let _ = runtime.lock().await.channel.send(ChatEvent::Error {
+            let mut g = runtime.lock().await;
+            g.turn.finish();
+            let _ = g.channel.send(ChatEvent::Error {
                 message: format!("tool-call round limit reached ({MAX_TOOL_ROUNDS})"),
             });
             return;
@@ -365,7 +341,7 @@ pub(crate) async fn run_turn_loop(
         // missing results with a synthetic "interrupted" tool message
         // so the transcript validates again. Persist the synthetic
         // entries so reload sees the same view.
-        repair_orphan_tool_calls(&runtime, &store, &cluster_id, &session_id).await;
+        repair_orphan_tool_calls(&runtime).await;
 
         // Auto-compaction: if the last Usage event landed us above the
         // model's usable window, summarise the head of the transcript
@@ -373,6 +349,9 @@ pub(crate) async fn run_turn_loop(
         // provider call; we mark the chat as in-flight to prevent
         // re-trigger on the round that consumes the summary.
         maybe_run_compaction(&runtime, &store, &provider, &cluster_id, &session_id).await;
+        // Read per round: a reasoning or prompt change made in Settings
+        // mid-turn applies from the next provider call.
+        let settings = load_persisted().await.settings;
         // Snapshot the transcript and tool schemas under the mutex; release
         // before any awaiting on network/MCP IO.
         let (
@@ -384,6 +363,8 @@ pub(crate) async fn run_turn_loop(
             temperature,
             max_tokens,
             provider_options,
+            cluster_ctx,
+            view_snapshot,
         ) = {
             let g = runtime.lock().await;
             let mut schemas: Vec<ToolSchema> = Vec::new();
@@ -395,12 +376,16 @@ pub(crate) async fn run_turn_loop(
             // native tools makes collisions practically impossible, but
             // duplicate-name behaviour is undefined for the LLM either way).
             schemas.extend(g.native.schemas());
-            // Per-chat override wins; otherwise inherit the
-            // settings-derived default the caller computed.
-            let opts = g
-                .provider_options
-                .clone()
-                .or_else(|| provider_options_default.clone());
+            // Per-chat override wins; otherwise the operator's reasoning
+            // choice, lowered for the model the chat is on *now* (it can be
+            // switched mid-turn).
+            let opts = options_for_round(
+                g.provider_options.as_ref(),
+                ctx.kind,
+                &g.model,
+                &settings,
+                ctx.is_oauth,
+            );
             (
                 // Fold any trailing run of consecutive User messages
                 // into one synthetic prompt. Operator-queued follow-ups
@@ -427,11 +412,20 @@ pub(crate) async fn run_turn_loop(
                 g.temperature,
                 g.max_tokens,
                 opts,
+                g.cluster.clone(),
+                g.last_view_context.clone(),
             )
         };
+        let system_prompt = compose_system_prompt(
+            &cluster_ctx,
+            view_snapshot.as_ref(),
+            &ctx.app.state::<AppState>(),
+            settings.system_prompt_override.as_deref(),
+        )
+        .await;
 
-        // Build the wire-shape message list. The system prompt is freshly
-        // composed each round so a mid-session `fs_configuration_use_context`
+        // Build the wire-shape message list. The system prompt is composed
+        // fresh each round so a mid-session `fs_configuration_use_context`
         // gets reflected immediately. We send the *full* transcript and let
         // token-based pressure valves manage capacity:
         //
@@ -450,11 +444,12 @@ pub(crate) async fn run_turn_loop(
         let mut full_messages = Vec::with_capacity(messages_so_far.len() + 1);
         full_messages.push(ChatMessage {
             role: MessageRole::System,
-            content: system_prompt.clone(),
+            content: system_prompt,
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
             reasoning_content: None,
+            thinking_blocks: vec![],
             images: vec![],
         });
         full_messages.extend(messages_so_far);
@@ -477,7 +472,7 @@ pub(crate) async fn run_turn_loop(
                 tool_calls,
             } => (assistant_msg, finish_reason, tool_calls),
             ProviderRoundOutcome::Stopped => {
-                runtime.lock().await.cancel = None;
+                runtime.lock().await.turn.finish();
                 return;
             }
             ProviderRoundOutcome::RetryAfterCompaction { original_error } => {
@@ -498,6 +493,7 @@ pub(crate) async fn run_turn_loop(
                         tool_call_id: None,
                         name: None,
                         reasoning_content: None,
+                        thinking_blocks: vec![],
                         images: vec![],
                     };
                     let now = chrono::Utc::now().timestamp_millis();
@@ -514,7 +510,7 @@ pub(crate) async fn run_turn_loop(
                     {
                         let mut g = runtime.lock().await;
                         g.messages.push(assistant_msg);
-                        g.cancel = None;
+                        g.turn.finish();
                     }
                     let _ = runtime
                         .lock()
@@ -564,6 +560,7 @@ pub(crate) async fn run_turn_loop(
                         tool_call_id: None,
                         name: None,
                         reasoning_content: None,
+                        thinking_blocks: vec![],
                         images: vec![],
                     };
                     let now = chrono::Utc::now().timestamp_millis();
@@ -591,7 +588,7 @@ pub(crate) async fn run_turn_loop(
                     {
                         let mut g = runtime.lock().await;
                         g.messages.push(assistant_msg);
-                        g.cancel = None;
+                        g.turn.finish();
                         let _ = g.channel.send(ChatEvent::AssistantStart {
                             message_id: synthetic_id.clone(),
                         });
@@ -622,7 +619,7 @@ pub(crate) async fn run_turn_loop(
                 // also clears the frontend's streaming state — no Error
                 // event here or the message would double-render. All
                 // that's left is ending the turn without retrying.
-                runtime.lock().await.cancel = None;
+                runtime.lock().await.turn.finish();
                 return;
             }
             ProviderRoundOutcome::TransientFailure {
@@ -646,6 +643,7 @@ pub(crate) async fn run_turn_loop(
                         tool_call_id: None,
                         name: None,
                         reasoning_content: None,
+                        thinking_blocks: vec![],
                         images: vec![],
                     };
                     let now = chrono::Utc::now().timestamp_millis();
@@ -662,7 +660,7 @@ pub(crate) async fn run_turn_loop(
                     {
                         let mut g = runtime.lock().await;
                         g.messages.push(assistant_msg);
-                        g.cancel = None;
+                        g.turn.finish();
                     }
                     let _ = runtime
                         .lock()
@@ -739,7 +737,7 @@ pub(crate) async fn run_turn_loop(
                     true
                 } else {
                     g.messages.push(assistant_msg);
-                    g.cancel = None;
+                    g.turn.finish();
                     false
                 }
             };
@@ -816,6 +814,7 @@ pub(crate) async fn run_turn_loop(
                 tool_call_id: Some(tc.id.clone()),
                 name: Some(tc.name.clone()),
                 reasoning_content: None,
+                thinking_blocks: vec![],
                 images: vec![],
             })
             .collect();
@@ -926,6 +925,7 @@ fn merge_trailing_user_run(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
         tool_call_id: None,
         name: None,
         reasoning_content: None,
+        thinking_blocks: vec![],
         images: vec![],
     });
     messages
@@ -1027,48 +1027,43 @@ async fn run_provider_round(
     })
     .await;
 
-    // Streaming sink: forwards events synchronously through the channel and
-    // accumulates text for persistence. try_lock keeps a misbehaving
-    // consumer from stalling the stream; on contention the event drops
-    // (the persisted assistant message is the source of truth either way).
-    let runtime_for_sink = runtime.clone();
-    // std::sync::Mutex (NOT tokio::sync::Mutex) — the sink is sync, no
-    // .await while holding, and we MUST NOT drop bytes on contention.
-    // The previous tokio try_lock could silently lose characters when
-    // the lock looked contended, leaving the persisted assistant
-    // message with broken markdown (`[label](url)` mangled to
-    // `[label]url)` on a missing `(` byte). std::Mutex::lock blocks
-    // for at most a few µs here.
+    // Streaming sink: forwards each event straight to the chat's channel and
+    // accumulates text for persistence. The sink holds its own clone of the
+    // channel rather than taking the runtime lock: a `try_lock` that lost to
+    // any other command would drop the delta and leave the bubble with
+    // missing characters (a lost `(` breaks every `[label](url)` link).
+    // `std::sync::Mutex` for the text — the sink is sync and never awaits
+    // while holding it.
+    let channel = runtime.lock().await.channel.clone();
     let text_accum: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
     let text_clone = text_accum.clone();
     let provider_sink: ferrisscope_agent::provider::EventSink =
         Box::new(move |evt: CompletionEvent| {
-            if let CompletionEvent::TokenDelta(s) = &evt {
-                if let Ok(mut g) = text_clone.lock() {
-                    g.push_str(s);
+            let outgoing = match evt {
+                CompletionEvent::TokenDelta(s) => {
+                    if let Ok(mut g) = text_clone.lock() {
+                        g.push_str(&s);
+                    }
+                    ChatEvent::TokenDelta { delta: s }
                 }
-            }
-            if let Ok(g) = runtime_for_sink.try_lock() {
-                let outgoing = match evt {
-                    CompletionEvent::TokenDelta(s) => ChatEvent::TokenDelta { delta: s },
-                    CompletionEvent::ToolCallStart { id, name } => {
-                        ChatEvent::ToolCallStart { id, name }
-                    }
-                    CompletionEvent::ToolCallArgsDelta { id, json_delta } => {
-                        ChatEvent::ToolCallArgsDelta { id, json_delta }
-                    }
-                    CompletionEvent::ToolCallEnd { id } => ChatEvent::ToolCallEnd { id },
-                };
-                let _ = g.channel.send(outgoing);
-            }
+                CompletionEvent::ToolCallStart { id, name } => {
+                    ChatEvent::ToolCallStart { id, name }
+                }
+                CompletionEvent::ToolCallArgsDelta { id, json_delta } => {
+                    ChatEvent::ToolCallArgsDelta { id, json_delta }
+                }
+                CompletionEvent::ToolCallEnd { id } => ChatEvent::ToolCallEnd { id },
+            };
+            let _ = channel.send(outgoing);
         });
 
     let result = provider.stream_completion(req, provider_sink).await;
 
-    let (finish_reason, tool_calls, reasoning_content): (
+    let (finish_reason, tool_calls, reasoning_content, thinking_blocks): (
         FinishReason,
         Vec<ToolCall>,
         Option<String>,
+        Vec<serde_json::Value>,
     ) = match result {
         Ok(final_) => {
             if let Some(usage) = &final_.usage {
@@ -1122,6 +1117,7 @@ async fn run_provider_round(
                 final_.finish_reason,
                 final_.tool_calls,
                 final_.reasoning_content,
+                final_.thinking_blocks,
             )
         }
         Err(ProviderError::Cancelled) => {
@@ -1172,6 +1168,7 @@ async fn run_provider_round(
                     tool_call_id: None,
                     name: None,
                     reasoning_content: None,
+                    thinking_blocks: vec![],
                     images: vec![],
                 };
                 let now = chrono::Utc::now().timestamp_millis();
@@ -1254,6 +1251,7 @@ async fn run_provider_round(
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                thinking_blocks: vec![],
                 images: vec![],
             };
             let now = chrono::Utc::now().timestamp_millis();
@@ -1307,6 +1305,7 @@ async fn run_provider_round(
         tool_call_id: None,
         name: None,
         reasoning_content,
+        thinking_blocks,
         images: vec![],
     };
     runtime.lock().await.in_flight_message_id = None;
@@ -1342,6 +1341,137 @@ async fn run_provider_round(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrisscope_agent::config::ProviderReasoning;
+
+    fn settings_with(
+        kind: ProviderKind,
+        effort: Option<&str>,
+        budget: Option<u32>,
+    ) -> AgentSettings {
+        let mut s = AgentSettings::default();
+        s.provider_reasoning.insert(
+            kind,
+            ProviderReasoning {
+                effort: effort.map(Into::into),
+                budget_tokens: budget,
+            },
+        );
+        s
+    }
+
+    #[test]
+    fn the_saved_choice_for_the_chats_provider_reaches_the_request() {
+        let s = settings_with(ProviderKind::Google, Some("low"), None);
+        let opts = resolve_provider_options(ProviderKind::Google, "gemini-2.5-flash", &s, false);
+        assert_eq!(
+            opts,
+            Some(serde_json::json!({ "reasoning": { "effort": "low" } }))
+        );
+        // Another provider's choice doesn't leak across.
+        assert_eq!(
+            resolve_provider_options(ProviderKind::Groq, "llama", &s, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_model_switch_between_rounds_changes_the_request_options() {
+        let s = settings_with(ProviderKind::Anthropic, Some("high"), Some(8192));
+        let on = |model: &str| options_for_round(None, ProviderKind::Anthropic, model, &s, false);
+        let effort_model = on("claude-opus-4-7").unwrap();
+        let budget_model = on("claude-haiku-4-5").unwrap();
+        assert_eq!(effort_model["output_config"]["effort"], "high");
+        assert!(budget_model.get("output_config").is_none());
+        assert_ne!(effort_model, budget_model);
+    }
+
+    #[test]
+    fn a_chat_level_override_wins_over_the_saved_reasoning_choice() {
+        let s = settings_with(ProviderKind::OpenAI, Some("low"), None);
+        let own = serde_json::json!({ "reasoning_effort": "high" });
+        assert_eq!(
+            options_for_round(Some(&own), ProviderKind::OpenAI, "gpt-5", &s, false),
+            Some(own.clone())
+        );
+        assert_eq!(
+            options_for_round(None, ProviderKind::OpenAI, "gpt-5", &s, false),
+            Some(serde_json::json!({ "reasoning_effort": "low" }))
+        );
+    }
+
+    #[test]
+    fn each_provider_gets_its_own_effort_name_through_to_its_wire() {
+        // Anthropic effort-capable → output_config; OpenAI → reasoning_effort;
+        // Codex OAuth → reasoning.effort. (Catalogue unseeded: id-based rules.)
+        let a = settings_with(ProviderKind::Anthropic, Some("high"), None);
+        let out = resolve_provider_options(ProviderKind::Anthropic, "claude-opus-4-7", &a, false)
+            .unwrap();
+        assert_eq!(out["output_config"]["effort"], "high");
+        let o = settings_with(ProviderKind::OpenAI, Some("medium"), None);
+        assert_eq!(
+            resolve_provider_options(ProviderKind::OpenAI, "gpt-5", &o, false),
+            Some(serde_json::json!({ "reasoning_effort": "medium" }))
+        );
+        assert_eq!(
+            resolve_provider_options(ProviderKind::OpenAI, "gpt-5", &o, true),
+            Some(serde_json::json!({ "reasoning": { "effort": "medium" } }))
+        );
+    }
+
+    #[test]
+    fn legacy_global_settings_still_apply_until_a_provider_has_its_own() {
+        use ferrisscope_agent::{ReasoningEffort, ReasoningSettings};
+        let s = AgentSettings {
+            reasoning: ReasoningSettings {
+                effort: Some(ReasoningEffort::High),
+                budget_tokens: None,
+            },
+            ..AgentSettings::default()
+        };
+        assert_eq!(
+            resolve_provider_options(ProviderKind::Groq, "llama", &s, false),
+            Some(serde_json::json!({ "reasoning_effort": "high" }))
+        );
+    }
+
+    #[test]
+    fn no_reasoning_settings_means_no_provider_options_for_any_provider() {
+        for kind in ProviderKind::all() {
+            assert_eq!(
+                resolve_provider_options(*kind, "any", &AgentSettings::default(), false),
+                None,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_gateways_build_the_per_model_routing_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let key = Credential::ApiKey { key: "k".into() };
+        let name = |kind| {
+            build_provider(kind, &key, None, Some("sess".into()), None)
+                .unwrap()
+                .name()
+        };
+        assert_eq!(name(ProviderKind::OpencodeZen), "opencode_zen");
+        assert_eq!(name(ProviderKind::OpencodeGo), "opencode_go");
+    }
+
+    #[test]
+    fn google_builds_the_native_gemini_provider() {
+        // reqwest needs a process-global rustls provider (main.rs installs it).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let p = build_provider(
+            ProviderKind::Google,
+            &Credential::ApiKey { key: "k".into() },
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(p.name(), "google");
+    }
 
     fn msg(role: MessageRole, content: &str) -> ChatMessage {
         ChatMessage {

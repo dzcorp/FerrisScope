@@ -304,6 +304,7 @@ fn main() {
             agent::ai_test_provider,
             agent::mcp_test_server,
             agent::ai_list_models,
+            agent::ai_reasoning_spec,
             agent::chat_create_session,
             agent::chat_list_sessions,
             agent::chat_load_session,

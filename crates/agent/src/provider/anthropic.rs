@@ -29,6 +29,61 @@ use serde_json::{json, Value};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// Default `max_tokens` ceiling when the operator hasn't set one (opencode's
+/// 32k), further limited by the model's own output limit.
+const DEFAULT_MAX_TOKENS_CAP: u32 = 32_000;
+
+/// Floor for `thinking.budget_tokens`.
+const MIN_THINKING_BUDGET: u32 = 1_024;
+
+/// Room left for the answer after an extended-thinking budget.
+const ANSWER_HEADROOM: u32 = 4_096;
+
+/// Make a request with thinking on acceptable to the Messages API:
+/// - `max_tokens` must exceed `thinking.budget_tokens` (thinking counts against
+///   it), so raise it — never lower an explicit value — leaving room to answer;
+///   the budget itself stays under the model's output limit;
+/// - sampling other than the default is rejected, so drop `temperature` / `top_k`.
+fn fit_thinking(body: &mut Value, output_limit: Option<u32>) {
+    let Some(kind) = body
+        .pointer("/thinking/type")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    if kind == "disabled" {
+        return;
+    }
+    if let Some(o) = body.as_object_mut() {
+        o.remove("temperature");
+        o.remove("top_k");
+    }
+    if kind != "enabled" {
+        return;
+    }
+    let Some(requested) = body
+        .pointer("/thinking/budget_tokens")
+        .and_then(Value::as_u64)
+    else {
+        return;
+    };
+    let cap = output_limit.unwrap_or(u32::MAX);
+    let ceiling = cap
+        .saturating_sub(MIN_THINKING_BUDGET)
+        .max(MIN_THINKING_BUDGET);
+    let budget = u32::try_from(requested)
+        .unwrap_or(u32::MAX)
+        .clamp(MIN_THINKING_BUDGET, ceiling);
+    let max_tokens = body["max_tokens"]
+        .as_u64()
+        .map_or(0, |m| u32::try_from(m).unwrap_or(u32::MAX));
+    let wanted = budget.saturating_add(ANSWER_HEADROOM).min(cap);
+    let max_tokens = max_tokens.max(wanted).max(budget + 1);
+    body["thinking"]["budget_tokens"] = json!(budget);
+    body["max_tokens"] = json!(max_tokens);
+}
+
 pub struct AnthropicProvider {
     client: reqwest::Client,
     base_url: String,
@@ -38,6 +93,7 @@ pub struct AnthropicProvider {
     /// `ProviderKind::CustomAnthropic` for operator-defined
     /// Anthropic-Messages-compatible gateways.
     kind: ProviderKind,
+    extra_headers: Vec<(&'static str, String)>,
 }
 
 impl AnthropicProvider {
@@ -52,6 +108,7 @@ impl AnthropicProvider {
         };
         Self {
             client: reqwest::Client::builder()
+                .user_agent(super::USER_AGENT)
                 .connect_timeout(std::time::Duration::from_mins(1))
                 .timeout(std::time::Duration::from_mins(10))
                 .build()
@@ -61,7 +118,16 @@ impl AnthropicProvider {
                 .unwrap_or_else(|| m.default_base_url.to_string()),
             api_key: key,
             kind,
+            extra_headers: Vec::new(),
         }
+    }
+
+    /// Attach the conversation's session id for gateways that route and
+    /// cache on it (a no-op for every other provider kind).
+    #[must_use]
+    pub fn with_session(mut self, session_id: Option<&str>) -> Self {
+        self.extra_headers = super::gateway_headers(self.kind, session_id);
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -77,6 +143,7 @@ impl AnthropicProvider {
             "anthropic-version",
             reqwest::header::HeaderValue::from_static(ANTHROPIC_VERSION),
         );
+        super::apply_headers(&mut h, &self.extra_headers);
         h
     }
 }
@@ -124,7 +191,11 @@ fn user_content(m: &ChatMessage, supports_vision: bool) -> Vec<Value> {
 /// `user` with `tool_result` blocks rather than a dedicated tool role).
 /// `supports_vision` gates whether user-message image attachments are
 /// emitted as `image` blocks or dropped with a note.
-fn build_messages(messages: &[ChatMessage], supports_vision: bool) -> (String, Vec<Value>) {
+fn build_messages(
+    messages: &[ChatMessage],
+    supports_vision: bool,
+    replay_thinking: bool,
+) -> (String, Vec<Value>) {
     let mut system_parts: Vec<String> = Vec::new();
     let mut out: Vec<Value> = Vec::new();
 
@@ -142,7 +213,13 @@ fn build_messages(messages: &[ChatMessage], supports_vision: bool) -> (String, V
                 }));
             }
             MessageRole::Assistant => {
-                let mut blocks: Vec<Value> = Vec::new();
+                // Thinking blocks lead the message: with thinking enabled the
+                // API rejects a tool turn that doesn't start with them.
+                let mut blocks: Vec<Value> = if replay_thinking {
+                    m.thinking_blocks.clone()
+                } else {
+                    Vec::new()
+                };
                 if !m.content.is_empty() {
                     blocks.push(json!({ "type": "text", "text": m.content }));
                 }
@@ -261,7 +338,16 @@ impl ChatProvider for AnthropicProvider {
         // model is text-only; unknown models default to "try it" and let
         // the apiserver be the arbiter.
         let supports_vision = crate::provider::catalogue::supports_vision(self.kind, &req.model);
-        let (system, messages) = build_messages(&req.messages, supports_vision);
+        // Kimi For Coding speaks Messages but isn't Claude: it never needed the
+        // blocks, so it keeps getting none.
+        let replay_thinking = self.kind != ProviderKind::KimiCoding;
+        let (system, messages) = build_messages(&req.messages, supports_vision, replay_thinking);
+        let output_limit = crate::provider::catalogue::lookup(self.kind, &req.model)
+            .map(|l| l.output)
+            .filter(|o| *o > 0);
+        // The model's own output ceiling (capped like opencode's 32k default):
+        // thinking tokens count against `max_tokens`, so 8192 starves them.
+        let default_max = output_limit.map_or(8192, |l| l.min(DEFAULT_MAX_TOKENS_CAP));
 
         let mut body = json!({
             "model": req.model,
@@ -270,7 +356,7 @@ impl ChatProvider for AnthropicProvider {
             // Anthropic requires max_tokens. Default to a generous
             // ceiling so the model isn't artificially clipped; the
             // operator can override per-chat from the chat header.
-            "max_tokens": req.max_tokens.unwrap_or(8192),
+            "max_tokens": req.max_tokens.unwrap_or(default_max),
         });
         if !system.is_empty() {
             body["system"] = json!(system);
@@ -296,6 +382,7 @@ impl ChatProvider for AnthropicProvider {
         if let Some(opts) = &req.provider_options {
             merge_top_level(&mut body, opts);
         }
+        fit_thinking(&mut body, output_limit);
 
         let resp = self
             .client
@@ -367,15 +454,20 @@ impl ChatProvider for AnthropicProvider {
 
         let finish_reason = state.finish_reason;
         let usage = state.usage.clone();
+        let thinking_blocks = if self.kind == ProviderKind::KimiCoding {
+            Vec::new()
+        } else {
+            state.thinking_blocks()
+        };
         let tool_calls = state.into_tool_calls();
         Ok(CompletionFinal {
             finish_reason,
             tool_calls,
             usage,
-            // Anthropic uses Messages-API thinking blocks, not the
-            // OpenAI-compat round-trip slot — no reasoning to echo back
-            // here.
+            // Thinking rides as signed content blocks, not the OpenAI-compat
+            // `reasoning_content` slot.
             reasoning_content: None,
+            thinking_blocks,
         })
     }
 }
@@ -403,6 +495,17 @@ struct BlockEntry {
     /// `true` once we've emitted `ToolCallStart` for this block.
     started: bool,
     is_tool: bool,
+    /// `thinking` / `redacted_thinking` blocks, accumulated for replay.
+    thinking: Option<ThinkingAcc>,
+}
+
+#[derive(Default)]
+struct ThinkingAcc {
+    redacted: bool,
+    text: String,
+    signature: String,
+    /// `redacted_thinking`'s opaque payload.
+    data: String,
 }
 
 impl SseState {
@@ -437,6 +540,21 @@ impl SseState {
                     entry.started = true;
                 }
             }
+            Some(kind @ ("thinking" | "redacted_thinking")) => {
+                let str_of = |k: &str| {
+                    block
+                        .get(k)
+                        .and_then(|x| x.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                entry.thinking = Some(ThinkingAcc {
+                    redacted: kind == "redacted_thinking",
+                    text: str_of("thinking"),
+                    signature: str_of("signature"),
+                    data: str_of("data"),
+                });
+            }
             _ => {
                 // text or other; nothing to emit yet.
             }
@@ -453,6 +571,22 @@ impl SseState {
                     if !text.is_empty() {
                         sink(CompletionEvent::TokenDelta(text.to_string()));
                     }
+                }
+            }
+            Some("thinking_delta") => {
+                if let (Some(acc), Some(t)) = (
+                    entry.thinking.as_mut(),
+                    delta.get("thinking").and_then(|x| x.as_str()),
+                ) {
+                    acc.text.push_str(t);
+                }
+            }
+            Some("signature_delta") => {
+                if let (Some(acc), Some(sig)) = (
+                    entry.thinking.as_mut(),
+                    delta.get("signature").and_then(|x| x.as_str()),
+                ) {
+                    acc.signature.push_str(sig);
                 }
             }
             Some("input_json_delta") => {
@@ -498,6 +632,25 @@ impl SseState {
         }
     }
 
+    /// Completed thinking blocks in message order. A block without its
+    /// signature (a stream cut short) can't be replayed and is dropped.
+    fn thinking_blocks(&self) -> Vec<Value> {
+        self.blocks
+            .values()
+            .filter_map(|e| e.thinking.as_ref())
+            .filter_map(|t| {
+                if t.redacted {
+                    (!t.data.is_empty())
+                        .then(|| json!({ "type": "redacted_thinking", "data": t.data }))
+                } else {
+                    (!t.signature.is_empty()).then(|| {
+                        json!({ "type": "thinking", "thinking": t.text, "signature": t.signature })
+                    })
+                }
+            })
+            .collect()
+    }
+
     fn into_tool_calls(self) -> Vec<ToolCall> {
         self.blocks
             .into_values()
@@ -510,6 +663,7 @@ impl SseState {
                 } else {
                     e.arguments
                 },
+                thought_signature: None,
             })
             .collect()
     }
@@ -552,6 +706,7 @@ mod tests {
                     id: "call_1".into(),
                     name: "list_pods".into(),
                     arguments: "{\"namespace\":\"default\"}".into(),
+                    thought_signature: None,
                 }],
                 ..Default::default()
             },
@@ -562,7 +717,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let (sys, body) = build_messages(&msgs, true);
+        let (sys, body) = build_messages(&msgs, true, true);
         assert_eq!(sys, "You are helpful.");
         assert_eq!(body.len(), 3);
         assert_eq!(body[0]["role"], "user");
@@ -585,7 +740,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (_sys, body) = build_messages(std::slice::from_ref(&msg), true);
+        let (_sys, body) = build_messages(std::slice::from_ref(&msg), true, true);
         assert_eq!(body.len(), 1);
         let content = body[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
@@ -607,7 +762,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (_sys, body) = build_messages(std::slice::from_ref(&msg), false);
+        let (_sys, body) = build_messages(std::slice::from_ref(&msg), false, true);
         let content = body[0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
@@ -668,4 +823,285 @@ mod tests {
     // being referenced by the test; left in case future tests need it.
     #[allow(dead_code)]
     fn _unused(_: ToolSchema) {}
+
+    // ─── thinking: budget fitting, capture, replay ──────────────────────────
+
+    fn body_with(thinking: Value, max_tokens: u64) -> Value {
+        json!({ "max_tokens": max_tokens, "temperature": 0.5, "top_k": 40, "thinking": thinking })
+    }
+
+    #[test]
+    fn a_thinking_budget_gets_room_to_answer_and_never_shrinks_an_explicit_max() {
+        // 32k budget under the old 8192 default would be a 400.
+        let mut b = body_with(json!({ "type": "enabled", "budget_tokens": 32_768 }), 8_192);
+        fit_thinking(&mut b, Some(64_000));
+        assert_eq!(b["thinking"]["budget_tokens"], 32_768);
+        assert_eq!(b["max_tokens"], 36_864);
+
+        let mut big = body_with(
+            json!({ "type": "enabled", "budget_tokens": 16_000 }),
+            50_000,
+        );
+        fit_thinking(&mut big, Some(64_000));
+        assert_eq!(big["max_tokens"], 50_000, "an explicit larger max is kept");
+    }
+
+    #[test]
+    fn a_budget_is_floored_and_kept_under_the_models_output_limit() {
+        let mut low = body_with(json!({ "type": "enabled", "budget_tokens": 100 }), 8_192);
+        fit_thinking(&mut low, None);
+        assert_eq!(low["thinking"]["budget_tokens"], 1_024);
+        assert!(low["max_tokens"].as_u64().unwrap() > 1_024);
+
+        let mut over = body_with(json!({ "type": "enabled", "budget_tokens": 32_768 }), 8_192);
+        fit_thinking(&mut over, Some(16_000));
+        assert_eq!(over["thinking"]["budget_tokens"], 14_976);
+        assert_eq!(over["max_tokens"], 16_000);
+        assert!(over["max_tokens"].as_u64() > over["thinking"]["budget_tokens"].as_u64());
+    }
+
+    #[test]
+    fn thinking_on_drops_sampling_knobs_and_off_leaves_them() {
+        let mut adaptive = body_with(json!({ "type": "adaptive" }), 8_192);
+        fit_thinking(&mut adaptive, None);
+        assert!(adaptive.get("temperature").is_none() && adaptive.get("top_k").is_none());
+        assert_eq!(
+            adaptive["max_tokens"], 8_192,
+            "adaptive has no budget to fit"
+        );
+
+        let mut off = body_with(json!({ "type": "disabled" }), 8_192);
+        fit_thinking(&mut off, None);
+        assert_eq!(off["temperature"], 0.5);
+
+        let mut none = json!({ "max_tokens": 8_192, "temperature": 0.5 });
+        fit_thinking(&mut none, None);
+        assert_eq!(none, json!({ "max_tokens": 8_192, "temperature": 0.5 }));
+    }
+
+    fn feed(events: &[Value]) -> SseState {
+        let sink: EventSink = Box::new(|_| {});
+        let mut st = SseState::default();
+        for v in events {
+            match v["type"].as_str().unwrap() {
+                "content_block_start" => st.on_block_start(&sink, v),
+                "content_block_delta" => st.on_block_delta(&sink, v),
+                "content_block_stop" => st.on_block_stop(&sink, v),
+                _ => {}
+            }
+        }
+        st
+    }
+
+    #[test]
+    fn thinking_blocks_are_captured_with_their_signatures_in_order() {
+        let st = feed(&[
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "Let me " } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "check." } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "signature_delta", "signature": "SIG" } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "redacted_thinking", "data": "OPAQUE" } }),
+            json!({ "type": "content_block_stop", "index": 1 }),
+            json!({ "type": "content_block_start", "index": 2, "content_block": { "type": "text", "text": "" } }),
+        ]);
+        assert_eq!(
+            st.thinking_blocks(),
+            vec![
+                json!({ "type": "thinking", "thinking": "Let me check.", "signature": "SIG" }),
+                json!({ "type": "redacted_thinking", "data": "OPAQUE" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_thinking_block_cut_off_before_its_signature_is_not_replayable() {
+        let st = feed(&[
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "half" } }),
+        ]);
+        assert!(st.thinking_blocks().is_empty());
+    }
+
+    #[test]
+    fn thinking_blocks_lead_the_assistant_turn_when_replayed() {
+        let blocks = vec![json!({ "type": "thinking", "thinking": "t", "signature": "S" })];
+        let msgs = vec![
+            ChatMessage {
+                role: MessageRole::User,
+                content: "go".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "checking".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "t".into(),
+                    arguments: "{}".into(),
+                    thought_signature: None,
+                }],
+                thinking_blocks: blocks.clone(),
+                ..Default::default()
+            },
+        ];
+        let (_s, with) = build_messages(&msgs, true, true);
+        let content = with[1]["content"].as_array().unwrap();
+        assert_eq!(content[0], blocks[0]);
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[2]["type"], "tool_use");
+
+        let (_s, without) = build_messages(&msgs, true, false);
+        assert_eq!(without[1]["content"][0]["type"], "text");
+    }
+
+    fn thinking_sse() -> String {
+        let events = [
+            json!({ "type": "message_start", "message": { "usage": { "input_tokens": 5, "output_tokens": 0 } } }),
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "hmm" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "signature_delta", "signature": "SIG-1" } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "tool_use", "id": "toolu_1", "name": "list_pods" } }),
+            json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "input_json_delta", "partial_json": "{\"namespace\":\"demo\"}" } }),
+            json!({ "type": "content_block_stop", "index": 1 }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" }, "usage": { "output_tokens": 9 } }),
+            json!({ "type": "message_stop" }),
+        ];
+        crate::provider::test_util::sse_response(&events)
+    }
+
+    fn provider_at(base: String, kind: ProviderKind) -> AnthropicProvider {
+        AnthropicProvider::new(&Credential::ApiKey { key: "k".into() }, Some(base), kind)
+    }
+
+    fn req(model: &str, opts: Option<Value>, messages: Vec<ChatMessage>) -> CompletionRequest {
+        CompletionRequest {
+            model: model.into(),
+            messages,
+            tools: vec![],
+            temperature: Some(0.7),
+            max_tokens: None,
+            provider_options: opts,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_thinking_turn_round_trips_its_blocks_and_fits_the_request() {
+        use crate::provider::test_util::serve_at;
+        let (base, log) = serve_at("/v1", vec![thinking_sse(), thinking_sse()]).await;
+        let p = provider_at(base, ProviderKind::Anthropic);
+        let sink = || -> EventSink { Box::new(|_| {}) };
+
+        // Turn 1: budget thinking. The request must satisfy max_tokens > budget
+        // and carry no temperature.
+        let opts = json!({ "thinking": { "type": "enabled", "budget_tokens": 16_000 } });
+        let first = p
+            .stream_completion(
+                req(
+                    "claude-haiku-4-5",
+                    Some(opts.clone()),
+                    vec![ChatMessage {
+                        role: MessageRole::User,
+                        content: "go".into(),
+                        ..Default::default()
+                    }],
+                ),
+                sink(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first.thinking_blocks,
+            vec![json!({ "type": "thinking", "thinking": "hmm", "signature": "SIG-1" })]
+        );
+        assert_eq!(first.tool_calls[0].name, "list_pods");
+
+        // Turn 2: the assistant turn is replayed with its thinking block first.
+        let history = vec![
+            ChatMessage {
+                role: MessageRole::User,
+                content: "go".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: MessageRole::Assistant,
+                tool_calls: first.tool_calls.clone(),
+                thinking_blocks: first.thinking_blocks.clone(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: MessageRole::Tool,
+                content: "web-1 Running".into(),
+                tool_call_id: Some(first.tool_calls[0].id.clone()),
+                ..Default::default()
+            },
+        ];
+        p.stream_completion(req("claude-haiku-4-5", Some(opts), history), sink())
+            .await
+            .unwrap();
+
+        let sent = log.lock().unwrap();
+        let one: Value = serde_json::from_str(&sent[0].body).unwrap();
+        assert_eq!(
+            one["thinking"],
+            json!({ "type": "enabled", "budget_tokens": 16_000 })
+        );
+        assert!(one["max_tokens"].as_u64().unwrap() > 16_000, "{one}");
+        assert!(one.get("temperature").is_none(), "{one}");
+        let two: Value = serde_json::from_str(&sent[1].body).unwrap();
+        assert_eq!(two["messages"][1]["content"][0]["type"], "thinking");
+        assert_eq!(two["messages"][1]["content"][0]["signature"], "SIG-1");
+        assert_eq!(two["messages"][1]["content"][1]["type"], "tool_use");
+    }
+
+    #[tokio::test]
+    async fn adaptive_thinking_sends_effort_in_output_config() {
+        use crate::provider::test_util::serve_at;
+        let (base, log) = serve_at("/v1", vec![thinking_sse()]).await;
+        let p = provider_at(base, ProviderKind::Anthropic);
+        let opts =
+            json!({ "thinking": { "type": "adaptive" }, "output_config": { "effort": "xhigh" } });
+        p.stream_completion(
+            req(
+                "claude-sonnet-5-5",
+                Some(opts),
+                vec![ChatMessage {
+                    role: MessageRole::User,
+                    content: "go".into(),
+                    ..Default::default()
+                }],
+            ),
+            Box::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        let body: Value = serde_json::from_str(&log.lock().unwrap()[0].body).unwrap();
+        assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[tokio::test]
+    async fn kimi_coding_neither_captures_nor_replays_thinking_blocks() {
+        use crate::provider::test_util::serve_at;
+        let (base, _log) = serve_at("/v1", vec![thinking_sse()]).await;
+        let p = provider_at(base, ProviderKind::KimiCoding);
+        let out = p
+            .stream_completion(
+                req(
+                    "kimi-for-coding",
+                    None,
+                    vec![ChatMessage {
+                        role: MessageRole::User,
+                        content: "go".into(),
+                        ..Default::default()
+                    }],
+                ),
+                Box::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        assert!(out.thinking_blocks.is_empty());
+    }
 }

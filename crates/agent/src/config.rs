@@ -2,8 +2,8 @@
 //! crate is responsible for serialising / deserialising this against
 //! `prefs.json`); we just define the shape.
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// LLM provider the agent can talk to. The set is intentionally small —
 /// adding a provider means an entry here, a metadata row in
@@ -16,15 +16,27 @@ pub enum ProviderKind {
     /// a curated catalogue of coding models behind a single OpenAI-compat
     /// endpoint. With no operator key the agent falls back to the public
     /// "free tier" key, which gates the upstream catalogue down to the
-    /// zero-cost models. This is the default so a fresh install can chat
-    /// without configuring anything.
-    #[default]
+    /// zero-cost models. Opt-in (see [`ProviderKind::default_enabled`]):
+    /// prompts leave for a third-party proxy, and some free models log or
+    /// train on them.
     #[serde(rename = "opencode_zen")]
     OpencodeZen,
+    /// OpenCode Go — the OpenCode subscription ($10 / $40 per month) for
+    /// open coding models, at <https://opencode.ai/zen/go/v1>. Same gateway
+    /// family as Zen (same session headers and per-model wires) but keyed:
+    /// no public fallback, so it needs no opt-in switch.
+    #[serde(rename = "opencode_go")]
+    OpencodeGo,
     OpenRouter,
     Anthropic,
+    /// Google Gemini via the Gemini API (AI Studio key) — the native
+    /// `generateContent` wire, not the OpenAI-compat shim: Gemini 3 needs
+    /// its `thoughtSignature`s replayed on function calls, which only the
+    /// native shape carries. Vertex AI / ADC are not supported.
+    Google,
     // Explicit rename — serde's snake_case mangles consecutive capitals
     // (`OpenAI` → `open_a_i`). Use the natural `openai` lowercase.
+    #[default]
     #[serde(rename = "openai")]
     OpenAI,
     Zai,
@@ -65,9 +77,9 @@ impl ProviderKind {
     /// The settings UI iterates over this to render its provider list.
     pub fn all() -> &'static [ProviderKind] {
         &[
-            Self::OpencodeZen,
             Self::OpenAI,
             Self::Anthropic,
+            Self::Google,
             Self::OpenRouter,
             Self::Zai,
             Self::Minimax,
@@ -77,16 +89,33 @@ impl ProviderKind {
             Self::KimiCoding,
             Self::Mistral,
             Self::Together,
+            Self::OpencodeZen,
+            Self::OpencodeGo,
             Self::Ollama,
             Self::CustomOpenAi,
             Self::CustomAnthropic,
         ]
     }
 
+    /// Whether the provider is usable before the operator touches its
+    /// toggle. Everything but the keyless free-tier proxy: a provider that
+    /// needs a credential can't leak anything until one is entered, but Zen
+    /// works with no input at all, so it stays off until switched on.
+    pub fn default_enabled(self) -> bool {
+        !self.supports_public_fallback()
+    }
+
+    /// The OpenCode gateways (Zen, Go): they take a User-Agent that names the
+    /// client and a stable session id (`x-opencode-session`) for routing and
+    /// prompt caching, and expose each model on its native wire.
+    pub fn is_opencode_gateway(self) -> bool {
+        matches!(self, Self::OpencodeZen | Self::OpencodeGo)
+    }
+
     /// True iff this provider supports the public-key "free tier"
     /// fallback when no operator credential is configured. The agent
-    /// quietly substitutes a literal `public` API key for these so a
-    /// fresh install can chat with the free models on first run.
+    /// substitutes a literal `public` API key for these — but only once the
+    /// operator has enabled the provider (see [`Self::default_enabled`]).
     pub fn supports_public_fallback(self) -> bool {
         matches!(self, Self::OpencodeZen)
     }
@@ -101,6 +130,66 @@ impl ProviderKind {
             _ => None,
         }
     }
+}
+
+impl ProviderKind {
+    /// Parse the stable serde id (`"openai"`, `"opencode_zen"`, …). `None`
+    /// for an id this build doesn't know.
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(id))
+            .ok()
+    }
+}
+
+/// Deserialize a provider-keyed map, skipping keys this build doesn't know.
+/// A settings file written by a newer version (a provider we haven't heard
+/// of) must not fail the whole parse — that used to reset every setting.
+pub fn lenient_kind_map<'de, D, V>(d: D) -> Result<HashMap<ProviderKind, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    let raw = HashMap::<String, V>::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|(id, v)| match ProviderKind::from_id(&id) {
+            Some(kind) => Some((kind, v)),
+            None => {
+                tracing::warn!(provider = %id, "settings: ignoring unknown provider");
+                None
+            }
+        })
+        .collect())
+}
+
+/// Set counterpart of [`lenient_kind_map`].
+pub fn lenient_kind_set<'de, D>(d: D) -> Result<HashSet<ProviderKind>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Vec::<String>::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|id| {
+            let kind = ProviderKind::from_id(&id);
+            if kind.is_none() {
+                tracing::warn!(provider = %id, "settings: ignoring unknown provider");
+            }
+            kind
+        })
+        .collect())
+}
+
+/// A single provider id that falls back to the default when unknown.
+pub fn lenient_kind<'de, D>(d: D) -> Result<ProviderKind, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let id = String::deserialize(d)?;
+    Ok(ProviderKind::from_id(&id).unwrap_or_else(|| {
+        tracing::warn!(provider = %id, "settings: unknown provider, using default");
+        ProviderKind::default()
+    }))
 }
 
 /// Stored credential for one provider. Lives in the OS keychain
@@ -156,6 +245,11 @@ pub struct ProviderConfig {
     /// enumerated id are dropped at merge time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_models: Vec<String>,
+    /// Operator's enable/disable choice. `None` = the provider's
+    /// [`ProviderKind::default_enabled`]. A disabled provider is unusable
+    /// everywhere (chat, model listing, picker) but keeps its credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -176,6 +270,25 @@ pub enum ReasoningEffort {
     Low,
     Medium,
     High,
+}
+
+/// One provider's reasoning choice, as saved. `effort` is a name from that
+/// provider's own vocabulary (`none`, `minimal`, `low`, `medium`, `high`,
+/// `xhigh`, `max` — each model accepts its own subset; see
+/// [`crate::provider::reasoning`]); `None` = leave it to the API. The budget
+/// only matters for providers / models that take one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderReasoning {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+}
+
+impl ProviderReasoning {
+    pub fn is_empty(&self) -> bool {
+        self.effort.is_none() && self.budget_tokens.is_none()
+    }
 }
 
 /// Universal reasoning / extended-thinking knobs. Each provider that
@@ -206,6 +319,20 @@ impl ReasoningSettings {
     /// emit any reasoning fields at all.
     pub fn is_active(&self) -> bool {
         self.effort.is_some() || self.budget_tokens.is_some()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.is_active()
+    }
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
     }
 }
 
@@ -295,11 +422,13 @@ fn default_enabled() -> bool {
 pub struct AgentSettings {
     /// Provider new chats default to. Drives the model picker and the
     /// initial `SessionMeta::provider_kind` for newly created sessions.
-    #[serde(default)]
+    /// Always an enabled provider: `ai_set_settings` and the load-time
+    /// normaliser re-point it when the chosen one is disabled.
+    #[serde(default, deserialize_with = "lenient_kind")]
     pub active_provider: ProviderKind,
     /// Per-provider config (base URL overrides). Sparse: entries exist
     /// only for providers the operator has explicitly configured.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_kind_map")]
     pub providers: HashMap<ProviderKind, ProviderConfig>,
     /// Last-used / preferred default model id within `active_provider`.
     /// New chats start here; the frontend overwrites this on first chat
@@ -332,8 +461,228 @@ pub struct AgentSettings {
     /// Universal reasoning / extended-thinking defaults. Mapped to each
     /// provider's native field shape at request build time. Per-chat
     /// `provider_options` still wins.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ReasoningSettings::is_empty")]
     pub reasoning: ReasoningSettings,
+    /// Reasoning choice per provider (names are provider-specific, so one
+    /// global value can't be right for all of them). `reasoning` above is the
+    /// pre-per-provider global, read only as a fallback / for migration.
+    #[serde(default, deserialize_with = "lenient_kind_map")]
+    pub provider_reasoning: HashMap<ProviderKind, ProviderReasoning>,
+}
+
+impl AgentSettings {
+    /// The reasoning choice that applies to `kind`: its own entry, else the
+    /// legacy global one (low/medium/high + budget) so installs from before
+    /// the per-provider settings keep their behaviour.
+    pub fn effective_reasoning(&self, kind: ProviderKind) -> ProviderReasoning {
+        if let Some(own) = self.provider_reasoning.get(&kind) {
+            return own.clone();
+        }
+        ProviderReasoning {
+            effort: self.reasoning.effort.map(|e| e.as_str().to_string()),
+            budget_tokens: self.reasoning.budget_tokens,
+        }
+    }
+
+    /// Whether `kind` may serve traffic. The operator's explicit choice wins;
+    /// otherwise the provider's [`ProviderKind::default_enabled`].
+    pub fn is_provider_enabled(&self, kind: ProviderKind) -> bool {
+        self.providers
+            .get(&kind)
+            .and_then(|c| c.enabled)
+            .unwrap_or_else(|| kind.default_enabled())
+    }
+}
+
+#[cfg(test)]
+mod lenient_tests {
+    use super::{AgentSettings, ProviderKind};
+
+    #[test]
+    fn from_id_round_trips_every_provider_and_rejects_strangers() {
+        for kind in ProviderKind::all() {
+            let id = serde_json::to_value(kind).unwrap();
+            assert_eq!(ProviderKind::from_id(id.as_str().unwrap()), Some(*kind));
+        }
+        assert_eq!(ProviderKind::from_id("from_the_future"), None);
+        assert_eq!(ProviderKind::from_id(""), None);
+    }
+
+    #[test]
+    fn unknown_provider_keys_are_dropped_not_fatal() {
+        let s: AgentSettings = serde_json::from_str(
+            r#"{
+                "active_provider": "anthropic",
+                "providers": {
+                    "from_the_future": { "base_url": "http://x" },
+                    "groq": { "base_url": "http://groq" }
+                },
+                "default_approval_mode": "approve_per_write",
+                "mcp_servers": [{ "id": "a", "name": "kept", "command": "x" }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(s.active_provider, ProviderKind::Anthropic);
+        assert_eq!(s.providers.len(), 1);
+        assert_eq!(
+            s.providers[&ProviderKind::Groq].base_url.as_deref(),
+            Some("http://groq")
+        );
+        assert_eq!(s.mcp_servers.len(), 1, "the rest of the file survives");
+    }
+
+    #[test]
+    fn unknown_active_provider_falls_back_to_default() {
+        let s: AgentSettings = serde_json::from_str(
+            r#"{ "active_provider": "from_the_future", "default_approval_mode": "approve_per_write" }"#,
+        )
+        .unwrap();
+        assert_eq!(s.active_provider, ProviderKind::default());
+    }
+}
+
+#[cfg(test)]
+mod provider_enable_tests {
+    use super::{AgentSettings, ProviderConfig, ProviderKind};
+
+    #[test]
+    fn only_the_keyless_free_tier_is_off_by_default() {
+        for kind in ProviderKind::all() {
+            assert_eq!(
+                kind.default_enabled(),
+                *kind != ProviderKind::OpencodeZen,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_settings_leave_zen_disabled_and_active_provider_enabled() {
+        let s = AgentSettings::default();
+        assert!(!s.is_provider_enabled(ProviderKind::OpencodeZen));
+        assert_ne!(s.active_provider, ProviderKind::OpencodeZen);
+        assert!(s.is_provider_enabled(s.active_provider));
+    }
+
+    #[test]
+    fn explicit_choice_overrides_the_default_both_ways() {
+        let mut s = AgentSettings::default();
+        s.providers.insert(
+            ProviderKind::OpencodeZen,
+            ProviderConfig {
+                enabled: Some(true),
+                ..ProviderConfig::default()
+            },
+        );
+        s.providers.insert(
+            ProviderKind::Anthropic,
+            ProviderConfig {
+                enabled: Some(false),
+                ..ProviderConfig::default()
+            },
+        );
+        assert!(s.is_provider_enabled(ProviderKind::OpencodeZen));
+        assert!(!s.is_provider_enabled(ProviderKind::Anthropic));
+    }
+
+    #[test]
+    fn legacy_provider_config_without_enabled_parses_as_unset() {
+        let cfg: ProviderConfig = serde_json::from_str(r#"{ "base_url": "http://x" }"#).unwrap();
+        assert_eq!(cfg.enabled, None);
+        let s = serde_json::to_string(&ProviderConfig::default()).unwrap();
+        assert!(!s.contains("enabled"), "{s}");
+        let on: ProviderConfig = serde_json::from_str(r#"{ "enabled": false }"#).unwrap();
+        assert_eq!(on.enabled, Some(false));
+    }
+
+    #[test]
+    fn only_the_opencode_gateways_are_gateways() {
+        for kind in ProviderKind::all() {
+            assert_eq!(
+                kind.is_opencode_gateway(),
+                matches!(kind, ProviderKind::OpencodeZen | ProviderKind::OpencodeGo),
+                "{kind:?}"
+            );
+        }
+        // Go is keyed, so it needs no opt-in switch.
+        assert!(ProviderKind::OpencodeGo.default_enabled());
+        assert!(!ProviderKind::OpencodeGo.supports_public_fallback());
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::OpencodeGo).unwrap(),
+            "\"opencode_go\""
+        );
+    }
+
+    #[test]
+    fn reasoning_choice_is_per_provider_with_the_legacy_global_as_fallback() {
+        use super::{ProviderReasoning, ReasoningEffort, ReasoningSettings};
+        let mut s = AgentSettings {
+            reasoning: ReasoningSettings {
+                effort: Some(ReasoningEffort::High),
+                budget_tokens: Some(8192),
+            },
+            ..AgentSettings::default()
+        };
+        // No entry: the legacy global applies.
+        assert_eq!(
+            s.effective_reasoning(ProviderKind::Anthropic),
+            ProviderReasoning {
+                effort: Some("high".into()),
+                budget_tokens: Some(8192)
+            }
+        );
+        // An entry wins, even an explicit "auto" (empty) one.
+        s.provider_reasoning
+            .insert(ProviderKind::Anthropic, ProviderReasoning::default());
+        assert!(s.effective_reasoning(ProviderKind::Anthropic).is_empty());
+        s.provider_reasoning.insert(
+            ProviderKind::OpenAI,
+            ProviderReasoning {
+                effort: Some("xhigh".into()),
+                budget_tokens: None,
+            },
+        );
+        assert_eq!(
+            s.effective_reasoning(ProviderKind::OpenAI)
+                .effort
+                .as_deref(),
+            Some("xhigh")
+        );
+        // Others still see the legacy value.
+        assert_eq!(
+            s.effective_reasoning(ProviderKind::Groq).effort.as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn provider_reasoning_round_trips_sparsely_and_drops_unknown_providers() {
+        let s: AgentSettings = serde_json::from_str(
+            r#"{
+                "default_approval_mode": "approve_per_write",
+                "provider_reasoning": {
+                    "openai": { "effort": "xhigh" },
+                    "anthropic": { "budget_tokens": 4096 },
+                    "from_the_future": { "effort": "max" }
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(s.provider_reasoning.len(), 2);
+        let out = serde_json::to_string(&s).unwrap();
+        assert!(out.contains(r#""effort":"xhigh""#), "{out}");
+        assert!(!out.contains("from_the_future"), "{out}");
+        // Empty legacy global isn't serialised any more.
+        assert!(!out.contains("\"reasoning\""), "{out}");
+    }
+
+    #[test]
+    fn every_provider_appears_once_in_all() {
+        let all = ProviderKind::all();
+        let unique: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), all.len());
+        assert_eq!(all.len(), 17);
+    }
 }
 
 #[cfg(test)]

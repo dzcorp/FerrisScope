@@ -85,8 +85,11 @@ impl OpenAICompatibleProvider {
             extra_headers.push(("x-title", "FerrisScope".into()));
         }
 
+        extra_headers.extend(super::gateway_headers(kind, session_id.as_deref()));
+
         Self {
             client: reqwest::Client::builder()
+                .user_agent(super::USER_AGENT)
                 // Generous timeouts: SSE streams can run hundreds of
                 // seconds for long completions. No automatic retries —
                 // the user re-sends.
@@ -379,7 +382,9 @@ impl ChatProvider for OpenAICompatibleProvider {
                     }
                 }
             }
-            ModelsEndpoint::Static | ModelsEndpoint::AnthropicCatalogue => {
+            ModelsEndpoint::Static
+            | ModelsEndpoint::AnthropicCatalogue
+            | ModelsEndpoint::GeminiCatalogue => {
                 // No enumerable live endpoint (Z.AI, MiniMax; AnthropicCatalogue
                 // only lands here on a mis-wire). models.dev is the source of
                 // truth; the static list is the offline / not-yet-loaded
@@ -598,6 +603,7 @@ impl ChatProvider for OpenAICompatibleProvider {
             tool_calls,
             usage,
             reasoning_content,
+            thinking_blocks: Vec::new(),
         })
     }
 }
@@ -672,6 +678,7 @@ impl ToolCallAccum {
                     id: e.id,
                     name: e.name,
                     arguments: e.arguments,
+                    thought_signature: None,
                 })
             })
             .collect()

@@ -44,6 +44,10 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
+fn legacy_provider_kind() -> crate::config::ProviderKind {
+    crate::config::ProviderKind::OpenRouter
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
@@ -52,9 +56,9 @@ pub struct SessionMeta {
     pub created_at_unix_ms: i64,
     pub updated_at_unix_ms: i64,
     /// Which provider backend the chat is bound to. Defaulted on read so
-    /// pre-multi-provider sessions deserialise to the historical OpenRouter
-    /// default unchanged.
-    #[serde(default)]
+    /// pre-multi-provider sessions deserialise to the OpenRouter they were
+    /// created against, independent of today's global default.
+    #[serde(default = "legacy_provider_kind")]
     pub provider_kind: crate::config::ProviderKind,
     pub model: String,
     pub approval_mode: crate::config::ApprovalMode,
@@ -149,6 +153,12 @@ pub enum SessionEvent {
         /// LLM-generated structured summary. Replaces the head on
         /// replay.
         summary: String,
+        /// The messages kept verbatim after the summary. They were logged
+        /// before this marker, so replay needs them here to restore the
+        /// transcript the live chat continued with. Empty on markers written
+        /// before this field existed (replay then drops them, as it did).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tail: Vec<ChatMessage>,
         ts: i64,
     },
 }
@@ -213,13 +223,26 @@ pub(crate) fn apply_compaction(events: Vec<SessionEvent>) -> Vec<SessionEvent> {
     let Some(idx) = last_compact else {
         return events;
     };
-    let SessionEvent::Compaction { summary, ts, .. } = &events[idx] else {
+    let SessionEvent::Compaction {
+        summary,
+        ts,
+        tail: kept,
+        ..
+    } = &events[idx]
+    else {
         return events;
     };
     let summary = summary.clone();
     let ts = *ts;
+    let kept: Vec<SessionEvent> = kept
+        .iter()
+        .map(|message| SessionEvent::Message {
+            message: message.clone(),
+            ts,
+        })
+        .collect();
     let tail: Vec<SessionEvent> = events.into_iter().skip(idx + 1).collect();
-    let mut out = Vec::with_capacity(tail.len() + 1);
+    let mut out = Vec::with_capacity(tail.len() + kept.len() + 1);
     out.push(SessionEvent::Message {
         message: ChatMessage {
             role: crate::types::MessageRole::Assistant,
@@ -230,10 +253,12 @@ pub(crate) fn apply_compaction(events: Vec<SessionEvent>) -> Vec<SessionEvent> {
             // Provider impls don't read it; the agent loop uses it.
             name: Some("context_checkpoint".to_string()),
             reasoning_content: None,
+            thinking_blocks: vec![],
             images: vec![],
         },
         ts,
     });
+    out.extend(kept);
     out.extend(tail);
     out
 }
@@ -283,10 +308,16 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Only a missing or empty index means "no sessions yet". Any other read
+    /// failure must surface: every writer rewrites the whole index from what
+    /// this returns, so treating an unreadable file as empty would wipe the
+    /// list of sessions on the next append.
     async fn read_index(&self) -> Result<IndexFile, SessionError> {
         match tokio::fs::read(self.index_path()).await {
             Ok(bytes) if !bytes.is_empty() => Ok(serde_json::from_slice(&bytes)?),
-            Ok(_) | Err(_) => Ok(IndexFile::default()),
+            Ok(_) => Ok(IndexFile::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(IndexFile::default()),
+            Err(e) => Err(SessionError::Io(e)),
         }
     }
 
@@ -346,6 +377,15 @@ impl SessionStore {
         let mut line = serde_json::to_string(&event)?;
         line.push('\n');
         file.write_all(line.as_bytes()).await?;
+        // Tool results and approval decisions are always logged next to a
+        // message that already bumps the index; rewriting the whole index for
+        // each of them would double the writes of every tool round.
+        if matches!(
+            event,
+            SessionEvent::ToolResult { .. } | SessionEvent::Approval { .. }
+        ) {
+            return Ok(());
+        }
         // Bump updated_at on the index as a best-effort breadcrumb.
         let _guard = self.index_lock.lock().await;
         let mut idx = self.read_index().await?;
@@ -470,5 +510,233 @@ impl SessionStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ProviderKind;
+
+    fn meta_json(provider: Option<&str>) -> String {
+        let provider = provider
+            .map(|p| format!(r#""provider_kind": "{p}","#))
+            .unwrap_or_default();
+        format!(
+            r#"{{
+                "id": "s1", "cluster_id": "c", "title": "t",
+                "created_at_unix_ms": 1, "updated_at_unix_ms": 2,
+                {provider}
+                "model": "m", "approval_mode": "approve_per_write"
+            }}"#
+        )
+    }
+
+    #[test]
+    fn session_without_provider_kind_loads_as_openrouter() {
+        let meta: SessionMeta = serde_json::from_str(&meta_json(None)).unwrap();
+        assert_eq!(meta.provider_kind, ProviderKind::OpenRouter);
+        assert_ne!(meta.provider_kind, ProviderKind::default());
+    }
+
+    #[test]
+    fn explicit_provider_kind_is_kept() {
+        let meta: SessionMeta = serde_json::from_str(&meta_json(Some("opencode_zen"))).unwrap();
+        assert_eq!(meta.provider_kind, ProviderKind::OpencodeZen);
+    }
+
+    fn store_meta(id: &str) -> SessionMeta {
+        serde_json::from_str(&meta_json(None).replace("\"s1\"", &format!("\"{id}\""))).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_missing_index_lists_no_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        assert!(store.list(None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_index_is_an_error_not_an_empty_list() {
+        // A directory where index.json should be: reading it fails with
+        // something other than NotFound.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("index.json")).unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        assert!(store.list(None).await.is_err());
+        assert!(store.create(store_meta("s1")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn appending_keeps_every_session_in_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        store.create(store_meta("s1")).await.unwrap();
+        store.create(store_meta("s2")).await.unwrap();
+        store
+            .append(
+                "c",
+                "s1",
+                SessionEvent::Message {
+                    message: ChatMessage::default(),
+                    ts: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let mut ids: Vec<String> = store
+            .list(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["s1", "s2"]);
+    }
+
+    #[tokio::test]
+    async fn tool_results_and_approvals_dont_rewrite_the_index_but_messages_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let mut meta = store_meta("s1");
+        meta.updated_at_unix_ms = 2;
+        store.create(meta).await.unwrap();
+        let updated = || async { store.list(None).await.unwrap()[0].updated_at_unix_ms };
+
+        let call = ToolCall {
+            id: "a".into(),
+            name: "t".into(),
+            arguments: "{}".into(),
+            thought_signature: None,
+        };
+        store
+            .append(
+                "c",
+                "s1",
+                SessionEvent::ToolResult {
+                    call,
+                    result: "ok".into(),
+                    error: None,
+                    ts: 9,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "c",
+                "s1",
+                SessionEvent::Approval {
+                    tool_call_id: "a".into(),
+                    decision: ApprovalDecision::Approved,
+                    ts: 9,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated().await, 2);
+
+        store
+            .append(
+                "c",
+                "s1",
+                SessionEvent::Message {
+                    message: ChatMessage::default(),
+                    ts: 9,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(updated().await > 2);
+        // Both skipped events are still in the transcript.
+        let events = store.load("s1").await.unwrap().events;
+        assert_eq!(events.len(), 3);
+    }
+
+    fn msg(role: crate::types::MessageRole, content: &str) -> ChatMessage {
+        ChatMessage {
+            role,
+            content: content.into(),
+            ..ChatMessage::default()
+        }
+    }
+
+    fn message_event(role: crate::types::MessageRole, content: &str) -> SessionEvent {
+        SessionEvent::Message {
+            message: msg(role, content),
+            ts: 1,
+        }
+    }
+
+    fn contents(events: &[SessionEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::Message { message, .. } => Some(message.content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn replay_keeps_the_messages_a_compaction_kept_verbatim() {
+        use crate::types::MessageRole::{Assistant, User};
+        let events = vec![
+            message_event(User, "old question"),
+            message_event(Assistant, "old answer"),
+            message_event(User, "latest question"),
+            SessionEvent::Compaction {
+                head_message_count: 2,
+                tokens_before: 900,
+                summary: "S".into(),
+                tail: vec![msg(User, "latest question")],
+                ts: 5,
+            },
+            message_event(Assistant, "answer after"),
+        ];
+        assert_eq!(
+            contents(&apply_compaction(events)),
+            ["[context checkpoint]\nS", "latest question", "answer after"]
+        );
+    }
+
+    #[test]
+    fn replay_of_a_compaction_without_a_tail_still_drops_the_head() {
+        use crate::types::MessageRole::{Assistant, User};
+        let legacy = r#"{"kind":"compaction","head_message_count":2,"tokens_before":9,"summary":"S","ts":5}"#;
+        let marker: SessionEvent = serde_json::from_str(legacy).unwrap();
+        let events = vec![
+            message_event(User, "q"),
+            message_event(Assistant, "a"),
+            marker,
+            message_event(User, "next"),
+        ];
+        assert_eq!(
+            contents(&apply_compaction(events)),
+            ["[context checkpoint]\nS", "next"]
+        );
+    }
+
+    #[test]
+    fn only_the_latest_compaction_applies_with_its_own_tail() {
+        use crate::types::MessageRole::User;
+        let marker = |summary: &str, kept: &str| SessionEvent::Compaction {
+            head_message_count: 1,
+            tokens_before: 1,
+            summary: summary.into(),
+            tail: vec![msg(User, kept)],
+            ts: 1,
+        };
+        let events = vec![
+            message_event(User, "a"),
+            marker("first", "k1"),
+            message_event(User, "b"),
+            marker("second", "k2"),
+        ];
+        assert_eq!(
+            contents(&apply_compaction(events)),
+            ["[context checkpoint]\nsecond", "k2"]
+        );
     }
 }

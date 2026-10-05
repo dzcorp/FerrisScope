@@ -15,6 +15,7 @@
 //! forbids it outside `#[cfg(test)]`).
 //!
 //! - [`settings`] — on-disk `agent_settings.json` load/save.
+//! - [`probe`] — the Settings Test button's `GET /models` request / response helpers.
 //! - [`credentials`] — keychain / encrypted-file credential storage + cache.
 //! - [`wire`] — serde DTOs crossing the Tauri boundary + the `ChatEvent` stream.
 //! - [`runtime`] — `AgentState`, `ChatRuntime`, the live-chat registry.
@@ -30,6 +31,7 @@ pub(crate) mod classify;
 pub(crate) mod commands;
 pub(crate) mod compaction;
 pub(crate) mod credentials;
+pub(crate) mod probe;
 pub(crate) mod prompt;
 pub(crate) mod runtime;
 pub(crate) mod settings;

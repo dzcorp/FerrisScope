@@ -61,6 +61,7 @@ import type {
   SshTestResult,
   LeaseDetail,
   ModelInfo,
+  ReasoningSpec,
   Credential,
   ProviderKind,
   McpServerConfig,
@@ -1197,6 +1198,10 @@ export const api = {
   /// when omitted). Provider must already have a credential configured.
   aiListModels: (provider?: ProviderKind) =>
     invoke<ModelInfo[]>("ai_list_models", { provider }),
+  /// Reasoning options for `provider` — for `model` when the catalogue knows
+  /// it, else everything the provider's models offer.
+  aiReasoningSpec: (provider: ProviderKind, model?: string | null) =>
+    invoke<ReasoningSpec>("ai_reasoning_spec", { provider, model: model ?? null }),
 
   // Chat sessions are persisted JSONL files under `<config-dir>/agent/`. A
   // chat is bound to one session + one cluster at open time.

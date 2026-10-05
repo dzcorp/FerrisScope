@@ -501,7 +501,9 @@ describe("VirtualClusterBar save mode with an active virtual context", () => {
     expect(screen.queryByText("Save as virtual context…")).toBeNull();
     // Root entries now carry the same icon-row anatomy as the
     // single-cluster menu (subtitles present).
-    expect(screen.getByText("Talk to the cluster-aware assistant")).toBeTruthy();
+    expect(screen.getByText("Edit and apply — pick a cluster")).toBeTruthy();
+    // The AI chat entry moved to the header, next to port forwards.
+    expect(screen.queryByText("Talk to the cluster-aware assistant")).toBeNull();
     expect(screen.getByText("Merge another cluster into this view")).toBeTruthy();
   });
 });

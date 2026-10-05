@@ -19,7 +19,7 @@ pub use config::{
 };
 pub use mcp::{classify as classify_tool, McpClient, McpError, McpTool, ToolCategory};
 pub use native::{NativeRegistry, NativeTool, NativeToolError};
-pub use provider::meta::{AuthMode, ModelsEndpoint, ProviderFlavor, ProviderMeta};
+pub use provider::meta::{AuthMode, EnableNotice, ModelsEndpoint, ProviderFlavor, ProviderMeta};
 pub use provider::{
     ChatProvider, CompletionEvent, CompletionFinal, CompletionRequest, EventSink, FinishReason,
     ModelInfo, ProviderError, Usage,

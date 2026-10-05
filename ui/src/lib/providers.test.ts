@@ -1,39 +1,46 @@
 import { describe, it, expect } from "vitest";
-import { PROVIDER_ORDER } from "./providers";
-import type { ProviderKind } from "../types";
+import { isProviderUsable, orderedProviders } from "./providers";
+import type { ProviderKind, ProviderStatusWire } from "../types";
 
-describe("PROVIDER_ORDER", () => {
-  it("has no duplicate provider kinds", () => {
-    expect(new Set(PROVIDER_ORDER).size).toBe(PROVIDER_ORDER.length);
+function status(kind: ProviderKind): ProviderStatusWire {
+  return { kind, display_name: kind } as ProviderStatusWire;
+}
+
+describe("orderedProviders", () => {
+  const providers = {
+    anthropic: status("anthropic"),
+    openai: status("openai"),
+    opencode_zen: status("opencode_zen"),
+  } as Record<ProviderKind, ProviderStatusWire>;
+
+  it("follows the backend order, not the map's key order", () => {
+    const out = orderedProviders({
+      providers,
+      provider_order: ["opencode_zen", "openai", "anthropic"],
+    });
+    expect(out.map((p) => p.kind)).toEqual(["opencode_zen", "openai", "anthropic"]);
   });
 
-  it("leads with the free-tier default so fresh installs can chat", () => {
-    // OpenCode Zen works without a key — it must be first so a brand-new
-    // user sees a usable provider at the top of both surfaces.
-    expect(PROVIDER_ORDER[0]).toBe("opencode_zen");
+  it("skips kinds the backend ordered but did not describe", () => {
+    const out = orderedProviders({
+      providers,
+      provider_order: ["openai", "google" as ProviderKind, "anthropic"],
+    });
+    expect(out.map((p) => p.kind)).toEqual(["openai", "anthropic"]);
   });
 
-  it("covers every ProviderKind exactly once", () => {
-    // Mirror of the union in types.ts. `satisfies Record<ProviderKind, ...>`
-    // in providers.ts guarantees this at compile time; this asserts the same
-    // set at runtime so a drift in either list fails loudly.
-    const expected: ProviderKind[] = [
-      "opencode_zen",
-      "openai",
-      "anthropic",
-      "open_router",
-      "zai",
-      "minimax",
-      "groq",
-      "deepseek",
-      "moonshot",
-      "kimi_coding",
-      "mistral",
-      "together",
-      "ollama",
-      "custom_openai",
-      "custom_anthropic",
-    ];
-    expect([...PROVIDER_ORDER].sort()).toEqual([...expected].sort());
+  it("omits providers missing from the order", () => {
+    const out = orderedProviders({ providers, provider_order: ["openai"] });
+    expect(out.map((p) => p.kind)).toEqual(["openai"]);
+  });
+});
+
+describe("isProviderUsable", () => {
+  it("needs the provider switched on and connected", () => {
+    expect(isProviderUsable({ enabled: true, configured: true })).toBe(true);
+    expect(isProviderUsable({ enabled: true, configured: false })).toBe(false);
+    // A stored key doesn't make a switched-off provider usable.
+    expect(isProviderUsable({ enabled: false, configured: true })).toBe(false);
+    expect(isProviderUsable({ enabled: false, configured: false })).toBe(false);
   });
 });

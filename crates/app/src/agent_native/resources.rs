@@ -663,7 +663,14 @@ impl NativeTool for ResourcesApply {
                     "name": { "type": "string", "description": "Patch modes. Object name." },
                     "patch": {
                         "description": "Patch modes. merge_patch → object; json_patch → array of ops.",
-                        "type": ["object", "array"]
+                        "anyOf": [
+                            { "type": "object", "description": "merge_patch body." },
+                            {
+                                "type": "array",
+                                "description": "json_patch operations, e.g. {\"op\":\"replace\",\"path\":\"/spec/replicas\",\"value\":3}.",
+                                "items": { "type": "object" }
+                            }
+                        ]
                     },
                     "dry_run": { "type": "boolean", "default": false },
                     "force": { "type": "boolean", "default": false, "description": "server_side_apply only." }

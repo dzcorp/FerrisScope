@@ -212,14 +212,15 @@ export const Icons = {
     14,
     <path d="M9 6l-7 6 7 6 1.6-1.6L5 12l5.6-4.4zM15 6l-1.6 1.6L19 12l-5.6 4.4L15 18l7-6zM14.5 4l-4 16h-2l4-16z" />,
   ),
-  // AI-chat glyph: solid speech bubble with a small tail. 24×24 viewBox per
-  // icon.md, currentColor fill, no strokes.
+  // AI-chat glyph: solid speech bubble with a four-point sparkle cut out of it
+  // (the cut is the only detail — negative space per icon.md). 24×24 viewBox,
+  // currentColor fill, no strokes.
   chat: filled(
     14,
     <path
       fillRule="evenodd"
       clipRule="evenodd"
-      d="M3 4h18v13H8l-4 4v-4H3V4Zm4 4v2h10V8H7Zm0 4v2h7v-2H7Z"
+      d="M3 3h18v14H8l-4 4v-4H3V3Zm9 2 1.6 3.4L17 10l-3.4 1.6L12 15l-1.6-3.4L7 10l3.4-1.6L12 5Z"
     />,
   ),
   eye: filled(

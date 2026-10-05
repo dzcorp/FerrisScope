@@ -1104,7 +1104,9 @@ describe("AI agent + chat", () => {
   it("aiGetSettings / aiSetSettings / aiSetCredential / aiDeleteCredential / aiOauthLogin / aiOauthCancel / aiTestProvider / aiListModels / mcpTestServer", async () => {
     const cap = captureNext({});
     await api.aiGetSettings();
-    await api.aiSetSettings({} as Parameters<typeof api.aiSetSettings>[0]);
+    await api.aiSetSettings({
+      provider_enabled: { provider: "opencode_zen", enabled: true },
+    });
     await api.aiSetCredential("anthropic", { type: "api_key", key: "k" } as Parameters<typeof api.aiSetCredential>[1]);
     await api.aiDeleteCredential("anthropic");
     await api.aiOauthLogin("anthropic");
@@ -1123,6 +1125,9 @@ describe("AI agent + chat", () => {
       "ai_list_models",
       "mcp_test_server",
     ]);
+    expect(cap.calls[1]?.args).toEqual({
+      patch: { provider_enabled: { provider: "opencode_zen", enabled: true } },
+    });
     expect(cap.calls[2]?.args?.provider).toBe("anthropic");
     expect(cap.calls[7]?.args).toEqual({ provider: "anthropic" });
   });

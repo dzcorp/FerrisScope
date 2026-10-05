@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use ferrisscope_agent::config::McpServerConfig;
 use ferrisscope_agent::provider::meta::{self, ProviderMeta};
+use ferrisscope_agent::provider::reasoning;
 use ferrisscope_agent::session::{
     ApprovalDecision, SessionData, SessionEvent, SessionMeta, SessionUpdate,
 };
 use ferrisscope_agent::types::{ChatMessage, ImageAttachment, MessageRole};
 use ferrisscope_agent::{
-    ApprovalMode, ChatProvider, Credential, FinishReason, ModelInfo, ProviderKind,
-    ReasoningSettings,
+    AgentSettings, ApprovalMode, ChatProvider, Credential, FinishReason, ModelInfo, ProviderKind,
 };
 use ferrisscope_core::kubeconfig;
 use tauri::{ipc::Channel, State};
@@ -24,15 +24,16 @@ use crate::secret_storage::{self};
 use crate::state::AppState;
 
 use super::{
-    assemble_system_prompt, autocontinue_if_idle, build_cluster_context_block, build_provider,
-    build_view_context_block, category_label, clear_credential, close_chat_runtime,
-    context_limits_for, effective_credential, load_persisted, make_credential_sink, mcp_category,
-    read_credential, repair_orphan_tool_calls, resolve_provider_options, run_auto_title_task,
-    run_compaction_internal, run_turn_loop, save_persisted, secret_storage_available_cached,
-    session_err_to_string, snapshot_for_title, write_credential, AgentState, AiSettingsPatch,
-    AiSettingsWire, ChatEvent, ChatOpenResult, ChatRuntime, ChatToolWire, McpServerHandle,
-    McpServerStatusWire, McpTestResult, ProviderStatusWire, ProviderTestRequest,
-    ProviderTestResult, ViewContextWire,
+    apply_provider_reasoning, apply_provider_switch, autocontinue_if_idle, build_provider,
+    category_label, clear_credential, close_chat_runtime, context_limits_for, ensure_enabled,
+    load_persisted, make_credential_sink, mcp_category, normalize_active_provider, probe,
+    read_credential, repair_orphan_tool_calls, resolve_credential, run_auto_title_task,
+    run_compaction_internal, save_persisted, secret_storage_available_cached,
+    session_err_to_string, snapshot_for_title, spawn_turn_loop, validate_base_url,
+    write_credential, AgentState, AiSettingsPatch, AiSettingsWire, ChatEvent, ChatOpenResult,
+    ChatRuntime, ChatToolWire, EnableNoticeWire, McpServerHandle, McpServerStatusWire,
+    McpTestResult, ProviderStatusWire, ProviderTestRequest, ProviderTestResult, TurnContext,
+    TurnGate, ViewContextWire,
 };
 
 #[tauri::command]
@@ -51,13 +52,15 @@ pub(crate) async fn ai_get_settings(
             .map(|c| c.custom_models.clone())
             .unwrap_or_default();
         let cred = read_credential(*kind).await;
+        let enabled = p.settings.is_provider_enabled(*kind);
         // Providers with a public fallback (OpenCode Zen's free tier)
         // report as configured even without an operator credential —
-        // chat / model-listing paths use `effective_credential` and
-        // the request still succeeds. We surface the distinction
-        // through `account_label = "free tier"` so the UI can show
-        // operators which mode they're in.
-        let public_fallback_active = cred.is_none() && kind.public_fallback_key().is_some();
+        // but only while enabled; chat / model-listing paths go through
+        // `resolve_credential`, which refuses a disabled provider. We
+        // surface the distinction through `account_label = "free tier"`
+        // so the UI can show operators which mode they're in.
+        let public_fallback_active =
+            enabled && cred.is_none() && kind.public_fallback_key().is_some();
         let auth_mode = if public_fallback_active {
             Some("api_key".to_string())
         } else {
@@ -93,12 +96,30 @@ pub(crate) async fn ai_get_settings(
                 configured: cred.is_some() || public_fallback_active,
                 account_label,
                 custom_models,
+                enabled,
+                enable_notice: meta::enable_notice(*kind).map(EnableNoticeWire::from),
+                free_tier: public_fallback_active,
+                allows_blank_key: m.allows_blank_key,
+                key_hint: m.key_hint.to_string(),
+                oauth_label: m.oauth_label.map(str::to_string),
+                signup_url: m.signup_url.map(str::to_string),
+                description: m.description.map(str::to_string),
+                reasoning: p.settings.effective_reasoning(*kind),
+                // The active provider's list follows its default model; the
+                // rest can only offer what their catalogue models have.
+                reasoning_spec: reasoning::spec(
+                    *kind,
+                    (*kind == p.settings.active_provider)
+                        .then_some(p.settings.default_model.as_deref())
+                        .flatten(),
+                ),
             },
         );
     }
     Ok(AiSettingsWire {
         active_provider: p.settings.active_provider,
         providers,
+        provider_order: ProviderKind::all().to_vec(),
         default_model: p.settings.default_model.clone(),
         default_approval_mode: p.settings.default_approval_mode,
         system_prompt_override: p.settings.system_prompt_override.clone(),
@@ -107,7 +128,6 @@ pub(crate) async fn ai_get_settings(
         secret_storage_backend: storage_backend,
         mcp_servers: p.settings.mcp_servers.clone(),
         mcp_binary_path: p.settings.mcp_binary_path.clone(),
-        reasoning: p.settings.reasoning,
     })
 }
 
@@ -117,16 +137,20 @@ pub(crate) async fn ai_set_settings(
     state: State<'_, AgentState>,
 ) -> Result<AiSettingsWire, String> {
     let mut p = load_persisted().await;
-    if let Some(k) = patch.active_provider {
-        p.settings.active_provider = k;
-    }
+    let prev_active = p.settings.active_provider;
+    let sets_default_model = patch.default_model.is_some();
+    apply_provider_switch(
+        &mut p,
+        patch.provider_enabled.as_ref(),
+        patch.active_provider,
+    )?;
     if let Some(bu) = patch.provider_base_url {
-        let cfg = p.settings.providers.entry(bu.provider).or_default();
-        cfg.base_url = if bu.base_url.is_empty() {
-            None
-        } else {
-            Some(bu.base_url)
-        };
+        let base_url = validate_base_url(&bu.base_url)?;
+        p.settings
+            .providers
+            .entry(bu.provider)
+            .or_default()
+            .base_url = base_url;
     }
     if let Some(cm) = patch.provider_custom_models {
         let cfg = p.settings.providers.entry(cm.provider).or_default();
@@ -180,16 +204,14 @@ pub(crate) async fn ai_set_settings(
             })
             .collect();
     }
-    if let Some(reasoning) = patch.reasoning {
-        // UI sends `0` from the budget select's "off" option; coerce
-        // to `None` so we don't ship `budget_tokens: 0` (which some
-        // providers treat as enabled-but-zero — pure tax).
-        p.settings.reasoning = ReasoningSettings {
-            effort: reasoning.effort,
-            budget_tokens: reasoning.budget_tokens.filter(|b| *b > 0),
-        };
+    if let Some(rp) = &patch.provider_reasoning {
+        apply_provider_reasoning(&mut p, rp)?;
     }
 
+    normalize_active_provider(&mut p);
+    if p.settings.active_provider != prev_active && !sets_default_model {
+        p.settings.default_model = default_model_for(p.settings.active_provider, &p.settings).await;
+    }
     save_persisted(&p).await.map_err(|e| e.to_string())?;
     ai_get_settings(state).await
 }
@@ -241,6 +263,13 @@ pub(crate) async fn ai_test_provider(
     req: ProviderTestRequest,
     _state: State<'_, AgentState>,
 ) -> Result<ProviderTestResult, String> {
+    let fail = |error: String| {
+        Ok(ProviderTestResult {
+            ok: false,
+            model_count: 0,
+            error: Some(error),
+        })
+    };
     // Blank key = "test the saved credential" — the settings row lets the
     // operator re-validate an already-persisted connection without
     // re-pasting the secret (which never round-trips to the frontend).
@@ -254,6 +283,17 @@ pub(crate) async fn ai_test_provider(
     } else {
         Credential::ApiKey { key: req.api_key }
     };
+    let key = match cred {
+        Credential::ApiKey { key } => key,
+        // A subscription token isn't an API key: probing `/models` with it
+        // would report a failure that says nothing about the sign-in.
+        Credential::OAuth { .. } => {
+            return fail(
+                "signed in with OAuth — Test only checks API keys; start a chat to verify the sign-in"
+                    .into(),
+            );
+        }
+    };
 
     // Probe the live `GET /models` endpoint directly rather than going
     // through `ChatProvider::list_models` — that path deliberately falls
@@ -262,81 +302,44 @@ pub(crate) async fn ai_test_provider(
     // phantom "OK · N models". The test button exists to validate the
     // *connection*, so only a live 200 counts.
     let m: &ProviderMeta = meta::for_kind(req.provider);
-    let base_url = req
-        .base_url
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| m.default_base_url.to_string());
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let key = match &cred {
-        Credential::ApiKey { key } => key.trim().to_string(),
-        Credential::OAuth { access, .. } => access.clone(),
+    let base_url = match validate_base_url(req.base_url.as_deref().unwrap_or("")) {
+        Ok(url) => url.unwrap_or_else(|| m.default_base_url.to_string()),
+        Err(e) => return fail(e),
     };
-    let mut http = reqwest::Client::builder()
+    let probe = probe::build(m.flavor, &base_url, &key);
+    let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| e.to_string())?
-        .get(&url);
-    if !key.is_empty() {
-        http = match m.flavor {
-            // Anthropic's first-party auth style (`x-api-key` + version);
-            // every OpenAI-shaped endpoint takes a Bearer token.
-            ferrisscope_agent::ProviderFlavor::AnthropicMessages => http
-                .header("x-api-key", &key)
-                .header("anthropic-version", "2023-06-01"),
-            _ => http.bearer_auth(&key),
-        };
+        .map_err(|e| e.to_string())?;
+    let mut http = client.get(&probe.url);
+    for (name, value) in &probe.headers {
+        http = http.header(*name, value);
     }
-    match http.send().await {
-        Err(e) => Ok(ProviderTestResult {
-            ok: false,
-            model_count: 0,
-            error: Some(format!("cannot reach {url}: {e}")),
+    let resp = match http.send().await {
+        Ok(r) => r,
+        Err(e) => return fail(format!("cannot reach {}: {e}", probe.url)),
+    };
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let snippet = probe::error_snippet(&body);
+        let code = status.as_u16();
+        return fail(if snippet.is_empty() {
+            format!("HTTP {code} from {}", probe.url)
+        } else {
+            format!("HTTP {code}: {snippet}")
+        });
+    }
+    match probe::count_models(&body) {
+        Some(model_count) => Ok(ProviderTestResult {
+            ok: true,
+            model_count,
+            error: None,
         }),
-        Ok(resp) => {
-            let status = resp.status();
-            if !status.is_success() {
-                let code = status.as_u16();
-                let body = resp.text().await.unwrap_or_default();
-                // Trim noisy HTML / long JSON error bodies for the chip.
-                let trimmed = body.trim();
-                let snippet = if trimmed.len() > 200 {
-                    format!("{}…", &trimmed[..200])
-                } else {
-                    trimmed.to_string()
-                };
-                return Ok(ProviderTestResult {
-                    ok: false,
-                    model_count: 0,
-                    error: Some(if snippet.is_empty() {
-                        format!("HTTP {code} from {url}")
-                    } else {
-                        format!("HTTP {code}: {snippet}")
-                    }),
-                });
-            }
-            // Both shapes we care about (`{data:[{id}]}` OpenAI-style and
-            // Anthropic's `{data:[{id, display_name}]}`) hang the list off
-            // `data`; count entries without parsing the full shape.
-            let body = resp.text().await.unwrap_or_default();
-            let count = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v.get("data")?.as_array().map(Vec::len));
-            match count {
-                Some(n) => Ok(ProviderTestResult {
-                    ok: true,
-                    model_count: n,
-                    error: None,
-                }),
-                None => Ok(ProviderTestResult {
-                    ok: false,
-                    model_count: 0,
-                    error: Some(
-                        "reachable but `GET /models` returned no `data` list — this endpoint may not enumerate models; add custom models below".to_string(),
-                    ),
-                }),
-            }
-        }
+        None => fail(
+            "reachable but `GET /models` returned no `data` list — this endpoint may not enumerate models; add custom models below".to_string(),
+        ),
     }
 }
 
@@ -634,7 +637,15 @@ pub(crate) async fn ai_list_models(
     _state: State<'_, AgentState>,
 ) -> Result<Vec<ModelInfo>, String> {
     let p = load_persisted().await;
-    let kind = provider.unwrap_or(p.settings.active_provider);
+    provider_models(provider.unwrap_or(p.settings.active_provider), &p.settings).await
+}
+
+/// `kind`'s models, best default first — what the model pickers list.
+async fn provider_models(
+    kind: ProviderKind,
+    settings: &AgentSettings,
+) -> Result<Vec<ModelInfo>, String> {
+    ensure_enabled(kind, settings)?;
     // Determine whether the public-tier fallback is in effect *before*
     // we hand the credential to the provider — the upstream catalogue
     // doesn't gate models by key, so we filter client-side from
@@ -649,8 +660,7 @@ pub(crate) async fn ai_list_models(
             })
         })
         .ok_or_else(|| "no credential configured for this provider".to_string())?;
-    let base_url = p
-        .settings
+    let base_url = settings
         .providers
         .get(&kind)
         .and_then(|c| c.base_url.clone());
@@ -665,14 +675,14 @@ pub(crate) async fn ai_list_models(
             // picker usable while surfacing nothing misleading (the
             // custom ids are the operator's own).
             let mut v = Vec::new();
-            merge_custom_models(&mut v, p.settings.providers.get(&kind));
+            merge_custom_models(&mut v, settings.providers.get(&kind));
             if v.is_empty() {
                 return Err(e.to_string());
             }
             return Ok(v);
         }
     };
-    merge_custom_models(&mut models, p.settings.providers.get(&kind));
+    merge_custom_models(&mut models, settings.providers.get(&kind));
     // OpenCode Zen on the public tier — drop everything the catalogue
     // marks as paid. Mirrors opencode's `cost.input === 0` filter.
     // When the catalogue hasn't loaded yet for this provider we leave
@@ -688,12 +698,49 @@ pub(crate) async fn ai_list_models(
     // catalogue cache is populated at startup.
     {
         let mut ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
-        ferrisscope_agent::provider::catalogue::sort_for_default(&mut ids);
+        ferrisscope_agent::provider::catalogue::sort_for_default_for(kind, &mut ids);
         let order: std::collections::HashMap<String, usize> =
             ids.into_iter().enumerate().map(|(i, s)| (s, i)).collect();
         models.sort_by_key(|m| order.get(&m.id).copied().unwrap_or(usize::MAX));
     }
     Ok(models)
+}
+
+/// The model a provider should start on: the first one its picker lists. Falls
+/// back to the offline catalogue when the provider can't be listed (no key yet,
+/// endpoint down). `None` leaves the choice to the first chat.
+async fn default_model_for(kind: ProviderKind, settings: &AgentSettings) -> Option<String> {
+    const LISTING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+    let listed = tokio::time::timeout(LISTING_TIMEOUT, provider_models(kind, settings))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|models| models.into_iter().next())
+        .map(|m| m.id);
+    listed.or_else(|| {
+        let mut ids: Vec<String> = ferrisscope_agent::provider::catalogue::list_models(kind)
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        ferrisscope_agent::provider::catalogue::sort_for_default_for(kind, &mut ids);
+        ids.into_iter().next()
+    })
+}
+
+/// What `provider` offers for reasoning — for `model` when it is one the
+/// catalogue knows, otherwise everything the provider's models offer. Lets the
+/// settings page re-list effort names (and show or hide the budget) as the
+/// default model changes.
+#[tauri::command]
+pub(crate) async fn ai_reasoning_spec(
+    provider: ProviderKind,
+    model: Option<String>,
+    _state: State<'_, AgentState>,
+) -> Result<reasoning::ReasoningSpec, String> {
+    Ok(reasoning::spec(
+        provider,
+        model.as_deref().filter(|m| !m.is_empty()),
+    ))
 }
 
 #[tauri::command]
@@ -720,32 +767,9 @@ pub(crate) async fn chat_create_session(
         .unwrap_or_default();
     let mut should_persist_default = false;
     if model_id.is_empty() {
-        let kind = p.settings.active_provider;
-        if let Some(cred) = effective_credential(kind).await {
-            let base_url = p
-                .settings
-                .providers
-                .get(&kind)
-                .and_then(|c| c.base_url.clone());
-            if let Ok(provider_impl) = build_provider(kind, &cred, base_url, None, None) {
-                if let Ok(mut list) = provider_impl.list_models().await {
-                    merge_custom_models(&mut list, p.settings.providers.get(&kind));
-                    let public_fallback_active = matches!(cred, Credential::ApiKey { ref key } if Some(key.as_str()) == kind.public_fallback_key());
-                    if public_fallback_active
-                        && ferrisscope_agent::provider::catalogue::has_data_for(kind)
-                    {
-                        list.retain(|m| {
-                            ferrisscope_agent::provider::catalogue::is_known_free(kind, &m.id)
-                        });
-                    }
-                    let mut ids: Vec<String> = list.into_iter().map(|m| m.id).collect();
-                    ferrisscope_agent::provider::catalogue::sort_for_default(&mut ids);
-                    if let Some(first) = ids.into_iter().next() {
-                        model_id = first;
-                        should_persist_default = p.settings.default_model.is_none();
-                    }
-                }
-            }
+        if let Some(top) = default_model_for(p.settings.active_provider, &p.settings).await {
+            should_persist_default = p.settings.default_model.is_none();
+            model_id = top;
         }
     }
     if should_persist_default && !model_id.is_empty() {
@@ -1031,7 +1055,7 @@ pub(crate) async fn chat_open(
         compaction_in_flight: false,
         channel: on_event,
         messages,
-        cancel: None,
+        turn: TurnGate::default(),
         in_flight_message_id: None,
         mcp_servers: pending_servers,
         external_scratch: external_scratch.clone(),
@@ -1084,38 +1108,9 @@ pub(crate) async fn chat_open(
         });
     }
 
-    // Heal any orphan tool_calls left over from a previously cancelled
-    // / crashed turn. The next provider call would 400 otherwise. We
-    // run this immediately on open rather than only at turn-start so
-    // re-opening a chat after a crash leaves the in-memory transcript
-    // self-consistent for the model picker / preview UI too.
-    {
-        let store_for_heal = match state.store().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "chat_open: cannot acquire store for orphan repair");
-                let initial = initial_status_for_open(&runtime).await;
-                let (context_limit, usable_context) =
-                    context_limits_for(data.meta.provider_kind, &data.meta.model);
-                return Ok(ChatOpenResult {
-                    chat_id,
-                    native_tool_count: initial.0,
-                    mcp_servers: initial.1,
-                    context_limit,
-                    usable_context,
-                });
-            }
-        };
-        let cluster_for_heal = data.meta.cluster_id.clone();
-        let session_for_heal = data.meta.id.clone();
-        repair_orphan_tool_calls(
-            &runtime,
-            &store_for_heal,
-            &cluster_for_heal,
-            &session_for_heal,
-        )
-        .await;
-    }
+    // Heal tool calls left without results by a cancelled / crashed turn: the
+    // next provider call would 400 otherwise.
+    repair_orphan_tool_calls(&runtime).await;
 
     // Emit the initial status now so the inspector renders without
     // sitting on "Checking…" — every configured server is in pending
@@ -1279,8 +1274,8 @@ pub(crate) async fn chat_send_message(
     // `data`, no data-URL prefix. Persisted on the user message and turned
     // into provider-native image blocks for vision-capable models.
     images: Option<Vec<ImageAttachment>>,
+    app: tauri::AppHandle,
     state: State<'_, AgentState>,
-    app_state: State<'_, AppState>,
 ) -> Result<(), String> {
     let runtime = {
         let chats = state.chats.lock().await;
@@ -1295,14 +1290,11 @@ pub(crate) async fn chat_send_message(
     // currently-active global default — operators may have changed the
     // global default since the session was created. Old (pre-multi-
     // provider) sessions deserialised default to OpenRouter.
-    let session_id_snapshot = runtime.lock().await.session_id.clone();
-    let kind = match store.load(&session_id_snapshot).await {
-        Ok(data) => data.meta.provider_kind,
-        Err(_) => p.settings.active_provider,
+    let (session_id_snapshot, kind) = {
+        let rt = runtime.lock().await;
+        (rt.session_id.clone(), rt.provider_kind)
     };
-    let cred = effective_credential(kind)
-        .await
-        .ok_or_else(|| format!("no credential configured for provider {kind:?}"))?;
+    let cred = resolve_credential(kind, &p.settings).await?;
     let base_url = p
         .settings
         .providers
@@ -1330,6 +1322,7 @@ pub(crate) async fn chat_send_message(
         tool_call_id: None,
         name: None,
         reasoning_content: None,
+        thinking_blocks: vec![],
         images: images.unwrap_or_default(),
     };
     let (cluster_id, session_id, queue_only, title_snapshot) = {
@@ -1339,7 +1332,7 @@ pub(crate) async fn chat_send_message(
         // sends use the most recent view. `None` payload clears the slot —
         // operators can disable the feature client-side by sending nothing.
         rt.last_view_context.clone_from(&view_context);
-        let queue_only = rt.cancel.is_some();
+        let queue_only = !rt.turn.claim();
         // Capture a once-per-chat snapshot for auto-titling under the
         // same lock so concurrent sends can't both fire the task.
         // The actual provider call runs outside this critical section.
@@ -1399,50 +1392,8 @@ pub(crate) async fn chat_send_message(
         return Ok(());
     }
 
-    // Pull the chat's cluster ctx so the system prompt can describe the
-    // *active* cluster (which may differ from origin after a
-    // `fs_configuration_use_context` call) instead of forcing the model
-    // to spend a tool round-trip on `fs_configuration_view` to know
-    // where it is.
-    let (cluster_ctx, view_snapshot) = {
-        let rt = runtime.lock().await;
-        (rt.cluster.clone(), rt.last_view_context.clone())
-    };
-    let cluster_block = build_cluster_context_block(&cluster_ctx, &app_state).await;
-    let active_cluster = cluster_ctx.active().await;
-    let view_block =
-        build_view_context_block(view_snapshot.as_ref(), &active_cluster, &app_state).await;
-    let system_prompt = assemble_system_prompt(
-        &cluster_block,
-        &view_block,
-        p.settings.system_prompt_override.as_deref(),
-    );
-
-    let runtime_clone = runtime.clone();
-    let store_clone = store.clone();
-    let cluster_id_clone = cluster_id.clone();
-    let session_id_clone = session_id.clone();
-    // OpenAI's Codex Responses endpoint rejects unknown top-level
-    // params (`reasoning_effort` 400s); Chat Completions accepts
-    // both. Pick the right shape based on credential type — OAuth
-    // ⇒ Codex Responses, ApiKey ⇒ Chat Completions.
-    let is_oauth = matches!(cred, Credential::OAuth { .. });
-    let provider_options_default = resolve_provider_options(kind, &p.settings, is_oauth);
-
-    let join = tokio::spawn(async move {
-        run_turn_loop(
-            runtime_clone,
-            store_clone,
-            provider,
-            system_prompt,
-            cluster_id_clone,
-            session_id_clone,
-            provider_options_default,
-        )
-        .await;
-    });
-    let abort = join.abort_handle();
-    runtime.lock().await.cancel = Some(abort);
+    let ctx = TurnContext::new(app, kind, &cred);
+    spawn_turn_loop(&runtime, &store, &provider, ctx, &cluster_id, &session_id).await;
     Ok(())
 }
 
@@ -1454,8 +1405,7 @@ pub(crate) async fn chat_cancel_streaming(
     let chats = state.chats.lock().await;
     if let Some(rt) = chats.get(&chat_id) {
         let mut rt = rt.lock().await;
-        if let Some(handle) = rt.cancel.take() {
-            handle.abort();
+        if rt.turn.abort() {
             // The aborted task can't emit `AssistantEnd` itself — its
             // future is dropped. Close the bubble + flip the streaming
             // flag from here so the UI doesn't hang on a perpetual
@@ -1474,6 +1424,7 @@ pub(crate) async fn chat_cancel_streaming(
                 });
             }
             rt.pending_approvals.clear();
+            let _ = rt.channel.send(ChatEvent::TurnState { running: false });
         }
     }
     Ok(())
@@ -1658,7 +1609,7 @@ pub(crate) async fn chat_list_tools(
 pub(crate) async fn chat_compact(
     chat_id: String,
     state: State<'_, AgentState>,
-    app_state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     let runtime = {
         let chats = state.chats.lock().await;
@@ -1669,14 +1620,11 @@ pub(crate) async fn chat_compact(
     };
     let store = state.store().await?;
     let p = load_persisted().await;
-    let session_id = runtime.lock().await.session_id.clone();
-    let kind = match store.load(&session_id).await {
-        Ok(d) => d.meta.provider_kind,
-        Err(_) => p.settings.active_provider,
+    let (session_id, kind) = {
+        let rt = runtime.lock().await;
+        (rt.session_id.clone(), rt.provider_kind)
     };
-    let cred = effective_credential(kind)
-        .await
-        .ok_or_else(|| format!("no credential configured for provider {kind:?}"))?;
+    let cred = resolve_credential(kind, &p.settings).await?;
     let base_url = p
         .settings
         .providers
@@ -1697,10 +1645,7 @@ pub(crate) async fn chat_compact(
         &provider,
         &cluster_id,
         &session_id,
-        &app_state,
-        &p,
-        &cred,
-        kind,
+        TurnContext::new(app, kind, &cred),
     )
     .await;
     Ok(())
@@ -1741,5 +1686,36 @@ pub(crate) async fn chat_approve_tool_call(
         // the UI silently drop the click rather than surface a confusing
         // error.
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn disabled(kind: ProviderKind) -> AgentSettings {
+        let mut s = AgentSettings::default();
+        s.providers.entry(kind).or_default().enabled = Some(false);
+        s
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_cannot_be_listed_starts_on_its_top_catalogue_model() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("models_dev.json"),
+            r#"{"groq":{"models":{"alpha-1":{},"zeta-2":{},"gpt-5-mini":{}}}}"#,
+        )
+        .unwrap();
+        ferrisscope_agent::provider::catalogue::load_from_disk(dir.path().to_path_buf()).await;
+
+        let top = default_model_for(ProviderKind::Groq, &disabled(ProviderKind::Groq)).await;
+        assert_eq!(top.as_deref(), Some("gpt-5-mini"));
+    }
+
+    #[tokio::test]
+    async fn a_provider_with_nothing_to_offer_has_no_default_model() {
+        let s = disabled(ProviderKind::Mistral);
+        assert_eq!(default_model_for(ProviderKind::Mistral, &s).await, None);
     }
 }

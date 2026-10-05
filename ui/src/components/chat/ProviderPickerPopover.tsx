@@ -3,7 +3,7 @@ import { useResolvedTheme } from "../../store";
 import { FF_MONO, FONT_SANS, type ThemeMode, R_LG, FS_MD, FS_XS } from "../../theme";
 import { Btn, Icons } from "../ui";
 import type { AiSettingsWire, ProviderKind } from "../../types";
-import { PROVIDER_ORDER } from "../../lib/providers";
+import { isProviderUsable, orderedProviders } from "../../lib/providers";
 import { useEscLayer } from "../../lib/escStack";
 
 type Props = {
@@ -50,12 +50,13 @@ export function ProviderPickerPopover({
     };
   }, [onClose]);
 
-  // Render in the shared PROVIDER_ORDER — the same list Settings → AI uses
-  // (mirrors Rust's `ProviderKind::all()`) — so muscle memory carries
-  // between the two surfaces.
-  const rows = PROVIDER_ORDER.map((kind) => settings.providers[kind]).filter(
-    (p): p is NonNullable<typeof p> => Boolean(p),
-  );
+  // Same backend order as Settings → AI, so muscle memory carries between
+  // the two surfaces.
+  const all = orderedProviders(settings);
+  // Switched-off providers aren't choices here; they stay manageable in
+  // Settings, which the footer points at.
+  const rows = all.filter((p) => p.enabled);
+  const disabledCount = all.length - rows.length;
 
   return (
     <div
@@ -135,12 +136,11 @@ export function ProviderPickerPopover({
       <div style={{ overflow: "auto", flex: 1 }}>
         {rows.map((p) => {
           const isCurrent = p.kind === currentProviderKind;
-          // `configured` is true for any provider that can actually
-          // serve traffic — operator key, OAuth, or the public-tier
-          // fallback (OpenCode Zen). The picker disables rows that
+          // Usable = enabled and holding a credential (operator key,
+          // OAuth, or the free-tier fallback once switched on). Rows that
           // would otherwise produce "no credential configured" errors
-          // and routes operators to Settings instead.
-          const usable = p.configured;
+          // route operators to Settings instead.
+          const usable = isProviderUsable(p);
           return (
             <button
               key={p.kind}
@@ -226,19 +226,41 @@ export function ProviderPickerPopover({
                   fontFamily: FF_MONO,
                   fontSize: FS_XS,
                   color: usable
-                    ? p.account_label === "free tier"
+                    ? p.free_tier
                       ? t.info
                       : t.good
                     : t.textDim,
                 }}
               >
                 {p.configured
-                  ? p.account_label ?? p.auth_mode ?? "ready"
+                  ? p.free_tier
+                    ? "free tier"
+                    : (p.account_label ?? p.auth_mode ?? "ready")
                   : "not connected"}
               </span>
             </button>
           );
         })}
+        {disabledCount > 0 && (
+          <button
+            type="button"
+            onClick={() => onOpenSettings("providers")}
+            style={{
+              display: "block",
+              width: "100%",
+              textAlign: "left",
+              padding: "8px 10px",
+              border: "none",
+              background: "transparent",
+              cursor: "pointer",
+              color: t.textMuted,
+              fontFamily: FF_MONO,
+              fontSize: FS_XS,
+            }}
+          >
+            {disabledCount} disabled — manage in Settings
+          </button>
+        )}
       </div>
     </div>
   );

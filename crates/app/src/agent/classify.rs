@@ -184,7 +184,15 @@ pub(crate) fn classify_usage_limit(e: &ProviderError) -> Option<String> {
         "spend limit",
         "billing",
     ];
-    if (400..500).contains(&code) && PROSE_MARKERS.iter().any(|m| lower.contains(m)) {
+    // Gemini words a per-minute cap exactly like the daily one ("exceeded your
+    // current quota") and only the quotaId in its details tells them apart.
+    // A per-minute cap clears by itself, so leave it to the retry loop; any
+    // per-day violation in the same body makes it a hard limit again.
+    let gemini_per_minute = lower.contains("perminute") && !lower.contains("perday");
+    if !gemini_per_minute
+        && (400..500).contains(&code)
+        && PROSE_MARKERS.iter().any(|m| lower.contains(m))
+    {
         return Some(match code {
             429 => "usage limit / quota exhausted (HTTP 429)".into(),
             403 => "access denied — quota or plan restriction (HTTP 403)".into(),
@@ -541,6 +549,35 @@ mod tests {
                 "{status} {body} should classify as usage limit"
             );
         }
+    }
+
+    #[test]
+    fn gemini_per_minute_quota_stays_transient_but_a_daily_one_is_a_usage_limit() {
+        let body = |quota_ids: &str| {
+            format!(
+                r#"{{"error":{{"code":429,"message":"You exceeded your current quota, please check your plan and billing details.","status":"RESOURCE_EXHAUSTED","details":[{{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{quota_ids}]}}]}}}}"#
+            )
+        };
+        let per_minute =
+            body(r#"{"quotaId":"GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}"#);
+        assert!(
+            classify_usage_limit(&http(429, &per_minute)).is_none(),
+            "an RPM cap clears on its own — retry, don't stop the turn"
+        );
+        let per_day = body(r#"{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}"#);
+        assert!(classify_usage_limit(&http(429, &per_day)).is_some());
+        let both = body(
+            r#"{"quotaId":"GenerateRequestsPerMinutePerProjectPerModel-FreeTier"},{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}"#,
+        );
+        assert!(
+            classify_usage_limit(&http(429, &both)).is_some(),
+            "a daily violation in the same body wins"
+        );
+        // And the per-minute shape really does take the retry path.
+        assert_eq!(
+            is_transient_error(&http(429, &per_minute)).as_deref(),
+            Some("rate limited")
+        );
     }
 
     #[test]

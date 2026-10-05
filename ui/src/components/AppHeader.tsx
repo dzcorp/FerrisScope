@@ -52,6 +52,9 @@ type Props = {
   onOpenNotifications: () => void;
   onOpenSettings: () => void;
   onOpenForwards: () => void;
+  /// Opens (or focuses) the AI chat for the current cluster view. Omitted when
+  /// no cluster view is open, which hides the button.
+  onOpenChat?: () => void;
 };
 
 // Top bar — brand, breadcrumb, command-palette stub, theme toggle. Per P6 the
@@ -75,6 +78,7 @@ export function AppHeader({
   onOpenNotifications,
   onOpenSettings,
   onOpenForwards,
+  onOpenChat,
 }: Props) {
   const t = useResolvedTheme().tokens;
   // Breadcrumb shows the short cluster name; `title` on the surrounding
@@ -540,6 +544,12 @@ export function AppHeader({
           <Kbd t={t}>{MOD_KEY}K</Kbd>
         </span>
       </button>
+
+      {onOpenChat && (
+        <IconBtn t={t} title="AI chat" onClick={onOpenChat}>
+          {Icons.chat}
+        </IconBtn>
+      )}
 
       <div style={{ position: "relative", display: "inline-flex" }}>
         <IconBtn

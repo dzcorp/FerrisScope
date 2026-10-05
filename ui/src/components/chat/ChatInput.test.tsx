@@ -25,7 +25,7 @@ function renderInput(
     <ChatInput
       mode="dark"
       disabled={false}
-      streaming={false}
+      busy={false}
       approvalMode="approve_per_write"
       onApprovalModeChange={() => {}}
       {...overrides}
@@ -121,25 +121,91 @@ describe("ChatInput — clipboard image attachments", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
-  it("shows a Stop button while streaming and cancels on click", () => {
-    const { onCancel } = renderInput({ streaming: true });
+  it("shows a Stop button while the agent is busy and cancels on click", () => {
+    const { onCancel } = renderInput({ busy: true });
     // Nothing typed → no send/queue button, just Stop.
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Stop the agent" }));
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
-  it("queues a typed message while streaming", () => {
-    const { onSend } = renderInput({ streaming: true });
+  it("queues a typed message while the agent is busy", () => {
+    const { onSend } = renderInput({ busy: true });
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: "and also scale it" },
     });
-    // Mid-stream the action button queues rather than sends.
+    // Mid-turn the action button queues rather than sends.
     fireEvent.click(
       screen.getByRole("button", { name: "Queue for the next round" }),
     );
     expect(onSend).toHaveBeenCalledTimes(1);
     expect((onSend.mock.calls[0] as [string])[0]).toBe("and also scale it");
+  });
+
+  describe("when the send is refused", () => {
+    const typeAndSend = (text: string) => {
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: text } });
+      fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    };
+
+    it("puts the draft back so the text isn't lost", async () => {
+      const onSend = vi.fn().mockResolvedValue(false);
+      render(
+        <ChatInput
+          mode="dark"
+          disabled={false}
+          busy={false}
+          approvalMode="approve_per_write"
+          onApprovalModeChange={() => {}}
+          onSend={onSend}
+          onCancel={() => {}}
+        />,
+      );
+      typeAndSend("scale web to 5");
+      expect(screen.getByRole("textbox")).toHaveValue("");
+      await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue("scale web to 5"));
+    });
+
+    it("keeps whatever was typed in the meantime instead of overwriting it", async () => {
+      let refuse!: (v: boolean) => void;
+      const onSend = vi.fn(() => new Promise<boolean>((r) => (refuse = r)));
+      render(
+        <ChatInput
+          mode="dark"
+          disabled={false}
+          busy={false}
+          approvalMode="approve_per_write"
+          onApprovalModeChange={() => {}}
+          onSend={onSend}
+          onCancel={() => {}}
+        />,
+      );
+      typeAndSend("first");
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "second" } });
+      refuse(false);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(screen.getByRole("textbox")).toHaveValue("second");
+    });
+
+    it("leaves the composer empty when the send is accepted", async () => {
+      const onSend = vi.fn().mockResolvedValue(true);
+      render(
+        <ChatInput
+          mode="dark"
+          disabled={false}
+          busy={false}
+          approvalMode="approve_per_write"
+          onApprovalModeChange={() => {}}
+          onSend={onSend}
+          onCancel={() => {}}
+        />,
+      );
+      typeAndSend("hello");
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(screen.getByRole("textbox")).toHaveValue("");
+    });
   });
 
   it("disables Send when the composer is empty", () => {

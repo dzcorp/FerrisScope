@@ -134,6 +134,9 @@ export type ExecutingToolCall = {
 };
 
 export type ChatViewState = {
+  /// A turn is in progress (`turn_state` events). Unlike a streaming bubble,
+  /// it stays true while tools run or an approval is pending.
+  running?: boolean;
   messages: ChatViewMessage[];
   // Per-tool-call accumulator buffer for arguments. Keyed by tool call id;
   // promoted into a final ChatViewMessage entry on tool_call_end.
@@ -292,6 +295,11 @@ export function applyChatEvent(
       }
       return {
         ...prev,
+        // Execution starting means the approval (if one was asked) is decided:
+        // retire its card now instead of leaving live buttons up for the whole run.
+        pendingApprovals: prev.pendingApprovals.filter(
+          (p) => p.toolCallId !== evt.tool_call_id,
+        ),
         executing: [
           ...prev.executing,
           {
@@ -368,24 +376,40 @@ export function applyChatEvent(
       // DockChat surfaces the in-flight pill; no transcript change.
       return prev;
     case "compaction_completed": {
-      // Backend rewrote its in-memory transcript: the head was folded
-      // into a single `[context checkpoint]` assistant message.
-      // Mirror that on the UI side by replacing all bubbles with the
-      // checkpoint. Streaming buffers and pending approvals get
-      // cleared too — the head they referred to no longer exists.
+      // The backend folded the head into a `[context checkpoint]` message and
+      // kept `tail` verbatim; mirror exactly that. Live state survives — a
+      // manual compaction can land mid-turn, and the bubble being streamed,
+      // a pending approval or a running tool still belong to the new
+      // transcript.
+      const rebuilt = chatStateFromMessages([
+        {
+          role: "assistant",
+          content: `[context checkpoint]\n${evt.summary}`,
+          name: "context_checkpoint",
+        },
+        ...evt.tail,
+      ]);
       return {
+        ...prev,
         messages: [
-          {
-            id: `compact-${Date.now()}`,
-            role: "assistant",
-            content: `[context checkpoint]\n${evt.summary}`,
-            toolName: "context_checkpoint",
-          },
+          ...rebuilt.messages,
+          ...prev.messages.filter((m) => m.streaming),
         ],
-        toolBuffers: {},
-        pendingApprovals: [],
+      };
+    }
+    case "turn_state": {
+      if (evt.running) return { ...prev, running: true };
+      // The turn is over (finished or cancelled): nothing can still be
+      // running or awaiting a decision, whatever the last events said.
+      return {
+        ...prev,
+        running: false,
         executing: [],
-        mcp: prev.mcp,
+        pendingApprovals: [],
+        toolBuffers: {},
+        messages: prev.messages.some((m) => m.streaming)
+          ? prev.messages.map((m) => (m.streaming ? { ...m, streaming: false } : m))
+          : prev.messages,
       };
     }
     default:

@@ -149,6 +149,27 @@ export function makeChatTab(
   };
 }
 
+/// Opens the chat for a cluster scope, or focuses the one already bound to any
+/// of its `members`: "open chat" lands in the existing conversation instead of
+/// stacking a blank tab (new sessions live behind the sessions popover). A new
+/// chat binds to the first member — the agent can switch clusters itself.
+export function openClusterChat(members: { id: string; name: string }[]) {
+  const s = useAppStore.getState();
+  const ids = new Set(members.map((m) => m.id));
+  const existing = s.dockTabs.find(
+    (tab) =>
+      tab.kind === "chat" &&
+      ids.has(String((tab.state as { clusterId?: string } | undefined)?.clusterId)),
+  );
+  if (existing) {
+    s.setDockActiveId(existing.id);
+    s.setDockMin("right", false);
+    return;
+  }
+  const first = members[0];
+  if (first) s.addDockTab(makeChatTab(first.id, first.name));
+}
+
 /// First-launch size before the operator drags: width for the right dock,
 /// height for the bottom one.
 export function dockDefaultSize(placement: DockPlacement): number {
@@ -417,7 +438,7 @@ export function Dock({
         >
           {/*
             Right-placement chat dock with a single tab: skip the tab strip
-            entirely. The "AI chat" menu is idempotent (one chat tab per
+            entirely. The header's AI chat button is idempotent (one chat tab per
             cluster), so a single-tab right dock is the steady state — the
             header chip already names the bound cluster, and the title row
             below it (in DockChat's own header) shows the active session.

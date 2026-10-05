@@ -130,6 +130,17 @@ async fn mcp_tool_is_trusted(runtime: &Arc<Mutex<ChatRuntime>>, name: &str) -> b
         .any(|s| s.trust_as_read && s.tools.iter().any(|t| t.name == name))
 }
 
+/// The model's tool arguments as JSON; empty text means no arguments. Text
+/// that doesn't parse (a reply cut off by the token limit, a stray comma) is
+/// refused instead of run with the arguments dropped: the approval card shows
+/// the raw text, so running something else would not be what was approved.
+fn parse_tool_args(raw: &str) -> Result<serde_json::Value, serde_json::Error> {
+    if raw.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_json::from_str(raw)
+}
+
 pub(crate) async fn execute_tool_call(
     runtime: &Arc<Mutex<ChatRuntime>>,
     store: &SessionStore,
@@ -139,12 +150,18 @@ pub(crate) async fn execute_tool_call(
     category: ToolCategory,
     approval_mode: ApprovalMode,
 ) -> (String, bool) {
-    let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
+    let args = match parse_tool_args(&tc.arguments) {
         Ok(v) => v,
-        Err(_) if tc.arguments.trim().is_empty() => serde_json::Value::Null,
         Err(e) => {
             tracing::warn!(error = %e, name = %tc.name, "tool call: bad json args");
-            serde_json::Value::Null
+            return (
+                format!(
+                    "Tool `{}` was not run: its arguments are not valid JSON ({e}). \
+                     Send the call again with one complete JSON object.",
+                    tc.name
+                ),
+                true,
+            );
         }
     };
 
@@ -353,6 +370,27 @@ pub(crate) fn tools_to_schemas(tools: &[McpTool]) -> Vec<ToolSchema> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_args_parse_as_json_and_empty_means_none() {
+        assert_eq!(
+            parse_tool_args(r#"{"name":"web","replicas":3}"#).unwrap(),
+            serde_json::json!({"name": "web", "replicas": 3})
+        );
+        assert_eq!(parse_tool_args("").unwrap(), serde_json::Value::Null);
+        assert_eq!(parse_tool_args("  \n").unwrap(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn truncated_or_malformed_tool_args_are_refused_not_nulled() {
+        for bad in [
+            r#"{"name":"web","namespace":"pro"#,
+            r#"{"a":1,}"#,
+            "not json",
+        ] {
+            assert!(parse_tool_args(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn cap_tool_result_passes_short_through() {

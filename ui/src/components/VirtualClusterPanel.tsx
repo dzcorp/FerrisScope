@@ -38,7 +38,7 @@ import {
 import { ReconnectBanner } from "./ClusterPanel";
 import { AddMenuItem, AddMenuTrigger, NamespaceButton } from "./ClusterBar";
 import { ResourceTable, type TableCluster } from "./ResourceTable";
-import { makeChatTab, makeTerminalTab, makeYamlTab } from "./Dock";
+import { makeTerminalTab, makeYamlTab } from "./Dock";
 import { toast } from "../lib/dialog";
 import { EmptyState, Icons, LoadingLine, Tooltip } from "./ui";
 import { useEscLayer } from "../lib/escStack";
@@ -324,28 +324,6 @@ function VirtualClusterBar({
     return () => window.removeEventListener("mousedown", onDown);
   }, [menuOpen]);
 
-  const openChat = () => {
-    // Idempotent: focus any chat tab already bound to one of the members;
-    // otherwise open a new chat on the first member — the agent can switch
-    // clusters itself via fs_configuration_use_context.
-    const s = useAppStore.getState();
-    const existing = s.dockTabs.find(
-      (tt) =>
-        tt.kind === "chat" &&
-        memberIds.includes(
-          String((tt.state as { clusterId?: string } | undefined)?.clusterId),
-        ),
-    );
-    if (existing) {
-      s.setDockActiveId(existing.id);
-      s.setDockMin("right", false);
-    } else {
-      const first = contexts[0];
-      if (first) addDockTab(makeChatTab(first.id, first.name));
-    }
-    setMenuOpen(false);
-  };
-
   const trimmedSave = saveName.trim();
   const saveDup = virtualContexts.some(
     (v) => v.name.toLowerCase() === trimmedSave.toLowerCase(),
@@ -503,13 +481,6 @@ function VirtualClusterBar({
                         setMenuOpen(false))
                       : setMenuMode("yaml")
                   }
-                />
-                <AddMenuItem
-                  t={t}
-                  icon={Icons.chat}
-                  title="AI chat"
-                  subtitle="Talk to the cluster-aware assistant"
-                  onClick={openChat}
                 />
                 <AddMenuItem
                   t={t}

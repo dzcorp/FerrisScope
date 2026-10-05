@@ -161,6 +161,7 @@ fn build_title_request(snapshot: &TitleSnapshot, model: String) -> CompletionReq
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                thinking_blocks: vec![],
                 images: vec![],
             },
             ChatMessage {
@@ -170,6 +171,7 @@ fn build_title_request(snapshot: &TitleSnapshot, model: String) -> CompletionReq
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                thinking_blocks: vec![],
                 images: vec![],
             },
         ],
