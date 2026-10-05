@@ -41,4 +41,15 @@ describe("icon set", () => {
     }
     expect(dupes).toEqual([]);
   });
+
+  it("draws the AI chat glyph as a bubble with a sparkle cut out of it", () => {
+    const svg = renderToStaticMarkup(Icons.chat);
+    // Even-odd fill: the second subpath (the four-point sparkle) is a hole in
+    // the bubble, not a second shape painted over it.
+    expect(svg).toContain('fill-rule="evenodd"');
+    const d = /d="([^"]+)"/.exec(svg)![1]!;
+    expect(d.match(/[Mm]/g)).toHaveLength(2);
+    // Bubble tail + sparkle are one path: nothing else is drawn.
+    expect(svg.match(/<path/g)).toHaveLength(1);
+  });
 });
