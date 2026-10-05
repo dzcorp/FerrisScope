@@ -2,9 +2,15 @@
 
 pub mod anthropic;
 pub mod catalogue;
+pub mod gateway;
+pub mod gemini;
+pub mod gemini_schema;
 pub mod meta;
 pub mod openai_codex;
 pub mod openai_compat;
+pub mod reasoning;
+#[cfg(test)]
+pub(crate) mod test_util;
 
 use crate::types::{ChatMessage, ToolCall, ToolSchema};
 use async_trait::async_trait;
@@ -156,6 +162,9 @@ pub struct CompletionFinal {
     /// reasoning at all (Anthropic uses a separate Messages-API
     /// content block; Codex Responses uses encrypted reasoning items).
     pub reasoning_content: Option<String>,
+    /// Anthropic thinking blocks (with signatures) the next request must
+    /// replay; see [`ChatMessage::thinking_blocks`]. Empty elsewhere.
+    pub thinking_blocks: Vec<serde_json::Value>,
 }
 
 /// Sink the provider invokes for each streaming event. Boxed-trait-object
@@ -200,6 +209,41 @@ pub(crate) fn dropped_images_note(text: &str, count: usize) -> String {
         note
     } else {
         format!("{text}\n\n{note}")
+    }
+}
+
+/// `User-Agent` for every provider request. The OpenCode gateways require a
+/// client that names itself (not a bare HTTP-library string) and watch for
+/// abuse; it costs the other providers nothing.
+pub(crate) const USER_AGENT: &str = concat!("FerrisScope/", env!("CARGO_PKG_VERSION"));
+
+/// Headers the OpenCode gateways (Zen, Go) use to route a conversation to
+/// one upstream and keep its prompt cache warm. Empty for every other
+/// provider: a session id is only meaningful — and only shared — with them.
+pub(crate) fn gateway_headers(
+    kind: crate::config::ProviderKind,
+    session_id: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    if !kind.is_opencode_gateway() {
+        return Vec::new();
+    }
+    let mut headers = vec![("x-opencode-client", "ferrisscope".to_string())];
+    if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+        headers.push(("x-opencode-session", sid.to_string()));
+        headers.push(("x-session-affinity", sid.to_string()));
+    }
+    headers
+}
+
+/// Insert `extra` into `map`, skipping any value that isn't a legal header.
+pub(crate) fn apply_headers(
+    map: &mut reqwest::header::HeaderMap,
+    extra: &[(&'static str, String)],
+) {
+    for (name, value) in extra {
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(value) {
+            map.insert(reqwest::header::HeaderName::from_static(name), v);
+        }
     }
 }
 

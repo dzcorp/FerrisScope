@@ -40,6 +40,13 @@ pub struct ChatMessage {
     /// session JSONLs so reload restores correct round-trip behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Anthropic `thinking` / `redacted_thinking` content blocks, verbatim
+    /// (signature included). With thinking enabled the Messages API requires
+    /// the blocks that preceded a `tool_use` to be sent back with it, so they
+    /// are persisted on the assistant message and replayed first. Empty for
+    /// every other provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thinking_blocks: Vec<serde_json::Value>,
     /// Image attachments on a `user` message (clipboard paste / file
     /// attach). Each is base64-encoded bytes plus a MIME type; providers
     /// that support vision turn these into their native image content
@@ -70,6 +77,12 @@ pub struct ToolCall {
     /// Raw JSON arguments object as a string. Providers stream it as text
     /// deltas, so we keep it as a string and parse at execution time.
     pub arguments: String,
+    /// Gemini's opaque `thoughtSignature` for this call. Gemini 3 rejects a
+    /// replayed function call that lacks the signature it issued, so it is
+    /// persisted with the transcript and sent back verbatim. `None` for every
+    /// other provider (and absent from older sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

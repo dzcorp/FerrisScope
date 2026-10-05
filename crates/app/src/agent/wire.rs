@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 
 use ferrisscope_agent::config::McpServerConfig;
-use ferrisscope_agent::{ApprovalMode, FinishReason, ProviderKind, ReasoningSettings};
+use ferrisscope_agent::config::ProviderReasoning;
+use ferrisscope_agent::provider::reasoning::ReasoningSpec;
+use ferrisscope_agent::types::ChatMessage;
+use ferrisscope_agent::{ApprovalMode, FinishReason, ProviderKind};
 use serde::{Deserialize, Serialize};
 
 use crate::secret_storage::StorageBackend;
@@ -16,6 +19,9 @@ use crate::secret_storage::StorageBackend;
 pub(crate) struct AiSettingsWire {
     pub active_provider: ProviderKind,
     pub providers: HashMap<ProviderKind, ProviderStatusWire>,
+    /// Display order of `providers` (the map has none). Single source of
+    /// truth for every provider list in the UI.
+    pub provider_order: Vec<ProviderKind>,
     pub default_model: Option<String>,
     pub default_approval_mode: ApprovalMode,
     pub system_prompt_override: Option<String>,
@@ -37,9 +43,6 @@ pub(crate) struct AiSettingsWire {
     /// operator switches to `mcp_servers`. Frontend should treat as
     /// read-only after migration; new edits go through `mcp_servers`.
     pub mcp_binary_path: Option<String>,
-    /// Universal reasoning / extended-thinking knobs. Mapped to each
-    /// provider's native shape at request time.
-    pub reasoning: ReasoningSettings,
 }
 
 /// Per-provider snapshot. Surfaces what's needed to render the provider
@@ -64,6 +67,49 @@ pub(crate) struct ProviderStatusWire {
     /// enumerated list (live `/models` / catalogue / static). The only
     /// model source for endpoints that can't enumerate (custom gateways).
     pub custom_models: Vec<String>,
+    /// Operator's switch for this provider. A disabled provider can't serve
+    /// chat or model listing and is hidden from the chat picker; its
+    /// credential is kept. Zen starts disabled (see `default_enabled`).
+    pub enabled: bool,
+    /// Disclosure to show before the operator switches this provider on.
+    pub enable_notice: Option<EnableNoticeWire>,
+    /// Currently running on the keyless public tier (enabled, nothing
+    /// stored). Distinct from holding a credential: there is nothing to
+    /// disconnect.
+    pub free_tier: bool,
+    /// A blank key is valid (local / open endpoints).
+    pub allows_blank_key: bool,
+    /// Placeholder for the API-key field.
+    pub key_hint: String,
+    /// Noun for "Sign in with …" when the provider offers OAuth.
+    pub oauth_label: Option<String>,
+    /// Where to create a key.
+    pub signup_url: Option<String>,
+    /// One plain-text line of context for the row.
+    pub description: Option<String>,
+    /// The operator's saved reasoning choice for this provider.
+    pub reasoning: ProviderReasoning,
+    /// What this provider (for the active one: its default model) offers:
+    /// effort names, and a token budget only where one is used.
+    pub reasoning_spec: ReasoningSpec,
+}
+
+/// Wire copy of `ferrisscope_agent::EnableNotice`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EnableNoticeWire {
+    pub headline: String,
+    pub points: Vec<String>,
+    pub learn_more_url: String,
+}
+
+impl From<&ferrisscope_agent::EnableNotice> for EnableNoticeWire {
+    fn from(n: &ferrisscope_agent::EnableNotice) -> Self {
+        Self {
+            headline: n.headline.to_string(),
+            points: n.points.iter().map(|p| (*p).to_string()).collect(),
+            learn_more_url: n.learn_more_url.to_string(),
+        }
+    }
 }
 
 /// What the frontend posts when changing global settings. Per-provider
@@ -79,6 +125,9 @@ pub(crate) struct AiSettingsPatch {
     /// Replace the custom model list for `provider`.
     #[serde(default)]
     pub provider_custom_models: Option<ProviderCustomModelsPatch>,
+    /// Switch `provider` on or off.
+    #[serde(default)]
+    pub provider_enabled: Option<ProviderEnabledPatch>,
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(default)]
@@ -94,17 +143,34 @@ pub(crate) struct AiSettingsPatch {
     pub mcp_servers: Option<Vec<McpServerConfig>>,
     #[serde(default)]
     pub mcp_binary_path: Option<String>,
-    /// Whole-object replace: `Some(_)` sets, `None` leaves alone. The
-    /// inner struct's own fields are themselves `Option`, so a clear
-    /// is `Some(ReasoningSettings::default())`.
+    /// Replace one provider's reasoning choice (see
+    /// [`ProviderReasoningPatch`]).
     #[serde(default)]
-    pub reasoning: Option<ReasoningSettings>,
+    pub provider_reasoning: Option<ProviderReasoningPatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ProviderBaseUrlPatch {
     pub provider: ProviderKind,
     pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ProviderEnabledPatch {
+    pub provider: ProviderKind,
+    pub enabled: bool,
+}
+
+/// Replace `provider`'s reasoning choice wholesale. An absent / empty `effort`
+/// means "let the API decide"; an absent / zero `budget_tokens` means the
+/// default. The effort is a name from that provider's own list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ProviderReasoningPatch {
+    pub provider: ProviderKind,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub budget_tokens: Option<u32>,
 }
 
 /// Whole-list replace of a provider's custom model ids. The backend
@@ -293,7 +359,15 @@ pub(crate) enum ChatEvent {
         /// the bubble list synchronously rather than refetching from
         /// disk and racing the next streaming round.
         summary: String,
+        /// The messages kept verbatim after the checkpoint, so the rebuilt
+        /// list matches the transcript the chat continues with.
+        tail: Vec<ChatMessage>,
     },
+    /// The turn loop started or ended. Bridges the gaps between assistant
+    /// bubbles — tool execution, a pending approval, a retry backoff — so the
+    /// UI knows the agent is still working, and can retire any tool strips
+    /// left over when a turn is cancelled.
+    TurnState { running: bool },
     /// Streaming error. The chat is left intact; the frontend can retry by
     /// sending another message.
     Error { message: String },

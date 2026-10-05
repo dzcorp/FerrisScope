@@ -2648,8 +2648,10 @@ export type SettingsTarget = {
 
 export type ProviderKind =
   | "opencode_zen"
+  | "opencode_go"
   | "open_router"
   | "anthropic"
+  | "google"
   | "openai"
   | "zai"
   | "minimax"
@@ -2688,18 +2690,61 @@ export type ProviderStatusWire = {
   /// Operator-supplied extra model ids, merged into the enumerated list.
   /// The only model source for endpoints that can't enumerate models.
   custom_models: string[];
+  /// Operator's switch. A disabled provider can't serve chat or model
+  /// listing and is hidden from the chat picker; its credential is kept.
+  /// Zen starts disabled.
+  enabled: boolean;
+  /// Disclosure to show before switching this provider on.
+  enable_notice: EnableNotice | null;
+  /// Running on the keyless public tier (enabled, nothing stored) — there
+  /// is no credential to disconnect.
+  free_tier: boolean;
+  /// A blank key is valid (local / open endpoints).
+  allows_blank_key: boolean;
+  /// Placeholder for the API-key field.
+  key_hint: string;
+  /// Noun for "Sign in with …" when the provider offers OAuth.
+  oauth_label: string | null;
+  /// Where to create a key.
+  signup_url: string | null;
+  /// One plain-text line of context for the row.
+  description: string | null;
+  /// The saved reasoning choice for this provider.
+  reasoning: ProviderReasoning;
+  reasoning_spec: ReasoningSpec;
+};
+
+export type EnableNotice = {
+  headline: string;
+  points: string[];
+  learn_more_url: string;
 };
 
 export type ApprovalMode = "approve_per_write" | "allow_all_writes";
 
-export type ReasoningEffort = "low" | "medium" | "high";
-
-/// Universal reasoning / extended-thinking knobs. Mapped to each
-/// provider's native shape at request time (Anthropic `thinking`,
-/// OpenAI `reasoning_effort`, OpenRouter `reasoning`, …).
-export type ReasoningSettings = {
-  effort?: ReasoningEffort | null;
+/// The operator's saved reasoning choice for one provider. `effort` is a name
+/// from that provider's own list (`none`, `minimal`, `low`, `medium`, `high`,
+/// `xhigh`, `max`, …); null/absent = let the API decide.
+export type ProviderReasoning = {
+  effort?: string | null;
   budget_tokens?: number | null;
+};
+
+export type BudgetRange = {
+  min: number;
+  max: number | null;
+  /// Ready-made choices inside the range.
+  presets: number[];
+};
+
+/// What a provider (for the active one: its default model) offers for
+/// reasoning. `budget` is present only where a token budget is used.
+export type ReasoningSpec = {
+  efforts: string[];
+  budget: BudgetRange | null;
+  toggle: boolean;
+  /// Lists come from the model catalogue rather than a static fallback.
+  from_catalogue: boolean;
 };
 
 /// One operator-configured external MCP server. Each entry produces one
@@ -2736,6 +2781,9 @@ export type McpServerConfig = {
 export type AiSettingsWire = {
   active_provider: ProviderKind;
   providers: Record<ProviderKind, ProviderStatusWire>;
+  /// Display order of `providers` — the single source for every provider
+  /// list in the UI.
+  provider_order: ProviderKind[];
   default_model: string | null;
   default_approval_mode: ApprovalMode;
   system_prompt_override: string | null;
@@ -2746,7 +2794,6 @@ export type AiSettingsWire = {
   /// writes through `mcp_servers`. Frontend hides it once `mcp_servers`
   /// is non-empty.
   mcp_binary_path: string | null;
-  reasoning: ReasoningSettings;
 };
 
 export type ProviderBaseUrlPatch = {
@@ -2760,8 +2807,14 @@ export type ProviderCustomModelsPatch = {
   models: string[];
 };
 
+export type ProviderEnabledPatch = {
+  provider: ProviderKind;
+  enabled: boolean;
+};
+
 export type AiSettingsPatch = {
   active_provider?: ProviderKind;
+  provider_enabled?: ProviderEnabledPatch;
   provider_base_url?: ProviderBaseUrlPatch;
   provider_custom_models?: ProviderCustomModelsPatch;
   default_model?: string;
@@ -2771,8 +2824,15 @@ export type AiSettingsPatch = {
   /// Whole-list replace. Pass `[]` to clear all servers.
   mcp_servers?: McpServerConfig[];
   mcp_binary_path?: string;
-  /// Whole-object replace; pass an object with `null` fields to clear.
-  reasoning?: ReasoningSettings;
+  /// Replace one provider's reasoning choice wholesale; null / empty fields
+  /// mean "let the API decide" / "default budget".
+  provider_reasoning?: ProviderReasoningPatch;
+};
+
+export type ProviderReasoningPatch = {
+  provider: ProviderKind;
+  effort: string | null;
+  budget_tokens: number | null;
 };
 
 export type ProviderTestRequest = {
@@ -2810,7 +2870,14 @@ export type AgentToolCall = {
   id: string;
   name: string;
   arguments: string;
+  /// Gemini's opaque `thoughtSignature`, kept so the backend can replay it.
+  /// Never displayed.
+  thought_signature?: string;
 };
+
+/// Anthropic `thinking` / `redacted_thinking` blocks, kept so the backend can
+/// replay them; never displayed.
+export type AgentThinkingBlock = Record<string, unknown>;
 
 // A single image attached to a user message. `data` is base64 WITHOUT the
 // `data:<mime>;base64,` prefix — matches the Rust `ImageAttachment` wire
@@ -2829,6 +2896,8 @@ export type AgentChatMessage = {
   // Image attachments on user messages (clipboard paste / file attach).
   // Absent / empty on every other role.
   images?: ChatImageAttachment[] | null;
+  // Anthropic thinking blocks persisted with an assistant turn (replay only).
+  thinking_blocks?: AgentThinkingBlock[];
 };
 
 export type SessionMeta = {
@@ -3048,7 +3117,12 @@ export type ChatEvent =
       type: "compaction_completed";
       summary_chars: number;
       summary: string;
+      /// Messages kept verbatim after the checkpoint.
+      tail: AgentChatMessage[];
     }
+  /// The turn loop started or ended. Covers the stretches with no assistant
+  /// bubble open (tools running, approval pending, retry backoff).
+  | { type: "turn_state"; running: boolean }
   | { type: "error"; message: string }
   /// A transient provider failure is being retried after a backoff.
   /// Informational only — cleared by the next assistant_start / error.

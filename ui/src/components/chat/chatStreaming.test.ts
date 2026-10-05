@@ -61,3 +61,115 @@ describe("applyChatEvent — retrying", () => {
     expect(next).toBe(prev);
   });
 });
+
+describe("applyChatEvent — turn_state", () => {
+  const withActivity = () => {
+    let s = chatStateFromMessages([{ role: "user", content: "restart it" }]);
+    s = applyChatEvent(s, { type: "turn_state", running: true });
+    s = applyChatEvent(s, {
+      type: "approval_request",
+      tool_call_id: "t1",
+      name: "fs_resources_apply",
+      arguments: "{}",
+    });
+    s = applyChatEvent(s, {
+      type: "tool_execution_start",
+      tool_call_id: "t2",
+      name: "fs_pods_exec",
+    });
+    return s;
+  };
+
+  it("marks the turn running, including while only tools are active", () => {
+    const s = withActivity();
+    expect(s.running).toBe(true);
+    expect(s.messages.some((m) => m.streaming)).toBe(false);
+  });
+
+  it("retires running tools and pending approvals when the turn ends or is cancelled", () => {
+    const s = applyChatEvent(withActivity(), { type: "turn_state", running: false });
+    expect(s.running).toBe(false);
+    expect(s.executing).toEqual([]);
+    expect(s.pendingApprovals).toEqual([]);
+  });
+
+  it("closes a bubble still marked as streaming", () => {
+    let s = applyChatEvent(chatStateFromMessages([]), { type: "assistant_start", message_id: "m1" });
+    s = applyChatEvent(s, { type: "token_delta", delta: "partial" });
+    s = applyChatEvent(s, { type: "turn_state", running: false });
+    expect(s.messages[0]).toMatchObject({ content: "partial", streaming: false });
+  });
+});
+
+describe("applyChatEvent — tool_execution_start", () => {
+  it("drops the approval card for a call that is now running", () => {
+    let s = applyChatEvent(chatStateFromMessages([]), {
+      type: "approval_request",
+      tool_call_id: "t1",
+      name: "fs_resources_apply",
+      arguments: "{}",
+    });
+    s = applyChatEvent(s, {
+      type: "approval_request",
+      tool_call_id: "t2",
+      name: "fs_resources_delete",
+      arguments: "{}",
+    });
+    s = applyChatEvent(s, {
+      type: "tool_execution_start",
+      tool_call_id: "t1",
+      name: "fs_resources_apply",
+    });
+    expect(s.pendingApprovals.map((p) => p.toolCallId)).toEqual(["t2"]);
+    expect(s.executing.map((e) => e.toolCallId)).toEqual(["t1"]);
+  });
+});
+
+describe("applyChatEvent — compaction_completed", () => {
+  const history: AgentChatMessage[] = [
+    { role: "user", content: "old question" },
+    { role: "assistant", content: "old answer" },
+    { role: "user", content: "latest question" },
+  ];
+
+  it("shows the checkpoint followed by the messages the backend kept", () => {
+    const prev = chatStateFromMessages(history);
+    const next = applyChatEvent(prev, {
+      type: "compaction_completed",
+      summary_chars: 1,
+      summary: "S",
+      tail: [{ role: "user", content: "latest question" }],
+    });
+    expect(next.messages.map((m) => m.content)).toEqual([
+      "[context checkpoint]\nS",
+      "latest question",
+    ]);
+    expect(next.messages[0]!.toolName).toBe("context_checkpoint");
+  });
+
+  it("keeps live state: the bubble being streamed, approvals, running tools, MCP status", () => {
+    let prev = chatStateFromMessages(history);
+    prev = applyChatEvent(prev, {
+      type: "mcp_status",
+      servers: [],
+      native_tool_count: 7,
+    });
+    prev = applyChatEvent(prev, { type: "assistant_start", message_id: "live" });
+    prev = applyChatEvent(prev, { type: "token_delta", delta: "thinking…" });
+    prev = applyChatEvent(prev, {
+      type: "approval_request",
+      tool_call_id: "t1",
+      name: "fs_resources_apply",
+      arguments: "{}",
+    });
+    const next = applyChatEvent(prev, {
+      type: "compaction_completed",
+      summary_chars: 1,
+      summary: "S",
+      tail: [],
+    });
+    expect(next.messages.at(-1)).toMatchObject({ id: "live", content: "thinking…", streaming: true });
+    expect(next.pendingApprovals).toHaveLength(1);
+    expect(next.mcp?.nativeToolCount).toBe(7);
+  });
+});

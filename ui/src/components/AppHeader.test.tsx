@@ -330,3 +330,41 @@ describe("AppHeader count loading hint", () => {
     expect(queryByTestId("count-loading")).toBeNull();
   });
 });
+
+describe("AppHeader AI chat button", () => {
+  function renderChat(onOpenChat?: () => void) {
+    return render(
+      <AppHeader
+        mode="dark"
+        context={null}
+        selectedKindLabel={null}
+        unreadNotifications={0}
+        activeForwards={0}
+        onHome={noop}
+        onPalette={noop}
+        onToggleTheme={noop}
+        onOpenNotifications={noop}
+        onOpenSettings={noop}
+        onOpenForwards={noop}
+        onOpenChat={onOpenChat}
+      />,
+    );
+  }
+
+  it("is hidden when no cluster view can host a chat", () => {
+    const { queryByLabelText } = renderChat();
+    expect(queryByLabelText("AI chat")).toBeNull();
+  });
+
+  it("opens the chat on click and sits right before the port forwards button", () => {
+    const onOpenChat = vi.fn();
+    const { getByLabelText } = renderChat(onOpenChat);
+    const chat = getByLabelText("AI chat");
+    fireEvent.click(chat);
+    expect(onOpenChat).toHaveBeenCalledTimes(1);
+    const forwards = getByLabelText("Port forwards");
+    expect(
+      chat.compareDocumentPosition(forwards) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});

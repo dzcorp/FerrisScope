@@ -4,6 +4,7 @@ import { tokens, FF_MONO, FONT_SANS, type ThemeMode, R_LG, R_MD, FS_MD, FS_SM, F
 import { Btn, Icons } from "../ui";
 import type { SessionMeta } from "../../types";
 import { useEscLayer } from "../../lib/escStack";
+import { confirm } from "../../lib/dialog";
 
 /// Per-session live runtime hint. Only includes sessions that are
 /// currently open in the parent's chat tab — flat sessions are absent
@@ -150,14 +151,15 @@ export function SessionsPopover({
             t={t}
             variant="danger"
             size="sm"
-            onClick={() => {
-              if (
-                confirm(
-                  `Delete all ${sessions.length} session${sessions.length === 1 ? "" : "s"} for this cluster? This cannot be undone.`,
-                )
-              ) {
-                onDeleteAll();
-              }
+            onClick={async () => {
+              const n = sessions.length;
+              const ok = await confirm({
+                title: `Delete all ${n} chat${n === 1 ? "" : "s"} for this cluster?`,
+                body: "Running chats are stopped. This can't be undone.",
+                confirmLabel: "Delete all",
+                tone: "danger",
+              });
+              if (ok) onDeleteAll();
             }}
             disabled={busy}
             icon={Icons.trash}
@@ -362,15 +364,15 @@ export function SessionsPopover({
                     </button>
                     <button
                       type="button"
-                      onClick={(e) => {
+                      onClick={async (e) => {
                         e.stopPropagation();
-                        if (
-                          confirm(
-                            `Delete chat "${s.title || "Untitled"}"? This cannot be undone.`,
-                          )
-                        ) {
-                          onDelete(s.id);
-                        }
+                        const ok = await confirm({
+                          title: `Delete chat "${s.title || "Untitled"}"?`,
+                          body: "This can't be undone.",
+                          confirmLabel: "Delete",
+                          tone: "danger",
+                        });
+                        if (ok) onDelete(s.id);
                       }}
                       title="Delete"
                       style={{ ...iconBtn(t), color: t.bad }}

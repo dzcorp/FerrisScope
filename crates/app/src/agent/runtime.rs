@@ -46,6 +46,59 @@ pub(crate) struct McpServerHandle {
     pub(crate) message: Option<String>,
 }
 
+/// Whether a turn loop is running (or about to) for a chat. `claim` is taken
+/// under the runtime lock before the slow work of building a turn, so a second
+/// send arriving in that window queues its message instead of starting a
+/// second loop on the same transcript.
+#[derive(Default)]
+pub(crate) struct TurnGate {
+    handle: Option<tokio::task::AbortHandle>,
+    claimed: bool,
+}
+
+impl TurnGate {
+    pub(crate) fn busy(&self) -> bool {
+        self.handle.is_some() || self.claimed
+    }
+
+    /// `true` when the caller now owns the right to start a turn.
+    pub(crate) fn claim(&mut self) -> bool {
+        if self.busy() {
+            return false;
+        }
+        self.claimed = true;
+        true
+    }
+
+    /// Give back a claim that ended up not starting a turn.
+    pub(crate) fn release(&mut self) {
+        self.claimed = false;
+    }
+
+    pub(crate) fn start(&mut self, handle: tokio::task::AbortHandle) {
+        self.handle = Some(handle);
+        self.claimed = false;
+    }
+
+    /// The loop is done on its own; nothing to abort.
+    pub(crate) fn finish(&mut self) {
+        self.handle = None;
+        self.claimed = false;
+    }
+
+    /// Abort the running loop; `true` when there was one.
+    pub(crate) fn abort(&mut self) -> bool {
+        self.claimed = false;
+        match self.handle.take() {
+            Some(h) => {
+                h.abort();
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 /// Per-live-chat handle. A chat is bound to one session + one cluster;
 /// re-opening the same session creates a new `chat_id`.
 pub(crate) struct ChatRuntime {
@@ -86,9 +139,8 @@ pub(crate) struct ChatRuntime {
     /// JSONL on every turn. Hydrated from `SessionStore::load` when the chat
     /// opens; then appended to on every turn.
     pub(crate) messages: Vec<ChatMessage>,
-    /// Cancellation handle for the in-flight `stream_completion` future.
-    /// Set while a turn is running so `chat_cancel_streaming` can abort.
-    pub(crate) cancel: Option<tokio::task::AbortHandle>,
+    /// The running turn loop, if any. `chat_cancel_streaming` aborts it.
+    pub(crate) turn: TurnGate,
     /// `message_id` of the assistant bubble currently being streamed.
     /// `Some` from `AssistantStart` until `AssistantEnd`. Lets
     /// `chat_cancel_streaming` close the bubble cleanly when the spawned
@@ -218,9 +270,7 @@ pub(crate) async fn close_chat_runtime(rt: Arc<Mutex<ChatRuntime>>) {
     // hundred ms per pod and we don't want to hold the chat lock during that.
     let (native_tools, scratch) = {
         let mut g = rt.lock().await;
-        if let Some(handle) = g.cancel.take() {
-            handle.abort();
-        }
+        g.turn.abort();
         g.pending_approvals.clear();
         g.mcp_servers.clear();
         (g.native.tools().to_vec(), g.external_scratch.take())
@@ -249,6 +299,54 @@ fn chats_matching_cluster(pairs: &[(String, String)], cluster_id: &str) -> Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn running_task() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(std::future::pending::<()>())
+    }
+
+    #[test]
+    fn a_claimed_gate_refuses_a_second_claim_until_released() {
+        let mut gate = TurnGate::default();
+        assert!(!gate.busy());
+        assert!(gate.claim());
+        assert!(gate.busy());
+        assert!(!gate.claim());
+        gate.release();
+        assert!(!gate.busy());
+        assert!(gate.claim());
+    }
+
+    #[tokio::test]
+    async fn a_started_turn_stays_busy_until_it_finishes() {
+        let mut gate = TurnGate::default();
+        assert!(gate.claim());
+        let task = running_task();
+        gate.start(task.abort_handle());
+        assert!(gate.busy());
+        assert!(!gate.claim(), "a running turn can't be claimed");
+        gate.finish();
+        assert!(!gate.busy());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn aborting_stops_the_task_and_frees_the_gate() {
+        let mut gate = TurnGate::default();
+        let task = running_task();
+        gate.start(task.abort_handle());
+        assert!(gate.abort());
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!gate.busy());
+        assert!(!gate.abort(), "nothing left to abort");
+    }
+
+    #[test]
+    fn aborting_drops_a_pending_claim() {
+        let mut gate = TurnGate::default();
+        assert!(gate.claim());
+        assert!(!gate.abort());
+        assert!(!gate.busy());
+    }
 
     #[test]
     fn chats_matching_cluster_selects_exact_cluster_only() {

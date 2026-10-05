@@ -155,6 +155,22 @@ pub(crate) fn assemble_system_prompt(
     out
 }
 
+/// The full system prompt for the chat's current state — active cluster, the
+/// operator's latest view, their override. Composed fresh for every provider
+/// call, so a mid-turn `fs_configuration_use_context` or a newer send shows up
+/// on the next round.
+pub(crate) async fn compose_system_prompt(
+    cluster: &agent_native::ChatClusterRef,
+    view: Option<&ViewContextWire>,
+    app_state: &AppState,
+    override_extra: Option<&str>,
+) -> String {
+    let cluster_block = build_cluster_context_block(cluster, app_state).await;
+    let active = cluster.active().await;
+    let view_block = build_view_context_block(view, &active, app_state).await;
+    assemble_system_prompt(&cluster_block, &view_block, override_extra)
+}
+
 /// Render the optional "what the operator is viewing" block. Returns ""
 /// when there's nothing useful to say (no view payload, or all fields
 /// empty). The block is informational — the LLM is told explicitly it

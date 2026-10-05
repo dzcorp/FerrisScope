@@ -115,102 +115,96 @@ pub(crate) fn context_limits_for(kind: ProviderKind, model: &str) -> (u32, u32) 
 /// context for the model to thread continuity onto the summary.
 const COMPACTION_TAIL_KEEP: usize = 4;
 
-/// Pad any `Assistant.tool_calls[].id` that doesn't have a matching
-/// downstream `Tool.tool_call_id` with a synthetic tool-result
-/// message. Both OpenAI Responses (`No tool output found for function
-/// call …`) and Anthropic (`tool_use_id … must be followed by
-/// tool_result`) reject orphans with 400.
+/// Make every assistant tool call answerable the way providers demand: each
+/// `Assistant.tool_calls[].id` followed immediately by its `Tool` result, and no
+/// `Tool` message anywhere else. OpenAI (`An assistant message with
+/// 'tool_calls' must be followed by tool messages…`, `No tool output found for
+/// function call …`) and Anthropic (`tool_use_id … must be followed by
+/// tool_result`) reject anything else with a 400 — for good, since the bad
+/// shape is in the history.
 ///
-/// Persists each synthetic tool message via `SessionEvent::Message`
-/// so a reload sees the same repaired transcript — without this,
-/// every chat_open would re-orphan and we'd loop. The original (now
-/// reconciled) tool_call line stays in the JSONL for audit.
-pub(crate) async fn repair_orphan_tool_calls(
-    runtime: &Arc<Mutex<ChatRuntime>>,
-    store: &SessionStore,
-    cluster_id: &str,
-    session_id: &str,
-) {
-    // Collect orphans under the lock, mutate, release. Persistence
-    // happens outside the lock — best-effort.
-    let synthetic: Vec<ChatMessage> = {
-        let mut g = runtime.lock().await;
-        let mut synthetic: Vec<ChatMessage> = Vec::new();
-        // Walk left-to-right. Every assistant message's tool_call ids
-        // must be answered by a subsequent Tool message before the
-        // next Assistant message (or EOF). When we find an unanswered
-        // id, append a synthetic tool result immediately after the
-        // last answered one (or at the end if there are none).
-        let mut i = 0;
-        while i < g.messages.len() {
-            let calls = match &g.messages[i] {
-                m if matches!(m.role, MessageRole::Assistant) && !m.tool_calls.is_empty() => {
-                    m.tool_calls.clone()
-                }
-                _ => {
-                    i += 1;
-                    continue;
-                }
-            };
-            // Find which ids are answered between here and the next
-            // assistant message (or the end).
-            let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let mut j = i + 1;
-            while j < g.messages.len() {
-                let m = &g.messages[j];
-                if matches!(m.role, MessageRole::Assistant) {
-                    break;
-                }
-                if matches!(m.role, MessageRole::Tool) {
-                    if let Some(id) = m.tool_call_id.as_ref() {
-                        answered.insert(id.clone());
-                    }
-                }
-                j += 1;
+/// A call with no result (the turn was cancelled or crashed mid-tool) gets a
+/// synthetic "interrupted" result; one whose result ended up later in the
+/// transcript (a message sent after the cancelled turn) is moved next to its
+/// call; results that answer nothing are dropped. In memory only: the log keeps
+/// what happened, and this re-derives the same repair on every load without
+/// growing it.
+fn repair_tool_pairs(messages: &mut Vec<ChatMessage>) -> usize {
+    use std::collections::HashSet;
+    let mut fixed = 0;
+    let mut i = 0;
+    while i < messages.len() {
+        let calls = match &messages[i] {
+            m if matches!(m.role, MessageRole::Assistant) && !m.tool_calls.is_empty() => {
+                m.tool_calls.clone()
             }
-            // For each unanswered tool_call, splice in a synthetic
-            // tool result right before `j` (the next assistant
-            // boundary or EOF).
-            let mut insert_at = j;
-            for tc in &calls {
-                if answered.contains(&tc.id) {
-                    continue;
-                }
-                let msg = ChatMessage {
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let mut run_end = i + 1;
+        let mut answered: HashSet<String> = HashSet::new();
+        while run_end < messages.len() && matches!(messages[run_end].role, MessageRole::Tool) {
+            if let Some(id) = &messages[run_end].tool_call_id {
+                answered.insert(id.clone());
+            }
+            run_end += 1;
+        }
+        let mut insert_at = run_end;
+        for tc in &calls {
+            if answered.contains(&tc.id) {
+                continue;
+            }
+            let stray = (run_end..messages.len()).find(|&k| {
+                matches!(messages[k].role, MessageRole::Tool)
+                    && messages[k].tool_call_id.as_deref() == Some(tc.id.as_str())
+            });
+            let result = match stray {
+                Some(k) => messages.remove(k),
+                None => ChatMessage {
                     role: MessageRole::Tool,
                     content: format!(
                         "[tool execution interrupted: `{}` produced no result on the previous turn]",
                         tc.name
                     ),
-                    tool_calls: vec![],
                     tool_call_id: Some(tc.id.clone()),
                     name: Some(tc.name.clone()),
-                    reasoning_content: None,
-                    images: vec![],
-                };
-                g.messages.insert(insert_at, msg.clone());
-                synthetic.push(msg);
-                insert_at += 1;
-            }
-            i = insert_at.max(i + 1);
-        }
-        synthetic
-    };
-    if synthetic.is_empty() {
-        return;
-    }
-    let now = chrono::Utc::now().timestamp_millis();
-    for msg in synthetic {
-        let _ = store
-            .append(
-                cluster_id,
-                session_id,
-                SessionEvent::Message {
-                    message: msg,
-                    ts: now,
+                    ..ChatMessage::default()
                 },
-            )
-            .await;
+            };
+            messages.insert(insert_at, result);
+            insert_at += 1;
+            fixed += 1;
+        }
+        i = insert_at.max(i + 1);
+    }
+    let mut allowed: HashSet<String> = HashSet::new();
+    let before = messages.len();
+    messages.retain(|m| match m.role {
+        MessageRole::Assistant => {
+            allowed = m.tool_calls.iter().map(|c| c.id.clone()).collect();
+            true
+        }
+        MessageRole::Tool => m
+            .tool_call_id
+            .as_deref()
+            .is_some_and(|id| allowed.contains(id)),
+        _ => {
+            allowed.clear();
+            true
+        }
+    });
+    fixed + (before - messages.len())
+}
+
+/// Runs [`repair_tool_pairs`] on the live transcript before a provider call
+/// (every round, and when a chat opens).
+pub(crate) async fn repair_orphan_tool_calls(runtime: &Arc<Mutex<ChatRuntime>>) {
+    let mut g = runtime.lock().await;
+    let fixed = repair_tool_pairs(&mut g.messages);
+    if fixed > 0 {
+        tracing::info!(fixed, "agent: repaired tool-call/result pairing");
     }
 }
 
@@ -237,11 +231,12 @@ pub(crate) async fn run_compaction_internal(
     session_id: &str,
     force: bool,
 ) {
-    let (last_total, model, message_count, in_flight) = {
+    let (last_total, model, kind, message_count, in_flight) = {
         let g = runtime.lock().await;
         (
             g.last_total_tokens,
             g.model.clone(),
+            g.provider_kind,
             g.messages.len(),
             g.compaction_in_flight,
         )
@@ -259,10 +254,6 @@ pub(crate) async fn run_compaction_internal(
     }
     // Resolve the model's usable window via models.dev (or per-
     // provider default).
-    let kind = match store.load(session_id).await {
-        Ok(d) => d.meta.provider_kind,
-        Err(_) => return,
-    };
     let context = ferrisscope_agent::provider::catalogue::context_window(kind, &model);
     let reserved = ferrisscope_agent::provider::catalogue::reserved_tokens(kind, &model);
     let usable = context.saturating_sub(reserved);
@@ -328,6 +319,7 @@ pub(crate) async fn run_compaction_internal(
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                thinking_blocks: vec![],
                 images: vec![],
             },
             ChatMessage {
@@ -337,6 +329,7 @@ pub(crate) async fn run_compaction_internal(
                 tool_call_id: None,
                 name: None,
                 reasoning_content: None,
+                thinking_blocks: vec![],
                 images: vec![],
             },
         ],
@@ -382,50 +375,48 @@ pub(crate) async fn run_compaction_internal(
         return;
     }
 
-    // Persist the marker BEFORE mutating in-memory transcript so a
-    // crash mid-replacement doesn't leave us with a desynced view.
+    // Replace the head with the synthetic checkpoint message in-place, then
+    // log the marker with the tail it kept, all under one lock hold so the
+    // tail is exactly what the live transcript continues with. A crash before
+    // the marker lands leaves the full history in the log — bigger, never
+    // inconsistent. Reset the token total so the next Usage event restarts the
+    // running view, and clear the in-flight flag so the next round proceeds.
     let now = chrono::Utc::now().timestamp_millis();
-    let _ = store
-        .append(
-            cluster_id,
-            session_id,
-            SessionEvent::Compaction {
-                head_message_count: head_count as u32,
-                tokens_before: last_total,
-                summary: summary.clone(),
-                ts: now,
-            },
-        )
-        .await;
-
-    // Replace the head with the synthetic checkpoint message in-
-    // place. Reset token total so the next Usage event resets the
-    // running view; clear the in-flight flag so the next round can
-    // proceed normally.
-    {
+    let tail: Vec<ChatMessage> = {
         let mut g = runtime.lock().await;
         let tail: Vec<ChatMessage> = g.messages.split_off(head_count);
         g.messages.clear();
         g.messages.push(ChatMessage {
             role: MessageRole::Assistant,
             content: format!("[context checkpoint]\n{summary}"),
-            tool_calls: vec![],
-            tool_call_id: None,
             name: Some("context_checkpoint".to_string()),
-            reasoning_content: None,
-            images: vec![],
+            ..ChatMessage::default()
         });
-        g.messages.extend(tail);
+        g.messages.extend(tail.iter().cloned());
         g.last_total_tokens = 0;
         g.compaction_in_flight = false;
-    }
+        let _ = store
+            .append(
+                cluster_id,
+                session_id,
+                SessionEvent::Compaction {
+                    head_message_count: head_count as u32,
+                    tokens_before: last_total,
+                    summary: summary.clone(),
+                    tail: tail.clone(),
+                    ts: now,
+                },
+            )
+            .await;
+        tail
+    };
 
     // Belt-and-braces: pad any Assistant tool_calls in the surviving
     // tail that no longer have matching Tool answers (manual compact
     // mid-turn can split an Assistant→Tool group). Without this the
     // next round would 400 on the converse orphan ("No tool output
     // found for function call …").
-    repair_orphan_tool_calls(runtime, store, cluster_id, session_id).await;
+    repair_orphan_tool_calls(runtime).await;
 
     let _ = runtime
         .lock()
@@ -434,6 +425,7 @@ pub(crate) async fn run_compaction_internal(
         .send(ChatEvent::CompactionCompleted {
             summary_chars: summary.len() as u32,
             summary: summary.clone(),
+            tail,
         });
     tracing::info!("agent: auto-compaction complete");
 }
@@ -486,6 +478,151 @@ fn render_head_for_summary(messages: &[ChatMessage]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrisscope_agent::ToolCall;
+
+    fn user(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::User,
+            content: text.into(),
+            ..ChatMessage::default()
+        }
+    }
+
+    fn assistant_calling(ids: &[&str]) -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::Assistant,
+            tool_calls: ids
+                .iter()
+                .map(|id| ToolCall {
+                    id: (*id).into(),
+                    name: "fs_pods_list".into(),
+                    arguments: "{}".into(),
+                    thought_signature: None,
+                })
+                .collect(),
+            ..ChatMessage::default()
+        }
+    }
+
+    fn result(id: &str) -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::Tool,
+            content: format!("result {id}"),
+            tool_call_id: Some(id.into()),
+            name: Some("fs_pods_list".into()),
+            ..ChatMessage::default()
+        }
+    }
+
+    fn shape(messages: &[ChatMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|m| match m.role {
+                MessageRole::User => format!("user:{}", m.content),
+                MessageRole::Assistant => format!(
+                    "asst[{}]",
+                    m.tool_calls
+                        .iter()
+                        .map(|c| c.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                MessageRole::Tool => format!("tool:{}", m.tool_call_id.clone().unwrap_or_default()),
+                MessageRole::System => "system".into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_call_cut_off_at_the_end_of_the_transcript_gets_an_interrupted_result() {
+        let mut m = vec![user("scale it"), assistant_calling(&["a"])];
+        assert_eq!(repair_tool_pairs(&mut m), 1);
+        assert_eq!(shape(&m), ["user:scale it", "asst[a]", "tool:a"]);
+        assert!(m[2].content.contains("interrupted"));
+    }
+
+    #[test]
+    fn the_result_lands_right_after_its_call_not_after_later_messages() {
+        // Cancelled mid-tool, then the operator wrote again and the model answered.
+        let mut m = vec![
+            user("scale it"),
+            assistant_calling(&["a"]),
+            user("never mind"),
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "ok".into(),
+                ..ChatMessage::default()
+            },
+        ];
+        repair_tool_pairs(&mut m);
+        assert_eq!(
+            shape(&m),
+            [
+                "user:scale it",
+                "asst[a]",
+                "tool:a",
+                "user:never mind",
+                "asst[]"
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_unanswered_calls_of_a_parallel_batch_are_padded() {
+        let mut m = vec![assistant_calling(&["a", "b", "c"]), result("b"), user("hi")];
+        assert_eq!(repair_tool_pairs(&mut m), 2);
+        assert_eq!(
+            shape(&m),
+            ["asst[a,b,c]", "tool:b", "tool:a", "tool:c", "user:hi"]
+        );
+    }
+
+    #[test]
+    fn a_result_stranded_after_a_user_message_is_moved_next_to_its_call() {
+        // What a previous version's repair left in the log: the padding went at
+        // the end, behind the message sent after the cancelled turn.
+        let mut m = vec![assistant_calling(&["a"]), user("never mind"), result("a")];
+        assert_eq!(repair_tool_pairs(&mut m), 1);
+        assert_eq!(shape(&m), ["asst[a]", "tool:a", "user:never mind"]);
+        assert_eq!(m[1].content, "result a", "moved, not replaced");
+    }
+
+    #[test]
+    fn results_that_answer_no_call_are_dropped() {
+        let mut m = vec![
+            user("hi"),
+            result("ghost"),
+            assistant_calling(&["a"]),
+            result("a"),
+        ];
+        assert_eq!(repair_tool_pairs(&mut m), 1);
+        assert_eq!(shape(&m), ["user:hi", "asst[a]", "tool:a"]);
+    }
+
+    #[test]
+    fn a_well_formed_transcript_is_left_alone_and_repair_is_idempotent() {
+        let ok = vec![
+            user("go"),
+            assistant_calling(&["a", "b"]),
+            result("a"),
+            result("b"),
+            assistant_calling(&["c"]),
+            result("c"),
+        ];
+        let mut m = ok.clone();
+        assert_eq!(repair_tool_pairs(&mut m), 0);
+        assert_eq!(shape(&m), shape(&ok));
+
+        let mut broken = vec![
+            assistant_calling(&["a"]),
+            user("x"),
+            assistant_calling(&["b"]),
+        ];
+        repair_tool_pairs(&mut broken);
+        let once = shape(&broken);
+        assert_eq!(repair_tool_pairs(&mut broken), 0);
+        assert_eq!(shape(&broken), once);
+    }
 
     /// Smoke test: token-driven flow keeps the full transcript on the wire,
     /// no byte/char pre-truncation. Compaction (proactive at 75%, reactive

@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+use ferrisscope_agent::provider::meta;
 use ferrisscope_agent::provider::openai_codex::CredentialSink;
-use ferrisscope_agent::{Credential, ProviderKind};
+use ferrisscope_agent::{AgentSettings, Credential, ProviderKind};
 
 use crate::secret_storage;
 
@@ -135,15 +136,43 @@ pub(crate) async fn read_credential(kind: ProviderKind) -> Option<Credential> {
 
 /// Effective credential for `kind` — the operator-configured one when
 /// set, otherwise the provider's public-fallback key when it has one
-/// (OpenCode Zen's free tier). This is what every chat / model-listing
-/// path should call: it lets a fresh install hit the free models on
-/// first run without forcing the operator through Settings → AI.
-pub(crate) async fn effective_credential(kind: ProviderKind) -> Option<Credential> {
+/// (OpenCode Zen's free tier). Private on purpose: it ignores the provider
+/// switch, so every caller goes through [`resolve_credential`].
+async fn effective_credential(kind: ProviderKind) -> Option<Credential> {
     if let Some(c) = read_credential(kind).await {
         return Some(c);
     }
     kind.public_fallback_key().map(|key| Credential::ApiKey {
         key: key.to_string(),
+    })
+}
+
+/// Refuse a provider the operator has switched off. The one place the
+/// "disabled" message is worded.
+pub(crate) fn ensure_enabled(kind: ProviderKind, settings: &AgentSettings) -> Result<(), String> {
+    if settings.is_provider_enabled(kind) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is disabled — enable it in Settings → AI",
+            meta::for_kind(kind).display_name
+        ))
+    }
+}
+
+/// The credential a chat / model-listing call should use for `kind`:
+/// enabled provider only, with the free-tier fallback when nothing is
+/// stored. This is what every request path calls.
+pub(crate) async fn resolve_credential(
+    kind: ProviderKind,
+    settings: &AgentSettings,
+) -> Result<Credential, String> {
+    ensure_enabled(kind, settings)?;
+    effective_credential(kind).await.ok_or_else(|| {
+        format!(
+            "no credential configured for {} — open Settings → AI to connect it",
+            meta::for_kind(kind).display_name
+        )
     })
 }
 
@@ -221,4 +250,41 @@ pub(crate) fn make_credential_sink(kind: ProviderKind) -> CredentialSink {
             }
         });
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrisscope_agent::ProviderConfig;
+
+    #[test]
+    fn ensure_enabled_refuses_default_off_zen_with_actionable_message() {
+        let s = AgentSettings::default();
+        let err = ensure_enabled(ProviderKind::OpencodeZen, &s).unwrap_err();
+        assert!(err.contains("OpenCode Zen"), "{err}");
+        assert!(err.contains("Settings → AI"), "{err}");
+        assert!(ensure_enabled(ProviderKind::OpenAI, &s).is_ok());
+    }
+
+    #[test]
+    fn ensure_enabled_blocks_a_switched_off_provider_that_has_a_key() {
+        let mut s = AgentSettings::default();
+        s.providers.insert(
+            ProviderKind::Anthropic,
+            ProviderConfig {
+                enabled: Some(false),
+                ..ProviderConfig::default()
+            },
+        );
+        assert!(ensure_enabled(ProviderKind::Anthropic, &s).is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_credential_never_hands_out_the_public_key_while_zen_is_off() {
+        let s = AgentSettings::default();
+        let err = resolve_credential(ProviderKind::OpencodeZen, &s)
+            .await
+            .unwrap_err();
+        assert!(err.contains("disabled"), "{err}");
+    }
 }

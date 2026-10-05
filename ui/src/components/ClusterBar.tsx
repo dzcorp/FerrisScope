@@ -4,7 +4,7 @@ import type { ContextInfo, ClusterInfo } from "../types";
 import { tokens, FF_MONO, type ThemeMode, R_LG, R_MD, FS_MD, FS_XS } from "../theme";
 import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
 import { Stat, StatusPill, Gauge, Icons, Kbd, Tooltip } from "./ui";
-import { makeChatTab, makeTerminalTab, makeYamlTab } from "./Dock";
+import { makeTerminalTab, makeYamlTab } from "./Dock";
 import { MOD_KEY, SHIFT_KEY } from "../lib/keyboard";
 import { useMetricsSubscription } from "../lib/useMetricsSubscription";
 import { useTabActive, useTabSlice } from "../lib/tabScope";
@@ -297,32 +297,6 @@ export function ClusterBar({ mode, context, state, style }: Props) {
               subtitle="Edit and apply a manifest"
               kbd={`${SHIFT_KEY}${MOD_KEY}Y`}
               onClick={() => addDockTab(makeYamlTab(context.id))}
-            />
-            <AddMenuItem
-              t={t}
-              icon={Icons.chat}
-              title="AI chat"
-              subtitle="Talk to the cluster-aware assistant"
-              onClick={() => {
-                // Idempotent: if a chat tab is already open for this cluster,
-                // focus it instead of stacking another tab. Operators expect
-                // "open chat" to land them in the existing chat, not on a
-                // fresh blank tab; new sessions live behind the popover's
-                // "New chat" button.
-                const s = useAppStore.getState();
-                const existing = s.dockTabs.find(
-                  (tt) =>
-                    tt.kind === "chat" &&
-                    (tt.state as { clusterId?: string } | undefined)
-                      ?.clusterId === context.id,
-                );
-                if (existing) {
-                  s.setDockActiveId(existing.id);
-                  s.setDockMin("right", false);
-                } else {
-                  addDockTab(makeChatTab(context.id, shortName(context)));
-                }
-              }}
             />
             <AddMenuItem
               t={t}

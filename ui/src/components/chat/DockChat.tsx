@@ -1,8 +1,9 @@
 import { logErr } from "../../lib/log";
+import { isProviderUsable } from "../../lib/providers";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DockTab } from "../../store";
 import { useAppStore, useResolvedTheme } from "../../store";
-import { FONT_SANS, type ThemeMode, FS_MD } from "../../theme";
+import { FONT_SANS, FF_MONO, type ThemeMode, FS_MD, FS_SM, R_MD } from "../../theme";
 import { api } from "../../api";
 import type {
   AgentChatMessage,
@@ -98,6 +99,13 @@ export function DockChat({ mode, tab, visible }: Props) {
   const contextLabel = tabState.contextLabel ?? clusterId;
 
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+  // A failed send / model switch / session action. Shown as a dismissible
+  // banner over the composer: it must not replace the transcript the way a
+  // failure to open the chat does, since the chat itself is still fine.
+  const [actionError, setActionError] = useState<string | null>(null);
+  // Bumped to re-run the bring-up effect (Retry, or settings closed while the
+  // chat was waiting for a provider).
+  const [bringUp, setBringUp] = useState(0);
   // Per-session live state, keyed by sessionId. Background sessions
   // remain in the map and keep streaming; the active session is just
   // `openChats[activeSessionId]`. Cleared only on tab unmount or
@@ -124,6 +132,11 @@ export function DockChat({ mode, tab, visible }: Props) {
   useEffect(() => {
     openChatsLatest.current = openChats;
   }, [openChats]);
+  // Sessions whose backend chat is being opened right now. A second bring-up
+  // for the same session (the effect re-runs when the tab's sessionId is
+  // patched mid-open) waits for it instead of opening a second backend chat —
+  // which would leak, MCP server processes included.
+  const opening = useRef<Map<string, Promise<void>>>(new Map());
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -200,9 +213,13 @@ export function DockChat({ mode, tab, visible }: Props) {
         if (e.type === "assistant_start") {
           nextStreaming = true;
           nextRetry = null;
-        } else if (e.type === "assistant_end" || e.type === "error") {
+        } else if (
+          e.type === "assistant_end" ||
+          e.type === "error" ||
+          (e.type === "turn_state" && !e.running)
+        ) {
           nextStreaming = false;
-          if (e.type === "error") nextRetry = null;
+          if (e.type !== "assistant_end") nextRetry = null;
         } else if (e.type === "retrying") {
           nextRetry = {
             attempt: e.attempt,
@@ -285,18 +302,20 @@ export function DockChat({ mode, tab, visible }: Props) {
       return;
     }
     let cancelled = false;
+    const openingSlot: { release: (() => void) | null } = { release: null };
     (async () => {
       setStatus({ kind: "opening" });
       try {
         const settings = await api.aiGetSettings();
         if (!cancelled) setAiSettings(settings);
         const activeProvider = settings.providers[settings.active_provider];
-        if (!activeProvider?.configured) {
+        if (!activeProvider || !isProviderUsable(activeProvider)) {
           if (!cancelled) {
             setStatus({
               kind: "needs_settings",
-              reason:
-                "active provider has no credential — open Settings → AI to connect one",
+              reason: activeProvider?.enabled === false
+                ? `${activeProvider.display_name} is disabled — enable it or pick another provider in Settings → AI`
+                : "no provider connected yet — open Settings → AI to connect one",
             });
           }
           return;
@@ -321,6 +340,8 @@ export function DockChat({ mode, tab, visible }: Props) {
             /* listing failed — fall through to the create path */
           }
         }
+        const inflight = sessionId ? opening.current.get(sessionId) : undefined;
+        if (inflight) await inflight;
         // Already open in this tab: just signal ready and reuse the
         // existing entry. No backend chat_open, no view reset — the
         // operator's previous turn (if any) has been streaming into
@@ -334,6 +355,18 @@ export function DockChat({ mode, tab, visible }: Props) {
             setStatus({ kind: "ready" });
           }
           return;
+        }
+        if (sessionId) {
+          const id = sessionId;
+          opening.current.set(
+            id,
+            new Promise<void>((resolve) => {
+              openingSlot.release = () => {
+                opening.current.delete(id);
+                resolve();
+              };
+            }),
+          );
         }
         // Resolve the default model up front — both the load-fallback
         // and the fresh-create path want it, and the API call may be slow.
@@ -475,6 +508,8 @@ export function DockChat({ mode, tab, visible }: Props) {
       } catch (e) {
         if (cancelled) return;
         setStatus({ kind: "error", message: String(e) });
+      } finally {
+        openingSlot.release?.();
       }
     })();
     return () => {
@@ -484,7 +519,18 @@ export function DockChat({ mode, tab, visible }: Props) {
       // tab unmount is the only path that tears chats down.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clusterId, tab.id, tabState.sessionId]);
+  }, [clusterId, tab.id, tabState.sessionId, bringUp]);
+
+  // A chat parked on "no provider connected" has nothing to retry until the
+  // operator has been to Settings; re-check when they come back.
+  const settingsOpenNow = useAppStore((s) => s.settingsOpen);
+  const settingsWasOpen = useRef(false);
+  useEffect(() => {
+    if (settingsWasOpen.current && !settingsOpenNow && status.kind === "needs_settings") {
+      setBringUp((n) => n + 1);
+    }
+    settingsWasOpen.current = settingsOpenNow;
+  }, [settingsOpenNow, status.kind]);
 
   // Tab-unmount cleanup. Walks `chatChannels.current` (mutated
   // synchronously when a session opens, so it's the source of truth
@@ -528,14 +574,18 @@ export function DockChat({ mode, tab, visible }: Props) {
     setModels(null);
   }, [activeSessionId]);
 
-  const onSend = async (text: string, images: ChatImageAttachment[] = []) => {
-    if (!activeChatId || !activeSessionId) return;
-    if (!text.trim() && images.length === 0) return;
+  const onSend = async (
+    text: string,
+    images: ChatImageAttachment[] = [],
+  ): Promise<boolean> => {
+    if (!activeChatId || !activeSessionId) return false;
+    if (!text.trim() && images.length === 0) return false;
     const sid = activeSessionId;
     // Optimistic append so the user's bubble appears immediately,
     // before the backend's first AssistantStart fires. The backend
     // persists the user message itself; the optimistic add is purely
     // for perceived latency.
+    const localId = `local-${Date.now()}`;
     setOpenChats((prev) => {
       const cur = prev[sid];
       if (!cur) return prev;
@@ -548,7 +598,7 @@ export function DockChat({ mode, tab, visible }: Props) {
             messages: [
               ...cur.view.messages,
               {
-                id: `local-${Date.now()}`,
+                id: localId,
                 role: "user",
                 content: text,
                 images: images.length > 0 ? images : undefined,
@@ -558,6 +608,7 @@ export function DockChat({ mode, tab, visible }: Props) {
         },
       };
     });
+    setActionError(null);
     try {
       await api.chatSendMessage(
         activeChatId,
@@ -565,8 +616,26 @@ export function DockChat({ mode, tab, visible }: Props) {
         snapshotViewContext(),
         images.length > 0 ? images : undefined,
       );
+      return true;
     } catch (e) {
-      setStatus({ kind: "error", message: String(e) });
+      // Not sent: take the optimistic bubble back (the composer restores the
+      // draft) and say why, without touching the transcript.
+      setOpenChats((prev) => {
+        const cur = prev[sid];
+        if (!cur) return prev;
+        return {
+          ...prev,
+          [sid]: {
+            ...cur,
+            view: {
+              ...cur.view,
+              messages: cur.view.messages.filter((m) => m.id !== localId),
+            },
+          },
+        };
+      });
+      setActionError(`Message not sent — ${String(e)}`);
+      return false;
     }
   };
 
@@ -657,16 +726,20 @@ export function DockChat({ mode, tab, visible }: Props) {
     // the user's perspective. On failure we surface in the error
     // overlay just like other chat-mutating actions.
     const sid = activeSessionId;
-    setOpenChats((prev) => {
-      const cur = prev[sid];
-      if (!cur) return prev;
-      return { ...prev, [sid]: { ...cur, meta: { ...cur.meta, model: modelId } } };
-    });
+    const previous = meta?.model ?? "";
+    const setModel = (model: string) =>
+      setOpenChats((prev) => {
+        const cur = prev[sid];
+        if (!cur) return prev;
+        return { ...prev, [sid]: { ...cur, meta: { ...cur.meta, model } } };
+      });
+    setModel(modelId);
     setModelPickerOpen(false);
     try {
       await api.chatSetModel(activeChatId, modelId);
     } catch (e) {
-      setStatus({ kind: "error", message: String(e) });
+      setModel(previous);
+      setActionError(`Couldn't switch model — ${String(e)}`);
     }
   };
 
@@ -725,7 +798,7 @@ export function DockChat({ mode, tab, visible }: Props) {
       await refreshSessions();
       switchToSession(created.id);
     } catch (e) {
-      setStatus({ kind: "error", message: String(e) });
+      setActionError(`Couldn't switch provider — ${String(e)}`);
     } finally {
       setSessionBusy(false);
     }
@@ -743,6 +816,7 @@ export function DockChat({ mode, tab, visible }: Props) {
       return;
     }
     patchTabState(tab.id, { sessionId, chatId: null });
+    setActionError(null);
     setSessionsOpen(false);
     // Close popovers anchored to the old session — their fetched lists
     // (models for the prior provider, tools for the prior chat) are
@@ -771,7 +845,7 @@ export function DockChat({ mode, tab, visible }: Props) {
       await refreshSessions();
       switchToSession(created.id);
     } catch (e) {
-      setStatus({ kind: "error", message: String(e) });
+      setActionError(`Couldn't start a new chat — ${String(e)}`);
     } finally {
       setSessionBusy(false);
     }
@@ -1000,6 +1074,16 @@ export function DockChat({ mode, tab, visible }: Props) {
             mode={mode}
             message={status.message}
             tone="bad"
+            action={
+              <Btn
+                t={t}
+                variant="secondary"
+                size="sm"
+                onClick={() => setBringUp((n) => n + 1)}
+              >
+                Retry
+              </Btn>
+            }
           />
         )}
         {status.kind === "ready" && (
@@ -1014,10 +1098,49 @@ export function DockChat({ mode, tab, visible }: Props) {
         )}
       </div>
 
+      {actionError && status.kind === "ready" && (
+        <div
+          role="alert"
+          className="fs-selectable"
+          style={{
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 8,
+            padding: "6px 10px",
+            background: t.surfaceAlt,
+            borderTop: `1px solid ${t.border}`,
+            color: t.bad,
+            fontFamily: FF_MONO,
+            fontSize: FS_SM,
+            borderRadius: R_MD,
+          }}
+        >
+          <span style={{ flex: 1, minWidth: 0, wordBreak: "break-word" }}>
+            {actionError}
+          </span>
+          <button
+            type="button"
+            aria-label="Dismiss error"
+            onClick={() => setActionError(null)}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "inherit",
+              cursor: "pointer",
+              fontFamily: FF_MONO,
+              padding: 0,
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       <ChatInput
         mode={mode}
         disabled={status.kind !== "ready"}
-        streaming={streaming}
+        busy={streaming || view.running === true}
         approvalMode={meta?.approval_mode ?? "approve_per_write"}
         onApprovalModeChange={(am) => {
           if (!activeChatId || !activeSessionId) return;

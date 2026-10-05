@@ -427,6 +427,7 @@ impl ChatProvider for OpenAICodexProvider {
             // Codex Responses uses encrypted reasoning items, not the
             // OpenAI-compat round-trip slot — nothing to echo back.
             reasoning_content: None,
+            thinking_blocks: Vec::new(),
         })
     }
 }
@@ -681,6 +682,7 @@ impl ResponsesState {
                 } else {
                     e.arguments
                 },
+                thought_signature: None,
             })
             .collect()
     }
@@ -710,6 +712,7 @@ mod tests {
                     id: "call_a".into(),
                     name: "list_pods".into(),
                     arguments: "{\"ns\":\"default\"}".into(),
+                    thought_signature: None,
                 }],
                 ..Default::default()
             },

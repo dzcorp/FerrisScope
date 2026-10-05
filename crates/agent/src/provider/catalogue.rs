@@ -27,7 +27,7 @@ use crate::provider::ModelInfo;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 
 const CATALOGUE_URL: &str = "https://models.dev/api.json";
@@ -45,6 +45,49 @@ pub struct ModelLimits {
     /// Max output tokens per response. Used as the reserve buffer when
     /// `input` isn't explicitly capped.
     pub output: u32,
+}
+
+/// Which request shape serves a model. models.dev records it per model as the
+/// AI-SDK package (`provider.npm`); the OpenCode gateways expose each model on
+/// its native wire, and only that wire carries everything the model returns
+/// (Anthropic thinking blocks, Gemini thought signatures).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Wire {
+    /// `/chat/completions` — also the safe default for anything unlisted.
+    #[default]
+    OpenAiChat,
+    /// Anthropic Messages (`/messages`).
+    AnthropicMessages,
+    /// Gemini `generateContent` (`/models/<id>:streamGenerateContent`).
+    Gemini,
+    /// OpenAI Responses (`/responses`). Not spoken natively here; callers
+    /// fall back to chat completions, which the gateways translate.
+    OpenAiResponses,
+}
+
+impl Wire {
+    fn from_npm(npm: Option<&str>) -> Self {
+        match npm {
+            Some("@ai-sdk/anthropic") => Self::AnthropicMessages,
+            Some("@ai-sdk/google") => Self::Gemini,
+            Some("@ai-sdk/openai") => Self::OpenAiResponses,
+            _ => Self::OpenAiChat,
+        }
+    }
+}
+
+/// What a model offers for reasoning, from models.dev `reasoning_options`:
+/// the effort names it accepts (each model has its own — `none`, `minimal`,
+/// `low` … `xhigh`, `max`), whether thinking can be switched off, and whether
+/// it takes a token budget (with its floor and optional ceiling). Identical
+/// specs are shared (`Arc`): a few dozen distinct shapes cover thousands of
+/// models.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ModelReasoning {
+    pub efforts: Vec<String>,
+    pub toggle: bool,
+    /// `(min, max)` when the model takes `budget_tokens`.
+    pub budget: Option<(u32, Option<u32>)>,
 }
 
 /// Per-model capability flags surfaced from models.dev. Drives request
@@ -76,6 +119,13 @@ pub struct ModelCapabilities {
     /// "reasoning_details") differs across vendors so we keep it as a
     /// string rather than encoding the variants here.
     pub interleaved_field: Option<String>,
+    /// The wire the model is served on (see [`Wire`]). One byte, so it adds
+    /// nothing to the per-entry cost noted above.
+    pub wire: Wire,
+    /// The model's reasoning options. `None` = the catalogue is silent about
+    /// them (fall back to the provider's defaults); `Some` with nothing in it
+    /// = it explicitly offers none.
+    pub reasoning_options: Option<Arc<ModelReasoning>>,
 }
 
 #[derive(Debug, Default)]
@@ -134,12 +184,74 @@ struct ModelEntry {
     /// We only read `input` to decide vision support.
     #[serde(default)]
     modalities: Option<ModalitiesJson>,
+    /// Per-model transport override, e.g. `{ "npm": "@ai-sdk/anthropic" }`
+    /// on a gateway that serves Claude next to open models.
+    #[serde(default)]
+    provider: Option<ModelProviderJson>,
+    /// `[{ "type": "effort", "values": ["low", …] }, { "type": "toggle" },
+    /// { "type": "budget_tokens", "min": 1024 }]`.
+    #[serde(default)]
+    reasoning_options: Option<Vec<ReasoningOptionJson>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReasoningOptionJson {
+    #[serde(rename = "type", default)]
+    kind: String,
+    /// Effort names; `null` is the API's "off" and reads as `none`.
+    #[serde(default)]
+    values: Vec<Option<String>>,
+    #[serde(default)]
+    min: Option<f64>,
+    #[serde(default)]
+    max: Option<f64>,
+}
+
+fn parse_reasoning(options: &[ReasoningOptionJson]) -> ModelReasoning {
+    let mut out = ModelReasoning::default();
+    for o in options {
+        match o.kind.as_str() {
+            "effort" => {
+                for v in &o.values {
+                    let name = v.clone().unwrap_or_else(|| "none".to_string());
+                    if !out.efforts.contains(&name) {
+                        out.efforts.push(name);
+                    }
+                }
+            }
+            "toggle" => out.toggle = true,
+            "budget_tokens" => {
+                let min = o.min.map_or(0, |m| m.max(0.0) as u32);
+                out.budget = Some((min, o.max.map(|m| m.max(0.0) as u32)));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelProviderJson {
+    #[serde(default)]
+    npm: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ModalitiesJson {
     #[serde(default)]
     input: Vec<String>,
+    #[serde(default)]
+    output: Vec<String>,
+}
+
+/// Whether a catalogue entry belongs in the *chat* model picker: it answers in
+/// text only (image / audio / video / music generators don't) and isn't an
+/// embedding model. A model with no modalities listed stays — absence isn't
+/// evidence. Limits and capabilities are still recorded for every entry; this
+/// only gates the picker list.
+fn is_chat_model(id: &str, modalities: Option<&ModalitiesJson>) -> bool {
+    let text_only = modalities.is_none_or(|m| m.output.iter().all(|o| o == "text"));
+    text_only && !id.to_ascii_lowercase().contains("embed")
 }
 
 #[derive(Debug, Deserialize)]
@@ -361,6 +473,7 @@ fn parse_catalogue(resp: ApiResponse) -> CatalogueMaps {
     let mut cost_by_id = HashMap::new();
     let mut caps_by_id = HashMap::new();
     let mut models_by_provider: HashMap<String, Vec<ModelInfo>> = HashMap::new();
+    let mut interned: HashMap<ModelReasoning, Arc<ModelReasoning>> = HashMap::new();
     for (provider_id, entry) in resp.0 {
         for (model_id, m) in entry.models {
             let key = (provider_id.clone(), model_id.clone());
@@ -368,14 +481,16 @@ fn parse_catalogue(resp: ApiResponse) -> CatalogueMaps {
             if let Some(limits) = parse_limits(m.limit.as_ref()) {
                 by_id.insert(key.clone(), limits);
             }
-            models_by_provider
-                .entry(provider_id.clone())
-                .or_default()
-                .push(ModelInfo {
-                    id: model_id.clone(),
-                    name: m.name.clone(),
-                    context_length,
-                });
+            if is_chat_model(&model_id, m.modalities.as_ref()) {
+                models_by_provider
+                    .entry(provider_id.clone())
+                    .or_default()
+                    .push(ModelInfo {
+                        id: model_id.clone(),
+                        name: m.name.clone(),
+                        context_length,
+                    });
+            }
             if let Some(c) = m.cost.as_ref().and_then(|c| c.input) {
                 cost_by_id.insert(key.clone(), c.max(0.0));
             }
@@ -398,6 +513,14 @@ fn parse_catalogue(resp: ApiResponse) -> CatalogueMaps {
                 temperature: m.temperature.unwrap_or(true),
                 vision,
                 interleaved_field,
+                wire: Wire::from_npm(m.provider.as_ref().and_then(|p| p.npm.as_deref())),
+                reasoning_options: m.reasoning_options.as_deref().map(|opts| {
+                    let spec = parse_reasoning(opts);
+                    interned
+                        .entry(spec.clone())
+                        .or_insert_with(|| Arc::new(spec))
+                        .clone()
+                }),
             };
             caps_by_id.insert(key, caps);
         }
@@ -443,6 +566,69 @@ pub fn supports_vision(kind: ProviderKind, model_id: &str) -> bool {
     capabilities(kind, model_id).is_none_or(|c| c.vision)
 }
 
+/// The reasoning options models.dev lists for `(kind, model)`, if it lists any.
+pub fn reasoning_options(kind: ProviderKind, model_id: &str) -> Option<Arc<ModelReasoning>> {
+    capabilities(kind, model_id)?.reasoning_options
+}
+
+/// Everything `kind`'s catalogue models offer for reasoning, merged: effort
+/// names in canonical order, and the loosest budget range. What a
+/// provider-level settings control can honestly list when no model is chosen.
+/// Empty when the catalogue has nothing for the provider.
+pub fn provider_reasoning_union(kind: ProviderKind) -> ModelReasoning {
+    let Some(mdid) = meta::models_dev_id(kind) else {
+        return ModelReasoning::default();
+    };
+    let Ok(g) = slot().try_read() else {
+        return ModelReasoning::default();
+    };
+    let mut efforts: Vec<String> = Vec::new();
+    let mut union = ModelReasoning::default();
+    for ((provider, _), caps) in &g.caps_by_id {
+        if provider != mdid {
+            continue;
+        }
+        let Some(r) = &caps.reasoning_options else {
+            continue;
+        };
+        for e in &r.efforts {
+            if !efforts.contains(e) {
+                efforts.push(e.clone());
+            }
+        }
+        union.toggle |= r.toggle;
+        union.budget = match (union.budget, r.budget) {
+            (None, b) | (b, None) => b,
+            (Some((lo_a, hi_a)), Some((lo_b, hi_b))) => Some((
+                lo_a.min(lo_b),
+                match (hi_a, hi_b) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    _ => None,
+                },
+            )),
+        };
+    }
+    efforts.sort_by_key(|e| effort_rank(e));
+    union.efforts = efforts;
+    union
+}
+
+/// Canonical low → high ordering of effort names; unknown names sort last,
+/// alphabetically stable.
+pub fn effort_rank(name: &str) -> usize {
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .position(|n| *n == name)
+        .unwrap_or(usize::MAX)
+}
+
+/// The wire `(kind, model)` is served on. `OpenAiChat` when the catalogue
+/// hasn't loaded or doesn't list the model — the one shape every gateway
+/// accepts.
+pub fn wire(kind: ProviderKind, model_id: &str) -> Wire {
+    capabilities(kind, model_id).map_or(Wire::default(), |c| c.wire)
+}
+
 /// Round-trip slot for OpenAI-compat assistant messages — when present,
 /// every assistant message in the next request body must carry this
 /// field with the previously-emitted reasoning text. DeepSeek (and the
@@ -467,6 +653,34 @@ const DEFAULT_PRIORITY: &[&str] = &["gpt-5", "claude-sonnet-4", "big-pickle", "g
 /// (`*-2026-…`) come ahead of older ones at the tail.
 pub fn sort_for_default<T: AsRef<str>>(models: &mut [T]) {
     models.sort_by(|a, b| default_order(a.as_ref(), b.as_ref()));
+}
+
+/// Free models whose provider collects or trains on prompts, per OpenCode's
+/// privacy page (Big Pickle, the MiMo / Ling / Nemotron free tiers, and the
+/// Contributor models that train Meta's models). Only ever *demotes* a model in
+/// the default ordering — it stays selectable — so a stale entry degrades to
+/// "slightly lower in the list", never to "missing".
+fn collects_prompts(id: &str) -> bool {
+    let l = id.to_ascii_lowercase();
+    l == "big-pickle"
+        || l.contains("contributor")
+        || (l.ends_with("-free") && ["mimo-", "ling-", "nemotron"].iter().any(|m| l.contains(m)))
+}
+
+/// [`sort_for_default`] with a provider's own policy on top: for the OpenCode
+/// gateways, models that collect prompts sort after every other model, so a
+/// fresh install never preselects one — important when the agent is about to
+/// send cluster data to it.
+pub fn sort_for_default_for<T: AsRef<str>>(kind: ProviderKind, models: &mut [T]) {
+    if kind.is_opencode_gateway() {
+        models.sort_by(|a, b| {
+            collects_prompts(a.as_ref())
+                .cmp(&collects_prompts(b.as_ref()))
+                .then_with(|| default_order(a.as_ref(), b.as_ref()))
+        });
+    } else {
+        sort_for_default(models);
+    }
 }
 
 /// The default-model comparator, keyed on a model id. Shared by
@@ -568,6 +782,160 @@ mod tests {
         file.set_modified(now + std::time::Duration::from_secs(5))
             .unwrap();
         assert!(cache_is_fresh(&path, now));
+    }
+
+    fn reasoning_of(
+        raw: serde_json::Value,
+        provider: &str,
+        model: &str,
+    ) -> Option<Arc<ModelReasoning>> {
+        let resp: ApiResponse = serde_json::from_value(raw).unwrap();
+        let (_l, _c, caps, _m) = parse_catalogue(resp);
+        caps.get(&(provider.to_string(), model.to_string()))
+            .unwrap()
+            .reasoning_options
+            .clone()
+    }
+
+    #[test]
+    fn reasoning_options_parse_efforts_toggle_and_budget() {
+        let raw = serde_json::json!({
+            "p": { "models": {
+                "effort": { "limit": { "context": 1 }, "reasoning_options": [
+                    { "type": "toggle" },
+                    { "type": "effort", "values": ["low", "medium", "high", "xhigh", "max"] } ] },
+                "budget": { "limit": { "context": 1 }, "reasoning_options": [
+                    { "type": "budget_tokens", "min": 1024 } ] },
+                "ranged": { "limit": { "context": 1 }, "reasoning_options": [
+                    { "type": "budget_tokens", "min": 128, "max": 32768 } ] },
+                "nullable": { "limit": { "context": 1 }, "reasoning_options": [
+                    { "type": "effort", "values": [null, "high"] } ] },
+                "none": { "limit": { "context": 1 }, "reasoning_options": [] },
+                "silent": { "limit": { "context": 1 } },
+            } }
+        });
+        let get = |m: &str| reasoning_of(raw.clone(), "p", m);
+        let e = get("effort").unwrap();
+        assert_eq!(e.efforts, ["low", "medium", "high", "xhigh", "max"]);
+        assert!(e.toggle && e.budget.is_none());
+        assert_eq!(get("budget").unwrap().budget, Some((1024, None)));
+        assert_eq!(get("ranged").unwrap().budget, Some((128, Some(32768))));
+        // `null` is the API's off switch.
+        assert_eq!(get("nullable").unwrap().efforts, ["none", "high"]);
+        // Explicitly nothing vs. silent are different answers.
+        assert_eq!(*get("none").unwrap(), ModelReasoning::default());
+        assert!(get("silent").is_none());
+    }
+
+    #[test]
+    fn identical_reasoning_specs_are_shared_not_copied() {
+        let raw = serde_json::json!({
+            "p": { "models": {
+                "a": { "limit": { "context": 1 }, "reasoning_options": [{ "type": "effort", "values": ["low", "high"] }] },
+                "b": { "limit": { "context": 1 }, "reasoning_options": [{ "type": "effort", "values": ["low", "high"] }] },
+            } }
+        });
+        let resp: ApiResponse = serde_json::from_value(raw).unwrap();
+        let (_l, _c, caps, _m) = parse_catalogue(resp);
+        let a = caps[&("p".to_string(), "a".to_string())]
+            .reasoning_options
+            .clone()
+            .unwrap();
+        let b = caps[&("p".to_string(), "b".to_string())]
+            .reasoning_options
+            .clone()
+            .unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn effort_names_sort_low_to_high_with_strangers_last() {
+        let mut names = [
+            "max", "wild", "low", "none", "xhigh", "high", "minimal", "medium",
+        ];
+        names.sort_by_key(|n| effort_rank(n));
+        assert_eq!(
+            names,
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max", "wild"]
+        );
+    }
+
+    #[test]
+    fn wire_follows_the_models_package_and_defaults_to_chat() {
+        let raw = serde_json::json!({
+            "opencode": {
+                "npm": "@ai-sdk/openai-compatible",
+                "models": {
+                    "claude-sonnet-4-6": { "limit": { "context": 200000 },
+                        "provider": { "npm": "@ai-sdk/anthropic" } },
+                    "gemini-3-flash": { "limit": { "context": 1048576 },
+                        "provider": { "npm": "@ai-sdk/google" } },
+                    "gpt-5.5": { "limit": { "context": 400000 },
+                        "provider": { "npm": "@ai-sdk/openai" } },
+                    "big-pickle": { "limit": { "context": 200000 } },
+                    "kimi-k3": { "limit": { "context": 262144 },
+                        "provider": { "npm": "@ai-sdk/openai-compatible" } },
+                }
+            }
+        });
+        let resp: ApiResponse = serde_json::from_value(raw).unwrap();
+        let (_l, _c, caps, _m) = parse_catalogue(resp);
+        let wire_of = |id: &str| {
+            caps.get(&("opencode".to_string(), id.to_string()))
+                .unwrap()
+                .wire
+        };
+        assert_eq!(wire_of("claude-sonnet-4-6"), Wire::AnthropicMessages);
+        assert_eq!(wire_of("gemini-3-flash"), Wire::Gemini);
+        assert_eq!(wire_of("gpt-5.5"), Wire::OpenAiResponses);
+        assert_eq!(wire_of("big-pickle"), Wire::OpenAiChat);
+        assert_eq!(wire_of("kimi-k3"), Wire::OpenAiChat);
+        // Unseeded catalogue (the unit-test default): the safe default.
+        assert_eq!(
+            wire(ProviderKind::OpencodeZen, "claude-sonnet-4-6"),
+            Wire::OpenAiChat
+        );
+    }
+
+    #[test]
+    fn gateways_never_preselect_a_model_that_collects_prompts() {
+        let mut ids: Vec<String> = [
+            "big-pickle",
+            "mimo-v2.5-free",
+            "nemotron-3-ultra-free",
+            "muse-spark-1.3-contributor-free",
+            "space-bunny-free",
+            "longcat-2.5-preview-free",
+            "ling-3.0-flash-fin-free",
+        ]
+        .map(String::from)
+        .to_vec();
+        sort_for_default_for(ProviderKind::OpencodeZen, &mut ids);
+        // The two zero-retention models lead; everything that collects follows.
+        let lead: std::collections::HashSet<&str> = ids[..2].iter().map(String::as_str).collect();
+        assert_eq!(
+            lead,
+            ["space-bunny-free", "longcat-2.5-preview-free"]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(ids.len(), 7);
+        assert!(ids[2..].iter().all(|i| collects_prompts(i)));
+    }
+
+    #[test]
+    fn demotion_is_a_gateway_policy_not_a_global_one() {
+        let ids = || vec!["big-pickle".to_string(), "random-model".to_string()];
+        let mut other = ids();
+        sort_for_default_for(ProviderKind::OpenRouter, &mut other);
+        assert_eq!(other[0], "big-pickle", "plain priority order elsewhere");
+        let mut zen = ids();
+        sort_for_default_for(ProviderKind::OpencodeZen, &mut zen);
+        assert_eq!(zen[0], "random-model");
+        // Paid models that merely share a family name aren't demoted.
+        assert!(!collects_prompts("mimo-v2.5-pro"));
+        assert!(!collects_prompts("kimi-k3"));
+        assert!(collects_prompts("Muse-Spark-1.2-Contributor"));
     }
 
     #[test]
@@ -733,6 +1101,38 @@ mod tests {
         // the newer 4.6 sorts ahead of 4.5.
         assert_eq!(list[0].id, "glm-4.6");
         assert_eq!(list[1].id, "glm-4.5");
+    }
+
+    #[test]
+    fn model_list_keeps_chat_models_and_drops_generators_and_embeddings() {
+        let raw = serde_json::json!({
+            "google": {
+                "models": {
+                    "gemini-2.5-pro": { "limit": { "context": 1048576 },
+                        "modalities": { "input": ["text", "image"], "output": ["text"] } },
+                    "gemini-2.5-flash-preview-tts": { "limit": { "context": 8192 },
+                        "modalities": { "input": ["text"], "output": ["audio"] } },
+                    "gemini-3-pro-image": { "limit": { "context": 65536 },
+                        "modalities": { "input": ["text"], "output": ["text", "image"] } },
+                    "veo-3.1": { "limit": { "context": 480 },
+                        "modalities": { "input": ["text"], "output": ["video"] } },
+                    "gemini-embedding-001": { "limit": { "context": 2048 },
+                        "modalities": { "input": ["text"], "output": ["text"] } },
+                    "no-modalities": { "limit": { "context": 1000 } },
+                }
+            }
+        });
+        let resp: ApiResponse = serde_json::from_value(raw).unwrap();
+        let (limits, _c, caps, models) = parse_catalogue(resp);
+        let listed = models_for(&models, "google");
+        let mut ids: Vec<&str> = listed.iter().map(|m| m.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["gemini-2.5-pro", "no-modalities"]);
+        // Excluded from the picker, but still known for limits / capabilities
+        // — an operator can add them as custom models and get right behaviour.
+        let key = ("google".to_string(), "gemini-3-pro-image".to_string());
+        assert!(limits.contains_key(&key));
+        assert!(caps.contains_key(&key));
     }
 
     #[test]

@@ -56,7 +56,7 @@ import {
   type ObserveTab,
   type ObserveTarget,
 } from "./components/LogPanel";
-import { Dock, makeTerminalTab, makeYamlTab } from "./components/Dock";
+import { Dock, makeTerminalTab, makeYamlTab, openClusterChat } from "./components/Dock";
 import { ModalHost } from "./components/ModalHost";
 import { NotificationsPanel } from "./components/NotificationsPanel";
 import { PortForwardsPanel } from "./components/PortForwardsPanel";
@@ -965,6 +965,17 @@ export default function App() {
         onOpenNotifications={openNotifications}
         onOpenSettings={() => openSettings()}
         onOpenForwards={openForwardsPanel}
+        onOpenChat={
+          activeContexts.length > 0
+            ? () =>
+                openClusterChat(
+                  activeContexts.map((c) => ({
+                    id: c.id,
+                    name: clusterLabels[c.id]?.short ?? c.name,
+                  })),
+                )
+            : undefined
+        }
       />
 
       <div

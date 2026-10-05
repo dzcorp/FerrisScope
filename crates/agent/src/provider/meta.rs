@@ -2,8 +2,11 @@
 //! supported auth modes, and the strategy we use to enumerate models.
 //!
 //! The set is intentionally small. Adding a provider means:
-//! 1. A new `ProviderKind` variant in [`crate::config`].
-//! 2. A `meta::for_kind` row here.
+//! 1. A new `ProviderKind` variant in [`crate::config`] (and the UI union in
+//!    `ui/src/types.ts`).
+//! 2. A `meta::for_kind` row here — including the row-facing fields
+//!    (`key_hint`, `allows_blank_key`, `oauth_label`, `signup_url`,
+//!    `description`), which the settings UI renders as-is.
 //! 3. (For OpenAI-shaped providers) nothing else — `OpenAICompatibleProvider`
 //!    picks up the metadata. (For Anthropic / OpenAI-Codex) a dedicated
 //!    [`crate::provider::ChatProvider`] impl.
@@ -30,6 +33,9 @@ pub enum ModelsEndpoint {
     /// Anthropic's `GET /v1/models` returning `{data:[{id, display_name,
     /// created_at}]}` (slightly different field names).
     AnthropicCatalogue,
+    /// Gemini API `GET /models` returning `{models:[{name, displayName,
+    /// inputTokenLimit, supportedGenerationMethods}], nextPageToken}`.
+    GeminiCatalogue,
     /// Provider's catalogue isn't reliable / discoverable. We fall back
     /// to a hard-coded list. The list lives next to the metadata in
     /// `STATIC_MODELS` keyed off the provider id.
@@ -57,6 +63,19 @@ pub struct ProviderMeta {
     /// exact model. The auto-compaction trigger uses this to decide
     /// when to summarise.
     pub default_context_window: u32,
+    /// The endpoint may legitimately be unauthenticated (local Ollama, open
+    /// gateways): a blank key is saved and sends no auth header.
+    pub allows_blank_key: bool,
+    /// Placeholder for the API-key field.
+    pub key_hint: &'static str,
+    /// Button noun for the OAuth connect flow ("Sign in with …"). `Some`
+    /// exactly when [`AuthMode::OAuth`] is offered.
+    pub oauth_label: Option<&'static str>,
+    /// Where the operator creates a key, shown as a link in the row.
+    pub signup_url: Option<&'static str>,
+    /// One plain-text line of context for the row, when the name alone
+    /// doesn't say what the provider is.
+    pub description: Option<&'static str>,
 }
 
 /// Selects the concrete provider impl to instantiate. The build-provider
@@ -71,6 +90,8 @@ pub enum ProviderFlavor {
     /// OpenAI Responses API at the Codex endpoint (OAuth-only). Different
     /// request body, different SSE event names.
     OpenAiResponses,
+    /// Gemini `models/<id>:streamGenerateContent?alt=sse` (`x-goog-api-key`).
+    GeminiGenerate,
 }
 
 const META_OPENCODE_ZEN: ProviderMeta = ProviderMeta {
@@ -86,7 +107,48 @@ const META_OPENCODE_ZEN: ProviderMeta = ProviderMeta {
     // Catalogue spans 200k (Claude) → 1M (GPT-5.4 Pro). Use the smaller
     // value as the conservative fallback; per-model overrides land via
     // the models.dev catalogue.
+    default_context_window: 200_000,    allows_blank_key: false,
+    key_hint: "(blank = free tier)",
+    oauth_label: None,
+    signup_url: Some("https://opencode.ai/zen"),
+    description: Some("Curated coding models behind one OpenAI-compatible endpoint. The free tier needs no key and lists zero-cost models only; add a key to unlock the full catalogue."),
+};
+
+const META_OPENCODE_GO: ProviderMeta = ProviderMeta {
+    id: "opencode_go",
+    display_name: "OpenCode Go",
+    default_base_url: "https://opencode.ai/zen/go/v1",
+    auth_modes: &[AuthMode::ApiKey],
+    models_endpoint: ModelsEndpoint::OpenAiCompatible,
+    flavor: ProviderFlavor::OpenAiCompat,
+    // Open coding models: 128k–1M; the models.dev `opencode-go` entry
+    // refines per model.
     default_context_window: 200_000,
+    allows_blank_key: false,
+    key_hint: "OpenCode API key",
+    oauth_label: None,
+    signup_url: Some("https://opencode.ai/auth"),
+    description: Some(
+        "OpenCode's subscription ($10 or $40 a month) for open coding models. Most run with zero data retention and no training; the \"Contributor\" models train Meta's models on your prompts.",
+    ),
+};
+
+const META_GOOGLE: ProviderMeta = ProviderMeta {
+    id: "google",
+    display_name: "Google Gemini",
+    default_base_url: "https://generativelanguage.googleapis.com/v1beta",
+    auth_modes: &[AuthMode::ApiKey],
+    models_endpoint: ModelsEndpoint::GeminiCatalogue,
+    flavor: ProviderFlavor::GeminiGenerate,
+    // Gemini 2.5 / 3.x are 1M-token windows; models.dev refines per model.
+    default_context_window: 1_048_576,
+    allows_blank_key: false,
+    key_hint: "AIza…",
+    oauth_label: None,
+    signup_url: Some("https://aistudio.google.com/apikey"),
+    description: Some(
+        "Gemini API with a Google AI Studio key. Vertex AI and Google sign-in aren't supported.",
+    ),
 };
 
 const META_OPENROUTER: ProviderMeta = ProviderMeta {
@@ -97,6 +159,11 @@ const META_OPENROUTER: ProviderMeta = ProviderMeta {
     models_endpoint: ModelsEndpoint::OpenAiCompatible,
     flavor: ProviderFlavor::OpenAiCompat,
     default_context_window: 200_000,
+    allows_blank_key: false,
+    key_hint: "sk-or-v1-…",
+    oauth_label: None,
+    signup_url: Some("https://openrouter.ai/keys"),
+    description: None,
 };
 
 const META_ANTHROPIC: ProviderMeta = ProviderMeta {
@@ -110,6 +177,11 @@ const META_ANTHROPIC: ProviderMeta = ProviderMeta {
     // `context-1m-2025-08-07` beta; per-model overrides handled by
     // `model_context_window`.
     default_context_window: 200_000,
+    allows_blank_key: false,
+    key_hint: "sk-ant-…",
+    oauth_label: None,
+    signup_url: Some("https://console.anthropic.com/settings/keys"),
+    description: None,
 };
 
 const META_OPENAI: ProviderMeta = ProviderMeta {
@@ -128,6 +200,11 @@ const META_OPENAI: ProviderMeta = ProviderMeta {
     // gpt-5 / gpt-5-mini default 400k; o1/o3 are 200k. Conservative
     // shared default; per-model table covers the variation.
     default_context_window: 200_000,
+    allows_blank_key: false,
+    key_hint: "sk-…",
+    oauth_label: Some("ChatGPT"),
+    signup_url: Some("https://platform.openai.com/api-keys"),
+    description: None,
 };
 
 const META_ZAI: ProviderMeta = ProviderMeta {
@@ -139,6 +216,11 @@ const META_ZAI: ProviderMeta = ProviderMeta {
     models_endpoint: ModelsEndpoint::Static,
     flavor: ProviderFlavor::OpenAiCompat,
     default_context_window: 200_000,
+    allows_blank_key: false,
+    key_hint: "API key",
+    oauth_label: None,
+    signup_url: None,
+    description: None,
 };
 
 const META_MINIMAX: ProviderMeta = ProviderMeta {
@@ -149,6 +231,11 @@ const META_MINIMAX: ProviderMeta = ProviderMeta {
     models_endpoint: ModelsEndpoint::Static,
     flavor: ProviderFlavor::OpenAiCompat,
     default_context_window: 200_000,
+    allows_blank_key: false,
+    key_hint: "API key",
+    oauth_label: None,
+    signup_url: None,
+    description: None,
 };
 
 const META_GROQ: ProviderMeta = ProviderMeta {
@@ -161,6 +248,11 @@ const META_GROQ: ProviderMeta = ProviderMeta {
     // Llama-3.3 70B + Kimi K2 on Groq are 131k; older models 32k. Use
     // the larger; per-model overrides cover anything tighter.
     default_context_window: 131_072,
+    allows_blank_key: false,
+    key_hint: "gsk_…",
+    oauth_label: None,
+    signup_url: Some("https://console.groq.com/keys"),
+    description: None,
 };
 
 const META_DEEPSEEK: ProviderMeta = ProviderMeta {
@@ -172,6 +264,11 @@ const META_DEEPSEEK: ProviderMeta = ProviderMeta {
     flavor: ProviderFlavor::OpenAiCompat,
     // deepseek-chat / deepseek-reasoner are 128k.
     default_context_window: 128_000,
+    allows_blank_key: false,
+    key_hint: "sk-…",
+    oauth_label: None,
+    signup_url: Some("https://platform.deepseek.com/api_keys"),
+    description: None,
 };
 
 const META_MISTRAL: ProviderMeta = ProviderMeta {
@@ -183,6 +280,11 @@ const META_MISTRAL: ProviderMeta = ProviderMeta {
     flavor: ProviderFlavor::OpenAiCompat,
     // mistral-large-2 / codestral are 128k–256k; conservative midpoint.
     default_context_window: 131_072,
+    allows_blank_key: false,
+    key_hint: "API key",
+    oauth_label: None,
+    signup_url: Some("https://console.mistral.ai/api-keys"),
+    description: None,
 };
 
 const META_TOGETHER: ProviderMeta = ProviderMeta {
@@ -194,6 +296,11 @@ const META_TOGETHER: ProviderMeta = ProviderMeta {
     flavor: ProviderFlavor::OpenAiCompat,
     // Highly model-dependent (32k → 1M). 128k is a safe middle.
     default_context_window: 131_072,
+    allows_blank_key: false,
+    key_hint: "API key",
+    oauth_label: None,
+    signup_url: Some("https://api.together.xyz/settings/api-keys"),
+    description: None,
 };
 
 const META_OLLAMA: ProviderMeta = ProviderMeta {
@@ -209,6 +316,11 @@ const META_OLLAMA: ProviderMeta = ProviderMeta {
     // Local models commonly run with `num_ctx: 8192`; bump if your
     // local Ollama is configured larger. 32k is a kind compromise.
     default_context_window: 32_768,
+    allows_blank_key: true,
+    key_hint: "(blank for local)",
+    oauth_label: None,
+    signup_url: None,
+    description: None,
 };
 
 const META_MOONSHOT: ProviderMeta = ProviderMeta {
@@ -225,7 +337,11 @@ const META_MOONSHOT: ProviderMeta = ProviderMeta {
     models_endpoint: ModelsEndpoint::OpenAiCompatible,
     flavor: ProviderFlavor::OpenAiCompat,
     // Kimi K2 generation is 256k; older moonshot-v1 models are 128k.
-    default_context_window: 131_072,
+    default_context_window: 131_072,    allows_blank_key: false,
+    key_hint: "sk-…",
+    oauth_label: None,
+    signup_url: Some("https://platform.moonshot.ai/console/api-keys"),
+    description: Some("Moonshot AI's Kimi models over an OpenAI-compatible wire; the model list is fetched live once a key is saved. In mainland China set the base URL to https://api.moonshot.cn/v1."),
 };
 
 const META_CUSTOM_OPENAI: ProviderMeta = ProviderMeta {
@@ -242,7 +358,11 @@ const META_CUSTOM_OPENAI: ProviderMeta = ProviderMeta {
     flavor: ProviderFlavor::OpenAiCompat,
     // Unknown upstream — conservative middle; custom models get the
     // same fallback unless the operator's gateway reports limits.
-    default_context_window: 131_072,
+    default_context_window: 131_072,    allows_blank_key: true,
+    key_hint: "(blank if endpoint is open)",
+    oauth_label: None,
+    signup_url: None,
+    description: Some("Any endpoint speaking OpenAI Chat Completions (proxy, gateway, self-hosted). Set the base URL and key, press Test to probe GET /models; if the endpoint can't list models, add ids under Custom models."),
 };
 
 const META_CUSTOM_ANTHROPIC: ProviderMeta = ProviderMeta {
@@ -253,7 +373,11 @@ const META_CUSTOM_ANTHROPIC: ProviderMeta = ProviderMeta {
     // Anthropic's `GET /v1/models` shape (`{data:[{id, display_name}]}`).
     models_endpoint: ModelsEndpoint::AnthropicCatalogue,
     flavor: ProviderFlavor::AnthropicMessages,
-    default_context_window: 200_000,
+    default_context_window: 200_000,    allows_blank_key: true,
+    key_hint: "(blank if endpoint is open)",
+    oauth_label: None,
+    signup_url: None,
+    description: Some("Any endpoint speaking Anthropic's Messages API (e.g. a Claude gateway or Kimi's /anthropic transport). Same probing rules as the OpenAI-compatible entry."),
 };
 
 const META_KIMI_CODING: ProviderMeta = ProviderMeta {
@@ -273,14 +397,48 @@ const META_KIMI_CODING: ProviderMeta = ProviderMeta {
     flavor: ProviderFlavor::AnthropicMessages,
     // kimi-for-coding / k3-256k are 256k; k3 is 1M. Conservative
     // fallback; models.dev (`kimi-for-coding`) enriches per model.
-    default_context_window: 262_144,
+    default_context_window: 262_144,    allows_blank_key: false,
+    key_hint: "sk-kimi-…",
+    oauth_label: None,
+    signup_url: None,
+    description: Some("The kimi.com coding subscription — a separate product from the Moonshot platform with its own keys and models (K2.7 Coding, K3). Speaks Anthropic's Messages API; models are listed live once a key is saved."),
 };
+
+/// Disclosure the UI must show before the operator switches a provider on.
+/// Lives next to the metadata so the wording is not a frontend concern.
+#[derive(Debug, Clone, Copy)]
+pub struct EnableNotice {
+    pub headline: &'static str,
+    pub points: &'static [&'static str],
+    pub learn_more_url: &'static str,
+}
+
+const ZEN_ENABLE_NOTICE: EnableNotice = EnableNotice {
+    headline: "Enable OpenCode Zen free tier?",
+    points: &[
+        "Free: no account or API key. FerrisScope uses OpenCode's public key and lists only zero-cost models.",
+        "Everything the agent sends leaves your machine for OpenCode's proxy and on to third-party model hosts — your prompts plus cluster data it reads (pod logs, manifests, events, tool output).",
+        "Free models run on trial terms. Some providers log requests or use them to improve their models (e.g. Big Pickle, NVIDIA Nemotron — \"no confidential data\"). Check the current list before use.",
+        "Don't use it on clusters holding secrets, customer data or regulated workloads. Models and rate limits change without notice.",
+    ],
+    learn_more_url: "https://opencode.ai/docs/zen#privacy",
+};
+
+/// The disclosure to show when enabling `kind`, if it has one.
+pub fn enable_notice(kind: ProviderKind) -> Option<&'static EnableNotice> {
+    match kind {
+        ProviderKind::OpencodeZen => Some(&ZEN_ENABLE_NOTICE),
+        _ => None,
+    }
+}
 
 pub fn for_kind(kind: ProviderKind) -> &'static ProviderMeta {
     match kind {
         ProviderKind::OpencodeZen => &META_OPENCODE_ZEN,
+        ProviderKind::OpencodeGo => &META_OPENCODE_GO,
         ProviderKind::OpenRouter => &META_OPENROUTER,
         ProviderKind::Anthropic => &META_ANTHROPIC,
+        ProviderKind::Google => &META_GOOGLE,
         ProviderKind::OpenAI => &META_OPENAI,
         ProviderKind::Zai => &META_ZAI,
         ProviderKind::Minimax => &META_MINIMAX,
@@ -305,8 +463,10 @@ pub fn models_dev_id(kind: ProviderKind) -> Option<&'static str> {
         // models.dev keys the OpenCode Zen catalogue under the bare
         // `opencode` id (matches opencode's own provider config).
         ProviderKind::OpencodeZen => "opencode",
+        ProviderKind::OpencodeGo => "opencode-go",
         ProviderKind::OpenRouter => "openrouter",
         ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Google => "google",
         ProviderKind::OpenAI => "openai",
         ProviderKind::Groq => "groq",
         ProviderKind::Deepseek => "deepseek",
@@ -376,6 +536,15 @@ pub fn static_models(kind: ProviderKind) -> &'static [(&'static str, &'static st
             ("claude-haiku-4-5", "Claude Haiku 4.5"),
             ("claude-haiku-4-5-1m", "Claude Haiku 4.5 (1M)"),
         ],
+        // Gemini — offline / cold-start fallback only; the live `GET /models`
+        // call and models.dev supply the real list.
+        ProviderKind::Google => &[
+            ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+            ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
+            ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+            ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+            ("gemini-flash-latest", "Gemini Flash Latest"),
+        ],
         // OpenAI Codex (OAuth) — model set the Codex endpoint accepts.
         // Used by `OpenAICodexProvider::list_models`.
         ProviderKind::OpenAI => &[
@@ -392,6 +561,54 @@ pub fn static_models(kind: ProviderKind) -> &'static [(&'static str, &'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_fields_agree_with_auth_modes_and_blank_key_policy() {
+        for kind in ProviderKind::all() {
+            let m = for_kind(*kind);
+            assert_eq!(
+                m.oauth_label.is_some(),
+                m.auth_modes.contains(&AuthMode::OAuth),
+                "{kind:?}: oauth_label must match the OAuth auth mode"
+            );
+            assert!(!m.key_hint.is_empty(), "{kind:?}");
+            if let Some(url) = m.signup_url {
+                assert!(url.starts_with("https://"), "{kind:?}: {url}");
+            }
+            if let Some(d) = m.description {
+                assert!(!d.trim().is_empty(), "{kind:?}");
+            }
+            // Only endpoints that can run unauthenticated may save a blank key.
+            assert_eq!(
+                m.allows_blank_key,
+                matches!(
+                    kind,
+                    ProviderKind::Ollama
+                        | ProviderKind::CustomOpenAi
+                        | ProviderKind::CustomAnthropic
+                ),
+                "{kind:?}"
+            );
+        }
+        assert_eq!(for_kind(ProviderKind::OpenAI).oauth_label, Some("ChatGPT"));
+    }
+
+    #[test]
+    fn only_zen_carries_an_enable_notice() {
+        for kind in ProviderKind::all() {
+            let notice = enable_notice(*kind);
+            assert_eq!(
+                notice.is_some(),
+                kind.supports_public_fallback(),
+                "{kind:?}"
+            );
+        }
+        let zen = enable_notice(ProviderKind::OpencodeZen).unwrap();
+        assert!(zen.points.len() >= 3);
+        assert!(zen.learn_more_url.starts_with("https://"));
+        assert!(zen.points.iter().any(|p| p.contains("Free")));
+        assert!(zen.points.iter().any(|p| p.contains("leaves your machine")));
+    }
 
     #[test]
     fn models_dev_id_maps_zai_and_minimax() {

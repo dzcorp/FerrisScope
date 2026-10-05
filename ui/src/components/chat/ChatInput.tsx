@@ -18,10 +18,17 @@ import type { ApprovalMode, ChatImageAttachment } from "../../types";
 type Props = {
   mode: ThemeMode;
   disabled: boolean;
-  streaming: boolean;
+  /// The agent is working a turn — streaming, running tools, waiting on an
+  /// approval. Shows Stop, and a message sent now is queued for its next round.
+  busy: boolean;
   approvalMode: ApprovalMode;
   onApprovalModeChange: (mode: ApprovalMode) => void;
-  onSend: (text: string, images: ChatImageAttachment[]) => void;
+  /// Resolves `false` when the message wasn't accepted; the draft is then put
+  /// back so a failed send never costs the operator their text.
+  onSend: (
+    text: string,
+    images: ChatImageAttachment[],
+  ) => void | boolean | Promise<void | boolean>;
   onCancel: () => void;
   /// Manual compaction trigger. Kicks off the same summarisation
   /// pipeline auto-compaction uses; folds older history into a
@@ -114,7 +121,7 @@ function readImageAttachment(file: File): Promise<Attachment | null> {
 export function ChatInput({
   
   disabled,
-  streaming,
+  busy,
   approvalMode,
   onApprovalModeChange,
   onSend,
@@ -249,10 +256,16 @@ export function ChatInput({
       data: a.data,
     }));
     if (!text.trim() && images.length === 0) return;
+    const sent = attachments;
     setValue("");
     setAttachments([]);
     setAttachError(null);
-    onSend(text, images);
+    void Promise.resolve(onSend(text, images)).then((accepted) => {
+      if (accepted !== false) return;
+      // Don't clobber anything typed since.
+      setValue((cur) => (cur === "" ? text : cur));
+      setAttachments((cur) => (cur.length === 0 ? sent : cur));
+    });
   };
 
   const canSend = !disabled && (!!value.trim() || attachments.length > 0);
@@ -341,8 +354,8 @@ export function ChatInput({
           placeholder={
             disabled
               ? "chat unavailable…"
-              : streaming
-                ? "agent is responding — Enter to queue for its next round"
+              : busy
+                ? "agent is working — Enter to queue for its next round"
                 : "Ask about this cluster…"
           }
           disabled={disabled}
@@ -375,7 +388,7 @@ export function ChatInput({
             {Icons.plus}
           </IconBtn>
           <span style={{ flex: 1 }} />
-          {streaming && (
+          {busy && (
             <RoundAction
               t={t}
               variant="neutral"
@@ -385,13 +398,13 @@ export function ChatInput({
               {Icons.stop}
             </RoundAction>
           )}
-          {(!streaming || canSend) && (
+          {(!busy || canSend) && (
             <RoundAction
               t={t}
               variant="accent"
               onClick={submit}
               disabled={!canSend}
-              title={streaming ? "Queue for the next round" : "Send"}
+              title={busy ? "Queue for the next round" : "Send"}
             >
               {Icons.send}
             </RoundAction>

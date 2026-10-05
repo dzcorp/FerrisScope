@@ -1,30 +1,19 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useResolvedTheme } from "../../store";
 import { api } from "../../api";
 import type {
   AiSettingsWire,
   ApprovalMode,
-  AuthMode,
   McpServerConfig,
   McpTransport,
   McpTestResult,
   ModelInfo,
   ProviderKind,
-  ProviderStatusWire,
-  ReasoningEffort,
 } from "../../types";
 import {
-  tokens,
   FF_MONO,
   type ThemeMode,
   type Tokens,
-  R_LG,
   R_MD,
   FS_MD,
   FS_SM,
@@ -32,7 +21,8 @@ import {
   hexWithAlpha,
 } from "../../theme";
 import { Btn, ErrorBlock, Field, SectionHeader, Select, Toggle } from "../ui";
-import { PROVIDER_ORDER } from "../../lib/providers";
+import { isProviderUsable, orderedProviders } from "../../lib/providers";
+import { ProviderRow } from "./ProviderRow";
 import {
   KvEditor,
   kvBufferFromPairs,
@@ -53,8 +43,15 @@ export function AiSection({}: { mode: ThemeMode }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [systemDraft, setSystemDraft] = useState("");
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [listed, setListed] = useState<{
+    provider: ProviderKind;
+    models: ModelInfo[];
+  } | null>(null);
   const [modelsBusy, setModelsBusy] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  // Orders overlapping model fetches: a slow answer for a provider the
+  // operator has since left must not overwrite the current list.
+  const modelsReq = useRef(0);
 
   const refresh = async () => {
     try {
@@ -73,29 +70,52 @@ export function AiSection({}: { mode: ThemeMode }) {
 
   const refreshModels = async () => {
     if (!settings) return;
+    const req = ++modelsReq.current;
     const active = settings.providers[settings.active_provider];
-    if (!active?.configured) {
-      setModels([]);
+    if (!active || !isProviderUsable(active)) {
+      setListed(null);
+      setModelsError(null);
+      setModelsBusy(false);
       return;
     }
     setModelsBusy(true);
+    setModelsError(null);
     try {
       const m = await api.aiListModels(settings.active_provider);
-      setModels(m);
+      if (req === modelsReq.current)
+        setListed({ provider: settings.active_provider, models: m });
     } catch (e) {
-      setError(String(e));
+      if (req === modelsReq.current) {
+        setListed(null);
+        setModelsError(String(e));
+      }
     } finally {
-      setModelsBusy(false);
+      if (req === modelsReq.current) setModelsBusy(false);
     }
   };
 
+  // Only the active provider's own list is shown: right after a switch the
+  // previous provider's models must not sit beside the new default.
+  const models =
+    listed && listed.provider === settings?.active_provider
+      ? listed.models
+      : [];
+
+  // Re-list whenever something that changes the list does: which provider is
+  // active, whether it is usable, its endpoint, or its custom model ids.
+  const activeProvider = settings?.providers[settings.active_provider];
+  const modelsKey = activeProvider
+    ? [
+        activeProvider.kind,
+        isProviderUsable(activeProvider),
+        activeProvider.base_url_override ?? "",
+        activeProvider.custom_models.join("\n"),
+      ].join("|")
+    : "";
   useEffect(() => {
     refreshModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    settings?.active_provider,
-    settings?.providers[settings?.active_provider as ProviderKind]?.configured,
-  ]);
+  }, [modelsKey]);
 
   if (!settings) {
     return (
@@ -119,21 +139,38 @@ export function AiSection({}: { mode: ThemeMode }) {
     );
   }
 
-  const save = async (patch: Parameters<typeof api.aiSetSettings>[0]) => {
+  /// Persists `patch`; resolves to why it was refused, or `null` once saved.
+  const trySave = async (
+    patch: Parameters<typeof api.aiSetSettings>[0],
+  ): Promise<string | null> => {
     setBusy(true);
-    setError(null);
     try {
       const next = await api.aiSetSettings(patch);
       setSettings(next);
       setSystemDraft(next.system_prompt_override ?? "");
+      return null;
     } catch (e) {
-      setError(String(e));
+      return String(e);
     } finally {
       setBusy(false);
     }
   };
 
-  const onSetCredential = async (provider: ProviderKind, key: string) => {
+  /// `trySave` that reports a refusal in the page-level error block.
+  /// Resolves to whether the patch was persisted.
+  const save = async (
+    patch: Parameters<typeof api.aiSetSettings>[0],
+  ): Promise<boolean> => {
+    setError(null);
+    const refused = await trySave(patch);
+    if (refused !== null) setError(refused);
+    return refused === null;
+  };
+
+  const onSetCredential = async (
+    provider: ProviderKind,
+    key: string,
+  ): Promise<boolean> => {
     setBusy(true);
     setError(null);
     try {
@@ -142,8 +179,10 @@ export function AiSection({}: { mode: ThemeMode }) {
         key,
       });
       setSettings(next);
+      return true;
     } catch (e) {
       setError(String(e));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -183,12 +222,8 @@ export function AiSection({}: { mode: ThemeMode }) {
     }
   };
 
-  // Render rows in the shared PROVIDER_ORDER (mirrors Rust's
-  // ProviderKind::all()); the chat-header switcher uses the same list so
-  // muscle memory carries between the two surfaces.
-  const visibleProviders = PROVIDER_ORDER.map(
-    (kind) => settings.providers[kind],
-  ).filter((p): p is ProviderStatusWire => Boolean(p));
+  // Backend order — the chat-header switcher uses the same list.
+  const visibleProviders = orderedProviders(settings);
 
   return (
     <div>
@@ -221,13 +256,25 @@ export function AiSection({}: { mode: ThemeMode }) {
               onOauthLogin={() => onOauthLogin(p.kind)}
               onOauthCancel={onOauthCancel}
               onSetBaseUrl={(url) =>
-                save({
+                trySave({
                   provider_base_url: { provider: p.kind, base_url: url },
                 })
               }
               onSetCustomModels={(models) =>
                 save({
                   provider_custom_models: { provider: p.kind, models },
+                })
+              }
+              onSetEnabled={(enabled) =>
+                save({ provider_enabled: { provider: p.kind, enabled } })
+              }
+              onSetReasoning={(effort, budget) =>
+                save({
+                  provider_reasoning: {
+                    provider: p.kind,
+                    effort,
+                    budget_tokens: budget,
+                  },
                 })
               }
             />
@@ -239,18 +286,20 @@ export function AiSection({}: { mode: ThemeMode }) {
         t={t}
         anchor="active-provider"
         label="Active provider"
-        hint="Which provider new chats use by default. Switching here doesn't affect already-open chats — they keep the provider they were created with."
+        hint="Which enabled provider new chats use by default. Switching here doesn't affect already-open chats — they keep the provider they were created with."
       >
         <Select<ProviderKind>
           t={t}
           value={settings.active_provider}
           onChange={(v) => save({ active_provider: v })}
-          options={visibleProviders.map((p) => ({
-            value: p.kind,
-            label: p.configured
-              ? `${p.display_name} · connected`
-              : p.display_name,
-          }))}
+          options={visibleProviders
+            .filter((p) => p.enabled)
+            .map((p) => ({
+              value: p.kind,
+              label: p.configured
+                ? `${p.display_name} · connected`
+                : p.display_name,
+            }))}
         />
       </Field>
 
@@ -313,12 +362,22 @@ export function AiSection({}: { mode: ThemeMode }) {
             onClick={refreshModels}
             disabled={
               modelsBusy ||
-              !settings.providers[settings.active_provider]?.configured
+              !isProviderUsable(
+                settings.providers[settings.active_provider] ?? {
+                  enabled: false,
+                  configured: false,
+                },
+              )
             }
           >
             {modelsBusy ? "Loading…" : "Refresh"}
           </Btn>
         </div>
+        {modelsError && (
+          <div style={{ marginTop: 6 }} data-testid="models-error">
+            <ErrorBlock t={t} message={modelsError} kindLabel="model list" inline />
+          </div>
+        )}
       </Field>
 
       <Field
@@ -333,61 +392,6 @@ export function AiSection({}: { mode: ThemeMode }) {
           options={[
             { value: "approve_per_write", label: "Approve per write" },
             { value: "allow_all_writes", label: "Allow all writes" },
-          ]}
-        />
-      </Field>
-
-      <Field
-        t={t}
-        label="Reasoning effort"
-        hint="Universal knob — mapped to each provider's native field (Anthropic thinking, OpenAI reasoning_effort, OpenRouter reasoning). Higher effort = more thinking time + tokens. Models without reasoning support ignore it."
-      >
-        <Select<string>
-          t={t}
-          value={settings.reasoning.effort ?? "auto"}
-          onChange={(v) =>
-            save({
-              reasoning: {
-                effort: v === "auto" ? null : (v as ReasoningEffort),
-                budget_tokens: settings.reasoning.budget_tokens ?? null,
-              },
-            })
-          }
-          options={[
-            { value: "auto", label: "Auto (let API decide)" },
-            { value: "low", label: "Low" },
-            { value: "medium", label: "Medium" },
-            { value: "high", label: "High" },
-          ]}
-        />
-      </Field>
-
-      <Field
-        t={t}
-        label="Reasoning token budget"
-        hint="Cap on thinking tokens. Used directly by Anthropic & OpenRouter; OpenAI / Codex use only the effort knob above. Off disables thinking on Anthropic."
-      >
-        <Select<string>
-          t={t}
-          value={
-            settings.reasoning.budget_tokens == null
-              ? "off"
-              : String(settings.reasoning.budget_tokens)
-          }
-          onChange={(v) =>
-            save({
-              reasoning: {
-                effort: settings.reasoning.effort ?? null,
-                budget_tokens: v === "off" ? 0 : Number(v),
-              },
-            })
-          }
-          options={[
-            { value: "off", label: "Off" },
-            { value: "4096", label: "4k (light)" },
-            { value: "8192", label: "8k" },
-            { value: "16384", label: "16k (recommended)" },
-            { value: "32768", label: "32k (deep)" },
           ]}
         />
       </Field>
@@ -427,6 +431,7 @@ export function AiSection({}: { mode: ThemeMode }) {
 
       {error && (
         <div
+          data-testid="page-error"
           style={{
             marginTop: 12,
             padding: "8px 10px",
@@ -446,547 +451,6 @@ export function AiSection({}: { mode: ThemeMode }) {
       )}
     </div>
   );
-}
-
-function ProviderRow({
-  t,
-  provider,
-  busy,
-  onSetKey,
-  onDelete,
-  onOauthLogin,
-  onOauthCancel,
-  onSetBaseUrl,
-  onSetCustomModels,
-}: {
-  t: ReturnType<typeof tokens>;
-  provider: ProviderStatusWire;
-  busy: boolean;
-  onSetKey: (key: string) => Promise<void>;
-  onDelete: () => Promise<void>;
-  onOauthLogin: () => Promise<void>;
-  onOauthCancel: () => Promise<void>;
-  onSetBaseUrl: (url: string) => Promise<void>;
-  onSetCustomModels: (models: string[]) => Promise<void>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [keyDraft, setKeyDraft] = useState("");
-  const [baseUrlDraft, setBaseUrlDraft] = useState(
-    provider.base_url_override ?? "",
-  );
-  const [customModelDraft, setCustomModelDraft] = useState("");
-  const [oauthInFlight, setOauthInFlight] = useState(false);
-  const [testRunning, setTestRunning] = useState(false);
-  const [testResult, setTestResult] = useState<string | null>(null);
-  const supportsOauth = provider.auth_modes.includes("oauth" as AuthMode);
-  const supportsKey = provider.auth_modes.includes("api_key" as AuthMode);
-  // Endpoints that may legitimately be unauthenticated (local Ollama,
-  // open gateways) — the backend treats a blank key as "no auth header".
-  const allowsBlankKey =
-    provider.kind === "ollama" ||
-    provider.kind === "custom_openai" ||
-    provider.kind === "custom_anthropic";
-
-  const onTest = async () => {
-    setTestRunning(true);
-    setTestResult(null);
-    try {
-      // Empty key = validate the already-saved credential backend-side.
-      // Base URL comes from the *draft* so the operator can probe an
-      // override before committing it (blur-save).
-      const res = await api.aiTestProvider({
-        provider: provider.kind,
-        base_url: baseUrlDraft.trim() ? baseUrlDraft.trim() : null,
-        api_key: keyDraft.trim(),
-      });
-      setTestResult(
-        res.ok
-          ? `OK · ${res.model_count} models reachable`
-          : `Failed: ${res.error ?? "unknown"}`,
-      );
-    } catch (e) {
-      setTestResult(String(e));
-    } finally {
-      setTestRunning(false);
-    }
-  };
-
-  const onOauth = async () => {
-    setOauthInFlight(true);
-    try {
-      await onOauthLogin();
-    } finally {
-      setOauthInFlight(false);
-    }
-  };
-
-  const statusChip = provider.configured ? (
-    <span
-      style={{
-        fontSize: FS_XS,
-        fontFamily: FF_MONO,
-        color: t.good,
-        background: hexWithAlpha(t.good, 0.1),
-        padding: "1px 6px",
-        borderRadius: R_LG,
-      }}
-    >
-      {provider.auth_mode === "oauth" ? "oauth" : "api key"}
-      {provider.account_label ? ` · ${provider.account_label}` : ""}
-    </span>
-  ) : (
-    <span
-      style={{
-        fontSize: FS_XS,
-        fontFamily: FF_MONO,
-        color: t.textMuted,
-      }}
-    >
-      not connected
-    </span>
-  );
-
-  return (
-    <div
-      style={{
-        background: t.surfaceAlt,
-        border: `1px solid ${t.borderSoft}`,
-        borderRadius: R_MD,
-        padding: "8px 10px",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <span
-            style={{
-              fontFamily: FF_MONO,
-              fontSize: FS_MD,
-              color: t.text,
-            }}
-          >
-            {provider.display_name}
-          </span>
-          {statusChip}
-        </div>
-        <Btn
-          t={t}
-          variant="ghost"
-          size="sm"
-          onClick={() => setOpen((v) => !v)}
-        >
-          {open ? "Hide" : provider.configured ? "Manage" : "Connect"}
-        </Btn>
-      </div>
-
-      {open && (
-        <div
-          style={{
-            marginTop: 8,
-            display: "flex",
-            flexDirection: "column",
-            gap: 8,
-          }}
-        >
-          {providerBlurb(provider.kind) && (
-            <div
-              style={{
-                fontSize: FS_SM,
-                color: t.textMuted,
-                lineHeight: 1.45,
-              }}
-            >
-              {providerBlurb(provider.kind)}
-            </div>
-          )}
-          {supportsOauth && (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <Btn
-                t={t}
-                variant={provider.auth_mode === "oauth" ? "ghost" : "primary"}
-                size="sm"
-                disabled={busy || oauthInFlight}
-                onClick={onOauth}
-              >
-                {oauthInFlight
-                  ? "Waiting for browser…"
-                  : provider.auth_mode === "oauth"
-                    ? "Re-authorize"
-                    : `Sign in with ${oauthLabel(provider.kind)}`}
-              </Btn>
-              {oauthInFlight && (
-                <Btn
-                  t={t}
-                  variant="ghost"
-                  size="sm"
-                  onClick={onOauthCancel}
-                >
-                  Cancel
-                </Btn>
-              )}
-            </div>
-          )}
-          {supportsKey && (
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: 6,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: FS_XS,
-                  color: t.textMuted,
-                  fontFamily: FF_MONO,
-                }}
-              >
-                {provider.auth_mode === "api_key"
-                  ? "API key — replace below or clear to disconnect."
-                  : "API key"}
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  gap: 6,
-                  alignItems: "center",
-                  flexWrap: "wrap",
-                }}
-              >
-                <input
-                  type="password"
-                  value={keyDraft}
-                  onChange={(e) => setKeyDraft(e.target.value)}
-                  placeholder={
-                    provider.auth_mode === "api_key"
-                      ? "•••••••• (replace)"
-                      : keyPlaceholder(provider.kind)
-                  }
-                  style={{
-                    flex: "1 1 220px",
-                    minWidth: 0,
-                    background: t.surface,
-                    border: `1px solid ${t.borderSoft}`,
-                    color: t.text,
-                    borderRadius: R_MD,
-                    padding: "6px 8px",
-                    fontFamily: FF_MONO,
-                    fontSize: FS_MD,
-                  }}
-                />
-                <Btn
-                  t={t}
-                  variant="secondary"
-                  size="sm"
-                  onClick={onTest}
-                  disabled={
-                    testRunning ||
-                    busy ||
-                    (!keyDraft.trim() &&
-                      !provider.configured &&
-                      !allowsBlankKey)
-                  }
-                  title={
-                    keyDraft.trim()
-                      ? "Probe GET /models with the key in the field"
-                      : "Probe GET /models with the saved credential"
-                  }
-                >
-                  {testRunning ? "Testing…" : "Test"}
-                </Btn>
-                <Btn
-                  t={t}
-                  variant="primary"
-                  size="sm"
-                  onClick={async () => {
-                    if (!keyDraft.trim() && !allowsBlankKey) return;
-                    await onSetKey(keyDraft.trim());
-                    setKeyDraft("");
-                  }}
-                  disabled={busy || (!keyDraft.trim() && !allowsBlankKey)}
-                >
-                  Save
-                </Btn>
-              </div>
-              {testResult && (
-                <div
-                  style={{
-                    fontSize: FS_SM,
-                    fontFamily: FF_MONO,
-                    color: testResult.startsWith("OK") ? t.good : t.bad,
-                  }}
-                >
-                  {testResult}
-                </div>
-              )}
-            </div>
-          )}
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 4,
-            }}
-          >
-            <div
-              style={{
-                fontSize: FS_XS,
-                color: t.textMuted,
-                fontFamily: FF_MONO,
-              }}
-            >
-              Base URL (override) — leave empty for{" "}
-              <span style={{ color: t.text }}>
-                {provider.default_base_url}
-              </span>
-            </div>
-            <input
-              type="text"
-              value={baseUrlDraft}
-              onChange={(e) => setBaseUrlDraft(e.target.value)}
-              onBlur={(e) => onSetBaseUrl(e.target.value)}
-              placeholder={provider.default_base_url}
-              style={{
-                width: "100%",
-                background: t.surface,
-                border: `1px solid ${t.borderSoft}`,
-                color: t.text,
-                borderRadius: R_MD,
-                padding: "6px 8px",
-                fontFamily: FF_MONO,
-                fontSize: FS_MD,
-              }}
-            />
-          </div>
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 4,
-            }}
-          >
-            <div
-              style={{
-                fontSize: FS_XS,
-                color: t.textMuted,
-                fontFamily: FF_MONO,
-              }}
-            >
-              Custom models — appended to whatever the provider enumerates.
-              Required for endpoints with no <span style={{ color: t.text }}>GET /models</span>.
-            </div>
-            {provider.custom_models.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {provider.custom_models.map((id) => (
-                  <span
-                    key={id}
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 4,
-                      fontFamily: FF_MONO,
-                      fontSize: FS_SM,
-                      color: t.text,
-                      background: t.surface,
-                      border: `1px solid ${t.borderSoft}`,
-                      borderRadius: R_MD,
-                      padding: "2px 6px",
-                    }}
-                  >
-                    {id}
-                    <button
-                      type="button"
-                      title="Remove custom model"
-                      disabled={busy}
-                      onClick={() =>
-                        onSetCustomModels(
-                          provider.custom_models.filter((m) => m !== id),
-                        )
-                      }
-                      style={{
-                        background: "transparent",
-                        border: "none",
-                        color: t.bad,
-                        cursor: "pointer",
-                        fontFamily: FF_MONO,
-                        fontSize: FS_MD,
-                        padding: 0,
-                      }}
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <input
-                type="text"
-                value={customModelDraft}
-                onChange={(e) => setCustomModelDraft(e.target.value)}
-                onKeyDown={async (e) => {
-                  if (e.key !== "Enter") return;
-                  const id = customModelDraft.trim();
-                  if (!id) return;
-                  if (!provider.custom_models.includes(id)) {
-                    await onSetCustomModels([...provider.custom_models, id]);
-                  }
-                  setCustomModelDraft("");
-                }}
-                placeholder="model id, e.g. kimi-k2.5"
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  background: t.surface,
-                  border: `1px solid ${t.borderSoft}`,
-                  color: t.text,
-                  borderRadius: R_MD,
-                  padding: "6px 8px",
-                  fontFamily: FF_MONO,
-                  fontSize: FS_MD,
-                }}
-              />
-              <Btn
-                t={t}
-                variant="secondary"
-                size="sm"
-                disabled={busy || !customModelDraft.trim()}
-                onClick={async () => {
-                  const id = customModelDraft.trim();
-                  if (!id) return;
-                  if (!provider.custom_models.includes(id)) {
-                    await onSetCustomModels([...provider.custom_models, id]);
-                  }
-                  setCustomModelDraft("");
-                }}
-              >
-                Add
-              </Btn>
-            </div>
-          </div>
-          {provider.configured && (
-            <div>
-              <Btn
-                t={t}
-                variant="ghost"
-                size="sm"
-                onClick={onDelete}
-                disabled={busy}
-              >
-                Disconnect
-              </Btn>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function oauthLabel(kind: ProviderKind): string {
-  switch (kind) {
-    case "openai":
-      return "ChatGPT";
-    default:
-      return "OAuth";
-  }
-}
-
-// Per-provider descriptive blurb shown above the key field. `null` = no
-// row-level description (most providers — the global hint is enough).
-function providerBlurb(kind: ProviderKind): ReactNode | null {
-  switch (kind) {
-    case "opencode_zen":
-      return (
-        <>
-          OpenCode Zen exposes a curated catalogue of coding models behind a
-          single OpenAI-compatible endpoint. Leave the key blank to use the{" "}
-          <strong>free tier</strong> (zero-cost models only) — or sign up at{" "}
-          <a
-            href="https://opencode.ai/zen"
-            target="_blank"
-            rel="noreferrer"
-            style={{ color: "inherit", textDecoration: "underline" }}
-          >
-            opencode.ai/zen
-          </a>{" "}
-          to unlock the full catalogue.
-        </>
-      );
-    case "moonshot":
-      return (
-        <>
-          Moonshot AI's Kimi models over an OpenAI-compatible wire. The model
-          list is fetched live from the API once a key is saved. Operators in
-          mainland China can point the base URL at{" "}
-          <span style={{ fontFamily: FF_MONO }}>
-            https://api.moonshot.cn/v1
-          </span>
-          .
-        </>
-      );
-    case "kimi_coding":
-      return (
-        <>
-          The kimi.com <strong>coding subscription</strong> — a separate
-          product from the Moonshot platform, with its own keys and its own
-          model set (K2.7 Coding, K3). Speaks Anthropic's Messages API;
-          models are listed live once a key is saved.
-        </>
-      );
-    case "custom_openai":
-      return (
-        <>
-          Any endpoint speaking OpenAI's Chat Completions API (proxy,
-          gateway, self-hosted). Set the base URL and key, hit{" "}
-          <strong>Test</strong> to probe <strong>GET /models</strong>; if the
-          endpoint can't enumerate models, add model ids under{" "}
-          <strong>Custom models</strong> below.
-        </>
-      );
-    case "custom_anthropic":
-      return (
-        <>
-          Any endpoint speaking Anthropic's Messages API (e.g. a Claude
-          gateway or Kimi's <strong>/anthropic</strong> transport). Same
-          probing rules as the OpenAI-compatible entry.
-        </>
-      );
-    default:
-      return null;
-  }
-}
-
-function keyPlaceholder(kind: ProviderKind): string {
-  switch (kind) {
-    case "anthropic":
-      return "sk-ant-…";
-    case "openai":
-      return "sk-…";
-    case "open_router":
-      return "sk-or-v1-…";
-    case "groq":
-      return "gsk_…";
-    case "moonshot":
-      return "sk-…";
-    case "kimi_coding":
-      return "sk-kimi-…";
-    case "opencode_zen":
-      return "(blank = free tier)";
-    case "ollama":
-      return "(blank for local)";
-    case "custom_openai":
-    case "custom_anthropic":
-      return "(blank if endpoint is open)";
-    default:
-      return "API key";
-  }
 }
 
 // ─── External MCP servers editor ────────────────────────────────────────────
@@ -1090,7 +554,7 @@ function McpServersField({
   settings: AiSettingsWire;
   save: (
     patch: Parameters<typeof api.aiSetSettings>[0],
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   setSettings: (next: AiSettingsWire) => void;
 }) {
   const servers = settings.mcp_servers;
