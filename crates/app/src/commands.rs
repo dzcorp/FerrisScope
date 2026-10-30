@@ -530,12 +530,15 @@ pub(crate) async fn open_privacy_settings_cmd(app: tauri::AppHandle) -> Result<(
 ///
 /// Refuses SSH-sourced contexts — the kubeconfig being described lives on
 /// another host and isn't ours to rewrite.
+///
+/// Resolves to a warning when the pin was written but a token cache could not
+/// be cleared afterwards.
 #[tauri::command]
 pub(crate) async fn pin_cloud_identity_cmd(
     name: String,
     identity: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let context_name = kubeconfig::context_name_from_id(&name).to_owned();
     let (is_ssh, source_path) = {
         let s = state.sources.lock().await;
@@ -560,28 +563,20 @@ pub(crate) async fn pin_cloud_identity_cmd(
     let path = source_path.ok_or_else(|| {
         format!("could not locate the kubeconfig file backing {name} — nothing was written")
     })?;
-    let written = tokio::task::spawn_blocking(move || {
+    let pinned = tokio::task::spawn_blocking(move || {
         let pinned =
             ferrisscope_core::cloud_identity::pin_identity(&path, &context_name, &identity);
-        // Unconditional, and deliberately not behind `?` on the line above.
-        // `pin_identity` rewrites the kubeconfig *before* it clears caches, so a
-        // failure reported there can still mean the new `--account` is already
-        // on disk. Skipping this clear in that case would leave a Dock terminal
-        // serving the pre-pin identity's token for up to an hour — precisely the
-        // staleness the pin exists to end. Core clears the slots it knows about
-        // (the plugin default and the app's per-identity ones); this third slot,
-        // written beside a terminal session's scratch kubeconfig, is ours.
+        // Core clears the token slots it knows about (the plugin default and
+        // the app's per-identity ones); this third slot, written beside a
+        // terminal session's scratch kubeconfig, is ours. Left alone, a Dock
+        // terminal would serve the pre-pin identity's token for up to an hour.
         crate::terminal::clear_plugin_slot(&crate::terminal::plugin_cache_slot());
-        pinned.map_err(|e| e.to_string())
+        pinned
     })
     .await
-    .map_err(|e| format!("pin identity task failed: {e}"))??;
-    // A cached client keeps the exec config it was built with, so a repin of a
-    // connected cluster would not take until something rebuilt it. Drop the
-    // entry: the next connect — or the next command, lazily — uses the new
-    // identity. Whichever view is showing the cluster still reconnects to
-    // restart its watches.
-    if written {
+    .map_err(|e| format!("pin identity task failed: {e}"))?;
+    let (evict, result) = pin_outcome(pinned);
+    if evict {
         let (logs, watchers, removed) = evict_cluster_entry(&state, &name).await;
         tracing::info!(
             cluster_id = %name,
@@ -591,7 +586,21 @@ pub(crate) async fn pin_cloud_identity_cmd(
             "pin_cloud_identity: entry evicted for the new identity"
         );
     }
-    Ok(())
+    result
+}
+
+/// Whether a pin must drop the cluster's cached client, and what the command
+/// returns. A cached client keeps the exec config it was built with, so it goes
+/// whenever the kubeconfig was rewritten — including when a cache clear failed
+/// afterwards, which is only a warning. Whichever view shows the cluster still
+/// reconnects to restart its watches.
+fn pin_outcome(
+    pinned: ferrisscope_core::Result<ferrisscope_core::cloud_identity::PinReport>,
+) -> (bool, Result<Option<String>, String>) {
+    match pinned {
+        Ok(report) => (report.written, Ok(report.cache_error)),
+        Err(e) => (false, Err(e.to_string())),
+    }
 }
 
 /// The context's cloud identity as it stands — what it pins, what it would
@@ -4096,13 +4105,19 @@ pub(crate) async fn terminal_open_shell(
         .await
 }
 
+/// Session owner label for cloud logins. Never a cluster id — those always
+/// carry `::` — so no cluster disconnect matches it.
+const CLOUD_LOGIN_OWNER: &str = "cloud-login";
+
 /// Open a PTY running `gcloud auth login` to renew a lapsed cloud session.
 ///
 /// The remedy for `Error::ExecReauthRequired`, and the one terminal session that
 /// deliberately does **not** resolve a kubeconfig: it exists because the connect
-/// failed, so there is no cluster to point one at. `cluster_id` is carried only
-/// as the ownership label every session gets, so a later disconnect closes this
-/// one too.
+/// failed, so there is no cluster to point one at.
+///
+/// Owned by no cluster: one login renews an account for every cluster waiting
+/// on it, so a disconnect of whichever cluster happened to start it must not
+/// kill it for the rest. The frontend closes it when its last follower leaves.
 ///
 /// `account` is what the failing context pins, or `None` for an unpinned context
 /// (gcloud then renews whichever account is active — the same one that context
@@ -4110,7 +4125,6 @@ pub(crate) async fn terminal_open_shell(
 /// than trusted for having come from our own hint.
 #[tauri::command]
 pub(crate) async fn cloud_login_open(
-    cluster_id: String,
     account: Option<String>,
     on_event: tauri::ipc::Channel<crate::terminal::TerminalEvent>,
     state: State<'_, AppState>,
@@ -4121,7 +4135,7 @@ pub(crate) async fn cloud_login_open(
     state
         .terminals
         .spawn_with_extras(
-            cluster_id,
+            CLOUD_LOGIN_OWNER.to_owned(),
             on_event,
             SpawnSpec::CloudLogin { account },
             Vec::new(),
@@ -5137,6 +5151,40 @@ mod tests {
         sanitize_event_segment,
     };
     use ferrisscope_core::health::{ClusterHealthEvent, ClusterHealthStatus};
+
+    #[test]
+    fn a_pin_drops_the_cached_client_whenever_the_kubeconfig_changed() {
+        use super::pin_outcome;
+        use ferrisscope_core::cloud_identity::PinReport;
+
+        let report = |written, cache_error: Option<&str>| {
+            Ok(PinReport {
+                written,
+                cache_error: cache_error.map(str::to_owned),
+            })
+        };
+        assert_eq!(pin_outcome(report(true, None)), (true, Ok(None)));
+        // Already pinned to that identity: nothing changed, keep the client.
+        assert_eq!(pin_outcome(report(false, None)), (false, Ok(None)));
+        // Written, then a cache clear failed: the client still has to go, or
+        // it keeps authenticating as the old identity; the failure is a
+        // warning.
+        assert_eq!(
+            pin_outcome(report(true, Some("cache clear failed"))),
+            (true, Ok(Some("cache clear failed".to_owned())))
+        );
+        // Refused before writing: nothing to drop.
+        let refused = pin_outcome(Err(ferrisscope_core::Error::Invalid("shared".to_owned())));
+        assert!(!refused.0);
+        assert!(refused.1.is_err());
+    }
+
+    #[test]
+    fn cloud_logins_are_owned_by_no_cluster() {
+        // Cluster ids are always `<source>::<context>`; a login labelled with
+        // one would die with that cluster's disconnect while others wait on it.
+        assert!(!super::CLOUD_LOGIN_OWNER.contains("::"));
+    }
 
     #[test]
     fn resume_reason_humanises_the_sleep() {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useAppStore } from "../store";
+import { toast } from "../lib/dialog";
 import type { PinOffer } from "../types";
 import type { Tokens } from "../theme";
 import { Btn, Select } from "./ui";
@@ -49,16 +50,18 @@ export function IdentityPicker({
     setError(null);
     api
       .pinCloudIdentity(contextId, identity)
-      .then(() => {
+      .then((warning) => {
+        if (warning) toast.warn(warning);
         // The fleet refreshes on the kubeconfig watcher only while mounted;
         // the cluster bar's identity chip reads the same list.
         void api
           .listContexts()
           .then((cs) => useAppStore.getState().setContexts(cs))
           .catch(() => {});
-        if (!mountedRef.current) return;
-        setConfirming(false);
+        // Even when the surface closed mid-pin: the backend already dropped
+        // the cluster's client, so whatever shows it must reconnect.
         onPinned();
+        if (mountedRef.current) setConfirming(false);
       })
       .catch((e: unknown) => {
         if (mountedRef.current) setError(String(e));

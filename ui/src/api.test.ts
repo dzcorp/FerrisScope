@@ -114,21 +114,17 @@ describe("contexts + connect", () => {
     });
   });
 
-  it("cloudLoginOpen → 'cloud_login_open' with cluster + account + channel", async () => {
+  it("cloudLoginOpen → 'cloud_login_open' with account + channel, no cluster", async () => {
     const cap = captureNext("t7");
     const onData = vi.fn();
     const onExit = vi.fn();
-    const opened = await api.cloudLoginOpen(
-      "default::ctx-a",
-      "a@b.io",
-      onData,
-      onExit,
-    );
+    const opened = await api.cloudLoginOpen("a@b.io", onData, onExit);
 
     expect(opened.sessionId).toBe("t7");
     expect(cap.calls[0]?.cmd).toBe("cloud_login_open");
     const args = cap.calls[0]?.args as Record<string, unknown>;
-    expect(args.clusterId).toBe("default::ctx-a");
+    // Shared by every cluster waiting on the account, so owned by none.
+    expect(args).not.toHaveProperty("clusterId");
     // The account reaches the backend as-is; it validates before it lands in an
     // argv element.
     expect(args.account).toBe("a@b.io");
@@ -150,7 +146,6 @@ describe("contexts + connect", () => {
     // context would have used. Sending "" instead would be a different request.
     const cap = captureNext("t8");
     await api.cloudLoginOpen(
-      "default::ctx-a",
       null,
       () => {},
       () => {},
@@ -168,8 +163,10 @@ describe("contexts + connect", () => {
   });
 
   it("pinCloudIdentity → 'pin_cloud_identity_cmd' with name + identity", async () => {
-    const cap = captureNext(undefined);
-    await api.pinCloudIdentity("default::ctx-a", "a@b.io");
+    const cap = captureNext("cache clear failed");
+    expect(await api.pinCloudIdentity("default::ctx-a", "a@b.io")).toBe(
+      "cache clear failed",
+    );
     expect(cap.calls[0]?.cmd).toBe("pin_cloud_identity_cmd");
     expect(cap.calls[0]?.args).toEqual({
       name: "default::ctx-a",

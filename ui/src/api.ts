@@ -161,8 +161,10 @@ export const api = {
   /// Pin the context's exec entry to an explicit cloud identity (backing the
   /// kubeconfig up first). Which field gets written — and whether a token cache
   /// is cleared alongside — is the backend's call, per provider.
+  /// Resolves to a warning when the pin was written but a token cache couldn't
+  /// be cleared.
   pinCloudIdentity: (name: string, identity: string) =>
-    invoke<void>("pin_cloud_identity_cmd", { name, identity }),
+    invoke<string | null>("pin_cloud_identity_cmd", { name, identity }),
   /// The context's cloud identity as it stands — what it pins and what it
   /// could be pinned to. Null for SSH sources and contexts without a cloud
   /// exec plugin. Unlike `connectHint`, needs no failed connect.
@@ -1105,8 +1107,8 @@ export const api = {
   // Same event plumbing as the other terminal sessions, but no cluster and no
   // kubeconfig: this runs *because* the connect failed. `account` is the one the
   // failing context pins, or null to renew whichever account gcloud has active.
+  // Owned by no cluster — every cluster waiting on the account shares it.
   cloudLoginOpen: async (
-    clusterId: string,
     account: string | null,
     onData: (b64: string) => void,
     onExit: (code: number) => void,
@@ -1117,7 +1119,6 @@ export const api = {
       else onExit(evt.code);
     };
     const sessionId = await invoke<string>("cloud_login_open", {
-      clusterId,
       account,
       onEvent: channel,
     });

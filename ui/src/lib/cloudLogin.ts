@@ -111,9 +111,7 @@ export function subscribeCloudLogin(
 }
 
 /// Start the login for `account`, or attach to the one already running.
-/// `clusterId` only labels the session's owner, so a disconnect of that
-/// cluster closes it too.
-export function startCloudLogin(clusterId: string, account: string | null): void {
+export function startCloudLogin(account: string | null): void {
   const key = keyOf(account);
   const e = entryFor(key);
   if (e.run) return;
@@ -122,7 +120,6 @@ export function startCloudLogin(clusterId: string, account: string | null): void
   publish(e, { running: true, log: "" });
   api
     .cloudLoginOpen(
-      clusterId,
       account,
       (b64) => {
         if (run.done) return;

@@ -32,6 +32,7 @@ export function CloudIdentityPanel({
 
   useEffect(() => {
     let live = true;
+    setS({ status: "loading" });
     api
       .cloudIdentityStatus(contextId)
       .then((data) => {

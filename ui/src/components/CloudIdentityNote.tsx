@@ -163,7 +163,7 @@ export function CloudIdentityNote({
               variant="primary"
               size="sm"
               disabled={login.running}
-              onClick={() => startCloudLogin(contextId, reauth.account)}
+              onClick={() => startCloudLogin(reauth.account)}
             >
               {login.running ? "Waiting for browser…" : "Log in"}
             </Btn>

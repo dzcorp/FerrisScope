@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 
+use crate::cloud_identity::ContextIdentity;
 use crate::sources::{KubeconfigSource, SourceKind, SourcesFile, SshSourceConfig};
 use crate::Result;
 
@@ -52,7 +53,7 @@ pub struct ContextInfo {
     /// The cloud identity the context's exec entry binds to, read off the file
     /// without probing any CLI. `None` for SSH sources, whose exec entry runs on
     /// another host.
-    pub cloud_identity: Option<crate::cloud_identity::ContextIdentity>,
+    pub cloud_identity: Option<ContextIdentity>,
 }
 
 /// Resolved descriptor for one source — the source we registered, plus the
@@ -94,7 +95,17 @@ pub fn list_contexts(file: &SourcesFile) -> Result<Vec<ContextInfo>> {
     // 1. Default kubeconfig (unless the user disabled it).
     if !file.default_disabled {
         match kube::config::Kubeconfig::read() {
-            Ok(kc) => append_contexts(&mut out, kc, DEFAULT_SOURCE_ID, DEFAULT_GROUP, None, true),
+            Ok(kc) => {
+                let identities = default_source_identities(&kc);
+                append_contexts(
+                    &mut out,
+                    kc,
+                    DEFAULT_SOURCE_ID,
+                    DEFAULT_GROUP,
+                    None,
+                    &identities,
+                );
+            }
             Err(e) => tracing::warn!(error = %e, "default kubeconfig read failed"),
         }
     }
@@ -182,26 +193,61 @@ pub fn default_kubeconfig_path() -> Option<PathBuf> {
         .map(|h: PathBuf| h.join(".kube").join("config"))
 }
 
+/// Each context's cloud identity binding in `kc`, by context name. First
+/// definition wins, as in the pin's own lookup.
+fn context_identities(kc: &kube::config::Kubeconfig) -> HashMap<String, ContextIdentity> {
+    let execs: HashMap<&str, &kube::config::ExecConfig> = kc
+        .auth_infos
+        .iter()
+        .filter_map(|a| Some((a.name.as_str(), a.auth_info.as_ref()?.exec.as_ref()?)))
+        .collect();
+    let mut out = HashMap::new();
+    for named in &kc.contexts {
+        let Some(user) = named.context.as_ref().and_then(|c| c.user.as_deref()) else {
+            continue;
+        };
+        let Some(spec) = execs.get(user).and_then(|e| crate::cluster::exec_spec(e)) else {
+            continue;
+        };
+        if let Some(id) =
+            crate::cloud_identity::context_identity(&spec.command, &spec.args, &spec.env)
+        {
+            out.entry(named.name.clone()).or_insert(id);
+        }
+    }
+    out
+}
+
+/// Identities for the default source. A pin can only edit
+/// [`default_kubeconfig_path`] — the first `KUBECONFIG` entry — so with several
+/// entries only contexts defined in that file get one; the merged view would
+/// offer a switcher for contexts no pin can reach.
+fn default_source_identities(
+    merged: &kube::config::Kubeconfig,
+) -> HashMap<String, ContextIdentity> {
+    if !lists_several_kubeconfigs(std::env::var("KUBECONFIG").ok().as_deref()) {
+        return context_identities(merged);
+    }
+    default_kubeconfig_path()
+        .and_then(|p| kube::config::Kubeconfig::read_from(p).ok())
+        .map(|kc| context_identities(&kc))
+        .unwrap_or_default()
+}
+
+/// Whether a `KUBECONFIG` value names more than one file.
+fn lists_several_kubeconfigs(env: Option<&str>) -> bool {
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    env.is_some_and(|v| v.split(sep).filter(|s| !s.is_empty()).count() > 1)
+}
+
 fn append_contexts(
     out: &mut Vec<ContextInfo>,
     kc: kube::config::Kubeconfig,
     source_id: &str,
     group: &str,
     source_path: Option<&Path>,
-    local: bool,
+    identities: &HashMap<String, ContextIdentity>,
 ) {
-    let execs: HashMap<&str, &kube::config::ExecConfig> = if local {
-        kc.auth_infos
-            .iter()
-            .filter_map(|a| Some((a.name.as_str(), a.auth_info.as_ref()?.exec.as_ref()?)))
-            .collect()
-    } else {
-        HashMap::new()
-    };
-    let identity_of = |user: Option<&String>| {
-        let spec = crate::cluster::exec_spec(execs.get(user?.as_str())?)?;
-        crate::cloud_identity::context_identity(&spec.command, &spec.args, &spec.env)
-    };
     // "Current" only makes sense for the user's default kubeconfig — every
     // user-added file typically has its own current-context line, so honoring
     // those would paint every tile as "current".
@@ -220,7 +266,7 @@ fn append_contexts(
             is_current: current.as_deref() == Some(named.name.as_str()),
             name: named.name.clone(),
             cluster: ctx.cluster.clone(),
-            cloud_identity: identity_of(ctx.user.as_ref()),
+            cloud_identity: identities.get(&named.name).cloned(),
             user: ctx.user.clone(),
             namespace: ctx.namespace.clone(),
             group: group.to_owned(),
@@ -232,7 +278,10 @@ fn append_contexts(
 
 fn load_file_into(out: &mut Vec<ContextInfo>, path: &Path, source_id: &str, group: &str) {
     match kube::config::Kubeconfig::read_from(path) {
-        Ok(kc) => append_contexts(out, kc, source_id, group, Some(path), true),
+        Ok(kc) => {
+            let identities = context_identities(&kc);
+            append_contexts(out, kc, source_id, group, Some(path), &identities);
+        }
         Err(e) => tracing::warn!(?path, error = %e, "kubeconfig file failed to parse"),
     }
 }
@@ -333,7 +382,8 @@ fn load_folder_into(
             .unwrap_or("file")
             .to_owned();
         let child_source_id = format!("{source_id_prefix}/{stem}");
-        append_contexts(out, kc, &child_source_id, group, Some(&path), true);
+        let identities = context_identities(&kc);
+        append_contexts(out, kc, &child_source_id, group, Some(&path), &identities);
     }
 
     // Prune entries for files that have disappeared from this folder. Other
@@ -715,7 +765,7 @@ fn load_ssh_into(out: &mut Vec<ContextInfo>, src: &KubeconfigSource, group: &str
     {
         // Each SSH source has exactly one kubeconfig (no folder fan-out), so
         // the source_id is used as-is — no `/<filename>` child segment.
-        append_contexts(out, kc, &src.id, group, None, false);
+        append_contexts(out, kc, &src.id, group, None, &HashMap::new());
     } else if let Some(SshCacheEntry {
         last_error: Some(err),
         ..
@@ -786,4 +836,51 @@ fn write_yaml_atomic(path: &Path, doc: &serde_yaml::Value) -> crate::Result<()> 
     let serialized = serde_yaml::to_string(doc)?;
     crate::atomic_write::atomic_write_sync(path, serialized.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn several_kubeconfigs_needs_two_real_entries() {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        assert!(!lists_several_kubeconfigs(None));
+        assert!(!lists_several_kubeconfigs(Some("")));
+        assert!(!lists_several_kubeconfigs(Some("/a")));
+        assert!(!lists_several_kubeconfigs(Some(&format!("/a{sep}"))));
+        assert!(lists_several_kubeconfigs(Some(&format!("/a{sep}/b"))));
+        assert!(lists_several_kubeconfigs(Some(&format!("{sep}/a{sep}/b"))));
+    }
+
+    #[test]
+    fn context_identities_skip_non_exec_users_and_keep_the_first_definition() {
+        let kc: kube::config::Kubeconfig = serde_yaml::from_str(
+            r#"
+apiVersion: v1
+kind: Config
+users:
+- name: g
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: gke-gcloud-auth-plugin
+      args: ["--account=a@x.io"]
+- name: t
+  user:
+    token: x
+contexts:
+- name: gke
+  context: {cluster: c, user: g}
+- name: gke
+  context: {cluster: c, user: t}
+- name: plain
+  context: {cluster: c, user: t}
+"#,
+        )
+        .expect("parse");
+        let ids = context_identities(&kc);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids["gke"].pinned.as_deref(), Some("a@x.io"));
+    }
 }

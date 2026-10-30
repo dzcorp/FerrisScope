@@ -48,8 +48,8 @@ describe("cloudLogin", () => {
     const h = harness();
     const a = follower("a@x.io");
     const active = follower(null);
-    startCloudLogin("c1", "a@x.io");
-    startCloudLogin("c2", null);
+    startCloudLogin("a@x.io");
+    startCloudLogin(null);
     await flush();
     expect(h.opens.map((o) => o.account)).toEqual(["a@x.io", null]);
     expect(a.last()?.running).toBe(true);
@@ -64,7 +64,7 @@ describe("cloudLogin", () => {
     const h = harness();
     const a = follower("a@x.io");
     const b = follower("a@x.io");
-    startCloudLogin("c1", "a@x.io");
+    startCloudLogin("a@x.io");
     await flush();
     cancelCloudLogin("a@x.io");
     expect(h.closed).toEqual(["s1"]);
@@ -80,7 +80,7 @@ describe("cloudLogin", () => {
   it("starts a fresh process after a failed one", async () => {
     const h = harness();
     const a = follower("a@x.io");
-    startCloudLogin("c1", "a@x.io");
+    startCloudLogin("a@x.io");
     await flush();
     h.opens[0]!.send({ kind: "data", b64: btoa("nope") });
     h.opens[0]!.send({ kind: "exit", code: 2 });
@@ -88,7 +88,7 @@ describe("cloudLogin", () => {
       running: false,
       log: "nope\n[gcloud exited with code 2]",
     });
-    startCloudLogin("c1", "a@x.io");
+    startCloudLogin("a@x.io");
     await flush();
     expect(h.opens).toHaveLength(2);
     expect(a.last()).toEqual({ running: true, log: "" });
@@ -98,7 +98,7 @@ describe("cloudLogin", () => {
   it("closes the session when every follower left before the open ack", async () => {
     const h = harness();
     const a = follower("a@x.io");
-    startCloudLogin("c1", "a@x.io");
+    startCloudLogin("a@x.io");
     a.off();
     await flush();
     expect(h.closed).toEqual(["s1"]);
@@ -107,7 +107,7 @@ describe("cloudLogin", () => {
   it("a newcomer sees the running login's output so far", async () => {
     const h = harness();
     const a = follower("a@x.io");
-    startCloudLogin("c1", "a@x.io");
+    startCloudLogin("a@x.io");
     await flush();
     h.opens[0]!.send({ kind: "data", b64: btoa("open https://x") });
     const b = follower("a@x.io");

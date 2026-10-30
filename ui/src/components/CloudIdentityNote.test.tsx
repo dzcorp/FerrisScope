@@ -557,7 +557,6 @@ describe("CloudIdentityNote", () => {
 
     await waitFor(() => expect(channel).toBeDefined());
     // The failing context's own account, not the CLI's active one.
-    expect(loginArgs?.clusterId).toBe("default::prod");
     expect(loginArgs?.account).toBe("ops@example.net");
     // Button locks while the browser round trip is outstanding, so a second
     // click can't spawn a second gcloud.

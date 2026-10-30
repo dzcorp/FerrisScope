@@ -652,9 +652,19 @@ pub struct Identities {
     pub active: Option<String>,
 }
 
+/// What [`pin_identity`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinReport {
+    /// The kubeconfig was rewritten; `false` when it already pinned that
+    /// identity.
+    pub written: bool,
+    /// A token cache could not be cleared after the write. The pin stands, but
+    /// a token minted for the previous identity may be served until it expires.
+    pub cache_error: Option<String>,
+}
+
 /// Write an identity pin into `context`'s exec entry, dispatching on whichever
-/// provider owns the exec command. `Ok(false)` when the entry already pinned
-/// that identity and nothing was written.
+/// provider owns the exec command.
 ///
 /// # Errors
 ///
@@ -662,7 +672,7 @@ pub struct Identities {
 /// *this* file — the multi-file `KUBECONFIG` case, where
 /// [`crate::kubeconfig::default_kubeconfig_path`] only yields the first entry —
 /// or when the provider has no per-context pin (Azure).
-pub fn pin_identity(kubeconfig: &Path, context: &str, identity: &str) -> Result<bool> {
+pub fn pin_identity(kubeconfig: &Path, context: &str, identity: &str) -> Result<PinReport> {
     pin_identity_at(
         kubeconfig,
         context,
@@ -717,7 +727,7 @@ fn pin_identity_at(
     identity: &str,
     gcloud_cache: Option<&Path>,
     slots_root: Option<&Path>,
-) -> Result<bool> {
+) -> Result<PinReport> {
     let identity = identity.trim();
     validate_identity(identity)?;
     let mut pinned_provider = None;
@@ -751,27 +761,31 @@ fn pin_identity_at(
     // only gcloud can still be holding a token minted as somebody else. AWS
     // mints per call and kubelogin's cache is keyed by tenant/client/server —
     // clearing anything for them would be cargo-culting this fix.
+    //
+    // A failure here is reported, not returned as an error: the file is already
+    // rewritten, and callers must still act on that (drop clients built from
+    // the old exec entry).
+    let mut cache_error = None;
     if pinned_provider == Some(Provider::Gcloud) {
-        if let Some(cache) = gcloud_cache {
-            gcloud::clear_plugin_cache_at(cache).map_err(|e| {
-                Error::Invalid(format!(
-                    "account pinned, but clearing the gcloud auth plugin token cache failed: {e}"
-                ))
-            })?;
+        if let Some(Err(e)) = gcloud_cache.map(gcloud::clear_plugin_cache_at) {
+            cache_error = Some(format!(
+                "account pinned, but clearing the gcloud auth plugin token cache failed: {e}"
+            ));
         }
         // The default slot above isn't the only one: every slot
         // `crate::exec_auth` hands the plugin can hold a token minted under the
         // pre-pin identity too, and the newly pinned account reads a *different*
         // slot, so a stale one would sit there until it expired.
-        if let Some(root) = slots_root {
-            crate::exec_auth::clear_cache_slots_at(root).map_err(|e| {
-                Error::Invalid(format!(
-                    "account pinned, but clearing the app's auth token cache failed: {e}"
-                ))
-            })?;
+        if let Some(Err(e)) = slots_root.map(crate::exec_auth::clear_cache_slots_at) {
+            cache_error.get_or_insert_with(|| {
+                format!("account pinned, but clearing the app's auth token cache failed: {e}")
+            });
         }
     }
-    Ok(written)
+    Ok(PinReport {
+        written,
+        cache_error,
+    })
 }
 
 /// Read a kubeconfig, hand `f` the mutable exec mapping for `context`, then back
@@ -1893,7 +1907,7 @@ users:
     /// Every pin test goes through `pin_identity_at` with a tempdir cache so
     /// the gcloud-only cache clear runs for real without touching the
     /// developer's `~/.kube`.
-    pub(super) fn pin(path: &Path, ctx: &str, identity: &str) -> Result<bool> {
+    pub(super) fn pin(path: &Path, ctx: &str, identity: &str) -> Result<PinReport> {
         pin_identity_at(
             path,
             ctx,
@@ -1953,7 +1967,9 @@ users:
         );
 
         assert!(
-            !pin(&path, "gke", "a@example.com").expect("second pin"),
+            !pin(&path, "gke", "a@example.com")
+                .expect("second pin")
+                .written,
             "a no-op pin must report that it wrote nothing"
         );
         assert_eq!(std::fs::read_to_string(&path).expect("read"), after_first);
@@ -2188,6 +2204,27 @@ users:
         std::fs::write(&cache, "{}").expect("re-seed cache");
         pin(&path, "eks", "dev").expect("pin aws");
         assert!(cache.exists(), "aws pin must leave the gcloud cache alone");
+    }
+
+    #[test]
+    fn a_failed_cache_clear_still_reports_the_write() {
+        // The kubeconfig is rewritten before any cache is cleared. Turning a
+        // clear failure into an error hid that write from the caller, which
+        // then kept serving a client built from the old exec entry — and a
+        // retry was a no-op, so it never recovered.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
+        let cache = path.with_extension("cache");
+        std::fs::create_dir(&cache).expect("a directory remove_file can't delete");
+
+        let report = pin(&path, "gke", "a@example.com").expect("pin");
+        assert!(report.written);
+        let why = report.cache_error.expect("cache error reported");
+        assert!(why.starts_with("account pinned, but"), "{why}");
+        assert_eq!(
+            read_args(&path, "gke-user"),
+            vec!["--account=a@example.com"]
+        );
     }
 
     #[test]

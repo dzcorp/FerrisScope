@@ -106,6 +106,28 @@ describe("CloudIdentityPanel", () => {
   });
 });
 
+describe("CloudIdentityPanel context switch", () => {
+  it("never shows the previous context's identities under a new one", async () => {
+    const pending: { fn: ((v: IdentityStatus) => void) | null } = { fn: null };
+    setMockInvoke((_cmd, args) => {
+      if ((args as { name: string }).name === "default::prod") return PINNED;
+      return new Promise<IdentityStatus>((resolve) => {
+        pending.fn = resolve;
+      });
+    });
+    const { rerender } = render(
+      <CloudIdentityPanel t={t} contextId="default::prod" onPinned={() => {}} />,
+    );
+    await waitFor(() => expect(screen.getByRole("combobox")).toBeInTheDocument());
+
+    rerender(<CloudIdentityPanel t={t} contextId="default::other" onPinned={() => {}} />);
+    await waitFor(() => expect(screen.getByText(/reading kubeconfig/i)).toBeInTheDocument());
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    pending.fn?.({ ...PINNED, detail: "other context" });
+    await waitFor(() => expect(screen.getByText("other context")).toBeInTheDocument());
+  });
+});
+
 describe("CloudIdentityModal", () => {
   it("names the context and closes", async () => {
     setMockInvoke(() => PINNED);
