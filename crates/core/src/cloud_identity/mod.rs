@@ -65,6 +65,17 @@ pub enum Binding {
     FollowsActive,
 }
 
+impl Binding {
+    /// The identity a pinned binding names.
+    #[must_use]
+    pub fn pinned(self) -> Option<String> {
+        match self {
+            Self::Pinned { identity } => Some(identity),
+            Self::FollowsActive => None,
+        }
+    }
+}
+
 /// What a provider can offer to write, when the operator asks to pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PinOffer {
@@ -126,6 +137,10 @@ pub struct ConnectHint {
     pub identities: Vec<String>,
     /// The identity an unpinned context currently authenticates as.
     pub active_identity: Option<String>,
+    /// What the context's exec entry pins today, when it pins anything.
+    pub pinned_identity: Option<String>,
+    /// What the picker should preselect — see [`suggest_identity`].
+    pub suggested_identity: Option<String>,
     /// `None` when the provider has no per-context pin at all (Azure): the note
     /// then explains the CLI command to run instead.
     pub pin: Option<PinOffer>,
@@ -337,6 +352,28 @@ pub fn classify(
         .or_else(|| azure::binding_for(base, args, env).map(|b| (Provider::Azure, b)))
 }
 
+/// A context's identity binding as written, without probing any CLI config —
+/// cheap enough to attach to every listed context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContextIdentity {
+    pub provider: Provider,
+    /// The identity the exec entry names; `None` when it follows the CLI.
+    pub pinned: Option<String>,
+}
+
+/// [`classify`], shaped for the context list.
+#[must_use]
+pub fn context_identity(
+    command: &str,
+    args: &[String],
+    env: &[(String, String)],
+) -> Option<ContextIdentity> {
+    classify(command, args, env).map(|(provider, binding)| ContextIdentity {
+        provider,
+        pinned: binding.pinned(),
+    })
+}
+
 /// Diagnose a failed connect for one context: read its exec entry off disk,
 /// classify the identity binding, probe the local CLI config, and compose the
 /// note — or `None` when this isn't an identity problem.
@@ -388,6 +425,30 @@ fn hint_for_context_with(
     probe: &dyn Fn(Provider) -> Identities,
     on_macos: bool,
 ) -> Result<Option<ConnectHint>> {
+    let Some((hint, pinned)) =
+        compose_for_context(context_name, source_path, error, probe, on_macos)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ConnectHint {
+        suggested_identity: suggest_identity(
+            &hint.identities,
+            hint.active_identity.as_deref(),
+            pinned.as_deref(),
+        ),
+        pinned_identity: pinned,
+        ..hint
+    }))
+}
+
+/// The note for one failed connect, plus the identity the context pins.
+fn compose_for_context(
+    context_name: &str,
+    source_path: Option<&Path>,
+    error: &str,
+    probe: &dyn Fn(Provider) -> Identities,
+    on_macos: bool,
+) -> Result<Option<(ConnectHint, Option<String>)>> {
     // Three different failures reach here. A 403 means the connect
     // *authenticated* and was refused, which is where identity drift shows up.
     // A lapsed cloud session never gets that far — the exec plugin refuses to
@@ -406,6 +467,7 @@ fn hint_for_context_with(
     let Some((provider, binding)) = classify(&spec.command, &spec.args, &spec.env) else {
         return Ok(None);
     };
+    let pinned = binding.pinned();
     if blocked {
         // Only gcloud: the classifier that produced `blocked` is gcloud's, and
         // the note's prose names the gcloud SDK layout. Another provider's
@@ -415,9 +477,8 @@ fn hint_for_context_with(
         if provider != Provider::Gcloud || !on_macos {
             return Ok(None);
         }
-        return Ok(Some(gcloud::compose_blocked_hint(
-            gcloud::blocked_path(error).as_deref(),
-        )));
+        let hint = gcloud::compose_blocked_hint(gcloud::blocked_path(error).as_deref());
+        return Ok(Some((hint, pinned)));
     }
     if helper_hidden {
         // Same restrictions as `blocked`: the note's prose is gcloud's and
@@ -427,7 +488,7 @@ fn hint_for_context_with(
         if provider != Provider::Gcloud || !on_macos {
             return Ok(None);
         }
-        return Ok(Some(gcloud::compose_hidden_helper_hint()));
+        return Ok(Some((gcloud::compose_hidden_helper_hint(), pinned)));
     }
     if reauth {
         // Only gcloud is claimed here. AWS mints per call (no session to lapse),
@@ -436,27 +497,150 @@ fn hint_for_context_with(
         if provider != Provider::Gcloud {
             return Ok(None);
         }
-        let account = match &binding {
-            Binding::Pinned { identity } => Some(identity.clone()),
-            Binding::FollowsActive => None,
-        };
         let identities = probe(provider);
-        return Ok(Some(gcloud::compose_reauth_hint(
-            account.as_deref(),
-            &identities,
-        )));
-    }
-    // A pinned context can't be suffering identity drift, whatever the
-    // provider — the 403 is a plain RBAC gap.
-    if binding != Binding::FollowsActive {
-        return Ok(None);
+        let hint = gcloud::compose_reauth_hint(pinned.as_deref(), &identities);
+        return Ok(Some((hint, pinned)));
     }
     let identities = probe(provider);
-    Ok(match provider {
-        Provider::Gcloud => gcloud::compose_hint(error, &identities),
-        Provider::Aws => aws::compose_hint(error, &identities),
-        Provider::Azure => azure::compose_hint(error, &identities),
+    // A pinned context can't be drifting, so its 403 gets different prose: the
+    // pinned identity was refused, which is either an RBAC gap or the wrong
+    // identity pinned. Only the operator can tell which, so the note states the
+    // fact and offers the repin.
+    let hint = match (provider, pinned.as_deref()) {
+        (Provider::Gcloud, Some(p)) => gcloud::compose_pinned_hint(error, p, &identities),
+        (Provider::Aws, Some(p)) => aws::compose_pinned_hint(error, p, &identities),
+        (Provider::Azure, Some(_)) => None,
+        (Provider::Gcloud, None) => gcloud::compose_hint(error, &identities),
+        (Provider::Aws, None) => aws::compose_hint(error, &identities),
+        (Provider::Azure, None) => azure::compose_hint(error, &identities),
+    };
+    Ok(hint.map(|h| (h, pinned)))
+}
+
+/// The picker's preselection: the CLI's active identity when it is listed and
+/// not already pinned, else the first listed one that isn't pinned. `active`
+/// must be listed because `gcloud auth revoke` leaves `[core] account` naming a
+/// credential that is gone.
+#[must_use]
+pub fn suggest_identity(
+    identities: &[String],
+    active: Option<&str>,
+    pinned: Option<&str>,
+) -> Option<String> {
+    let offered = |i: &str| Some(i) != pinned && identities.iter().any(|x| x == i);
+    active
+        .filter(|a| offered(a))
+        .map(str::to_owned)
+        .or_else(|| identities.iter().find(|i| offered(i)).cloned())
+}
+
+/// A pinned context with no other identity to switch to has nothing a repin
+/// could offer.
+fn has_alternative(identities: &Identities, pinned: &str) -> bool {
+    identities.identities.iter().any(|i| i != pinned)
+}
+
+/// A context's cloud identity as it stands, for the "change account" surfaces.
+///
+/// Unlike [`ConnectHint`] this answers without a failure: it describes whatever
+/// the exec entry does today, so an operator who pinned the wrong identity — or
+/// is connected with partial access as the wrong one — can change it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IdentityStatus {
+    pub provider: Provider,
+    /// One or two sentences on how this context picks its identity.
+    pub detail: String,
+    pub pinned_identity: Option<String>,
+    pub active_identity: Option<String>,
+    /// Identities configured on this machine — the picker's choices.
+    pub identities: Vec<String>,
+    pub suggested_identity: Option<String>,
+    /// `None` when the provider has no per-context pin (Azure).
+    pub pin: Option<PinOffer>,
+    /// Why a pin would be refused before it is attempted (the exec user is
+    /// shared with other contexts). The picker is withheld while this is set.
+    pub pin_blocked: Option<String>,
+}
+
+/// Describe `context`'s cloud identity binding as written in `kubeconfig`.
+///
+/// `Ok(None)` when the context is absent from the file, has no exec plugin, or
+/// uses one no provider claims.
+///
+/// # Errors
+///
+/// Propagates kubeconfig read/parse failures.
+pub fn identity_status(kubeconfig: &Path, context: &str) -> Result<Option<IdentityStatus>> {
+    identity_status_with(kubeconfig, context, &|provider| match provider {
+        Provider::Gcloud => gcloud::probe().unwrap_or_default(),
+        Provider::Aws => aws::probe(),
+        Provider::Azure => azure::probe().unwrap_or_default(),
     })
+}
+
+/// [`identity_status`] with the CLI-config probe injected for tests.
+///
+/// Reads the file as a [`serde_yaml::Value`], the same view [`edit_exec`]
+/// edits, so the status describes exactly the entry a pin would rewrite.
+fn identity_status_with(
+    kubeconfig: &Path,
+    context: &str,
+    probe: &dyn Fn(Provider) -> Identities,
+) -> Result<Option<IdentityStatus>> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(kubeconfig)?)?;
+    let Some(user_name) = context_user_name(&doc, context) else {
+        return Ok(None);
+    };
+    let Some(exec) = user_exec(&doc, &user_name) else {
+        return Ok(None);
+    };
+    let command = exec
+        .get("command")
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or_default();
+    let Some((provider, binding)) = classify(command, &exec_args(exec), &exec_env_pairs(exec))
+    else {
+        return Ok(None);
+    };
+    let pinned = binding.pinned();
+    let ids = probe(provider);
+    let (detail, pin) = match provider {
+        Provider::Gcloud => (
+            gcloud::status_detail(pinned.as_deref(), ids.active.as_deref()),
+            Some(gcloud::pin_offer(pinned.is_some())),
+        ),
+        Provider::Aws => (
+            aws::status_detail(pinned.as_deref(), ids.active.as_deref()),
+            Some(aws::pin_offer(pinned.is_some())),
+        ),
+        Provider::Azure => (azure::status_detail(ids.active.as_deref()), None),
+    };
+    let others: Vec<String> = contexts_using_user(&doc, &user_name)
+        .into_iter()
+        .filter(|c| c != context)
+        .collect();
+    let pin_blocked = (pin.is_some() && !others.is_empty()).then(|| {
+        format!(
+            "User '{user_name}' is shared with {}, so a pin here would re-point {} too. \
+             Give '{context}' its own user entry in the kubeconfig first.",
+            others.join(", "),
+            if others.len() == 1 { "it" } else { "them" }
+        )
+    });
+    Ok(Some(IdentityStatus {
+        provider,
+        detail,
+        suggested_identity: suggest_identity(
+            &ids.identities,
+            ids.active.as_deref(),
+            pinned.as_deref(),
+        ),
+        pinned_identity: pinned,
+        active_identity: ids.active,
+        identities: ids.identities,
+        pin,
+        pin_blocked,
+    }))
 }
 
 /// The identities a provider's CLI has configured, plus the active one.
@@ -469,7 +653,8 @@ pub struct Identities {
 }
 
 /// Write an identity pin into `context`'s exec entry, dispatching on whichever
-/// provider owns the exec command.
+/// provider owns the exec command. `Ok(false)` when the entry already pinned
+/// that identity and nothing was written.
 ///
 /// # Errors
 ///
@@ -477,7 +662,7 @@ pub struct Identities {
 /// *this* file — the multi-file `KUBECONFIG` case, where
 /// [`crate::kubeconfig::default_kubeconfig_path`] only yields the first entry —
 /// or when the provider has no per-context pin (Azure).
-pub fn pin_identity(kubeconfig: &Path, context: &str, identity: &str) -> Result<()> {
+pub fn pin_identity(kubeconfig: &Path, context: &str, identity: &str) -> Result<bool> {
     pin_identity_at(
         kubeconfig,
         context,
@@ -532,11 +717,11 @@ fn pin_identity_at(
     identity: &str,
     gcloud_cache: Option<&Path>,
     slots_root: Option<&Path>,
-) -> Result<()> {
+) -> Result<bool> {
     let identity = identity.trim();
     validate_identity(identity)?;
     let mut pinned_provider = None;
-    edit_exec(kubeconfig, context, |exec| {
+    let written = edit_exec(kubeconfig, context, |exec| {
         let command = exec
             .get("command")
             .and_then(serde_yaml::Value::as_str)
@@ -586,7 +771,7 @@ fn pin_identity_at(
             })?;
         }
     }
-    Ok(())
+    Ok(written)
 }
 
 /// Read a kubeconfig, hand `f` the mutable exec mapping for `context`, then back
@@ -598,8 +783,8 @@ fn pin_identity_at(
 /// operator's kubeconfig. Value-level editing preserves unknown keys and
 /// document order; comments are lost either way, which is why the backup exists.
 ///
-/// Nothing is written if `f` fails.
-fn edit_exec<F>(kubeconfig: &Path, context: &str, f: F) -> Result<()>
+/// Nothing is written if `f` fails. `Ok(false)` when `f` changed nothing.
+fn edit_exec<F>(kubeconfig: &Path, context: &str, f: F) -> Result<bool>
 where
     F: FnOnce(&mut serde_yaml::Mapping) -> Result<()>,
 {
@@ -663,7 +848,7 @@ where
     // rewrites the kubeconfig and — worse — refreshes the backup, so a stray
     // second click would discard the pre-edit copy for no benefit.
     if serialized == original {
-        return Ok(());
+        return Ok(false);
     }
 
     // Lost-update guard. Everything above works from the snapshot read at the
@@ -715,7 +900,7 @@ where
     crate::atomic_write::atomic_write_sync_mode(&backup, original.as_bytes(), mode)?;
 
     crate::atomic_write::atomic_write_sync_mode(kubeconfig, serialized.as_bytes(), mode)?;
-    Ok(())
+    Ok(true)
 }
 
 /// Names of every context whose `context.user` is `user_name`.
@@ -784,6 +969,64 @@ fn user_exec_mut<'a>(
         .get_mut("user")?
         .get_mut("exec")?
         .as_mapping_mut()
+}
+
+/// Shared handle on `users[name].user.exec`.
+fn user_exec<'a>(doc: &'a serde_yaml::Value, user_name: &str) -> Option<&'a serde_yaml::Mapping> {
+    doc.get("users")?
+        .as_sequence()?
+        .iter()
+        .find(|u| u.get("name").and_then(serde_yaml::Value::as_str) == Some(user_name))?
+        .get("user")?
+        .get("exec")?
+        .as_mapping()
+}
+
+/// Read the exec `env` block as `(name, value)` pairs, skipping malformed
+/// entries the plugin would ignore too.
+fn exec_env_pairs(exec: &serde_yaml::Mapping) -> Vec<(String, String)> {
+    exec.get("env")
+        .and_then(serde_yaml::Value::as_sequence)
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|e| {
+                    Some((
+                        e.get("name")?.as_str()?.to_owned(),
+                        e.get("value")?.as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `args` carries `flag` in either form, even with a blank value.
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter()
+        .any(|a| a == flag || a.strip_prefix(flag).is_some_and(|r| r.starts_with('=')))
+}
+
+/// Drop every form of `flag` (`--flag=x`, `--flag x`) and append
+/// `--flag=<value>`, keeping unrelated args in order.
+fn set_flag_arg(args: &[String], flag: &str, value: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len() + 1);
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == flag {
+            skip_next = true;
+            continue;
+        }
+        if arg.strip_prefix(flag).is_some_and(|r| r.starts_with('=')) {
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out.push(format!("{flag}={value}"));
+    out
 }
 
 /// Read the exec `args` list as strings.
@@ -1158,22 +1401,231 @@ mod tests {
     }
 
     #[test]
-    fn hint_refuses_a_context_that_already_names_an_identity() {
-        // The gate that stops the note firing on a correctly-pinned context.
-        // Without it, a genuine RBAC gap on a pinned context is misdiagnosed as
-        // identity drift and the operator is offered a re-pin of what is
-        // already pinned.
+    fn a_pinned_context_gets_a_repin_note_never_drift_prose() {
+        // A pinned context can't drift, so its 403 must not be explained as
+        // drift or a stale cache. It may still be pinned to the wrong account,
+        // which is the case the repin exists for: the note states the fact and
+        // preselects an account other than the one already pinned.
         let tmp = tempfile::tempdir().expect("tempdir");
         let pinned = KUBECONFIG_YAML.replace(
             "      command: gke-gcloud-auth-plugin",
             "      command: gke-gcloud-auth-plugin\n      args: [\"--account=a@example.com\"]",
         );
         let path = kubeconfig_fixture(tmp.path(), &pinned);
+        let hint = hint_for_context_with("gke", Some(&path), FORBIDDEN_403, &two_accounts, true)
+            .expect("hint")
+            .expect("a repin note");
+
+        assert_eq!(hint.title, "Pinned Google account was refused");
+        assert!(hint.detail.contains("a@example.com"), "{}", hint.detail);
+        assert!(!hint.detail.contains("cache"), "{}", hint.detail);
+        assert_eq!(hint.pinned_identity.as_deref(), Some("a@example.com"));
+        assert_eq!(hint.suggested_identity.as_deref(), Some("b@example.com"));
+        let offer = hint.pin.expect("pin offer");
+        assert!(
+            offer.effects[0].starts_with("replace"),
+            "{:?}",
+            offer.effects
+        );
+        assert_eq!(hint.reauth, None);
+
+        // With no other account on the machine there is nothing to repin to,
+        // so the 403 is a plain RBAC gap and gets no note.
+        let only_pinned = |_: Provider| Identities {
+            identities: vec!["a@example.com".to_owned()],
+            active: Some("a@example.com".to_owned()),
+        };
         assert_eq!(
-            hint_for_context_with("gke", Some(&path), FORBIDDEN_403, &no_probe, true)
+            hint_for_context_with("gke", Some(&path), FORBIDDEN_403, &only_pinned, true)
                 .expect("hint"),
             None
         );
+    }
+
+    #[test]
+    fn the_drift_note_preselects_the_active_identity() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
+        let hint = hint_for_context_with("gke", Some(&path), FORBIDDEN_403, &two_accounts, true)
+            .expect("hint")
+            .expect("a drift note");
+        assert_eq!(hint.pinned_identity, None);
+        assert_eq!(hint.suggested_identity.as_deref(), Some("b@example.com"));
+        assert!(hint.pin.expect("pin").effects[0].starts_with("add --account"));
+    }
+
+    #[test]
+    fn suggest_identity_skips_the_pinned_and_the_unlisted() {
+        let ids = vec![
+            "a@x.io".to_owned(),
+            "b@x.io".to_owned(),
+            "c@x.io".to_owned(),
+        ];
+        assert_eq!(
+            suggest_identity(&ids, Some("b@x.io"), None).as_deref(),
+            Some("b@x.io")
+        );
+        // Active is what the context already pins → the next one instead.
+        assert_eq!(
+            suggest_identity(&ids, Some("a@x.io"), Some("a@x.io")).as_deref(),
+            Some("b@x.io")
+        );
+        // An active account gcloud no longer holds credentials for is never
+        // preselected.
+        assert_eq!(
+            suggest_identity(&ids, Some("gone@x.io"), None).as_deref(),
+            Some("a@x.io")
+        );
+        assert_eq!(
+            suggest_identity(&["a@x.io".to_owned()], None, Some("a@x.io")),
+            None
+        );
+        assert_eq!(suggest_identity(&[], Some("a@x.io"), None), None);
+    }
+
+    #[test]
+    fn identity_status_describes_unpinned_and_pinned_contexts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = kubeconfig_fixture(tmp.path(), KUBECONFIG_YAML);
+
+        let st = identity_status_with(&path, "gke", &two_accounts)
+            .expect("status")
+            .expect("gcloud context");
+        assert_eq!(st.provider, Provider::Gcloud);
+        assert_eq!(st.pinned_identity, None);
+        assert_eq!(st.active_identity.as_deref(), Some("b@example.com"));
+        assert_eq!(st.suggested_identity.as_deref(), Some("b@example.com"));
+        assert!(st.pin.expect("pin").effects[0].starts_with("add --account"));
+        assert_eq!(st.pin_blocked, None);
+
+        pin(&path, "gke", "a@example.com").expect("pin");
+        let st = identity_status_with(&path, "gke", &two_accounts)
+            .expect("status")
+            .expect("gcloud context");
+        assert_eq!(st.pinned_identity.as_deref(), Some("a@example.com"));
+        assert_eq!(st.suggested_identity.as_deref(), Some("b@example.com"));
+        assert!(
+            st.detail.contains("pinned to a@example.com"),
+            "{}",
+            st.detail
+        );
+        assert!(st.pin.expect("pin").effects[0].starts_with("replace"));
+
+        // Azure is detect-only: a status, no pin, and the prose names the
+        // command that does switch it.
+        let az = identity_status_with(&path, "aks", &two_accounts)
+            .expect("status")
+            .expect("azure context");
+        assert_eq!(az.provider, Provider::Azure);
+        assert_eq!(az.pin, None);
+        assert!(az.detail.contains("az account set"), "{}", az.detail);
+
+        // No exec plugin, or no such context: nothing to describe.
+        assert_eq!(
+            identity_status_with(&path, "plain", &no_probe).expect("status"),
+            None
+        );
+        assert_eq!(
+            identity_status_with(&path, "nope", &no_probe).expect("status"),
+            None
+        );
+    }
+
+    #[test]
+    fn identity_status_withholds_the_pin_on_a_shared_user() {
+        // `edit_exec` refuses this pin; the status says so up front so the UI
+        // doesn't offer a picker whose confirm is certain to fail.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let shared = KUBECONFIG_YAML.replace(
+            "- name: aks\n  context:\n    cluster: c\n    user: aks-user",
+            "- name: eks-stage\n  context:\n    cluster: c\n    user: eks-user",
+        );
+        let path = kubeconfig_fixture(tmp.path(), &shared);
+        let st = identity_status_with(&path, "eks", &two_accounts)
+            .expect("status")
+            .expect("aws context");
+        let why = st.pin_blocked.expect("blocked");
+        assert!(
+            why.contains("'eks-user' is shared with eks-stage,"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_repin_takes_whichever_form_the_pin_was_written_in() {
+        // The invariant every repin has to keep: after it, the classifier
+        // reads the new identity. Writing a fresh pin beside an old one that
+        // the plugin honours first changes the file and nothing else.
+        let gke = |extra: &str| {
+            KUBECONFIG_YAML.replace(
+                "      command: gke-gcloud-auth-plugin",
+                &format!("      command: gke-gcloud-auth-plugin\n{extra}"),
+            )
+        };
+        let eks = |args: &str, env: &str| {
+            KUBECONFIG_YAML
+                .replace(
+                    r#"      args: ["--region", "us-east-1", "eks", "get-token", "--cluster-name", "prod"]"#,
+                    &format!("      args: {args}"),
+                )
+                .replace(
+                    "      - name: AWS_REGION\n        value: us-east-1",
+                    &format!("      - name: AWS_REGION\n        value: us-east-1\n{env}"),
+                )
+        };
+        let cases: Vec<(&str, &str, String)> = vec![
+            ("gke", "gke-user", gke("")),
+            ("gke", "gke-user", gke("      args: [\"--account\", \"old@x.io\"]")),
+            (
+                "gke",
+                "gke-user",
+                gke("      env:\n      - name: CLOUDSDK_CORE_ACCOUNT\n        value: old@x.io"),
+            ),
+            (
+                "gke",
+                "gke-user",
+                gke("      args: [\"--account=old@x.io\"]\n      env:\n      - name: CLOUDSDK_CORE_ACCOUNT\n        value: old@x.io"),
+            ),
+            ("eks", "eks-user", eks(r#"["eks", "get-token"]"#, "")),
+            ("eks", "eks-user", eks(r#"["eks", "get-token", "--profile", "old"]"#, "")),
+            (
+                "eks",
+                "eks-user",
+                eks(r#"["eks", "get-token"]"#, "      - name: AWS_DEFAULT_PROFILE\n        value: old"),
+            ),
+            (
+                "eks",
+                "eks-user",
+                eks(
+                    r#"["eks", "get-token", "--profile=old"]"#,
+                    "      - name: AWS_PROFILE\n        value: old\n      - name: AWS_DEFAULT_PROFILE\n        value: old",
+                ),
+            ),
+        ];
+        for (ctx, user, body) in cases {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = kubeconfig_fixture(tmp.path(), &body);
+            pin(&path, ctx, "new").expect("pin");
+            let exec = read_exec(&path, user);
+            let command = exec
+                .get("command")
+                .and_then(serde_yaml::Value::as_str)
+                .expect("command");
+            assert_eq!(
+                classify(command, &read_args(&path, user), &read_env(&path, user)).map(|(_, b)| b),
+                Some(Binding::Pinned {
+                    identity: "new".to_owned()
+                }),
+                "repin did not take for:\n{body}"
+            );
+            assert!(
+                !std::fs::read_to_string(&path)
+                    .expect("read")
+                    .contains("old"),
+                "a stale pin survived:\n{}",
+                std::fs::read_to_string(&path).expect("read")
+            );
+        }
     }
 
     #[test]
@@ -1441,7 +1893,7 @@ users:
     /// Every pin test goes through `pin_identity_at` with a tempdir cache so
     /// the gcloud-only cache clear runs for real without touching the
     /// developer's `~/.kube`.
-    pub(super) fn pin(path: &Path, ctx: &str, identity: &str) -> Result<()> {
+    pub(super) fn pin(path: &Path, ctx: &str, identity: &str) -> Result<bool> {
         pin_identity_at(
             path,
             ctx,
@@ -1500,7 +1952,10 @@ users:
             "the first pin backs up the original"
         );
 
-        pin(&path, "gke", "a@example.com").expect("second pin");
+        assert!(
+            !pin(&path, "gke", "a@example.com").expect("second pin"),
+            "a no-op pin must report that it wrote nothing"
+        );
         assert_eq!(std::fs::read_to_string(&path).expect("read"), after_first);
         assert_eq!(
             std::fs::read_to_string(&backup).expect("read backup"),

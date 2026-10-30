@@ -49,6 +49,10 @@ pub struct ContextInfo {
     /// Path of the kubeconfig file this context came from. `None` for contexts
     /// loaded from the implicit default (which kube-rs resolves on its own).
     pub source_path: Option<PathBuf>,
+    /// The cloud identity the context's exec entry binds to, read off the file
+    /// without probing any CLI. `None` for SSH sources, whose exec entry runs on
+    /// another host.
+    pub cloud_identity: Option<crate::cloud_identity::ContextIdentity>,
 }
 
 /// Resolved descriptor for one source — the source we registered, plus the
@@ -90,7 +94,7 @@ pub fn list_contexts(file: &SourcesFile) -> Result<Vec<ContextInfo>> {
     // 1. Default kubeconfig (unless the user disabled it).
     if !file.default_disabled {
         match kube::config::Kubeconfig::read() {
-            Ok(kc) => append_contexts(&mut out, kc, DEFAULT_SOURCE_ID, DEFAULT_GROUP, None),
+            Ok(kc) => append_contexts(&mut out, kc, DEFAULT_SOURCE_ID, DEFAULT_GROUP, None, true),
             Err(e) => tracing::warn!(error = %e, "default kubeconfig read failed"),
         }
     }
@@ -184,7 +188,20 @@ fn append_contexts(
     source_id: &str,
     group: &str,
     source_path: Option<&Path>,
+    local: bool,
 ) {
+    let execs: HashMap<&str, &kube::config::ExecConfig> = if local {
+        kc.auth_infos
+            .iter()
+            .filter_map(|a| Some((a.name.as_str(), a.auth_info.as_ref()?.exec.as_ref()?)))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let identity_of = |user: Option<&String>| {
+        let spec = crate::cluster::exec_spec(execs.get(user?.as_str())?)?;
+        crate::cloud_identity::context_identity(&spec.command, &spec.args, &spec.env)
+    };
     // "Current" only makes sense for the user's default kubeconfig — every
     // user-added file typically has its own current-context line, so honoring
     // those would paint every tile as "current".
@@ -194,15 +211,18 @@ fn append_contexts(
     } else {
         None
     };
-    for named in kc.contexts {
-        let Some(ctx) = named.context else { continue };
+    for named in &kc.contexts {
+        let Some(ctx) = named.context.as_ref() else {
+            continue;
+        };
         out.push(ContextInfo {
             id: format!("{source_id}::{}", named.name),
             is_current: current.as_deref() == Some(named.name.as_str()),
-            name: named.name,
-            cluster: ctx.cluster,
-            user: ctx.user,
-            namespace: ctx.namespace,
+            name: named.name.clone(),
+            cluster: ctx.cluster.clone(),
+            cloud_identity: identity_of(ctx.user.as_ref()),
+            user: ctx.user.clone(),
+            namespace: ctx.namespace.clone(),
             group: group.to_owned(),
             source_id: source_id.to_owned(),
             source_path: source_path.map(Path::to_path_buf),
@@ -212,7 +232,7 @@ fn append_contexts(
 
 fn load_file_into(out: &mut Vec<ContextInfo>, path: &Path, source_id: &str, group: &str) {
     match kube::config::Kubeconfig::read_from(path) {
-        Ok(kc) => append_contexts(out, kc, source_id, group, Some(path)),
+        Ok(kc) => append_contexts(out, kc, source_id, group, Some(path), true),
         Err(e) => tracing::warn!(?path, error = %e, "kubeconfig file failed to parse"),
     }
 }
@@ -313,7 +333,7 @@ fn load_folder_into(
             .unwrap_or("file")
             .to_owned();
         let child_source_id = format!("{source_id_prefix}/{stem}");
-        append_contexts(out, kc, &child_source_id, group, Some(&path));
+        append_contexts(out, kc, &child_source_id, group, Some(&path), true);
     }
 
     // Prune entries for files that have disappeared from this folder. Other
@@ -695,7 +715,7 @@ fn load_ssh_into(out: &mut Vec<ContextInfo>, src: &KubeconfigSource, group: &str
     {
         // Each SSH source has exactly one kubeconfig (no folder fan-out), so
         // the source_id is used as-is — no `/<filename>` child segment.
-        append_contexts(out, kc, &src.id, group, None);
+        append_contexts(out, kc, &src.id, group, None, false);
     } else if let Some(SshCacheEntry {
         last_error: Some(err),
         ..

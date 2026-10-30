@@ -205,6 +205,57 @@ describe("FleetLanding virtual-context flow", () => {
   });
 });
 
+describe("FleetLanding cloud identity menu", () => {
+  const withIdentity = () =>
+    setMockInvoke((cmd) => {
+      switch (cmd) {
+        case "list_contexts":
+          return [
+            {
+              ...fleetCtx("default::a", "alpha"),
+              cloud_identity: { provider: "gcloud", pinned: "old@example.com" },
+            },
+            fleetCtx("default::b", "beta"),
+          ];
+        case "get_fleet_cache":
+          return {};
+        case "cloud_identity_status_cmd":
+          return {
+            provider: "gcloud",
+            detail: "This context is pinned to old@example.com.",
+            pinned_identity: "old@example.com",
+            active_identity: null,
+            identities: ["new@example.com", "old@example.com"],
+            suggested_identity: "new@example.com",
+            pin: { noun: "account", effects: ["replace the account"] },
+            pin_blocked: null,
+          };
+        default:
+          return undefined;
+      }
+    });
+
+  it("offers the switcher only on contexts with a cloud identity", async () => {
+    resetVctxState();
+    withIdentity();
+    await act(async () => {
+      render(<FleetLanding mode="dark" onSelect={() => {}} />);
+    });
+    await act(async () => {});
+
+    fireEvent.contextMenu(screen.getAllByText("beta").at(-1)!);
+    expect(screen.getByText("Remove context from kubeconfig")).toBeTruthy();
+    expect(screen.queryByText("Cloud identity…")).toBeNull();
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    fireEvent.contextMenu(screen.getAllByText("alpha").at(-1)!);
+    fireEvent.click(screen.getByText("Cloud identity…"));
+    const dialog = await screen.findByRole("dialog");
+    await act(async () => {});
+    expect(dialog).toHaveTextContent("This context is pinned to old@example.com.");
+  });
+});
+
 // ─── Virtual context fleet-view variants ────────────────────────────────────
 
 const fleetProbe = (name: string, over: Record<string, unknown>) => ({

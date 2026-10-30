@@ -24,6 +24,7 @@ import type {
   ClusterHealthEvent,
   ClusterInfo,
   ConnectHint,
+  IdentityStatus,
   ConnectionDiagnostics,
   ClusterProbe,
   ClusterRoleBindingDetail,
@@ -162,6 +163,11 @@ export const api = {
   /// is cleared alongside — is the backend's call, per provider.
   pinCloudIdentity: (name: string, identity: string) =>
     invoke<void>("pin_cloud_identity_cmd", { name, identity }),
+  /// The context's cloud identity as it stands — what it pins and what it
+  /// could be pinned to. Null for SSH sources and contexts without a cloud
+  /// exec plugin. Unlike `connectHint`, needs no failed connect.
+  cloudIdentityStatus: (name: string) =>
+    invoke<IdentityStatus | null>("cloud_identity_status_cmd", { name }),
   /// Open the macOS Files-and-Folders privacy pane — the remedy button for a
   /// TCC-blocked auth plugin (`ConnectHint.unblock`). The target URL is a
   /// backend constant, not an argument, so this is not a general URL opener.

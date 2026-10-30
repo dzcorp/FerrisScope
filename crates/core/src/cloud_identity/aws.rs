@@ -30,13 +30,17 @@
 use std::path::PathBuf;
 
 use super::{
-    env_nonempty, exec_env, flag_value, home_dir, ini_sections, set_exec_env, Binding, ConnectHint,
-    Identities, PinOffer, Provider,
+    env_nonempty, exec_args, exec_env, exec_env_pairs, flag_value, has_flag, home_dir,
+    ini_sections, set_exec_args, set_exec_env, set_flag_arg, Binding, ConnectHint, Identities,
+    PinOffer, Provider,
 };
 use crate::Result;
 
 /// Exec commands this provider owns.
 pub const OWNS_COMMANDS: &[&str] = &["aws", "aws-iam-authenticator"];
+
+/// The `aws` CLI's profile flag.
+const PROFILE_FLAG: &str = "--profile";
 
 /// Profile every AWS tool falls back to when nothing selects one.
 const DEFAULT_PROFILE: &str = "default";
@@ -129,7 +133,7 @@ pub fn binding_for(basename: &str, args: &[String], env: &[(String, String)]) ->
     // that variable as unpinned, then offer a pin that writes `AWS_PROFILE` —
     // which the pre-existing `AWS_DEFAULT_PROFILE` would keep overriding. The
     // file would change, the operator would reconnect, and nothing would.
-    let pinned = flag_value(args, "--profile")
+    let pinned = flag_value(args, PROFILE_FLAG)
         .or_else(|| exec_env(env, "AWS_DEFAULT_PROFILE"))
         .or_else(|| exec_env(env, "AWS_PROFILE"));
     Some(match pinned {
@@ -176,35 +180,130 @@ pub fn compose_hint(error: &str, profiles: &Identities) -> Option<ConnectHint> {
         authenticated_as,
         identities: profiles.identities.clone(),
         active_identity: active,
-        pin: Some(PinOffer {
-            noun: "profile".to_owned(),
-            effects: vec![
-                "set AWS_PROFILE in this context's exec env block in your kubeconfig".to_owned(),
-                "keep a .ferrisscope-backup copy next to the kubeconfig it edits — if yours \
-                 is a symlink, that is the real file's directory, not the link's"
-                    .to_owned(),
-                "rewrite the file through a YAML parser, which drops comments and \
-                 expands any anchors/aliases — the backup holds the file as it was \
-                 immediately before this edit, so comments an earlier pin already \
-                 removed are not in it either"
-                    .to_owned(),
-            ],
-        }),
+        pinned_identity: None,
+        suggested_identity: None,
+        pin: Some(pin_offer(false)),
         reauth: None,
         unblock: None,
     })
 }
 
-/// Write `AWS_PROFILE=<identity>` into an exec mapping's `env` block.
+/// Build the "pinned profile refused" note, or `None` when there is no other
+/// profile to switch to. Callers have already established a 403 on a context
+/// pinned to `pinned`.
 ///
-/// Env rather than `--profile` on purpose — see the module docs.
+/// The apiserver reports an IAM ARN, never a profile name, so the two can't be
+/// compared — the note names both and leaves the call to the operator.
+#[must_use]
+pub fn compose_pinned_hint(
+    error: &str,
+    pinned: &str,
+    profiles: &Identities,
+) -> Option<ConnectHint> {
+    if !super::has_alternative(profiles, pinned) {
+        return None;
+    }
+    let authenticated_as = super::forbidden_user(error);
+    let seen = authenticated_as
+        .as_ref()
+        .map_or_else(String::new, |u| format!(" (the apiserver saw {u})"));
+    Some(ConnectHint {
+        provider: Provider::Aws,
+        title: "Pinned AWS profile was refused".to_owned(),
+        detail: format!(
+            "This context is pinned to the {pinned} profile, and the apiserver refused it{seen}. \
+             Either that identity lacks an access entry or RBAC binding on this cluster, or the \
+             context is pinned to the wrong profile. If it is the wrong one, pin another below."
+        ),
+        authenticated_as,
+        identities: profiles.identities.clone(),
+        active_identity: profiles.active.clone(),
+        pinned_identity: None,
+        suggested_identity: None,
+        pin: Some(pin_offer(true)),
+        reauth: None,
+        unblock: None,
+    })
+}
+
+/// How an AWS context picks its profile, for the status surfaces.
+#[must_use]
+pub fn status_detail(pinned: Option<&str>, active: Option<&str>) -> String {
+    match pinned {
+        Some(p) => format!(
+            "This context is pinned to the {p} profile, whatever AWS_PROFILE says. Pin another \
+             profile to switch it."
+        ),
+        None => {
+            let current = active.unwrap_or(DEFAULT_PROFILE);
+            format!(
+                "This context names no profile, so it authenticates as {current} — whatever \
+                 AWS_PROFILE is set to when the app launches, falling back to \
+                 {DEFAULT_PROFILE}. Pin a profile to fix it."
+            )
+        }
+    }
+}
+
+/// What an AWS pin writes. `repin` when the entry already names a profile,
+/// which the pin then replaces wherever it is written.
+#[must_use]
+pub fn pin_offer(repin: bool) -> PinOffer {
+    let write = if repin {
+        "replace the profile this context's exec entry names — --profile, AWS_PROFILE or \
+         AWS_DEFAULT_PROFILE, wherever it is set — in your kubeconfig"
+    } else {
+        "set AWS_PROFILE in this context's exec env block in your kubeconfig"
+    };
+    PinOffer {
+        noun: "profile".to_owned(),
+        effects: vec![
+            write.to_owned(),
+            "keep a .ferrisscope-backup copy next to the kubeconfig it edits — if yours \
+             is a symlink, that is the real file's directory, not the link's"
+                .to_owned(),
+            "rewrite the file through a YAML parser, which drops comments and \
+             expands any anchors/aliases — the backup holds the file as it was \
+             immediately before this edit, so comments an earlier pin already \
+             removed are not in it either"
+                .to_owned(),
+        ],
+    }
+}
+
+/// Exec env vars that select a profile, in the order [`binding_for`] reads them.
+const PROFILE_ENVS: [&str; 2] = ["AWS_DEFAULT_PROFILE", "AWS_PROFILE"];
+
+/// Pin an exec mapping to `identity`.
+///
+/// Every place that already names a profile is rewritten. The tools don't
+/// agree on precedence — botocore reads `AWS_DEFAULT_PROFILE` before
+/// `AWS_PROFILE`, and `--profile` beats both on the `aws` CLI — so rewriting
+/// one and leaving another would let the old profile keep winning on some
+/// binary. An entry naming none gains `AWS_PROFILE`: env rather than
+/// `--profile` on purpose, see the module docs.
 ///
 /// # Errors
 ///
 /// Never — the signature matches the other providers' so the dispatcher can
 /// treat them uniformly.
 pub fn write_pin(exec: &mut serde_yaml::Mapping, identity: &str) -> Result<()> {
-    set_exec_env(exec, "AWS_PROFILE", identity);
+    let args = exec_args(exec);
+    let env = exec_env_pairs(exec);
+    let mut named = false;
+    if has_flag(&args, PROFILE_FLAG) {
+        set_exec_args(exec, set_flag_arg(&args, PROFILE_FLAG, identity));
+        named = true;
+    }
+    for key in PROFILE_ENVS {
+        if exec_env(&env, key).is_some() {
+            set_exec_env(exec, key, identity);
+            named = true;
+        }
+    }
+    if !named {
+        set_exec_env(exec, "AWS_PROFILE", identity);
+    }
     Ok(())
 }
 

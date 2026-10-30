@@ -176,6 +176,13 @@ describe("contexts + connect", () => {
       identity: "a@b.io",
     });
   });
+
+  it("cloudIdentityStatus → 'cloud_identity_status_cmd' with name", async () => {
+    const cap = captureNext(null);
+    expect(await api.cloudIdentityStatus("default::ctx-a")).toBeNull();
+    expect(cap.calls[0]?.cmd).toBe("cloud_identity_status_cmd");
+    expect(cap.calls[0]?.args).toEqual({ name: "default::ctx-a" });
+  });
 });
 
 describe("subscribeResource", () => {

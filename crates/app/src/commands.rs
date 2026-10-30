@@ -560,7 +560,7 @@ pub(crate) async fn pin_cloud_identity_cmd(
     let path = source_path.ok_or_else(|| {
         format!("could not locate the kubeconfig file backing {name} — nothing was written")
     })?;
-    tokio::task::spawn_blocking(move || {
+    let written = tokio::task::spawn_blocking(move || {
         let pinned =
             ferrisscope_core::cloud_identity::pin_identity(&path, &context_name, &identity);
         // Unconditional, and deliberately not behind `?` on the line above.
@@ -575,7 +575,56 @@ pub(crate) async fn pin_cloud_identity_cmd(
         pinned.map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("pin identity task failed: {e}"))?
+    .map_err(|e| format!("pin identity task failed: {e}"))??;
+    // A cached client keeps the exec config it was built with, so a repin of a
+    // connected cluster would not take until something rebuilt it. Drop the
+    // entry: the next connect — or the next command, lazily — uses the new
+    // identity. Whichever view is showing the cluster still reconnects to
+    // restart its watches.
+    if written {
+        let (logs, watchers, removed) = evict_cluster_entry(&state, &name).await;
+        tracing::info!(
+            cluster_id = %name,
+            logs,
+            watchers,
+            removed,
+            "pin_cloud_identity: entry evicted for the new identity"
+        );
+    }
+    Ok(())
+}
+
+/// The context's cloud identity as it stands — what it pins, what it would
+/// follow, and what it could be pinned to. Backs the "change account" surfaces,
+/// which unlike `connect_hint_cmd` answer without a failed connect.
+///
+/// `None` for SSH-sourced contexts (their exec entry runs on another host),
+/// for ids that resolve to no file, and for contexts without a recognised
+/// cloud exec plugin.
+#[tauri::command]
+pub(crate) async fn cloud_identity_status_cmd(
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<Option<ferrisscope_core::cloud_identity::IdentityStatus>, String> {
+    let context_name = kubeconfig::context_name_from_id(&name).to_owned();
+    let (is_ssh, source_path) = {
+        let s = state.sources.lock().await;
+        (
+            kubeconfig::ssh_for(&name, &s).is_some(),
+            kubeconfig::resolve_path_for(&name, &s),
+        )
+    };
+    // Same rule as the pin: only a concrete local file is ours to describe,
+    // because only that file is what a pin would edit.
+    let (false, Some(path)) = (is_ssh, source_path) else {
+        return Ok(None);
+    };
+    tokio::task::spawn_blocking(move || {
+        ferrisscope_core::cloud_identity::identity_status(&path, &context_name)
+    })
+    .await
+    .map_err(|e| format!("identity status task failed: {e}"))?
+    .map_err(|e| e.to_string())
 }
 
 /// Wall-clock budget for `connect_context`. Long enough for slow auth plugins

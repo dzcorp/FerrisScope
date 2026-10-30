@@ -7,6 +7,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use ferrisscope_core::cloud_identity::{ContextIdentity, Provider};
 use ferrisscope_core::kubeconfig::{
     context_name_from_id, delete_context_in_file, list_contexts, resolve_path_for,
     set_current_context_in_file, source_path_for, DEFAULT_SOURCE_ID,
@@ -81,6 +82,84 @@ fn list_contexts_from_single_file_source() {
         // default is allowed to highlight a tile.
         assert!(!c.is_current, "user source must not propagate is_current");
     }
+}
+
+#[test]
+fn list_contexts_reports_each_contexts_cloud_identity() {
+    // Read off the exec entry with no CLI probe — the fleet menu and the
+    // cluster bar chip gate on it.
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config");
+    std::fs::write(
+        &path,
+        r#"apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster:
+    server: https://example.invalid:6443
+users:
+- name: pinned
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: gke-gcloud-auth-plugin
+      args: ["--account=a@example.com"]
+- name: ambient
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: aws
+      args: ["eks", "get-token"]
+- name: token
+  user:
+    token: t
+contexts:
+- name: gke
+  context: {cluster: c, user: pinned}
+- name: eks
+  context: {cluster: c, user: ambient}
+- name: plain
+  context: {cluster: c, user: token}
+- name: dangling
+  context: {cluster: c, user: missing}
+"#,
+    )
+    .unwrap();
+    let mut file = empty_sources();
+    file.sources.push(KubeconfigSource {
+        id: "src1".into(),
+        path,
+        kind: SourceKind::File,
+        group_override: None,
+        enabled: true,
+        ssh: None,
+    });
+
+    let ctxs = list_contexts(&file).unwrap();
+    let identity = |name: &str| {
+        ctxs.iter()
+            .find(|c| c.name == name)
+            .expect("context listed")
+            .cloud_identity
+            .clone()
+    };
+    assert_eq!(
+        identity("gke"),
+        Some(ContextIdentity {
+            provider: Provider::Gcloud,
+            pinned: Some("a@example.com".into()),
+        })
+    );
+    assert_eq!(
+        identity("eks"),
+        Some(ContextIdentity {
+            provider: Provider::Aws,
+            pinned: None,
+        })
+    );
+    assert_eq!(identity("plain"), None);
+    assert_eq!(identity("dangling"), None);
 }
 
 #[test]

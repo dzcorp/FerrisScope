@@ -829,12 +829,17 @@ fn exec_for_context(kc: &Kubeconfig, context_name: &str) -> Option<ExecSpec> {
         .find(|c| c.name == context_name)
         .and_then(|c| c.context.as_ref())
         .and_then(|ctx| ctx.user.clone())?;
-    let exec = kc
-        .auth_infos
+    kc.auth_infos
         .iter()
         .find(|a| a.name == user)
         .and_then(|a| a.auth_info.as_ref())
-        .and_then(|ai| ai.exec.as_ref())?;
+        .and_then(|ai| ai.exec.as_ref())
+        .and_then(exec_spec)
+}
+
+/// Flatten a kubeconfig exec entry into an [`ExecSpec`]. `None` without a
+/// command.
+pub(crate) fn exec_spec(exec: &kube::config::ExecConfig) -> Option<ExecSpec> {
     let command = exec.command.clone()?;
     let args = exec.args.clone().unwrap_or_default();
     // kube models the exec env as a list of free-form maps rather than a typed

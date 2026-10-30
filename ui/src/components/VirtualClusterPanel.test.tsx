@@ -162,6 +162,75 @@ describe("VirtualClusterPanel", () => {
     expect(screen.getByText("Pick a resource kind")).toBeTruthy();
   });
 
+  it("members on one lapsed Google account share a single login", async () => {
+    // Each failed member shows the note, but one Log in renews the account
+    // for all of them and reconnects every member waiting on it.
+    let channel: { onmessage: (m: unknown) => void } | undefined;
+    let opens = 0;
+    const reconnected: string[] = [];
+    setMockInvoke((cmd, args) => {
+      switch (cmd) {
+        case "connect_context":
+          throw new Error(
+            "cloud session expired for ops@example.net — run `gcloud auth login --account=ops@example.net`",
+          );
+        case "connect_hint_cmd":
+          return {
+            provider: "gcloud",
+            title: "Google session expired",
+            detail: "The Google session for ops@example.net has expired.",
+            authenticated_as: null,
+            identities: ["ops@example.net"],
+            active_identity: "ops@example.net",
+            pinned_identity: "ops@example.net",
+            suggested_identity: null,
+            pin: null,
+            reauth: {
+              command: "gcloud auth login --account=ops@example.net",
+              account: "ops@example.net",
+            },
+            unblock: null,
+          };
+        case "cloud_login_open":
+          opens += 1;
+          channel = args?.onEvent as { onmessage: (m: unknown) => void };
+          return "t1";
+        case "reconnect_cluster":
+          reconnected.push(String(args?.clusterId));
+          return undefined;
+        default:
+          return undefined;
+      }
+    });
+    await act(async () => {
+      render(
+        <VirtualClusterPanel
+          mode="dark"
+          title="prod fleet"
+          viewScopeId="vctx:t1"
+          contexts={MEMBERS}
+        />,
+      );
+    });
+    await act(async () => {});
+
+    const logins = screen.getAllByRole("button", { name: /^log in$/i });
+    expect(logins).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: /^diagnose$/i })).toHaveLength(2);
+    await act(async () => {
+      fireEvent.click(logins[0]!);
+    });
+    expect(opens).toBe(1);
+    expect(
+      screen.getAllByRole("button", { name: /waiting for browser/i }),
+    ).toHaveLength(2);
+
+    await act(async () => {
+      channel?.onmessage({ kind: "exit", code: 0 });
+    });
+    expect(reconnected.sort()).toEqual(["default::prod-eu", "default::prod-us"]);
+  });
+
   it("renders the all-down empty state when every member fails", async () => {
     setMockInvoke((cmd) => {
       if (cmd === "connect_context") throw new Error("nope");

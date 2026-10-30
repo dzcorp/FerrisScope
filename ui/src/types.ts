@@ -125,6 +125,9 @@ export type ContextInfo = {
   group: string;
   source_id: string;
   source_path: string | null;
+  /// Set for contexts on a recognised cloud exec plugin; null otherwise and
+  /// for SSH sources. Optional so hand-built fixtures needn't carry it.
+  cloud_identity?: ContextIdentity | null;
 };
 
 /// The exec-credential plugin a context declares, plus whether the app can find
@@ -210,6 +213,11 @@ export type ConnectHint = {
   identities: string[];
   /// The identity an unpinned context currently authenticates as.
   active_identity: string | null;
+  /// What the context's exec entry pins today, when it pins anything.
+  pinned_identity: string | null;
+  /// What the picker preselects — never the pinned identity, never one the
+  /// picker doesn't list.
+  suggested_identity: string | null;
   /// null when the provider has no per-context pin at all (Azure): the note
   /// then explains the CLI command to run instead.
   pin: PinOffer | null;
@@ -219,6 +227,32 @@ export type ConnectHint = {
   /// Set when the OS refused to execute the plugin's helper. Mutually
   /// exclusive with both `pin` and `reauth`.
   unblock: UnblockOffer | null;
+};
+
+/// A context's cloud identity as it stands, for the "change account" surfaces —
+/// available without a failed connect. Mirrors
+/// `ferrisscope_core::cloud_identity::IdentityStatus`.
+export type IdentityStatus = {
+  provider: CloudProvider;
+  /// How this context picks its identity, as prose.
+  detail: string;
+  pinned_identity: string | null;
+  active_identity: string | null;
+  identities: string[];
+  suggested_identity: string | null;
+  /// null when the provider has no per-context pin (Azure).
+  pin: PinOffer | null;
+  /// Why a pin would be refused up front (the exec user is shared with other
+  /// contexts). The picker is withheld while set.
+  pin_blocked: string | null;
+};
+
+/// The identity binding written in a context's exec entry, without any CLI
+/// probe. Mirrors `ferrisscope_core::cloud_identity::ContextIdentity`.
+export type ContextIdentity = {
+  provider: CloudProvider;
+  /// The identity the entry names; null when it follows the cloud CLI.
+  pinned: string | null;
 };
 
 export type KubeconfigSourceKind = "file" | "folder" | "ssh";

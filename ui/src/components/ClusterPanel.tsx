@@ -51,7 +51,12 @@ export function ClusterPanel({ mode, context }: Props) {
         background: t.bg,
       }}
     >
-      <ClusterBar mode={mode} context={context} state={connectStateForBar(state)} />
+      <ClusterBar
+        mode={mode}
+        context={context}
+        state={connectStateForBar(state)}
+        onIdentityChanged={reconnect}
+      />
 
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
         {state.status === "ok" ? (
@@ -256,6 +261,7 @@ export function ReconnectBanner({
           <CloudIdentityNote
             t={t}
             contextId={diagnoseContext.id}
+            contextName={diagnoseContext.name}
             reason={(hintReason ?? reason) as string}
             onReconnect={onReconnect}
           />
@@ -280,6 +286,10 @@ export function ReconnectBanner({
           contextId={diagnoseContext.id}
           contextName={diagnoseContext.name}
           onClose={() => setShowDiag(false)}
+          onIdentityChanged={() => {
+            setShowDiag(false);
+            onReconnect();
+          }}
         />
       )}
     </div>
