@@ -336,8 +336,8 @@ describe("FleetLanding virtual-context view variants", () => {
     // single member's "3 nodes · 10 pods" summary line.
     expect(screen.getByText("5 nodes · 30 pods")).toBeTruthy();
     // Gauge pair on the vctx card plus one pair per member FleetCard.
-    expect(screen.getAllByText("cpu")).toHaveLength(3);
-    expect(screen.getAllByText("mem")).toHaveLength(3);
+    expect(screen.getAllByText("CPU")).toHaveLength(3);
+    expect(screen.getAllByText("MEM")).toHaveLength(3);
     // Member chips keep per-member identity on the card.
     expect(screen.getAllByText("alpha").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("2 clusters")).toBeTruthy();
@@ -354,7 +354,7 @@ describe("FleetLanding virtual-context view variants", () => {
     await act(async () => {});
 
     expect(screen.getByText("2 clusters")).toBeTruthy();
-    expect(screen.queryByText("cpu")).toBeNull();
+    expect(screen.queryByText("CPU")).toBeNull();
     expect(screen.queryByText("5 nodes · 30 pods")).toBeNull();
     // Still opens on click.
     fireEvent.click(screen.getByText("edge"));
@@ -372,7 +372,7 @@ describe("FleetLanding virtual-context view variants", () => {
     await act(async () => {});
 
     expect(screen.getByText("2 clusters · 5 nodes · 30 pods")).toBeTruthy();
-    expect(screen.queryByText("cpu")).toBeNull();
+    expect(screen.queryByText("CPU")).toBeNull();
     fireEvent.click(screen.getByText("edge"));
     expect(useAppStore.getState().selectedVirtualContextId).toBe("v1");
   });

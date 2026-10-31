@@ -20,6 +20,14 @@ import {
   FS_XS,
   clusterAccent,
   vibrantSurface,
+  FW_BOLD,
+  FW_MEDIUM,
+  FW_SEMIBOLD,
+  shade,
+  FIELD_H,
+  LABEL_CASE,
+  labelTracking,
+  labelWeight,
 } from "../theme";
 import { BrandMark, IconBtn, Icons, Kbd, LoadingLine, Tooltip } from "./ui";
 import { MOD_KEY, IS_MAC } from "../lib/keyboard";
@@ -157,7 +165,7 @@ export function AppHeader({
       >
         <BrandMark size={26} />
       </div>
-      <div style={{ fontSize: FS_LG, fontWeight: 700, letterSpacing: -0.3 }}>
+      <div style={{ fontSize: FS_LG, fontWeight: FW_BOLD, letterSpacing: -0.3 }}>
         FerrisScope
       </div>
     </button>
@@ -171,7 +179,7 @@ export function AppHeader({
         alignItems: "center",
         gap: 8,
         fontSize: FS_MD,
-        fontWeight: 500,
+        fontWeight: FW_MEDIUM,
         minWidth: 0,
       }}
     >
@@ -187,7 +195,7 @@ export function AppHeader({
           borderRadius: R_MD,
           fontFamily: "inherit",
           fontSize: FS_MD,
-          fontWeight: 500,
+          fontWeight: FW_MEDIUM,
         }}
       >
         Clusters
@@ -218,7 +226,7 @@ export function AppHeader({
                 padding: "3px 6px",
                 borderRadius: R_SM,
                 cursor: "pointer",
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 letterSpacing: -0.2,
                 color: "inherit",
                 font: "inherit",
@@ -268,7 +276,7 @@ export function AppHeader({
                 borderRadius: R_SM,
                 background: t.chip,
                 color: t.textDim,
-                fontWeight: 500,
+                fontWeight: FW_MEDIUM,
                 marginLeft: 2,
                 fontFamily: FF_MONO,
               }}
@@ -513,7 +521,7 @@ export function AppHeader({
           color: "inherit",
           // `minHeight` instead of fixed `height` so the row stays
           // single-line and centered at any theme's base font size.
-          minHeight: 32,
+          minHeight: FIELD_H,
           // Hide vertical overflow that 14-px-base themes would otherwise
           // push past the row.
           whiteSpace: "nowrap",
@@ -575,9 +583,9 @@ export function AppHeader({
               padding: "0 3px",
               borderRadius: R_MD,
               background: t.accent,
-              color: "#fff",
+              color: t.onAccent,
               fontSize: FS_XS,
-              fontWeight: 700,
+              fontWeight: FW_BOLD,
               fontFamily: FF_MONO,
               fontVariantNumeric: "tabular-nums",
               display: "inline-flex",
@@ -616,9 +624,9 @@ export function AppHeader({
               padding: "0 3px",
               borderRadius: R_MD,
               background: t.bad,
-              color: "#fff",
+              color: t.onBad,
               fontSize: FS_XS,
-              fontWeight: 700,
+              fontWeight: FW_BOLD,
               fontFamily: FF_MONO,
               fontVariantNumeric: "tabular-nums",
               display: "inline-flex",
@@ -925,7 +933,7 @@ function ClusterSwitcherMenu({
           background: t.surface,
           border: `1px solid ${t.border}`,
           borderRadius: R_MD,
-          boxShadow: "0 8px 28px rgba(0,0,0,0.28)",
+          boxShadow: `0 8px 28px ${shade(t, 0.28)}`,
           padding: 4,
           display: "flex",
           flexDirection: "column",
@@ -953,7 +961,7 @@ function ClusterSwitcherMenu({
                 background: isActive ? t.accentSoft : "transparent",
                 color: isActive ? t.text : t.textDim,
                 fontSize: FS_SM,
-                fontWeight: isActive ? 600 : 500,
+                fontWeight: isActive ? FW_SEMIBOLD : FW_MEDIUM,
               }}
             >
               {dot(primaryId)}
@@ -1032,9 +1040,9 @@ function MenuCaption({ t, children }: { t: Tokens; children: ReactNode }) {
       style={{
         fontSize: FS_XS,
         color: t.textMuted,
-        fontWeight: 600,
-        letterSpacing: 0.4,
-        textTransform: "uppercase",
+        fontWeight: labelWeight(FW_SEMIBOLD),
+        letterSpacing: labelTracking(0.4),
+        textTransform: LABEL_CASE,
         padding: "4px 8px 2px",
       }}
     >
@@ -1072,7 +1080,7 @@ function MenuOpenRow({
         cursor: "pointer",
         color: t.textDim,
         fontSize: FS_SM,
-        fontWeight: 500,
+        fontWeight: FW_MEDIUM,
       }}
     >
       <span

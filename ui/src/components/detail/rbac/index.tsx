@@ -11,7 +11,7 @@
 import { useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS, FW_SEMIBOLD } from "../../../theme";
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section } from "../../ui";
 import {
@@ -97,7 +97,7 @@ function VerbChip({ t, verb }: { t: Tokens; verb: string }) {
           padding: "1px 7px",
           borderRadius: R_SM,
           fontSize: FS_SM,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
           fontFamily: FF_MONO,
           background: bg,
           color: fg,
@@ -385,7 +385,7 @@ export function ServiceAccountSummary(props: {
             style={{
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.text,
             }}
           >
@@ -551,7 +551,7 @@ export function RoleSummary(props: {
             style={{
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.text,
             }}
           >
@@ -632,7 +632,7 @@ export function ClusterRoleSummary(props: {
             style={{
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.text,
             }}
           >
@@ -642,7 +642,7 @@ export function ClusterRoleSummary(props: {
             <span
               style={{
                 fontSize: FS_SM,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 padding: "1px 7px",
                 borderRadius: R_SM,
                 background: t.chip,
@@ -754,7 +754,7 @@ export function RoleBindingSummary(props: {
             style={{
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.text,
             }}
           >
@@ -852,7 +852,7 @@ export function ClusterRoleBindingSummary(props: {
             style={{
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.text,
             }}
           >

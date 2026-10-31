@@ -22,6 +22,7 @@ import {
   Section,
   SectionHeader,
   Stat,
+  TabButton,
   TextInput,
   Toggle,
 } from "./atoms";
@@ -775,5 +776,105 @@ describe("ErrorBlock — selectable error strings", () => {
       />,
     );
     expect(container.querySelector(".fs-selectable")).not.toBeNull();
+  });
+});
+
+describe("field atoms follow the palette's input roles", () => {
+  const k = {
+    ...tokens("dark"),
+    input: "#313131",
+    inputBorder: "#3c3c3c",
+    focus: "#0078d4",
+    onAccent: "#000000",
+  };
+
+  it("TextInput paints input / inputBorder and focuses in the focus colour", () => {
+    const { getByRole } = render(<TextInput t={k} value="" onChange={() => {}} ariaLabel="q" />);
+    const input = getByRole("textbox", { name: "q" });
+    expect(input.style.background).toBe("rgb(49, 49, 49)");
+    expect(input.style.border).toBe("1px solid rgb(60, 60, 60)");
+    expect(input.style.height).toBe("var(--fs-field-h, 32px)");
+    fireEvent.focus(input);
+    expect(input.style.borderColor).toBe("rgb(0, 120, 212)");
+  });
+
+  it("a checked Checkbox draws its tick in onAccent", () => {
+    const { getByRole } = render(<Checkbox t={k} checked label="pick" />);
+    expect(getByRole("checkbox", { name: "pick" }).style.color).toBe("rgb(0, 0, 0)");
+  });
+});
+
+describe("theme-styled atoms", () => {
+  it("TabButton uses the tab roles and the theme's indicator width", () => {
+    const k = { ...tokens("dark"), tabActiveText: "#ffffff", tabIndicator: "#00a7a0", tabText: "#8e9297" };
+    const { getByRole, rerender } = render(<TabButton t={k} active onClick={() => {}}>Summary</TabButton>);
+    const b = getByRole("button", { name: "Summary" });
+    expect(b.style.color).toBe("rgb(255, 255, 255)");
+    expect(b.style.borderBottom).toContain("var(--fs-tab-indicator, 2px)");
+    rerender(<TabButton t={k} active={false} onClick={() => {}}>Summary</TabButton>);
+    expect(getByRole("button", { name: "Summary" }).style.color).toBe("rgb(142, 146, 151)");
+  });
+
+  it("Eyebrow and Section follow the label vars", () => {
+    const { getByText } = render(
+      <>
+        <Eyebrow t={tokens("dark")}>Pod</Eyebrow>
+        <Section t={tokens("dark")} title="Labels" />
+      </>,
+    );
+    const e = getByText("Pod");
+    expect(e.style.textTransform).toBe("var(--fs-label-case, uppercase)");
+    expect(e.style.fontFamily).toContain("--fs-label-font");
+    expect(e.style.fontWeight).toBe("var(--fs-label-fw, var(--fs-fw-bold, 700))");
+    expect(getByText("Labels").parentElement!.style.textTransform).toBe("var(--fs-label-case, uppercase)");
+  });
+
+  it("Gauge takes ring thickness and cap from the theme", async () => {
+    const { useAppStore } = await import("../../store");
+    const { act } = await import("@testing-library/react");
+    const initial = useAppStore.getState();
+    try {
+      const ring = () => {
+        const { container, unmount } = render(<Gauge value={0.5} size={36} color="#f00" track="#000" />);
+        const arc = container.querySelectorAll("circle")[1]!;
+        const out = [arc.getAttribute("stroke-width"), arc.getAttribute("stroke-linecap")];
+        unmount();
+        return out;
+      };
+      expect(ring()).toEqual(["3.5", "round"]);
+      act(() => useAppStore.getState().setTheme("lens"));
+      expect(ring()).toEqual(["2", "butt"]);
+    } finally {
+      act(() => useAppStore.setState({ ...initial }));
+    }
+  });
+});
+
+describe("Gauge rings", () => {
+  it("draws usage, requests and limits as concentric rings, outermost first", () => {
+    const { container } = render(
+      <Gauge
+        value={0.5}
+        size={36}
+        color="#c93dce"
+        track="#30353a"
+        rings={[
+          { value: 0.4, color: "#4caf50" },
+          { value: 0.8, color: "#00a7a0" },
+        ]}
+      />,
+    );
+    const rings = [...container.querySelectorAll("g[data-ring]")];
+    expect(rings).toHaveLength(3);
+    const radius = rings.map((g) => Number(g.querySelectorAll("circle")[1]!.getAttribute("r")));
+    expect(radius[0]).toBeGreaterThan(radius[1]!);
+    expect(radius[1]).toBeGreaterThan(radius[2]!);
+    expect(rings.map((g) => g.querySelectorAll("circle")[1]!.getAttribute("stroke"))).toEqual([
+      "#c93dce",
+      "#4caf50",
+      "#00a7a0",
+    ]);
+    // Lens's 3-ring cutout is 63 %: rings stay outside it.
+    expect(radius[2]! - 1).toBeGreaterThan(18 * 0.63);
   });
 });

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
-import { FF_MONO, FONT_SANS, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS } from "../theme";
+import { FF_MONO, FF_SANS, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, shade, LABEL_CASE, LABEL_FONT, labelTracking, labelWeight } from "../theme";
 import type {
   ForwardEntry,
   ForwardStatus,
@@ -219,13 +219,13 @@ export function PortForwardsPanel({ mode }: Props) {
           borderLeft: `1px solid ${t.border}`,
           boxShadow:
             mode === "dark"
-              ? "-12px 0 32px rgba(0,0,0,0.4)"
-              : "-12px 0 32px rgba(15,20,30,0.12)",
+              ? `-12px 0 32px ${shade(t, 0.4)}`
+              : `-12px 0 32px ${shade(t, 0.12)}`,
           display: "flex",
           flexDirection: "column",
           zIndex: 31,
           animation: "fs-slide-from-right .22s cubic-bezier(.2,.7,.2,1)",
-          fontFamily: FONT_SANS,
+          fontFamily: FF_SANS,
         }}
       >
         <header
@@ -244,13 +244,13 @@ export function PortForwardsPanel({ mode }: Props) {
               style={{
                 marginTop: 2,
                 fontSize: FS_MD,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 color: t.text,
               }}
             >
               {entries.length} active
               {globalSessions.length > 0 && (
-                <span style={{ color: t.textDim, fontWeight: 400 }}>
+                <span style={{ color: t.textDim, fontWeight: FW_NORMAL }}>
                   {" · "}
                   {globalSessions.length} global
                 </span>
@@ -346,11 +346,11 @@ function ClusterGroup({
           borderTop: `1px solid ${t.borderSoft}`,
           borderBottom: `1px solid ${t.borderSoft}`,
           fontSize: FS_XS,
-          fontWeight: 700,
-          letterSpacing: 0.4,
-          textTransform: "uppercase",
+          fontWeight: labelWeight(FW_BOLD),
+          letterSpacing: labelTracking(0.4),
+          textTransform: LABEL_CASE,
           color: t.textMuted,
-          fontFamily: FF_MONO,
+          fontFamily: LABEL_FONT,
         }}
       >
         {title}
@@ -559,11 +559,11 @@ function GlobalSection({
           borderTop: `1px solid ${t.borderSoft}`,
           borderBottom: `1px solid ${t.borderSoft}`,
           fontSize: FS_XS,
-          fontWeight: 700,
-          letterSpacing: 0.4,
-          textTransform: "uppercase",
+          fontWeight: labelWeight(FW_BOLD),
+          letterSpacing: labelTracking(0.4),
+          textTransform: LABEL_CASE,
           color: t.textMuted,
-          fontFamily: FF_MONO,
+          fontFamily: LABEL_FONT,
         }}
       >
         Global · DNS forwards

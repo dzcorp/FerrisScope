@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 import type { Tokens } from "../../theme";
-import { FF_MONO, FS_SM } from "../../theme";
+import { FF_MONO, FS_SM, FIELD_H_SM } from "../../theme";
 import { Select } from "../ui";
 import { PreviousLogsToggle } from "./PreviousControls";
 import { TAIL_OPTIONS } from "../../lib/logSources";
@@ -15,7 +15,6 @@ import type { LogContainer } from "../../types";
 // styling; now the anatomy lives here once. Purely presentational — every bit
 // of state (container, previous, tail, muted set) is owned by the caller.
 
-const CONTROL_H = 26;
 // Popover min width for the tail picker — fits the longest label ("all
 // history") without clipping. See the `popoverMinWidth` note below.
 const TAIL_POPOVER_MIN_W = 150;
@@ -127,7 +126,7 @@ export function LogToolbar({
         style={{
           fontFamily: FF_MONO,
           fontSize: FS_SM,
-          height: CONTROL_H,
+          height: FIELD_H_SM,
           padding: "3px 28px 3px 8px",
         }}
       />
@@ -179,7 +178,7 @@ function SingleControls({
           style={{
             fontFamily: FF_MONO,
             fontSize: FS_SM,
-            height: CONTROL_H,
+            height: FIELD_H_SM,
             padding: "3px 28px 3px 8px",
           }}
         />

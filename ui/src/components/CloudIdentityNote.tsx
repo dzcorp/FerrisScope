@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { ConnectHint } from "../types";
 import type { Tokens } from "../theme";
-import { FS_SM } from "../theme";
+import { FS_SM, FW_SEMIBOLD } from "../theme";
 import { Btn, Chip } from "./ui";
 import { Copyable, Mono } from "./detail/primitives";
 import { IdentityPicker } from "./IdentityPicker";
@@ -105,7 +105,7 @@ export function CloudIdentityNote({
         fontSize: FS_SM,
       }}
     >
-      <div style={{ color: t.warn, fontWeight: 600 }}>{hint.title}</div>
+      <div style={{ color: t.warn, fontWeight: FW_SEMIBOLD }}>{hint.title}</div>
       <div style={{ color: t.text }}>{hint.detail}</div>
 
       {hint.authenticated_as && (

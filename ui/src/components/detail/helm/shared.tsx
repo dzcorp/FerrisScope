@@ -7,6 +7,7 @@ import { api } from "../../../api";
 import { Btn, Chip, ErrorBlock, IconBtn, Icons } from "../../ui";
 import { ChipWrap, Copyable, Mute } from "..";
 import type { HelmFailure } from "./useHelmRelease";
+import { defineMonacoThemes, useMonacoTheme } from "../../../lib/monacoTheme";
 
 export const sectionGap = { marginBottom: DETAIL_LAYOUT.sectionGap } as const;
 
@@ -155,7 +156,8 @@ export function YamlEditor({
   emptyLabel?: string;
   label: string;
 }) {
-  const { mode, typography } = useResolvedTheme();
+  const monacoTheme = useMonacoTheme();
+  const { typography } = useResolvedTheme();
   const [active, setActive] = useState(false);
   const editorRef = useRef<MonacoEditor | null>(null);
   if (readOnly && emptyLabel && !value.trim()) return <Mute t={t}>{emptyLabel}</Mute>;
@@ -173,7 +175,8 @@ export function YamlEditor({
       <Editor
         height={height}
         language="yaml"
-        theme={mode === "dark" ? "vs-dark" : "light"}
+        theme={monacoTheme}
+        beforeMount={defineMonacoThemes}
         value={value}
         onChange={(next) => onChange?.(next ?? "")}
         onMount={(editor, monaco) => {

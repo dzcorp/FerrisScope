@@ -68,3 +68,30 @@ describe("BulkBar disabled reasons", () => {
     );
   });
 });
+
+describe("BulkBar palette roles", () => {
+  it("inks actions in bulkText and destructive ones in bulkDanger", async () => {
+    const { act } = await import("@testing-library/react");
+    const { useAppStore } = await import("../store");
+    const initial = useAppStore.getState();
+    act(() => useAppStore.getState().setTheme("vscode"));
+    try {
+      render(
+        <BulkBar
+          mode="dark"
+          count={1}
+          onClear={() => {}}
+          actions={[
+            { icon: null, label: "Logs", onClick: () => {} },
+            { icon: null, label: "Delete", onClick: () => {}, danger: true },
+          ]}
+        />,
+      );
+      expect(screen.getByText("Logs").closest("button")!.style.color).toBe("rgb(255, 255, 255)");
+      // Modern dark's bad (#f85149) lifted toward white.
+      expect(screen.getByText("Delete").closest("button")!.style.color).toBe("rgb(249, 116, 109)");
+    } finally {
+      act(() => useAppStore.setState({ ...initial }));
+    }
+  });
+});

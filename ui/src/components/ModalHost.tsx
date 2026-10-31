@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useAppStore, useResolvedTheme } from "../store";
 import type { ConfirmModal } from "../store";
-import { tokens, FONT_SANS, FF_MONO, type ThemeMode, R_LG, FS_MD } from "../theme";
+import { tokens, FF_SANS, FF_MONO, type ThemeMode, R_LG, FS_MD, FW_SEMIBOLD, shade } from "../theme";
 import { Btn, IconBtn, Icons } from "./ui";
 
 type Props = { mode: ThemeMode };
@@ -82,10 +82,10 @@ function Modal({
         color: t.text,
         border: `1px solid ${t.border}`,
         borderRadius: R_LG,
-        boxShadow: "0 24px 60px rgba(0,0,0,0.35)",
+        boxShadow: `0 24px 60px ${shade(t, 0.35)}`,
         zIndex: 61,
         animation: "fs-modal-drop .18s cubic-bezier(.2,.7,.2,1)",
-        fontFamily: FONT_SANS,
+        fontFamily: FF_SANS,
       }}
     >
       <header
@@ -102,7 +102,7 @@ function Modal({
           style={{
             flex: 1,
             fontSize: FS_MD,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             color: t.text,
             wordBreak: "break-word",
           }}
@@ -129,7 +129,7 @@ function Modal({
               // Use mono only if the body looks like an identifier list
               // (multi-line with slashes) — keeps copy-friendly content tabular
               // and still legible.
-              /\n.+\//.test(m.body) ? FF_MONO : FONT_SANS,
+              /\n.+\//.test(m.body) ? FF_MONO : FF_SANS,
             maxHeight: "60vh",
             overflowY: "auto",
           }}

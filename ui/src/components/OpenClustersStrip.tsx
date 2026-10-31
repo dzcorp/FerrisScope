@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useAppStore, useClusterLabels } from "../store";
-import { clusterAccent, FS_SM, FS_XS, R_SM, type Tokens } from "../theme";
+import { clusterAccent, FS_SM, FS_XS, R_SM, type Tokens, FW_MEDIUM, FW_SEMIBOLD, LABEL_CASE, labelTracking, labelWeight } from "../theme";
 import { clusterColorIndexMap } from "../lib/multiCluster";
 import { Icons, Tooltip } from "./ui";
 import {
@@ -58,9 +58,9 @@ export function OpenClustersStrip({ t, open }: Props) {
           style={{
             fontSize: FS_XS,
             color: t.textMuted,
-            fontWeight: 600,
-            letterSpacing: 0.4,
-            textTransform: "uppercase",
+            fontWeight: labelWeight(FW_SEMIBOLD),
+            letterSpacing: labelTracking(0.4),
+            textTransform: LABEL_CASE,
             padding: "4px 6px 2px",
           }}
         >
@@ -137,7 +137,7 @@ export function OpenClustersStrip({ t, open }: Props) {
                     flex: 1,
                     minWidth: 0,
                     fontSize: FS_SM,
-                    fontWeight: isActive ? 600 : 500,
+                    fontWeight: isActive ? FW_SEMIBOLD : FW_MEDIUM,
                     whiteSpace: "nowrap",
                     overflow: "hidden",
                     textOverflow: "ellipsis",

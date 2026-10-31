@@ -16,6 +16,12 @@ import {
   FS_XS,
   hexWithAlpha,
   readyDesiredColor,
+  FW_BOLD,
+  FW_SEMIBOLD,
+  LABEL_CASE,
+  LABEL_FONT,
+  labelTracking,
+  labelWeight,
 } from "../../../theme";
 import { Btn, Checkbox, Chip, Section, Select, Icons } from "../../ui";
 import { ForwardChip } from "../forwardChip";
@@ -583,7 +589,7 @@ function TolerationRow({ t, tol }: { t: Tokens; tol: PodToleration }) {
             padding: "1px 7px",
             borderRadius: R_SM,
             fontSize: FS_XS,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             fontFamily: FF_MONO,
             background: eff.bg,
             color: eff.fg,
@@ -715,7 +721,7 @@ function ConditionStatusChip({ t, status }: { t: Tokens; status: string }) {
         padding: "1px 7px",
         borderRadius: R_SM,
         fontSize: FS_SM,
-        fontWeight: 600,
+        fontWeight: FW_SEMIBOLD,
         background: bg,
         color: fg,
       }}
@@ -1007,7 +1013,7 @@ function ContainerSummaryCard({
               style={{
                 fontFamily: FF_MONO,
                 fontSize: FS_MD,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 flex: 1,
                 minWidth: 0,
                 overflow: "hidden",
@@ -1021,11 +1027,11 @@ function ContainerSummaryCard({
           <span
             style={{
               fontSize: FS_XS,
-              fontWeight: 700,
+              fontWeight: labelWeight(FW_BOLD),
               color: t.textMuted,
-              textTransform: "uppercase",
-              letterSpacing: 0.4,
-              fontFamily: FF_MONO,
+              textTransform: LABEL_CASE,
+              letterSpacing: labelTracking(0.4),
+              fontFamily: LABEL_FONT,
             }}
           >
             {c.kind}
@@ -1322,7 +1328,7 @@ export function ReplicaCounts({
       style={{
         fontFamily: FF_MONO,
         fontSize: FS_MD,
-        fontWeight: 600,
+        fontWeight: FW_SEMIBOLD,
         fontVariantNumeric: "tabular-nums",
         color: readyDesiredColor(ready, desired, t),
       }}
@@ -1348,7 +1354,7 @@ function stepperBtnStyle(t: Tokens, disabled: boolean): React.CSSProperties {
     justifyContent: "center",
     fontFamily: FF_MONO,
     fontSize: FS_LG,
-    fontWeight: 700,
+    fontWeight: FW_BOLD,
     padding: 0,
     outline: "none",
   };
@@ -1491,7 +1497,7 @@ export function ReplicasEditor({
               textAlign: "center",
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               fontVariantNumeric: "tabular-nums",
               background: "transparent",
               color: invalid ? t.bad : isDirty ? t.warn : t.text,
@@ -1553,7 +1559,7 @@ export function ReplicasEditor({
             style={{
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               fontVariantNumeric: "tabular-nums",
               color: statusColor,
             }}
@@ -2476,10 +2482,10 @@ function ResourcesSide({
       <div
         style={{
           fontSize: FS_XS,
-          fontFamily: FF_MONO,
+          fontFamily: LABEL_FONT,
           color: t.textMuted,
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
+          textTransform: LABEL_CASE,
+          letterSpacing: labelTracking(0.4),
           margin: "2px 0 4px",
         }}
       >

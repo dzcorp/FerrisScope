@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { FF_MONO, type ThemeMode, R_MD, R_SM, FS_SM, FS_XS } from "../../theme";
+import { FF_MONO, type ThemeMode, R_MD, R_SM, FS_SM, FS_XS, shade } from "../../theme";
 import { useAppStore, useResolvedTheme } from "../../store";
 import { placeTooltip, fixedRectScale, type Side } from "../../lib/zoom";
 
@@ -143,23 +143,16 @@ export function Tooltip({
     left: pos.x,
     zIndex: 9999,
     pointerEvents: "none",
-    // Tooltips intentionally invert the surface — dark on light themes,
-    // even darker on dark themes — for readability against any backdrop.
-    // `bulkBg` is the same near-black we use for the bulk-action bar, so
-    // tooltips read as the same "modal/floating" surface across themes.
-    background: t.bulkBg,
-    color: themeMode === "dark" ? t.text : "#f4f6f9",
-    border: `1px solid ${themeMode === "dark" ? t.border : "rgba(255,255,255,0.06)"}`,
+    background: t.tooltip,
+    color: t.tooltipText,
+    border: `1px solid ${t.tooltipBorder}`,
     borderRadius: R_MD,
     padding: "5px 8px",
     fontSize: FS_SM,
     lineHeight: 1.35,
     letterSpacing: -0.05,
     maxWidth: 320,
-    boxShadow:
-      themeMode === "dark"
-        ? "0 8px 24px rgba(0,0,0,0.45)"
-        : "0 8px 24px rgba(15,20,30,0.22)",
+    boxShadow: `0 8px 24px ${shade(t, themeMode === "dark" ? 0.45 : 0.22)}`,
     display: "inline-flex",
     alignItems: "center",
     gap: 8,

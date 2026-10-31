@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useResolvedTheme } from "../../store";
 import {
   tokens,
-  FONT_SANS,
+  FF_SANS,
   FF_MONO,
   type ThemeMode,
   R_SM,
@@ -10,6 +10,7 @@ import {
   R_LG,
   FS_MD,
   FS_XS,
+  hexWithAlpha,
 } from "../../theme";
 import { IconBtn, Icons, Toggle } from "../ui";
 import { api } from "../../api";
@@ -274,6 +275,7 @@ export function ChatInput({
     <div
       style={{
         flexShrink: 0,
+        minWidth: 0,
         borderTop: `1px solid ${t.border}`,
         background: t.surfaceAlt,
         padding: 10,
@@ -309,6 +311,7 @@ export function ChatInput({
           display: "flex",
           flexDirection: "column",
           gap: 8,
+          minWidth: 0,
           background: t.surface,
           border: `1px solid ${focused ? t.accent : t.borderSoft}`,
           borderRadius: R_LG,
@@ -365,7 +368,10 @@ export function ChatInput({
             minHeight: MIN_HEIGHT,
             maxHeight: MAX_HEIGHT,
             resize: "none",
-            fontFamily: FONT_SANS,
+            // Text always wraps, so a sideways scrollbar is never useful.
+            overflowX: "hidden",
+            overflowWrap: "anywhere",
+            fontFamily: FF_SANS,
             fontSize: FS_MD,
             color: t.text,
             background: "transparent",
@@ -416,8 +422,11 @@ export function ChatInput({
       <div
         style={{
           display: "flex",
+          flexWrap: "wrap",
           alignItems: "center",
-          gap: 10,
+          columnGap: 10,
+          rowGap: 4,
+          minWidth: 0,
           paddingLeft: 2,
           fontSize: FS_XS,
           fontFamily: FF_MONO,
@@ -504,7 +513,7 @@ function RoundAction({
       : hover
         ? t.btnHover
         : t.surface;
-  const fg = disabled ? t.textMuted : accent ? "#ffffff" : t.text;
+  const fg = disabled ? t.textMuted : accent ? t.onAccent : t.text;
   return (
     <button
       type="button"
@@ -586,10 +595,10 @@ function Thumbnail({
           borderRadius: R_SM,
           border: "none",
           cursor: "pointer",
-          color: "#fff",
-          background: "rgba(15,20,30,0.65)",
+          color: t.tooltipText,
+          background: hexWithAlpha(t.tooltip, 0.8),
           lineHeight: 1,
-          fontSize: 12,
+          fontSize: FS_MD,
         }}
       >
         ×

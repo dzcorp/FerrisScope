@@ -26,6 +26,14 @@ import {
   FS_SM,
   FS_XS,
   R_SM,
+  FW_BOLD,
+  FW_SEMIBOLD,
+  shade,
+  LABEL_CASE,
+  LABEL_FONT,
+  labelTracking,
+  labelWeight,
+  titleBarTokens,
 } from "../theme";
 import {
   EmptyState,
@@ -409,6 +417,7 @@ export function DetailPanel({
   onOpenExec,
 }: Props) {
   const t = useResolvedTheme().tokens;
+  const ht = titleBarTokens(t);
   const isPod = kind.id === "pods";
   const isNode = kind.id === "nodes";
   const isJob = kind.id === "jobs";
@@ -1101,8 +1110,8 @@ export function DetailPanel({
           borderLeft: `1px solid ${t.border}`,
           boxShadow:
             mode === "dark"
-              ? "-12px 0 32px rgba(0,0,0,0.4)"
-              : "-12px 0 32px rgba(15,20,30,0.12)",
+              ? `-12px 0 32px ${shade(t, 0.4)}`
+              : `-12px 0 32px ${shade(t, 0.12)}`,
           display: "flex",
           flexDirection: "column",
           zIndex: 31,
@@ -1113,8 +1122,9 @@ export function DetailPanel({
       >
         <header
           style={{
+            background: ht.drawerTitle,
             padding: "16px 22px 12px",
-            borderBottom: `1px solid ${t.borderSoft}`,
+            borderBottom: `1px solid ${ht.borderSoft}`,
             display: "flex",
             alignItems: "center",
             gap: 12,
@@ -1130,25 +1140,25 @@ export function DetailPanel({
                 marginBottom: 6,
               }}
             >
-              <Eyebrow t={t}>{kind.kind}</Eyebrow>
-              <span style={{ color: t.textMuted, fontSize: FS_SM }}>·</span>
+              <Eyebrow t={ht}>{kind.kind}</Eyebrow>
+              <span style={{ color: ht.textMuted, fontSize: FS_SM }}>·</span>
               <span
                 style={{
                   fontFamily: FF_MONO,
                   fontSize: FS_SM,
-                  color: t.textDim,
+                  color: ht.textDim,
                 }}
               >
                 {kind.group ? `${kind.group}/${kind.version}` : kind.version}
               </span>
               {target.namespace && (
                 <>
-                  <span style={{ color: t.textMuted, fontSize: FS_SM }}>·</span>
+                  <span style={{ color: ht.textMuted, fontSize: FS_SM }}>·</span>
                   <span
                     style={{
                       fontFamily: FF_MONO,
                       fontSize: FS_SM,
-                      color: t.textDim,
+                      color: ht.textDim,
                     }}
                   >
                     {target.namespace}
@@ -1160,11 +1170,11 @@ export function DetailPanel({
               <span
                 style={{
                   fontSize: FS_LG,
-                  fontWeight: 600,
+                  fontWeight: FW_SEMIBOLD,
                   fontFamily: FF_MONO,
                   wordBreak: "break-all",
                   lineHeight: 1.3,
-                  color: t.text,
+                  color: ht.text,
                 }}
               >
                 {target.name}
@@ -1173,7 +1183,7 @@ export function DetailPanel({
           </div>
           {canBack && (
             <IconBtn
-              t={t}
+              t={ht}
               size="lg"
               title={`Back to ${prevEntry!.kindId} · ${prevEntry!.name} (Alt+←)`}
               onClick={() => history?.onBack()}
@@ -1183,7 +1193,7 @@ export function DetailPanel({
           )}
           {canForward && (
             <IconBtn
-              t={t}
+              t={ht}
               size="lg"
               title={`Forward to ${nextEntry!.kindId} · ${nextEntry!.name} (Alt+→)`}
               onClick={() => history?.onForward()}
@@ -1199,14 +1209,14 @@ export function DetailPanel({
                   style={{
                     width: 1,
                     height: 22,
-                    background: t.borderSoft,
+                    background: ht.borderSoft,
                     margin: "0 6px",
                   }}
                 />
               )}
               <IconBtn
                 ref={shellBtnRef}
-                t={t}
+                t={ht}
                 size="lg"
                 title={gatedTitle(
                   podShellContainers.length === 0
@@ -1233,7 +1243,7 @@ export function DetailPanel({
               </IconBtn>
               <IconBtn
                 ref={restartBtnRef}
-                t={t}
+                t={ht}
                 size="lg"
                 title={gatedTitle("Rollout restart owner workload", access("restart"))}
                 disabled={restarting || !target.namespace || degraded || !access("restart").allowed}
@@ -1243,7 +1253,7 @@ export function DetailPanel({
               </IconBtn>
               <IconBtn
                 ref={deleteBtnRef}
-                t={t}
+                t={ht}
                 size="lg"
                 title={gatedTitle("Delete…", access("delete"))}
                 danger
@@ -1260,7 +1270,7 @@ export function DetailPanel({
                 style={{
                   width: 1,
                   height: 22,
-                  background: t.borderSoft,
+                  background: ht.borderSoft,
                   margin: "0 6px",
                 }}
               />
@@ -1274,14 +1284,14 @@ export function DetailPanel({
                   style={{
                     width: 1,
                     height: 22,
-                    background: t.borderSoft,
+                    background: ht.borderSoft,
                     margin: "0 6px",
                   }}
                 />
               )}
               <IconBtn
                 ref={shellBtnRef}
-                t={t}
+                t={ht}
                 size="lg"
                 title={gatedTitle(
                   `Open shell on node (kubectl debug node/${target.name})`,
@@ -1294,7 +1304,7 @@ export function DetailPanel({
               </IconBtn>
               <IconBtn
                 ref={cordonBtnRef}
-                t={t}
+                t={ht}
                 size="lg"
                 title={gatedTitle(
                   nodeCordoned
@@ -1309,7 +1319,7 @@ export function DetailPanel({
               </IconBtn>
               <IconBtn
                 ref={drainBtnRef}
-                t={t}
+                t={ht}
                 size="lg"
                 title={gatedTitle("Drain node — cordon and evict pods", access("drain"))}
                 disabled={draining || degraded || !access("drain").allowed}
@@ -1319,7 +1329,7 @@ export function DetailPanel({
               </IconBtn>
               <IconBtn
                 ref={deleteBtnRef}
-                t={t}
+                t={ht}
                 size="lg"
                 title={gatedTitle("Delete…", access("delete"))}
                 danger
@@ -1336,7 +1346,7 @@ export function DetailPanel({
                 style={{
                   width: 1,
                   height: 22,
-                  background: t.borderSoft,
+                  background: ht.borderSoft,
                   margin: "0 6px",
                 }}
               />
@@ -1353,14 +1363,14 @@ export function DetailPanel({
                   style={{
                     width: 1,
                     height: 22,
-                    background: t.borderSoft,
+                    background: ht.borderSoft,
                     margin: "0 6px",
                   }}
                 />
               )}
               {isCronJob && (
                 <IconBtn
-                  t={t}
+                  t={ht}
                   size="lg"
                   title={gatedTitle(
                     "Run now — create a Job from this CronJob's template",
@@ -1374,7 +1384,7 @@ export function DetailPanel({
               )}
               {isJob && (
                 <IconBtn
-                  t={t}
+                  t={ht}
                   size="lg"
                   title={gatedTitle(
                     "Re-run — create a copy of this Job under a new name",
@@ -1388,7 +1398,7 @@ export function DetailPanel({
               )}
               {(isJob || isCronJob) && (
                 <IconBtn
-                  t={t}
+                  t={ht}
                   size="lg"
                   title={gatedTitle(
                     jobFinished
@@ -1416,7 +1426,7 @@ export function DetailPanel({
               {isRestartableWorkload && (
                 <IconBtn
                   ref={restartBtnRef}
-                  t={t}
+                  t={ht}
                   size="lg"
                   title={gatedTitle(`Rollout restart ${kind.kind.toLowerCase()}`, access("restart"))}
                   disabled={restarting || !target.namespace || degraded || !access("restart").allowed}
@@ -1427,17 +1437,17 @@ export function DetailPanel({
               )}
               {gitops && (
                 <GitOpsActions
-                  t={t}
+                  t={ht}
                   mode={mode}
                   ctl={gitops}
                   name={target.name}
                   clusterId={clusterId}
                 />
               )}
-              {helm && <HelmActions t={t} mode={mode} ctl={helm} />}
+              {helm && <HelmActions t={ht} mode={mode} ctl={helm} />}
               {isNamespace && (
                 <NamespaceForwardButton
-                  t={t}
+                  t={ht}
                   clusterId={clusterId}
                   namespace={target.name}
                   disabled={degraded}
@@ -1447,7 +1457,7 @@ export function DetailPanel({
               {kind.id !== "helm_charts" && (
                 <IconBtn
                   ref={deleteBtnRef}
-                  t={t}
+                  t={ht}
                   size="lg"
                   title={gatedTitle(
                     kind.id === "helm_releases" ? "Uninstall…" : "Delete…",
@@ -1468,18 +1478,18 @@ export function DetailPanel({
                 style={{
                   width: 1,
                   height: 22,
-                  background: t.borderSoft,
+                  background: ht.borderSoft,
                   margin: "0 6px",
                 }}
               />
             </>
           )}
           {tab === "yaml" && hasYaml && (
-            <IconBtn t={t} size="lg" title="Refresh" onClick={refetch}>
+            <IconBtn t={ht} size="lg" title="Refresh" onClick={refetch}>
               {Icons.refresh}
             </IconBtn>
           )}
-          <IconBtn t={t} size="lg" title="Close" onClick={() => void requestClose()}>
+          <IconBtn t={ht} size="lg" title="Close" onClick={() => void requestClose()}>
             {Icons.close}
           </IconBtn>
         </header>
@@ -1637,7 +1647,6 @@ export function DetailPanel({
               <LoadingLine t={t} label="Fetching YAML…" />
             ) : (
               <YamlTab
-                mode={mode}
                 t={t}
                 yaml={load.kind === "ready" ? load.yaml : ""}
                 yamlRaw={load.kind === "ready" ? load.yamlRaw : ""}
@@ -2119,11 +2128,11 @@ export function ObjectEvents({
                   textAlign: "left",
                   padding: "10px 14px",
                   fontSize: FS_XS,
-                  fontWeight: 700,
+                  fontWeight: labelWeight(FW_BOLD),
                   color: t.textMuted,
-                  textTransform: "uppercase",
-                  letterSpacing: 0.5,
-                  fontFamily: FF_MONO,
+                  textTransform: LABEL_CASE,
+                  letterSpacing: labelTracking(0.5),
+                  fontFamily: LABEL_FONT,
                   width: typeof w === "number" ? w : undefined,
                 }}
               >
@@ -3065,7 +3074,7 @@ function ContainerCard({
             style={{
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               flex: 1,
               minWidth: 0,
               overflow: "hidden",
@@ -3080,7 +3089,7 @@ function ContainerCard({
               style={{
                 fontSize: FS_XS,
                 fontFamily: FF_MONO,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 color: c.restart_count > 5 ? t.bad : t.warn,
                 flexShrink: 0,
               }}
@@ -3091,11 +3100,11 @@ function ContainerCard({
           <span
             style={{
               fontSize: FS_XS,
-              fontWeight: 700,
+              fontWeight: labelWeight(FW_BOLD),
               color: t.textMuted,
-              textTransform: "uppercase",
-              letterSpacing: 0.4,
-              fontFamily: FF_MONO,
+              textTransform: LABEL_CASE,
+              letterSpacing: labelTracking(0.4),
+              fontFamily: LABEL_FONT,
             }}
           >
             {c.kind}

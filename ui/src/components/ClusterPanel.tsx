@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
 import type { ClusterInfo, ContextInfo } from "../types";
-import { type ThemeMode, FS_MD } from "../theme";
+import { type ThemeMode, FS_MD, FW_NORMAL, FW_SEMIBOLD } from "../theme";
 import {
   useClusterConnection,
   type ConnectState,
@@ -246,10 +246,10 @@ export function ReconnectBanner({
         }}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ color: t.text, fontSize: FS_MD, fontWeight: 600 }}>
+        <div style={{ color: t.text, fontSize: FS_MD, fontWeight: FW_SEMIBOLD }}>
           {title}
           {busy && progress && (
-            <span style={{ marginLeft: 6, color: t.textDim, fontWeight: 400 }}>
+            <span style={{ marginLeft: 6, color: t.textDim, fontWeight: FW_NORMAL }}>
               ({progress.attempt}/{progress.max})
             </span>
           )}

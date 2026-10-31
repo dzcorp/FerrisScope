@@ -1,4 +1,4 @@
-import { FF_MONO, type Tokens, FS_SM, FS_XS, R_SM } from "../../theme";
+import { FF_MONO, type Tokens, FS_SM, FS_XS, R_SM, FW_BOLD, FW_NORMAL, FW_SEMIBOLD } from "../../theme";
 
 // Shared chrome for the "previous (terminated) instance" log view — issue #63.
 // Both single-pod log surfaces (Detail panel Logs tab + single-pod overlay)
@@ -41,7 +41,7 @@ export function PreviousLogsToggle({
         color: active ? t.warn : t.textDim,
         fontFamily: FF_MONO,
         fontSize: FS_SM,
-        fontWeight: active ? 600 : 400,
+        fontWeight: active ? FW_SEMIBOLD : FW_NORMAL,
         cursor: "pointer",
         whiteSpace: "nowrap",
       }}
@@ -71,7 +71,7 @@ export function PreviousLogsBanner({ t }: { t: Tokens }) {
         gap: 6,
       }}
     >
-      <span aria-hidden style={{ fontWeight: 700 }}>
+      <span aria-hidden style={{ fontWeight: FW_BOLD }}>
         ⚠
       </span>
       Showing logs from the previous terminated instance — not the live

@@ -3,7 +3,7 @@ import { isProviderUsable } from "../../lib/providers";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DockTab } from "../../store";
 import { useAppStore, useResolvedTheme } from "../../store";
-import { FONT_SANS, FF_MONO, type ThemeMode, FS_MD, FS_SM, R_MD } from "../../theme";
+import { FF_SANS, FF_MONO, type ThemeMode, FS_MD, FS_SM, R_MD } from "../../theme";
 import { api } from "../../api";
 import type {
   AgentChatMessage,
@@ -964,7 +964,7 @@ export function DockChat({ mode, tab, visible }: Props) {
         display: "flex",
         flexDirection: "column",
         background: t.surface,
-        fontFamily: FONT_SANS,
+        fontFamily: FF_SANS,
       }}
     >
       <div style={{ position: "relative", flexShrink: 0 }}>

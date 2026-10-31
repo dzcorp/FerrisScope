@@ -1,6 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useResolvedTheme } from "../../store";
-import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_MD, FS_SM } from "../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_MD, FS_SM, FW_BOLD, FW_SEMIBOLD, shade } from "../../theme";
 import type { ChatViewMessage, ExecutingToolCall } from "./chatStreaming";
 
 // A row inside a tool group is either a resolved result message or an
@@ -163,7 +163,7 @@ function ToolGroupBubbleInner({ items }: Props) {
         background: t.surface,
         border: `1px solid ${t.border}`,
         borderRadius: R_LG,
-        boxShadow: "0 1px 2px rgba(15,20,30,0.04)",
+        boxShadow: `0 1px 2px ${shade(t, 0.04)}`,
         // Paint containment: the viewport's scroll + the row enter
         // animation shouldn't bleed paint into sibling bubbles.
         contain: "content",
@@ -196,12 +196,12 @@ function ToolGroupBubbleInner({ items }: Props) {
           {total} tool {total === 1 ? "call" : "calls"}
         </span>
         {runningCount > 0 && (
-          <span style={{ color: t.accent, fontWeight: 600 }}>
+          <span style={{ color: t.accent, fontWeight: FW_SEMIBOLD }}>
             {runningCount} running
           </span>
         )}
         {errorCount > 0 && (
-          <span style={{ color: t.bad, fontWeight: 600 }}>
+          <span style={{ color: t.bad, fontWeight: FW_SEMIBOLD }}>
             {errorCount} failed
           </span>
         )}
@@ -327,7 +327,7 @@ function ExecutingRow({
             flexShrink: 0,
           }}
         />
-        <span style={{ color: t.accent, fontWeight: 600 }}>{entry.name}</span>
+        <span style={{ color: t.accent, fontWeight: FW_SEMIBOLD }}>{entry.name}</span>
         <span style={{ color: t.textDim }}>running</span>
         <span style={{ color: t.textDim, flex: 1, minWidth: 0 }}>{secs}s</span>
       </div>
@@ -395,10 +395,10 @@ function ResultRow({
         <span style={{ color: t.textDim, width: 8 }}>
           {showPayload ? "▾" : "▸"}
         </span>
-        <span style={{ color: status, width: 10, fontWeight: 700 }}>
+        <span style={{ color: status, width: 10, fontWeight: FW_BOLD }}>
           {message.toolIsError ? "✗" : "✓"}
         </span>
-        <span style={{ color: t.accent, fontWeight: 600 }}>{label}</span>
+        <span style={{ color: t.accent, fontWeight: FW_SEMIBOLD }}>{label}</span>
         {preview && (
           <span
             style={{
@@ -438,7 +438,7 @@ function ResultRow({
             wordBreak: "break-word",
             maxHeight: 320,
             overflow: "auto",
-            boxShadow: "0 1px 2px rgba(15,20,30,0.04)",
+            boxShadow: `0 1px 2px ${shade(t, 0.04)}`,
             contain: "content",
           }}
         >

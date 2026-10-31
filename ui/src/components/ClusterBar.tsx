@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { Mono } from "./detail";
 import type { ContextInfo, ClusterInfo } from "../types";
-import { tokens, FF_MONO, type ThemeMode, R_LG, R_MD, FS_MD, FS_XS } from "../theme";
+import { tokens, FF_MONO, type ThemeMode, R_LG, R_MD, FS_MD, FS_XS, FW_BOLD, FW_MEDIUM, FW_SEMIBOLD, shade, capacityColor, LABEL_CASE, LABEL_FONT, labelTracking, labelWeight } from "../theme";
 import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
 import { Stat, STAT_ELLIPSIS, StatusPill, Gauge, Icons, KindIcons, Kbd, Tooltip } from "./ui";
 import { makeTerminalTab, makeYamlTab } from "./Dock";
@@ -9,6 +9,7 @@ import { CloudIdentityModal } from "./CloudIdentityPanel";
 import { MOD_KEY, SHIFT_KEY } from "../lib/keyboard";
 import { useMetricsSubscription } from "../lib/useMetricsSubscription";
 import { useTabActive, useTabSlice } from "../lib/tabScope";
+import { useClusterAllocation } from "../lib/clusterAllocation";
 
 type ConnectState =
   | { status: "idle" }
@@ -185,7 +186,7 @@ export function ClusterBar({
                   ...CLUSTER_LINE,
                   fontFamily: FF_MONO,
                   fontSize: FS_XS,
-                  fontWeight: 500,
+                  fontWeight: FW_MEDIUM,
                   color: t.textMuted,
                 }}
               >
@@ -262,8 +263,8 @@ export function ClusterBar({
               zIndex: 22,
               boxShadow:
                 mode === "dark"
-                  ? "0 8px 24px rgba(0,0,0,0.4)"
-                  : "0 8px 24px rgba(15,20,30,0.12)",
+                  ? `0 8px 24px ${shade(t, 0.4)}`
+                  : `0 8px 24px ${shade(t, 0.12)}`,
               // The "Add cluster…" mode lists every kubeconfig context —
               // long lists must scroll, not run off the viewport.
               maxHeight: "min(420px, 60vh)",
@@ -276,11 +277,11 @@ export function ClusterBar({
                   style={{
                     padding: "6px 10px 4px",
                     fontSize: FS_XS,
-                    fontWeight: 700,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
+                    fontWeight: labelWeight(FW_BOLD),
+                    textTransform: LABEL_CASE,
+                    letterSpacing: labelTracking(0.5),
                     color: t.textMuted,
-                    fontFamily: FF_MONO,
+                    fontFamily: LABEL_FONT,
                   }}
                 >
                   Add cluster to this view
@@ -429,9 +430,9 @@ export function AddMenuTrigger({
               padding: "0 3px",
               borderRadius: R_MD,
               background: t.accent,
-              color: "#fff",
+              color: t.onAccent,
               fontSize: FS_XS,
-              fontWeight: 700,
+              fontWeight: FW_BOLD,
               fontFamily: FF_MONO,
               display: "flex",
               alignItems: "center",
@@ -520,10 +521,10 @@ export function NamespaceButton() {
             style={{
               fontSize: FS_XS,
               color: t.textMuted,
-              fontWeight: 600,
-              textTransform: "uppercase",
-              letterSpacing: 0.4,
-              fontFamily: FF_MONO,
+              fontWeight: labelWeight(FW_SEMIBOLD),
+              textTransform: LABEL_CASE,
+              letterSpacing: labelTracking(0.4),
+              fontFamily: LABEL_FONT,
             }}
           >
             Namespace
@@ -531,7 +532,7 @@ export function NamespaceButton() {
           <span
             style={{
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               fontFamily: nsAll || nsCount > 1 ? "inherit" : FF_MONO,
               color: nsAll ? t.text : t.accent,
               maxWidth: "100%",
@@ -612,7 +613,7 @@ export function AddMenuItem({
           minWidth: 0,
         }}
       >
-        <span style={{ fontSize: FS_MD, fontWeight: 600, color: t.text }}>
+        <span style={{ fontSize: FS_MD, fontWeight: FW_SEMIBOLD, color: t.text }}>
           {title}
         </span>
         <span style={{ fontSize: FS_XS, color: t.textMuted, marginTop: 1 }}>
@@ -643,21 +644,46 @@ export function AddMenuItem({
 // match HV2: <65% green, 65–80% amber, >80% red. Per P5 the colour means the
 // same thing everywhere — so we route through the same status palette the
 // pod table uses, not a custom gradient.
-function ClusterGauges({ clusterId }: { mode: ThemeMode; clusterId: string }) {
-  const t = useResolvedTheme().tokens;
+export function ClusterGauges({ clusterId }: { mode: ThemeMode; clusterId: string }) {
+  const { tokens: t, chart } = useResolvedTheme();
   // Subscribe lazily — only while the gauges are actually mounted. Gauges
   // are part of the always-on cluster bar today, but isolating the
   // subscription here means future variants of the bar that hide the
   // gauges (e.g. a compact mode) don't pay for metrics polling either.
   useMetricsSubscription(clusterId, "cluster");
   const metrics = useAppStore((s) => s.metricsByCluster[clusterId] ?? null);
+  const alloc = useClusterAllocation(clusterId, chart.gaugeRings);
   if (!metrics || !metrics.available || !metrics.cluster) return null;
   const c = metrics.cluster;
   if (c.cpu_capacity_milli === 0 || c.mem_capacity_mib === 0) return null;
 
-  const cpuRatio = c.cpu_used_milli / c.cpu_capacity_milli;
-  const memRatio = c.mem_used_mib / c.mem_capacity_mib;
-  const colorFor = (r: number) => (r > 0.8 ? t.bad : r > 0.65 ? t.warn : t.good);
+  // With allocation data the rings read against allocatable, as Lens does.
+  const cpuDen = alloc?.cpuAllocatable || c.cpu_capacity_milli;
+  const memDen = alloc?.memAllocatable || c.mem_capacity_mib;
+  const cpuRatio = c.cpu_used_milli / cpuDen;
+  const memRatio = c.mem_used_mib / memDen;
+  const colorFor = (r: number) => capacityColor(r, t, chart);
+  const rings = (req: number | null | undefined, lim: number | null | undefined, den: number) =>
+    alloc && chart.gaugeRings
+      ? [
+          ...(req != null ? [{ value: req / den, color: t.chartRingRequests }] : []),
+          ...(lim != null ? [{ value: lim / den, color: t.chartRingLimits }] : []),
+        ]
+      : undefined;
+  const cpuTitle = [
+    `${c.cpu_used_milli}m used / ${cpuDen}m ${alloc?.cpuAllocatable ? "allocatable" : "capacity"}`,
+    alloc?.cpuRequests != null ? `requests ${Math.round(alloc.cpuRequests)}m` : null,
+    alloc?.cpuLimits != null ? `limits ${Math.round(alloc.cpuLimits)}m` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const memTitle = [
+    `${c.mem_used_mib} Mi used / ${Math.round(memDen)} Mi ${alloc?.memAllocatable ? "allocatable" : "capacity"}`,
+    alloc?.memRequests != null ? `requests ${Math.round(alloc.memRequests)} Mi` : null,
+    alloc?.memLimits != null ? `limits ${Math.round(alloc.memLimits)} Mi` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -665,19 +691,21 @@ function ClusterGauges({ clusterId }: { mode: ThemeMode; clusterId: string }) {
         label="CPU"
         ratio={cpuRatio}
         color={colorFor(cpuRatio)}
-        track={t.borderSoft}
+        track={t.chartRingTrack}
         textMuted={t.textMuted}
         text={t.text}
-        title={`${c.cpu_used_milli}m / ${c.cpu_capacity_milli}m`}
+        rings={rings(alloc?.cpuRequests, alloc?.cpuLimits, cpuDen)}
+        title={cpuTitle}
       />
       <GaugeStat
         label="MEM"
         ratio={memRatio}
         color={colorFor(memRatio)}
-        track={t.borderSoft}
+        track={t.chartRingTrack}
         textMuted={t.textMuted}
         text={t.text}
-        title={`${c.mem_used_mib} Mi / ${c.mem_capacity_mib} Mi`}
+        rings={rings(alloc?.memRequests, alloc?.memLimits, memDen)}
+        title={memTitle}
       />
     </div>
   );
@@ -691,6 +719,7 @@ function GaugeStat({
   textMuted,
   text,
   title,
+  rings,
 }: {
   label: string;
   ratio: number;
@@ -699,19 +728,20 @@ function GaugeStat({
   textMuted: string;
   text: string;
   title?: string;
+  rings?: { value: number; color: string }[];
 }) {
   const inner = (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <Gauge value={ratio} size={36} thickness={3.5} color={color} track={track} />
+      <Gauge value={ratio} size={36} color={color} track={track} rings={rings} />
       <div>
         <div
           style={{
             fontSize: FS_XS,
             color: textMuted,
-            fontWeight: 600,
-            textTransform: "uppercase",
-            letterSpacing: 0.4,
-            fontFamily: FF_MONO,
+            fontWeight: labelWeight(FW_SEMIBOLD),
+            textTransform: LABEL_CASE,
+            letterSpacing: labelTracking(0.4),
+            fontFamily: LABEL_FONT,
           }}
         >
           {label}
@@ -720,7 +750,7 @@ function GaugeStat({
           style={{
             fontSize: FS_MD,
             fontVariantNumeric: "tabular-nums",
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             color: text,
             fontFamily: FF_MONO,
           }}

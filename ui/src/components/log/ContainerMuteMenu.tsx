@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Tokens } from "../../theme";
-import { FF_MONO, FS_XS } from "../../theme";
+import { FF_MONO, FS_XS, shade } from "../../theme";
 import { placeSelectPopover, fixedRectScale } from "../../lib/zoom";
 import { containerKindSuffix } from "../../lib/podContainers";
 import type { LogContainer } from "../../types";
@@ -242,7 +242,7 @@ function MutePopover({
             background: t.surface,
             border: `1px solid ${t.border}`,
             borderRadius: "var(--fs-radius-md, 6px)",
-            boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
+            boxShadow: `0 8px 24px ${shade(t, 0.28)}`,
             zIndex: 60,
           }}
         >

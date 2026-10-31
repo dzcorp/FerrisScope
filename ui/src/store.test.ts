@@ -80,7 +80,7 @@ describe("setTheme", () => {
     useAppStore.getState().setTheme("vscode");
     const sV = useAppStore.getState();
     expect(sV.themeId).toBe("vscode");
-    expect(sV.paletteId).toBe("dark-plus");
+    expect(sV.paletteId).toBe("modern");
     expect(sV.settings.density).toBe("compact");
   });
   it("preserves an operator-set density across theme switches (seed-once)", () => {

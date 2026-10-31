@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useResolvedTheme } from "../../store";
-import { FF_MONO, FONT_SANS, type ThemeMode, R_LG, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { FF_MONO, FF_SANS, type ThemeMode, R_LG, R_MD, FS_MD, FS_SM, FS_XS, shade, LABEL_CASE, LABEL_FONT, labelTracking } from "../../theme";
 import { Btn, ErrorBlock, Icons } from "../ui";
 import type { ModelInfo, ProviderKind } from "../../types";
 import { useEscLayer } from "../../lib/escStack";
@@ -127,13 +127,13 @@ export function ModelPickerPopover({
         background: t.surface,
         border: `1px solid ${t.border}`,
         borderRadius: R_LG,
-        boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+        boxShadow: `0 8px 24px ${shade(t, 0.18)}`,
         marginTop: 4,
         maxHeight: 420,
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
-        fontFamily: FONT_SANS,
+        fontFamily: FF_SANS,
       }}
     >
       <div
@@ -158,9 +158,9 @@ export function ModelPickerPopover({
             style={{
               color: t.textMuted,
               fontSize: FS_XS,
-              fontFamily: FF_MONO,
-              letterSpacing: 0.5,
-              textTransform: "uppercase",
+              fontFamily: LABEL_FONT,
+              letterSpacing: labelTracking(0.5),
+              textTransform: LABEL_CASE,
             }}
           >
             Model · {providerLabel}
@@ -291,7 +291,7 @@ export function ModelPickerPopover({
                       : "transparent",
                   cursor: "pointer",
                   color: t.text,
-                  fontFamily: FONT_SANS,
+                  fontFamily: FF_SANS,
                   fontSize: FS_MD,
                 }}
               >

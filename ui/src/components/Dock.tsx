@@ -33,6 +33,11 @@ import {
   FS_SM,
   FS_XS,
   hexWithAlpha,
+  xtermTheme,
+  FW_MEDIUM,
+  FW_SEMIBOLD,
+  shade,
+  TAB_INDICATOR_W,
 } from "../theme";
 import { Btn, ErrorBlock, IconBtn, Icons, Select } from "./ui";
 import { closeDockTabs } from "../lib/dockClose";
@@ -52,6 +57,7 @@ import {
   DEFAULT_YAML_TEMPLATE_ID,
   getYamlTemplate,
 } from "../lib/yamlTemplates";
+import { defineMonacoThemes, useMonacoTheme } from "../lib/monacoTheme";
 
 let _seq = 1;
 
@@ -326,7 +332,7 @@ export function Dock({
           <span style={{ color: t.textDim, display: "inline-flex" }}>
             {Icons.shell}
           </span>
-          <span style={{ color: t.textDim, fontWeight: 500 }}>Dock</span>
+          <span style={{ color: t.textDim, fontWeight: FW_MEDIUM }}>Dock</span>
           <span style={{ color: t.textMuted }}>·</span>
           <span style={{ color: t.textMuted }}>
             {tabs.length} tab{tabs.length === 1 ? "" : "s"}
@@ -366,8 +372,8 @@ export function Dock({
         borderLeft: `1px solid ${t.border}`,
         boxShadow:
           mode === "dark"
-            ? "-8px 0 24px rgba(0,0,0,0.4)"
-            : "-8px 0 24px rgba(15,20,30,0.08)",
+            ? `-8px 0 24px ${shade(t, 0.4)}`
+            : `-8px 0 24px ${shade(t, 0.08)}`,
         zIndex: 25,
       }
     : {
@@ -383,8 +389,8 @@ export function Dock({
         borderTop: `1px solid ${t.border}`,
         boxShadow:
           mode === "dark"
-            ? "0 -8px 24px rgba(0,0,0,0.4)"
-            : "0 -8px 24px rgba(15,20,30,0.08)",
+            ? `0 -8px 24px ${shade(t, 0.4)}`
+            : `0 -8px 24px ${shade(t, 0.08)}`,
         zIndex: 25,
       };
 
@@ -459,23 +465,23 @@ export function Dock({
                   gap: 7,
                   padding: "0 10px 0 12px",
                   height: 34,
-                  borderRight: `1px solid ${t.borderSoft}`,
-                  background: isActive ? t.surface : "transparent",
-                  borderBottom: `2px solid ${
-                    isActive ? t.accent : "transparent"
+                  borderRight: `1px solid ${t.dockTabBorder}`,
+                  background: isActive ? t.dockTabActive : "transparent",
+                  borderBottom: `${TAB_INDICATOR_W} solid ${
+                    isActive ? t.tabIndicator : "transparent"
                   }`,
                   marginBottom: -1,
                   cursor: "pointer",
                   minWidth: 0,
                   fontSize: FS_SM,
                   color: isActive ? t.text : t.textDim,
-                  fontWeight: isActive ? 600 : 500,
+                  fontWeight: isActive ? FW_SEMIBOLD : FW_MEDIUM,
                 }}
               >
                 <span
                   style={{
                     display: "inline-flex",
-                    color: isActive ? t.accent : t.textMuted,
+                    color: isActive ? t.tabIndicator : t.textMuted,
                   }}
                 >
                   {tab.kind === "terminal"
@@ -885,22 +891,8 @@ function DockTerminal({
           cursorBlink: true,
           convertEol: true,
           allowProposedApi: true,
-          theme: {
-            // xterm reads literal colors at construction time — it doesn't
-            // respond to subsequent token changes (the live-update effect
-            // below handles toggles). The *console* palette flows through
-            // here: dark by default even under a light theme, so the terminal
-            // reads like a terminal. ANSI colors emitted by the shell aren't
-            // remapped — that's the program's choice.
-            background: consoleT.surfaceAlt,
-            foreground: consoleT.text,
-            cursor: consoleT.good,
-            // xterm's default selection is a translucent white — invisible on
-            // a light console. Derive a veil from the text colour so it stays
-            // visible (and glyphs readable) on both light and dark consoles.
-            selectionBackground: hexWithAlpha(consoleT.text, 0.3),
-            selectionInactiveBackground: hexWithAlpha(consoleT.text, 0.18),
-          },
+          // Read once at construction; the effect below re-applies changes.
+          theme: xtermTheme(consoleT),
         });
         fit = new FitAddon();
         term.loadAddon(fit);
@@ -1157,15 +1149,9 @@ function DockTerminal({
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    term.options.theme = {
-      background: consoleT.surfaceAlt,
-      foreground: consoleT.text,
-      cursor: consoleT.good,
-      selectionBackground: hexWithAlpha(consoleT.text, 0.3),
-      selectionInactiveBackground: hexWithAlpha(consoleT.text, 0.18),
-    };
+    term.options.theme = xtermTheme(consoleT);
     term.refresh(0, term.rows - 1);
-  }, [consoleT.surfaceAlt, consoleT.text, consoleT.good]);
+  }, [consoleT]);
 
   return (
     <div
@@ -1199,7 +1185,7 @@ function DockTerminal({
             background: consoleT.surface,
             border: `1px solid ${consoleT.border}`,
             borderRadius: R_MD,
-            boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
+            boxShadow: `0 6px 18px ${shade(consoleT, 0.35)}`,
           }}
         >
           <input
@@ -1359,6 +1345,7 @@ function DockYaml({
   tab: DockTab;
   onPatch: (p: Partial<YamlTabState>) => void;
 }) {
+  const monacoTheme = useMonacoTheme();
   const resolved = useResolvedTheme();
   const t = resolved.tokens;
   const st = tab.state as Partial<YamlTabState>;
@@ -1500,7 +1487,8 @@ function DockYaml({
         <Editor
           height="100%"
           language="yaml"
-          theme={mode === "dark" ? "vs-dark" : "light"}
+          theme={monacoTheme}
+          beforeMount={defineMonacoThemes}
           value={content}
           onChange={(next) =>
             onPatch({

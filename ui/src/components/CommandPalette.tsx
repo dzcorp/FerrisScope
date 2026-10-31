@@ -5,7 +5,7 @@ import {
   useClusterLabels,
   useResolvedTheme,
 } from "../store";
-import { FF_MONO, type ThemeMode, R_LG, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
+import { FF_MONO, type ThemeMode, R_LG, FS_LG, FS_MD, FS_SM, FS_XS, FW_MEDIUM, shade } from "../theme";
 import { Eyebrow, Icons, Kbd, KindIcons, resolveKindIcon } from "./ui";
 import { MOD_KEY } from "../lib/keyboard";
 import { api } from "../api";
@@ -430,7 +430,7 @@ export function CommandPalette({ mode, onClose }: Props) {
           right: 0,
           bottom: 0,
           left: 0,
-          background: "rgba(8,10,14,0.32)",
+          background: t.scrimSoft,
           backdropFilter: "blur(2px)",
           WebkitBackdropFilter: "blur(2px)",
           zIndex: 50,
@@ -451,7 +451,7 @@ export function CommandPalette({ mode, onClose }: Props) {
           background: t.paletteBg,
           border: `1px solid ${t.paletteBorder}`,
           borderRadius: R_LG,
-          boxShadow: "0 24px 56px rgba(0,0,0,0.25)",
+          boxShadow: `0 24px 56px ${shade(t, 0.25)}`,
           backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)",
           zIndex: 51,
@@ -555,7 +555,7 @@ export function CommandPalette({ mode, onClose }: Props) {
                         <div
                           style={{
                             fontSize: FS_MD,
-                            fontWeight: 500,
+                            fontWeight: FW_MEDIUM,
                             fontFamily: it.mono ? FF_MONO : "inherit",
                             color: t.text,
                             overflow: "hidden",

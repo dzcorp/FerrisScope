@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FF_MONO, type ThemeMode, R_LG, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../theme";
+import { FF_MONO, type ThemeMode, R_LG, R_MD, R_SM, FS_MD, FS_SM, FS_XS, FW_SEMIBOLD, shade } from "../theme";
 import { useAppStore, useResolvedTheme } from "../store";
 import { Btn, IconBtn, Icons, Kbd, KindIcons } from "./ui";
 
@@ -182,7 +182,7 @@ export function NamespaceModal({
           background: t.surface,
           border: `1px solid ${t.border}`,
           borderRadius: R_LG,
-          boxShadow: "0 24px 56px rgba(0,0,0,0.28)",
+          boxShadow: `0 24px 56px ${shade(t, 0.28)}`,
           zIndex: 41,
           overflow: "hidden",
         }}
@@ -205,7 +205,7 @@ export function NamespaceModal({
               <div
                 style={{
                   fontSize: FS_MD,
-                  fontWeight: 600,
+                  fontWeight: FW_SEMIBOLD,
                   letterSpacing: -0.2,
                   color: t.text,
                 }}
@@ -316,7 +316,7 @@ export function NamespaceModal({
           >
             {KindIcons.Namespace}
           </span>
-          <span style={{ fontSize: FS_MD, fontWeight: 600, flex: 1 }}>
+          <span style={{ fontSize: FS_MD, fontWeight: FW_SEMIBOLD, flex: 1 }}>
             All namespaces
           </span>
           <span
@@ -458,7 +458,7 @@ export function NamespaceModal({
                           height="9"
                           viewBox="0 0 10 10"
                           fill="none"
-                          stroke="white"
+                          stroke={t.onAccent}
                           strokeWidth="2"
                           strokeLinecap="round"
                           strokeLinejoin="round"

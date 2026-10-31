@@ -390,3 +390,33 @@ describe("Rail RBAC", () => {
     act(() => useAppStore.setState({ scopeExtras: [] }));
   });
 });
+
+describe("Rail active item follows the theme", () => {
+  const pods: ResourceKind = { id: "pods", kind: "Pod", group: "", version: "v1", plural: "pods", namespaced: true, category: "Workloads", columns: [] };
+  const ctx = { id: "default::a", name: "a", cluster: "a", user: null, namespace: null, is_current: true, group: "Default", source_id: "default", source_path: null };
+
+  async function mountActive(themeId: string) {
+    setMockInvoke((cmd) => (cmd === "list_resource_kinds" ? [pods] : cmd === "list_custom_resource_kinds" ? [] : undefined));
+    act(() => {
+      useAppStore.getState().setTheme(themeId);
+      useAppStore.setState({ selectedContext: ctx.id, selectedVirtualContextId: null, scopeExtras: [], railMode: "pinned", contexts: [ctx], selectedKindId: "pods" });
+    });
+    await act(async () => { render(<Rail mode="dark" />); });
+    return screen.getByRole("button", { name: "Pod" });
+  }
+
+  it("Lens paints the active item solid primary with white text, no side bar", async () => {
+    const btn = await mountActive("lens");
+    expect(btn).toHaveAttribute("data-active", "true");
+    expect(btn.style.background).toBe("rgb(0, 167, 160)");
+    expect(btn.style.color).toBe("rgb(255, 255, 255)");
+    const bar = btn.firstElementChild as HTMLElement;
+    expect(bar.style.background).toBe("transparent");
+  });
+
+  it("Default keeps the soft accent wash and accent bar", async () => {
+    const btn = await mountActive("default");
+    expect(btn.style.background).toBe("rgba(240, 140, 110, 0.16)");
+    expect((btn.firstElementChild as HTMLElement).style.background).toBe("rgb(240, 140, 110)");
+  });
+});

@@ -1,55 +1,59 @@
-import type { ResolvedTheme, ThemeMode } from "../theme";
+import { hexWithAlpha, type ResolvedTheme, type ThemeMode } from "../theme";
 
-// Publish theme-derived state onto the document: body background/typography,
-// the `:root` CSS custom properties components read via `var(--fs-*)`, and the
-// native `color-scheme`. Pure w.r.t. its inputs (the only effect is the DOM
-// write), so App can call it from a `useLayoutEffect` keyed on the resolved
-// theme + mode rather than re-running the writes on every render.
-//
-// `isMac` / `titlebarInsetPx` are passed in rather than imported so this stays
-// a leaf module with no platform-const dependency (and is trivially testable).
+// Publish theme-derived state onto the document: body typography, the `:root`
+// custom properties components read via `var(--fs-*)`, and `color-scheme`.
 export function applyThemeCssVars(
   resolved: ResolvedTheme,
   themeMode: ThemeMode,
   opts: { isMac: boolean; titlebarInsetPx: number },
 ): void {
   const tk = resolved.tokens;
-  document.body.style.background = tk.bg;
+  const ty = resolved.typography;
+  const sz = resolved.sizing;
   document.body.style.color = tk.text;
-  // Theme typography flows to the document so every component that doesn't
-  // explicitly override font / base size picks it up. Cheap blanket effect —
-  // covers the long tail of components not yet swept to consume ResolvedTheme.
-  document.body.style.fontFamily = resolved.typography.fontSans;
-  document.body.style.fontSize = `${resolved.typography.base}px`;
-  // macOS vibrancy: the window is transparent and an NSVisualEffectView sits
-  // behind the webview (tauri.macos.conf.json). The page background must be
-  // clear for that material to show through; the opaque content area repaints
-  // t.bg itself. No-op (and reverts to the stylesheet) off macOS.
+  document.body.style.fontFamily = ty.fontSans;
+  document.body.style.fontSize = `${ty.base}px`;
+  // macOS vibrancy needs a clear page so the NSVisualEffectView shows through;
+  // elsewhere the stylesheet's background applies.
   document.body.style.background = opts.isMac ? "transparent" : "";
-  // Publish the typography + sizing scale as CSS custom properties so
-  // components can read `var(--fs-fs-sm)` etc. without each one threading
-  // ResolvedTheme through props. Incremental migration: components keep their
-  // inline pixel literals as the var fallback until they're swept.
   const root = document.documentElement.style;
-  root.setProperty("--fs-font-sans", resolved.typography.fontSans);
-  root.setProperty("--fs-font-mono", resolved.typography.fontMono);
-  root.setProperty("--fs-fs-xs", `${resolved.typography.scale.xs}px`);
-  root.setProperty("--fs-fs-sm", `${resolved.typography.scale.sm}px`);
-  root.setProperty("--fs-fs-md", `${resolved.typography.scale.md}px`);
-  root.setProperty("--fs-fs-lg", `${resolved.typography.scale.lg}px`);
-  root.setProperty("--fs-fs-xl", `${resolved.typography.scale.xl}px`);
-  root.setProperty("--fs-radius-sm", `${resolved.sizing.radius.sm}px`);
-  root.setProperty("--fs-radius-md", `${resolved.sizing.radius.md}px`);
-  root.setProperty("--fs-radius-lg", `${resolved.sizing.radius.lg}px`);
-  root.setProperty("--fs-control-h", `${resolved.sizing.controlHeight}px`);
-  root.setProperty("--fs-border-w", `${resolved.sizing.borderWidth}px`);
-  // Publish the custom-titlebar height (Linux only — 0 elsewhere) as a CSS
-  // variable. Every fixed-position overlay (scrim, side panel, modal, dock)
-  // reads `var(--fs-titlebar-h, 0px)` for its top inset so the titlebar stays
-  // accessible (drag, close) above modals — matching native macOS/Windows.
-  root.setProperty("--fs-titlebar-h", `${opts.titlebarInsetPx}px`);
-  // Tell native form controls (select dropdowns, scrollbars, autofill) to theme
-  // themselves to match — otherwise the OS defaults to light, leaving a white
-  // dropdown list on a dark page.
+  const px = (n: number) => `${n}px`;
+  const vars: [string, string][] = [
+    ["--fs-font-sans", ty.fontSans],
+    ["--fs-font-mono", ty.fontMono],
+    ["--fs-fs-xs", px(ty.scale.xs)],
+    ["--fs-fs-sm", px(ty.scale.sm)],
+    ["--fs-fs-md", px(ty.scale.md)],
+    ["--fs-fs-lg", px(ty.scale.lg)],
+    ["--fs-fs-xl", px(ty.scale.xl)],
+    ["--fs-fw-normal", String(ty.weights.normal)],
+    ["--fs-fw-medium", String(ty.weights.medium)],
+    ["--fs-fw-semibold", String(ty.weights.semibold)],
+    ["--fs-fw-bold", String(ty.weights.bold)],
+    ["--fs-label-case", ty.label.caps ? "uppercase" : "none"],
+    ["--fs-label-font", ty.label.mono ? "var(--fs-font-mono)" : "var(--fs-font-sans)"],
+    ["--fs-label-ls", String(ty.label.tracking)],
+    ["--fs-table-fs", px(ty.table.text)],
+    ["--fs-table-fs-mono", px(ty.table.mono)],
+    ["--fs-radius-sm", px(sz.radius.sm)],
+    ["--fs-radius-md", px(sz.radius.md)],
+    ["--fs-radius-lg", px(sz.radius.lg)],
+    ["--fs-control-h", px(sz.controlHeight)],
+    ["--fs-field-h", px(sz.fieldHeight.md)],
+    ["--fs-field-h-sm", px(sz.fieldHeight.sm)],
+    ["--fs-tab-indicator", px(sz.tabIndicator)],
+    ["--fs-border-w", px(sz.borderWidth)],
+    ["--fs-accent", tk.accent],
+    ["--fs-focus", tk.focus],
+    ["--fs-accent-ring", hexWithAlpha(tk.accent, 0.32)],
+    ["--fs-scroll-thumb", tk.scrollThumb],
+    ["--fs-scroll-thumb-hover", tk.scrollThumbHover],
+    ["--fs-scroll-thumb-active", tk.scrollThumbActive],
+    // Linux custom titlebar height (0 elsewhere); fixed overlays inset by it.
+    ["--fs-titlebar-h", px(opts.titlebarInsetPx)],
+  ];
+  for (const [k, v] of vars) root.setProperty(k, v);
+  if (ty.label.weight === null) root.removeProperty("--fs-label-fw");
+  else root.setProperty("--fs-label-fw", String(ty.label.weight));
   document.documentElement.style.colorScheme = themeMode;
 }

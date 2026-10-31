@@ -9,7 +9,7 @@ import { act, cleanup, render, screen, fireEvent, waitFor } from "@testing-libra
 import { ForwardChip, forwardId, parseLocalPort, portIssue } from "./forwardChip";
 import { api } from "../../api";
 import { useAppStore } from "../../store";
-import { tokens, hexWithAlpha, tintPair, THEMES, type Tokens } from "../../theme";
+import { tokens, hexWithAlpha, tintPair, THEMES, completeTokens, type Tokens } from "../../theme";
 import type { ForwardEntry, ForwardStatus, ForwardTarget, LocalPortCheck } from "../../types";
 
 const t = tokens("dark");
@@ -338,8 +338,8 @@ function allPalettes(): { label: string; t: Tokens }[] {
   const out: { label: string; t: Tokens }[] = [];
   for (const theme of THEMES) {
     for (const p of theme.palettes) {
-      out.push({ label: `${theme.id}/${p.id}/light`, t: p.light });
-      out.push({ label: `${theme.id}/${p.id}/dark`, t: p.dark });
+      out.push({ label: `${theme.id}/${p.id}/light`, t: completeTokens(p.light) });
+      out.push({ label: `${theme.id}/${p.id}/dark`, t: completeTokens(p.dark) });
     }
   }
   return out;

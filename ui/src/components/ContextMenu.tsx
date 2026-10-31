@@ -5,7 +5,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { tokens, FF_MONO, type ThemeMode, R_LG, FS_MD, FS_XS } from "../theme";
+import { tokens, FF_MONO, type ThemeMode, R_LG, FS_MD, FS_XS, shade } from "../theme";
 import { placeMenuAtCursor, rootZoom } from "../lib/zoom";
 
 import { useResolvedTheme } from "../store";
@@ -88,8 +88,8 @@ export function ContextMenu({ mode, position, items, onClose, rowName }: Props) 
         borderRadius: R_LG,
         boxShadow:
           mode === "dark"
-            ? "0 12px 32px rgba(0,0,0,0.45)"
-            : "0 12px 32px rgba(15,20,30,0.18)",
+            ? `0 12px 32px ${shade(t, 0.45)}`
+            : `0 12px 32px ${shade(t, 0.18)}`,
         padding: "6px 0",
       }}
     >

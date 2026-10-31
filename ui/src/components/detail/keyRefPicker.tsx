@@ -14,7 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
-import { FF_MONO, type Tokens, R_LG, FS_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { FF_MONO, type Tokens, R_LG, FS_LG, FS_MD, FS_SM, FS_XS, shade, LABEL_CASE, LABEL_FONT, labelTracking } from "../../theme";
 import type {
   ConfigMapKeysSummary,
   PvcSummary,
@@ -253,7 +253,7 @@ export function KeyRefPicker({
           right: 0,
           bottom: 0,
           left: 0,
-          background: "rgba(8,10,14,0.32)",
+          background: t.scrimSoft,
           backdropFilter: "blur(2px)",
           WebkitBackdropFilter: "blur(2px)",
           zIndex: 60,
@@ -279,7 +279,7 @@ export function KeyRefPicker({
           background: t.paletteBg,
           border: `1px solid ${t.paletteBorder}`,
           borderRadius: R_LG,
-          boxShadow: "0 24px 56px rgba(0,0,0,0.25)",
+          boxShadow: `0 24px 56px ${shade(t, 0.25)}`,
           backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)",
           zIndex: 61,
@@ -319,10 +319,10 @@ export function KeyRefPicker({
           <span
             style={{
               fontSize: FS_XS,
-              fontFamily: FF_MONO,
+              fontFamily: LABEL_FONT,
               color: t.textMuted,
-              textTransform: "uppercase",
-              letterSpacing: 0.4,
+              textTransform: LABEL_CASE,
+              letterSpacing: labelTracking(0.4),
             }}
           >
             {titleKind} · {namespace}

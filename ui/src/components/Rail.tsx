@@ -18,6 +18,14 @@ import {
   FS_SM,
   FS_XS,
   chromeSurface,
+  FW_BOLD,
+  FW_MEDIUM,
+  FW_SEMIBOLD,
+  shade,
+  LABEL_CASE,
+  LABEL_FONT,
+  labelTracking,
+  labelWeight,
 } from "../theme";
 import { IS_MAC } from "../lib/keyboard";
 import { compareApiGroups } from "../lib/crdGroups";
@@ -295,7 +303,7 @@ export function Rail({}: Props) {
             overContent: floating,
           }),
           borderRight: `1px solid ${t.border}`,
-          boxShadow: floating ? "4px 0 16px rgba(15,20,30,0.08)" : "none",
+          boxShadow: floating ? `4px 0 16px ${shade(t, 0.08)}` : "none",
           display: "flex",
           flexDirection: "column",
           // Opaque at once on open; translucent only once the shrink is done,
@@ -461,11 +469,11 @@ function RailFooter({
                     borderLeft: i === 0 ? "none" : `1px solid ${t.border}`,
                     background: active ? t.accentSoft : "transparent",
                     color: active ? t.accent : t.textMuted,
-                    fontFamily: FF_MONO,
+                    fontFamily: LABEL_FONT,
                     fontSize: FS_XS,
-                    fontWeight: 600,
-                    letterSpacing: 0.3,
-                    textTransform: "uppercase",
+                    fontWeight: labelWeight(FW_SEMIBOLD),
+                    letterSpacing: labelTracking(0.3),
+                    textTransform: LABEL_CASE,
                     cursor: "pointer",
                     display: "flex",
                     alignItems: "center",
@@ -554,7 +562,7 @@ function FooterRowButton({
           style={{
             flex: 1,
             fontSize: FS_MD,
-            fontWeight: 500,
+            fontWeight: FW_MEDIUM,
             whiteSpace: "nowrap",
             color: accent ? t.accent : t.text,
           }}
@@ -604,11 +612,11 @@ function RailGroup({
       <div
         style={{
           fontSize: FS_XS,
-          fontWeight: 700,
+          fontWeight: labelWeight(FW_BOLD),
           color: t.textMuted,
-          textTransform: "uppercase",
-          letterSpacing: 0.6,
-          fontFamily: FF_MONO,
+          textTransform: LABEL_CASE,
+          letterSpacing: labelTracking(0.6),
+          fontFamily: LABEL_FONT,
           padding: "6px 16px 4px",
           opacity: open ? 1 : 0,
           transition: "opacity .15s",
@@ -870,8 +878,8 @@ const RailItem = memo(function RailItem({
           border: "none",
           cursor: "pointer",
           fontFamily: "inherit",
-          background: active ? t.accentSoft : undefined,
-          color: active ? t.accent : t.textDim,
+          background: active ? t.railActive : undefined,
+          color: active ? t.railActiveText : t.textDim,
           width: "100%",
           minHeight: 32,
           position: "relative",
@@ -889,7 +897,7 @@ const RailItem = memo(function RailItem({
               bottom: 6,
               width: 2,
               borderRadius: R_SM,
-              background: t.accent,
+              background: t.railIndicator,
             }}
           />
         )}
@@ -900,7 +908,7 @@ const RailItem = memo(function RailItem({
               height: 16,
               flexShrink: 0,
               display: "flex",
-              color: active ? t.accent : t.textDim,
+              color: active ? t.railActiveText : t.textDim,
             }}
           >
             {icon}
@@ -910,12 +918,12 @@ const RailItem = memo(function RailItem({
           style={{
             flex: 1,
             fontSize: FS_MD,
-            fontWeight: active ? 600 : 500,
+            fontWeight: active ? FW_SEMIBOLD : FW_MEDIUM,
             letterSpacing: -0.1,
             opacity: open ? 1 : 0,
             transition: "opacity .15s",
             whiteSpace: "nowrap",
-            color: active ? t.accent : t.text,
+            color: active ? t.railActiveText : t.text,
             minWidth: 0,
             overflow: "hidden",
             textOverflow: "ellipsis",

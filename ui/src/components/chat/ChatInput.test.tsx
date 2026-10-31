@@ -233,3 +233,23 @@ describe("ChatInput — clipboard image attachments", () => {
     expect(images).toEqual([{ mime: "image/png", data: "aGk=" }]);
   });
 });
+
+describe("ChatInput — layout", () => {
+  it("never scrolls the composer sideways and lets the meta row wrap", () => {
+    renderInput({ onCompact: () => {}, usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, contextLimit: 200000 });
+    const textarea = screen.getByRole("textbox");
+    expect(textarea.style.overflowX).toBe("hidden");
+    expect(textarea.style.overflowWrap).toBe("anywhere");
+    const meta = screen.getByRole("button", { name: "compact" }).parentElement!;
+    expect(meta.style.flexWrap).toBe("wrap");
+    expect(meta.style.minWidth).toBe("0px");
+  });
+
+  it("paints the thumbnail remove badge from theme tokens", async () => {
+    renderInput();
+    pasteImage(pngFile());
+    const badge = await screen.findByRole("button", { name: "Remove shot.png" });
+    expect(badge.style.color).not.toBe("rgb(255, 255, 255)");
+    expect(badge.style.background).not.toContain("15, 20, 30");
+  });
+});

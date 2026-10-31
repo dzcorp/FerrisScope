@@ -10,6 +10,7 @@ import {
   FS_SM,
   FS_XS,
   hexWithAlpha,
+  FW_SEMIBOLD,
 } from "../../theme";
 import { Btn, ErrorBlock } from "../ui";
 import { useCopyFlash } from "../detail/primitives";
@@ -104,7 +105,7 @@ function ToolApprovalCardInner({ chatId, approval }: Props) {
             marginBottom: 6,
           }}
         >
-          <span style={{ color: t.warn, fontWeight: 600, fontSize: FS_SM }}>
+          <span style={{ color: t.warn, fontWeight: FW_SEMIBOLD, fontSize: FS_SM }}>
             ⚠ APPROVAL REQUIRED
           </span>
           <span style={{ color: t.text, fontSize: FS_MD, flex: 1, minWidth: 0 }}>

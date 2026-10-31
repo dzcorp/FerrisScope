@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { useResolvedTheme } from "../../store";
 import { api } from "../../api";
-import { FF_MONO, type ThemeMode, R_MD, FS_SM, hexWithAlpha } from "../../theme";
+import { FF_MONO, type ThemeMode, R_MD, FS_SM, hexWithAlpha, FW_SEMIBOLD } from "../../theme";
 import { Btn, ErrorBlock } from "../ui";
 import type { ApprovalDecision } from "../../types";
 import type { PendingApproval } from "./chatStreaming";
@@ -103,7 +103,7 @@ function ToolApprovalBulkBarInner({ chatId, approvals }: Props) {
           gap: 8,
         }}
       >
-        <span style={{ color: t.warn, fontWeight: 600, fontSize: FS_SM }}>
+        <span style={{ color: t.warn, fontWeight: FW_SEMIBOLD, fontSize: FS_SM }}>
           ⚠ {approvals.length} APPROVALS PENDING
         </span>
         <span

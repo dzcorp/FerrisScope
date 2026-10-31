@@ -54,11 +54,16 @@ import {
   usageColor,
   clusterAccent,
   FF_MONO,
-  FONT_MONO,
+  FF_SANS,
+  TABLE_FS_MONO,
+  TABLE_FS_TEXT,
+  tableFonts,
+  type TableFonts,
   type ThemeMode,
   FS_MD,
   FS_SM,
-  FS_XS,
+  FW_NORMAL,
+  FW_SEMIBOLD,
 } from "../theme";
 import type { DetailTarget } from "./DetailPanel";
 import type { ObserveTarget } from "./LogPanel";
@@ -372,6 +377,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   const density = useAppStore((s) => s.settings.density);
   const monoTables = useAppStore((s) => s.settings.monoTables);
   const resolved = useResolvedTheme();
+  const tableType = resolved.typography.table;
   const ROW_HEIGHT = resolved.sizing.rowHeights[density];
   const addDockTab = useAppStore((s) => s.addDockTab);
   // Display name for a row's origin cluster (terminal tab titles, context
@@ -1148,6 +1154,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // longest names in practical clusters (kube-system pods top out around
   // 60 chars) without scanning 2800 rows on every delta — the result
   // converges within the first sync.
+  const fonts = useMemo(() => tableFonts(resolved.typography), [resolved.typography]);
   const naturalWidths = useMemo(() => {
     if (filtered.length === 0) return null;
     const sample = filtered.slice(0, 200);
@@ -1161,11 +1168,12 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
           ? clusterColumnNaturalWidth(
               c,
               clusters.map((cl) => clusterMeta[cl.id]?.short ?? cl.name),
+              fonts,
             )
-          : naturalContentWidth(c, sample);
+          : naturalContentWidth(c, sample, fonts, monoTables);
     }
     return result;
-  }, [filtered, visibleColumns, clusters, clusterMeta]);
+  }, [filtered, visibleColumns, clusters, clusterMeta, fonts, monoTables]);
 
   useEffect(() => {
     if (containerWidth === 0) return;
@@ -1367,7 +1375,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
           ref={headerRef}
           style={{
             display: "flex",
-            background: t.headerAlt,
+            background: t.tableHeader,
             borderBottom: `1px solid ${t.border}`,
             flexShrink: 0,
             position: "sticky",
@@ -1438,12 +1446,12 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
                   flexGrow: isStretchCol ? 1 : 0,
                   position: "relative",
                   padding: i === 1 ? "10px 12px 10px 22px" : "10px 12px",
-                  fontSize: FS_XS,
-                  fontWeight: 700,
-                  color: sort ? t.text : t.textMuted,
-                  textTransform: "uppercase",
-                  letterSpacing: 0.5,
-                  fontFamily: FF_MONO,
+                  fontSize: tableType.header,
+                  fontWeight: resolved.typography.weights[tableType.headerWeight],
+                  color: sort ? t.text : t.tableHeaderText,
+                  textTransform: tableType.headerCaps ? "uppercase" : "none",
+                  letterSpacing: tableType.headerCaps ? 0.5 : 0,
+                  fontFamily: tableType.headerMono ? FF_MONO : FF_SANS,
                   textAlign: rightAlign(header.column.id) ? "right" : "left",
                   cursor: canSort ? "pointer" : "default",
                   userSelect: "none",
@@ -2470,7 +2478,7 @@ const Row = memo(function Row({
   dimmed?: boolean;
   children: React.ReactNode;
 }) {
-  const baseBg = checked ? t.accentSoft : selected ? t.hover : "transparent";
+  const baseBg = checked ? t.rowChecked : selected ? t.rowSelected : "transparent";
   return (
     <div
       data-uid={uid}
@@ -2485,6 +2493,10 @@ const Row = memo(function Row({
         display: "flex",
         cursor: "pointer",
         background: baseBg,
+        boxShadow:
+          selected && t.rowSelectedBar !== "transparent"
+            ? `inset 3px 0 0 ${t.rowSelectedBar}`
+            : undefined,
         borderBottom: `1px solid ${t.borderSoft}`,
         color: t.text,
         opacity: dimmed ? 0.45 : undefined,
@@ -2543,17 +2555,9 @@ export function measureText(text: string, font: string): number {
   return width;
 }
 
-// Cell font strings used by canvas measureText for column-width fitting.
-// Canvas cannot resolve CSS custom properties, so these must reference a
-// literal font family. We use the Default theme's JetBrains Mono — themes
-// that pick a different mono will have slightly off measurements, but the
-// resize handles still let the operator tune column widths interactively.
-const CELL_FONT_TEXT = "12px system-ui, -apple-system, Segoe UI, sans-serif";
-const CELL_FONT_MONO = `12px ${FONT_MONO}`;
-const HEADER_FONT = `700 10.5px ${FONT_MONO}`;
-
-function isMonoCell(c: ColumnDef): boolean {
-  if (c.id === "name" || c.id === "namespace" || c.id === "node") return true;
+// Mirrors the mono decision in `renderCell` for the columns auto-fit sizes.
+function isMonoCell(c: ColumnDef, monoTables: boolean): boolean {
+  if (c.id === "name" || c.id === "namespace" || c.id === "node") return monoTables;
   switch (c.kind) {
     case "age":
     case "number":
@@ -2570,10 +2574,21 @@ function isMonoCell(c: ColumnDef): boolean {
 // chrome pad covers the sort caret (~14 px when active), letter-spacing
 // on the uppercase header, and a small breathing room so text doesn't
 // kiss the right edge.
-function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
+function headerTextWidth(c: ColumnDef, fonts: TableFonts): number {
+  const label = String(c.header ?? "");
+  return fonts.headerCaps
+    ? measureText(label.toUpperCase(), fonts.header) * 1.12
+    : measureText(label, fonts.header);
+}
+
+function naturalContentWidth(
+  c: ColumnDef,
+  sample: ResourceRow[],
+  fonts: TableFonts,
+  monoTables: boolean,
+): number {
   const CHROME_PAD = 28;
-  const headerWidth =
-    measureText(String(c.header ?? "").toUpperCase(), HEADER_FONT) * 1.12;
+  const headerWidth = headerTextWidth(c, fonts);
 
   // Phase column renders StatusPill (when non-ambient) + ContainerDots
   // (when the row carries `container_states`, i.e. pods). Plain
@@ -2583,7 +2598,6 @@ function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
   // Mirror the rendering math from `renderCell`'s `phase` branch.
   if (c.kind === "phase") {
     // Dense StatusPill: 3px bar + 5px gap before the text glyphs.
-    const PILL_FONT = `500 11px system-ui, -apple-system, Segoe UI, sans-serif`;
     const PILL_CHROME = 8;
     const PHASE_WRAP_GAP = 8; // PHASE_WRAP's gap between pill and dots
     const DOT_SIZE = 7; // size prop on ContainerDots in ResourceTable
@@ -2601,7 +2615,7 @@ function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
         : [];
       const isPodRow = states.length > 0;
       const pillWidth =
-        isPodRow && ambient ? 0 : measureText(phase, PILL_FONT) + PILL_CHROME;
+        isPodRow && ambient ? 0 : measureText(phase, fonts.pill) + PILL_CHROME;
 
       let dotsWidth = 0;
       if (isPodRow) {
@@ -2633,7 +2647,7 @@ function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
     return Math.ceil(Math.max(maxRendered, headerWidth)) + CHROME_PAD;
   }
 
-  const font = isMonoCell(c) ? CELL_FONT_MONO : CELL_FONT_TEXT;
+  const font = isMonoCell(c, monoTables) ? fonts.mono : fonts.text;
   let dataWidth = 0;
   for (const r of sample) {
     const v = cellRaw(c, r);
@@ -2652,14 +2666,17 @@ function naturalContentWidth(c: ColumnDef, sample: ResourceRow[]): number {
 // Natural width for the synthetic Cluster column — the longest *displayed*
 // (compressed) member name plus the identity dot (8px) and its gap (7px).
 // Same CHROME_PAD + header floor as `naturalContentWidth`.
-function clusterColumnNaturalWidth(c: ColumnDef, names: string[]): number {
+function clusterColumnNaturalWidth(
+  c: ColumnDef,
+  names: string[],
+  fonts: TableFonts,
+): number {
   const CHROME_PAD = 28;
   const DOT_AND_GAP = 15;
-  const headerWidth =
-    measureText(String(c.header ?? "").toUpperCase(), HEADER_FONT) * 1.12;
+  const headerWidth = headerTextWidth(c, fonts);
   let nameWidth = 0;
   for (const name of names) {
-    const w = measureText(name, CELL_FONT_TEXT);
+    const w = measureText(name, fonts.text);
     if (w > nameWidth) nameWidth = w;
   }
   return Math.ceil(Math.max(nameWidth + DOT_AND_GAP, headerWidth)) + CHROME_PAD;
@@ -2986,7 +3003,7 @@ export function renderCell(
               fontFamily: FF_MONO,
               fontSize: FS_SM,
               color,
-              fontWeight: n > 0 ? 600 : 400,
+              fontWeight: n > 0 ? FW_SEMIBOLD : FW_NORMAL,
             }}
           >
             {n}
@@ -3068,7 +3085,7 @@ export function renderCell(
           onClick={onClick}
           style={{
             fontFamily: mono ? FF_MONO : "inherit",
-            fontSize: mono ? 11.5 : 12,
+            fontSize: mono ? TABLE_FS_MONO : TABLE_FS_TEXT,
             color: c.id === "namespace" || c.id === "controlled_by" ? t.textDim : t.text,
             fontVariantNumeric: isQty ? "tabular-nums" : undefined,
             overflow: "hidden",

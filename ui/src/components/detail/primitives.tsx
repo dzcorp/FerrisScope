@@ -13,7 +13,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { DETAIL_LAYOUT, FF_MONO, type Tokens, R_SM, R_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { DETAIL_LAYOUT, FF_MONO, type Tokens, R_SM, R_LG, FS_MD, FS_SM, FS_XS, FW_BOLD, FW_SEMIBOLD, LABEL_CASE, LABEL_FONT, labelTracking, labelWeight } from "../../theme";
 import { MOD_KEY } from "../../lib/keyboard";
 import { Chip, Icons, Tooltip } from "../ui";
 
@@ -58,11 +58,11 @@ export function DetailRow({
         <div
           style={{
             fontSize: FS_XS,
-            fontWeight: 700,
-            color: t.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 0.6,
-            fontFamily: FF_MONO,
+            fontWeight: labelWeight(FW_BOLD),
+            color: t.detailLabel,
+            textTransform: LABEL_CASE,
+            letterSpacing: labelTracking(0.6),
+            fontFamily: LABEL_FONT,
             marginTop: 2,
           }}
         >
@@ -72,7 +72,7 @@ export function DetailRow({
       <div
         style={{
           minWidth: 0,
-          color: t.text,
+          color: t.detailValue,
           display: "flex",
           flexWrap: "wrap",
           alignItems: "center",
@@ -339,10 +339,10 @@ export function ExpandAllButton({
         color: t.textDim,
         cursor: "pointer",
         fontSize: FS_XS,
-        fontFamily: FF_MONO,
-        textTransform: "uppercase",
-        letterSpacing: 0.4,
-        fontWeight: 700,
+        fontFamily: LABEL_FONT,
+        textTransform: LABEL_CASE,
+        letterSpacing: labelTracking(0.4),
+        fontWeight: labelWeight(FW_BOLD),
       }}
     >
       {allOpen ? "Collapse all" : "Expand all"}
@@ -578,7 +578,7 @@ export function ConditionChip({
         padding: "1px 7px",
         borderRadius: R_SM,
         fontSize: FS_SM,
-        fontWeight: 600,
+        fontWeight: FW_SEMIBOLD,
         background: bg,
         color: fg,
       }}
@@ -629,7 +629,7 @@ export function ChipStrip({
               padding: "1px 7px",
               borderRadius: R_SM,
               fontSize: FS_SM,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               fontFamily: mono ? FF_MONO : "inherit",
               background: bg,
               color: fg,
@@ -912,11 +912,11 @@ export function SubGrid({
             <div
               style={{
                 fontSize: FS_XS,
-                fontWeight: 700,
+                fontWeight: labelWeight(FW_BOLD),
                 color: t.textMuted,
-                textTransform: "uppercase",
-                letterSpacing: 0.5,
-                fontFamily: FF_MONO,
+                textTransform: LABEL_CASE,
+                letterSpacing: labelTracking(0.5),
+                fontFamily: LABEL_FONT,
                 marginBottom: 2,
               }}
             >

@@ -8,7 +8,7 @@
 // a Force Takeover button, and a red strip on hard errors.
 
 import type { Tokens } from "../../theme";
-import { FF_MONO, R_MD, FS_SM, FS_XS } from "../../theme";
+import { FF_MONO, R_MD, FS_SM, FS_XS, FW_SEMIBOLD, shade } from "../../theme";
 import { Btn, ErrorBlock } from "../ui";
 import { useEditSession } from "./editSession";
 
@@ -32,7 +32,7 @@ export function GlobalSaveBar({ t }: { t: Tokens }) {
         display: "flex",
         flexDirection: "column",
         gap: 8,
-        boxShadow: "0 -8px 24px rgba(0,0,0,0.10)",
+        boxShadow: `0 -8px 24px ${shade(t, 0.10)}`,
         zIndex: 5,
       }}
     >
@@ -120,7 +120,7 @@ function ConflictRow({
           fontSize: FS_SM,
           fontFamily: FF_MONO,
           color: t.warn,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
         }}
       >
         SSA conflict

@@ -7,7 +7,21 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
-import { FF_MONO, type Tokens, R_MD, R_SM, FS_XS } from "../../theme";
+import {
+  FF_MONO,
+  FIELD_H,
+  FIELD_H_SM,
+  FS_MD,
+  FS_SM,
+  FS_XS,
+  hexWithAlpha,
+  R_MD,
+  R_SM,
+  type Tokens,
+  FW_MEDIUM,
+  FW_SEMIBOLD,
+  shade,
+} from "../../theme";
 import { Tooltip } from "./Tooltip";
 
 export type BtnVariant = "primary" | "secondary" | "ghost" | "danger";
@@ -31,9 +45,9 @@ type BtnProps = {
   pressed?: boolean;
 };
 
-// Push button for primary/secondary/ghost/danger variants. Hit target ≥ 28px
-// per R-08; primary uses the accent token, danger never colors a default
-// action (callers place danger in trailing menu items per R-04).
+// Push button for primary/secondary/ghost/danger variants. Height is the
+// theme's `sizing.fieldHeight` (Default keeps R-08's ≥ 28px); danger never
+// colors a default action (callers place danger in trailing menu items, R-04).
 export function Btn({
   t,
   variant = "secondary",
@@ -57,8 +71,8 @@ export function Btn({
 
   const sizes =
     size === "sm"
-      ? { pad: "5px 10px", fs: 11.5, h: 26, gap: 6, iconSz: 12 }
-      : { pad: "7px 13px", fs: 12.5, h: 32, gap: 7, iconSz: 13 };
+      ? { pad: "0 10px", fs: `calc(${FS_SM} + 0.5px)`, h: FIELD_H_SM, gap: 6, iconSz: 12 }
+      : { pad: "0 13px", fs: FS_MD, h: FIELD_H, gap: 7, iconSz: 13 };
 
   const variants: Record<
     BtnVariant,
@@ -66,17 +80,17 @@ export function Btn({
   > = {
     primary: {
       bg: active ? t.accentActive : hover ? t.accentHover : t.accent,
-      fg: "#ffffff",
+      fg: t.onAccent,
       border: "transparent",
       shadow: hover
-        ? `0 1px 2px rgba(15,20,30,0.10), 0 0 0 3px ${t.accentSoft}`
-        : "0 1px 2px rgba(15,20,30,0.06)",
+        ? `0 1px 2px ${shade(t, 0.10)}, 0 0 0 3px ${t.accentSoft}`
+        : `0 1px 2px ${shade(t, 0.06)}`,
     },
     secondary: {
       bg: hover ? t.btnHover : t.surface,
       fg: t.text,
       border: t.border,
-      shadow: "0 1px 0 rgba(15,20,30,0.02)",
+      shadow: `0 1px 0 ${shade(t, 0.02)}`,
     },
     ghost: {
       bg: hover ? t.hover : "transparent",
@@ -85,9 +99,9 @@ export function Btn({
       shadow: "none",
     },
     danger: {
-      bg: hover ? "rgba(244,63,94,0.12)" : "transparent",
+      bg: hover ? hexWithAlpha(t.bad, 0.12) : "transparent",
       fg: t.bad,
-      border: hover ? "rgba(244,63,94,0.32)" : "transparent",
+      border: hover ? hexWithAlpha(t.bad, 0.32) : "transparent",
       shadow: "none",
     },
   };
@@ -123,7 +137,7 @@ export function Btn({
         color: v.fg,
         fontFamily: "inherit",
         fontSize: sizes.fs,
-        fontWeight: variant === "primary" ? 600 : 500,
+        fontWeight: variant === "primary" ? FW_SEMIBOLD : FW_MEDIUM,
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.55 : 1,
         outline: "none",
@@ -167,9 +181,9 @@ export function Btn({
             padding: "1px 5px",
             borderRadius: R_SM,
             background:
-              variant === "primary" ? "rgba(255,255,255,0.18)" : t.chip,
+              variant === "primary" ? hexWithAlpha(t.onAccent, 0.18) : t.chip,
             color:
-              variant === "primary" ? "rgba(255,255,255,0.8)" : t.textMuted,
+              variant === "primary" ? hexWithAlpha(t.onAccent, 0.8) : t.textMuted,
             marginLeft: 2,
           }}
         >

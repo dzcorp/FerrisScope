@@ -10,6 +10,9 @@ import {
   FS_SM,
   FS_XS,
   R_SM,
+  FW_BOLD,
+  FW_NORMAL,
+  FW_SEMIBOLD,
 } from "../theme";
 import { Chip, ErrorBlock } from "./ui";
 import {
@@ -137,7 +140,7 @@ function MergedView({
               alignItems: "center",
               gap: 8,
               fontSize: FS_SM,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.textDim,
               marginBottom: 4,
             }}
@@ -153,7 +156,7 @@ function MergedView({
               }}
             />
             {g.label}
-            <span style={{ color: t.textMuted, fontWeight: 400 }}>({g.items.length})</span>
+            <span style={{ color: t.textMuted, fontWeight: FW_NORMAL }}>({g.items.length})</span>
           </div>
           <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
             {g.items.map((c, i) => (
@@ -203,12 +206,12 @@ function PerVersionView({
               color: t.text,
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
             }}
           >
             v{rel.version}
             {rel.published_at ? (
-              <span style={{ color: t.textMuted, fontWeight: 400, fontSize: FS_XS }}>
+              <span style={{ color: t.textMuted, fontWeight: FW_NORMAL, fontSize: FS_XS }}>
                 {rel.published_at.slice(0, 10)}
               </span>
             ) : null}
@@ -293,7 +296,7 @@ export function ReleaseNotes({
   return (
     <div data-fs-anchor="about-whatsnew" style={{ marginTop: 18 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-        <div style={{ fontSize: FS_LG, fontWeight: 700, color: t.text }}>
+        <div style={{ fontSize: FS_LG, fontWeight: FW_BOLD, color: t.text }}>
           {phase === "ready" && releases.length > 0
             ? `What's new in ${versionRangeLabel(releases)}`
             : "What's new"}

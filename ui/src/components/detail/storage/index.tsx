@@ -14,6 +14,7 @@ import {
   FS_MD,
   FS_SM,
   FS_XS,
+  FW_SEMIBOLD,
 } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
@@ -244,7 +245,7 @@ export function PersistentVolumeClaimSummary(props: {
               style={{
                 fontFamily: FF_MONO,
                 fontSize: FS_MD,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 color: t.text,
               }}
             >
@@ -467,7 +468,7 @@ export function PersistentVolumeSummary(props: {
               style={{
                 fontFamily: FF_MONO,
                 fontSize: FS_MD,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 color: t.text,
               }}
             >
@@ -706,7 +707,7 @@ export function StorageClassSummary(props: {
             style={{
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.text,
               wordBreak: "break-all",
             }}

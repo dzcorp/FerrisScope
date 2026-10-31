@@ -17,6 +17,9 @@ import {
   R_LG,
   R_MD,
   R_SM,
+  FW_BOLD,
+  FW_SEMIBOLD,
+  shade,
 } from "../theme";
 import {
   useClusterConnection,
@@ -375,7 +378,7 @@ function VirtualClusterBar({
       <span
         style={{
           fontSize: FS_MD,
-          fontWeight: 700,
+          fontWeight: FW_BOLD,
           color: t.text,
           whiteSpace: "nowrap",
         }}
@@ -413,7 +416,7 @@ function VirtualClusterBar({
               padding: "0 12px",
               borderRadius: R_MD,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               fontFamily: "inherit",
               cursor: "pointer",
               outline: "none",
@@ -448,7 +451,7 @@ function VirtualClusterBar({
               padding: 4,
               minWidth: 240,
               zIndex: 22,
-              boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+              boxShadow: `0 8px 24px ${shade(t, 0.25)}`,
               // Long context lists (Add cluster / member pickers) must
               // scroll, not run off the viewport.
               maxHeight: "min(420px, 60vh)",
@@ -594,7 +597,7 @@ function VirtualClusterBar({
                   style={{
                     border: `1px solid ${t.border}`,
                     background: canSave ? t.accent : t.chip,
-                    color: canSave ? "#fff" : t.textMuted,
+                    color: canSave ? t.onAccent : t.textMuted,
                     borderRadius: R_MD,
                     padding: "0 10px",
                     fontSize: FS_XS,
@@ -919,7 +922,7 @@ function MemberStrip({
                 background: t.surface,
                 border: `1px solid ${t.border}`,
                 borderRadius: R_MD,
-                boxShadow: "0 8px 28px rgba(0,0,0,0.28)",
+                boxShadow: `0 8px 28px ${shade(t, 0.28)}`,
                 padding: 4,
               }}
             >

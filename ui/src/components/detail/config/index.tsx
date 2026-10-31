@@ -12,7 +12,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FF_MONO, type ThemeMode, type Tokens, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_MD, R_SM, FS_MD, FS_SM, FS_XS, FW_BOLD, FW_SEMIBOLD, LABEL_CASE, LABEL_FONT, labelTracking, labelWeight } from "../../../theme";
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section } from "../../ui";
 import {
@@ -1126,7 +1126,7 @@ function SecretEditRow({
                 : t.textMuted,
             border: "none",
             cursor: !showPlaintext && !decodable ? "not-allowed" : "pointer",
-            fontWeight: 700,
+            fontWeight: FW_BOLD,
             letterSpacing: 0.4,
             whiteSpace: "nowrap",
           }}
@@ -1213,7 +1213,7 @@ function SecretValueRow({
               color: revealed ? t.warn : t.textDim,
               border: "none",
               cursor: "pointer",
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
             }}
             title={revealed ? "Hide plaintext" : "Decode base64 and reveal"}
           >
@@ -2273,11 +2273,11 @@ function LimitRangeEditItem({
         <span
           style={{
             fontSize: FS_XS,
-            fontWeight: 700,
+            fontWeight: labelWeight(FW_BOLD),
             color: t.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 0.6,
-            fontFamily: FF_MONO,
+            textTransform: LABEL_CASE,
+            letterSpacing: labelTracking(0.6),
+            fontFamily: LABEL_FONT,
           }}
         >
           Type
@@ -2303,11 +2303,11 @@ function LimitRangeEditItem({
           <div
             style={{
               fontSize: FS_XS,
-              fontWeight: 700,
+              fontWeight: labelWeight(FW_BOLD),
               color: t.textMuted,
-              textTransform: "uppercase",
-              letterSpacing: 0.5,
-              fontFamily: FF_MONO,
+              textTransform: LABEL_CASE,
+              letterSpacing: labelTracking(0.5),
+              fontFamily: LABEL_FONT,
               marginBottom: 4,
             }}
           >

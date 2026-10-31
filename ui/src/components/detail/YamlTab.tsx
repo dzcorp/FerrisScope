@@ -23,20 +23,23 @@ import { installClipboardShortcuts } from "../../lib/monacoClipboard";
 import { mergePatch, parseYaml, type Json } from "../../lib/yamlEdit";
 import { useResolvedTheme } from "../../store";
 import {
-  FF_MONO,
   FS_MD,
   FS_SM,
   FS_XS,
   R_SM,
-  type ThemeMode,
   type Tokens,
+  FW_BOLD,
+  LABEL_CASE,
+  LABEL_FONT,
+  labelTracking,
+  labelWeight,
 } from "../../theme";
 import { ErrorBlock } from "../ui";
+import { defineMonacoThemes, useMonacoTheme } from "../../lib/monacoTheme";
 
 export type YamlStale = { message: string };
 
 type Props = {
-  mode: ThemeMode;
   t: Tokens;
   // Stripped, source-like YAML — the editable baseline.
   yaml: string;
@@ -76,7 +79,6 @@ type Props = {
 };
 
 export function YamlTab({
-  mode,
   t,
   yaml,
   yamlRaw,
@@ -100,6 +102,7 @@ export function YamlTab({
   readOnly = false,
   readOnlyReason = null,
 }: Props) {
+  const monacoTheme = useMonacoTheme();
   const monoFont = useResolvedTheme().typography.fontMono;
 
   // Operator-facing toggle: render the unstripped raw YAML read-only so
@@ -252,15 +255,15 @@ export function YamlTab({
             alignItems: "center",
             gap: 7,
             fontSize: FS_XS,
-            fontFamily: FF_MONO,
+            fontFamily: LABEL_FONT,
             color:
               statusTone === "accent"
                 ? t.accent
                 : statusTone === "bad"
                   ? t.bad
                   : t.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 0.6,
+            textTransform: LABEL_CASE,
+            letterSpacing: labelTracking(0.6),
             minWidth: 0,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -374,7 +377,8 @@ export function YamlTab({
         <Editor
           height="100%"
           language="yaml"
-          theme={mode === "dark" ? "vs-dark" : "light"}
+          theme={monacoTheme}
+          beforeMount={defineMonacoThemes}
           value={value}
           onChange={(next) => {
             if (showRaw || saving || readOnly) return;
@@ -435,7 +439,7 @@ function StaleBanner({
       }}
     >
       <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-        <span style={{ color: t.warn, fontWeight: 700 }}>Object changed</span>
+        <span style={{ color: t.warn, fontWeight: FW_BOLD }}>Object changed</span>
         <span style={{ color: t.textDim }}>
           since you opened it — saving would overwrite the newer copy
         </span>
@@ -487,12 +491,12 @@ function toggleBtnStyle(t: Tokens, active: boolean): CSSProperties {
     border: "none",
     background: active ? t.accentSoft : t.chip,
     color: active ? t.accent : t.textDim,
-    fontFamily: FF_MONO,
+    fontFamily: LABEL_FONT,
     fontSize: FS_SM,
-    fontWeight: 700,
-    letterSpacing: 0.4,
+    fontWeight: labelWeight(FW_BOLD),
+    letterSpacing: labelTracking(0.4),
     cursor: "pointer",
-    textTransform: "uppercase",
+    textTransform: LABEL_CASE,
   };
 }
 
@@ -506,11 +510,11 @@ function chipBtnStyle(
     padding: "0 10px",
     borderRadius: R_SM,
     border: "none",
-    fontFamily: FF_MONO,
+    fontFamily: LABEL_FONT,
     fontSize: FS_SM,
-    fontWeight: 700,
-    letterSpacing: 0.4,
-    textTransform: "uppercase",
+    fontWeight: labelWeight(FW_BOLD),
+    letterSpacing: labelTracking(0.4),
+    textTransform: LABEL_CASE,
     cursor: disabled ? "not-allowed" : "pointer",
   };
   if (variant === "primary") {
