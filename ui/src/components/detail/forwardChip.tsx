@@ -29,6 +29,7 @@ import {
   hexWithAlpha,
   tintPair,
   tokensAreDark,
+  FW_SEMIBOLD,
 } from "../../theme";
 import type { ForwardEntry, ForwardTarget, LocalPortCheck } from "../../types";
 import { toast } from "../../lib/dialog";
@@ -233,7 +234,7 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
                 {issue.tone === "bad" ? Icons.error : Icons.warn}
               </span>
               <span style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
-                <span style={{ fontWeight: 600 }}>{issue.title}</span>
+                <span style={{ fontWeight: FW_SEMIBOLD }}>{issue.title}</span>
                 {issue.detail && <span style={{ color: t.textMuted }}>{issue.detail}</span>}
               </span>
               {suggestion !== null && (
@@ -495,7 +496,7 @@ function segment(t: Tokens, hover: boolean, divided: boolean, busy = false) {
     color: t.accent,
     fontFamily: "inherit",
     fontSize: "inherit",
-    fontWeight: 600,
+    fontWeight: FW_SEMIBOLD,
     cursor: busy ? "not-allowed" : "pointer",
     opacity: busy ? 0.6 : 1,
   } as const;
@@ -506,7 +507,7 @@ function portInput(t: Tokens, tone?: string) {
     width: "6ch",
     fontFamily: "inherit",
     fontSize: "inherit",
-    fontWeight: 600,
+    fontWeight: FW_SEMIBOLD,
     background: "transparent",
     color: tone ?? t.text,
     border: "none",
@@ -544,7 +545,7 @@ function chipButton(t: Tokens, tone: string, busy: boolean) {
     border: `1px solid ${tone}`,
     background: fill.bg,
     color: fill.fg,
-    fontWeight: 600,
+    fontWeight: FW_SEMIBOLD,
     cursor: busy ? "wait" : "pointer",
     fontFamily: "inherit",
     opacity: busy ? 0.6 : 1,

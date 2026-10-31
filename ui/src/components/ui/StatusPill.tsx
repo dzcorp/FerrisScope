@@ -4,6 +4,7 @@ import {
   statusIsTransient,
   type ThemeMode,
   type Tokens,
+  FW_MEDIUM,
 } from "../../theme";
 import { Tooltip } from "./Tooltip";
 
@@ -63,7 +64,7 @@ export function StatusPill({ status, t, dense, compact }: Props) {
         gap: dense ? 5 : 7,
         color: t.text,
         fontSize: dense ? "var(--fs-fs-sm, 11px)" : "var(--fs-fs-md, 12.5px)",
-        fontWeight: 500,
+        fontWeight: FW_MEDIUM,
         lineHeight: 1.4,
         whiteSpace: "nowrap",
       }}

@@ -16,6 +16,15 @@ import {
   FS_SM,
   FS_XL,
   FS_XS,
+  FW_BOLD,
+  FW_MEDIUM,
+  FW_SEMIBOLD,
+  capacityColor,
+  LABEL_CASE,
+  LABEL_FONT,
+  labelTracking,
+  labelWeight,
+  hexWithAlpha,
 } from "../theme";
 import { MOD_KEY } from "../lib/keyboard";
 import { labelFor, type ClusterLabel } from "../lib/clusterName";
@@ -331,7 +340,7 @@ export function FleetLanding({ mode, onSelect }: Props) {
           <div
             style={{
               fontSize: FS_XL,
-              fontWeight: 700,
+              fontWeight: FW_BOLD,
               letterSpacing: -0.6,
               marginBottom: 4,
               color: t.text,
@@ -483,10 +492,10 @@ export function FleetLanding({ mode, onSelect }: Props) {
               border: `1px solid ${
                 duplicateName && trimmedName.length > 0
                   ? t.bad
-                  : "rgba(255,255,255,0.2)"
+                  : hexWithAlpha(t.bulkText, 0.2)
               }`,
-              background: "rgba(255,255,255,0.08)",
-              color: "#fff",
+              background: hexWithAlpha(t.bulkText, 0.08),
+              color: t.bulkText,
               fontSize: FS_MD,
               fontFamily: "inherit",
               outline: "none",
@@ -816,7 +825,7 @@ function VirtualContextCard({
   onOpen: () => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
-  const t = useResolvedTheme().tokens;
+  const { tokens: t, chart } = useResolvedTheme();
   const { resolved, colorIdx, agg } = resolveVctx(vctx, contexts, probes);
   const dotColor = vctxDotColor(t, agg);
 
@@ -876,7 +885,7 @@ function VirtualContextCard({
         <span
           style={{
             fontSize: FS_MD,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             letterSpacing: -0.2,
             color: t.text,
             overflow: "hidden",
@@ -904,8 +913,7 @@ function VirtualContextCard({
     );
   }
 
-  const colorFor = (r: number) =>
-    r > 0.8 ? t.bad : r > 0.65 ? t.warn : t.good;
+  const colorFor = (r: number) => capacityColor(r, t, chart);
   const stats = vctxStats(agg);
 
   return (
@@ -930,13 +938,13 @@ function VirtualContextCard({
           mode={mode}
           ratio={agg.cpuRatio}
           color={agg.cpuRatio != null ? colorFor(agg.cpuRatio) : t.unknown}
-          label="cpu"
+          label="CPU"
         />
         <GaugeWithLabel
           mode={mode}
           ratio={agg.memRatio}
           color={agg.memRatio != null ? colorFor(agg.memRatio) : t.unknown}
-          label="mem"
+          label="MEM"
         />
       </div>
       <div
@@ -962,7 +970,7 @@ function VirtualContextCard({
           <span
             style={{
               fontSize: FS_LG,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               letterSpacing: -0.3,
               color: t.text,
               overflow: "hidden",
@@ -1081,7 +1089,7 @@ function VirtualContextRow({
         <span
           style={{
             fontSize: FS_MD,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             letterSpacing: -0.2,
             color: t.text,
             whiteSpace: "nowrap",
@@ -1245,7 +1253,7 @@ function FleetGroup({
           style={{
             fontSize: FS_XS,
             fontFamily: FF_MONO,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             color: t.textMuted,
             letterSpacing: 0.2,
             whiteSpace: "nowrap",
@@ -1408,7 +1416,7 @@ function FleetCard({
   onSelect: (e: React.MouseEvent) => void;
   onMenu: (pos: MenuPosition) => void;
 }) {
-  const t = useResolvedTheme().tokens;
+  const { tokens: t, chart } = useResolvedTheme();
   const sub = showQualifier ? secondaryLabel(context, labels) : null;
   const density = useAppStore((s) => s.settings.density);
   const cardPad =
@@ -1430,7 +1438,7 @@ function FleetCard({
     probe.mem_capacity_mib > 0
       ? probe.mem_used_mib / probe.mem_capacity_mib
       : null;
-  const colorFor = (r: number) => (r > 0.8 ? t.bad : r > 0.65 ? t.warn : t.good);
+  const colorFor = (r: number) => capacityColor(r, t, chart);
 
   // Status dot logic: green when last probe was healthy, red when it
   // explicitly failed, neutral grey when we have no data yet.
@@ -1489,13 +1497,13 @@ function FleetCard({
           mode={mode}
           ratio={cpuRatio}
           color={cpuRatio != null ? colorFor(cpuRatio) : t.unknown}
-          label="cpu"
+          label="CPU"
         />
         <GaugeWithLabel
           mode={mode}
           ratio={memRatio}
           color={memRatio != null ? colorFor(memRatio) : t.unknown}
-          label="mem"
+          label="MEM"
         />
       </div>
 
@@ -1512,7 +1520,7 @@ function FleetCard({
           <div
             style={{
               fontSize: FS_LG,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               letterSpacing: -0.3,
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -1529,7 +1537,7 @@ function FleetCard({
                 style={{
                   marginLeft: 6,
                   fontSize: FS_SM,
-                  fontWeight: 500,
+                  fontWeight: FW_MEDIUM,
                   color: t.textMuted,
                   fontFamily: FF_MONO,
                   letterSpacing: 0,
@@ -1563,15 +1571,15 @@ function FleetCard({
           {context.is_current && (
             <span
               style={{
-                fontFamily: FF_MONO,
+                fontFamily: LABEL_FONT,
                 fontSize: FS_XS,
                 color: t.accent,
                 background: t.accentSoft,
                 padding: "1px 6px",
                 borderRadius: R_SM,
-                fontWeight: 600,
-                textTransform: "uppercase",
-                letterSpacing: 0.4,
+                fontWeight: labelWeight(FW_SEMIBOLD),
+                textTransform: LABEL_CASE,
+                letterSpacing: labelTracking(0.4),
                 flexShrink: 0,
               }}
             >
@@ -1724,9 +1732,8 @@ function GaugeWithLabel({
       <Gauge
         value={ratio ?? 0}
         size={42}
-        thickness={4}
-        color={ratio == null ? t.borderSoft : color}
-        track={t.borderSoft}
+        color={ratio == null ? t.chartRingTrack : color}
+        track={t.chartRingTrack}
       />
       <div
         style={{
@@ -1737,7 +1744,7 @@ function GaugeWithLabel({
           alignItems: "center",
           justifyContent: "center",
           fontSize: FS_XS,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
           fontFamily: FF_MONO,
           fontVariantNumeric: "tabular-nums",
           color: t.text,
@@ -1755,10 +1762,10 @@ function GaugeWithLabel({
           style={{
             fontSize: FS_XS,
             opacity: 0.55,
-            fontWeight: 500,
+            fontWeight: labelWeight(FW_MEDIUM),
             marginTop: 1,
-            textTransform: "uppercase",
-            letterSpacing: 0.4,
+            textTransform: LABEL_CASE,
+            letterSpacing: labelTracking(0.4),
           }}
         >
           {label}
@@ -1873,7 +1880,7 @@ function MiniCard({
           flex: 1,
           minWidth: 0,
           fontSize: FS_MD,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
           letterSpacing: -0.2,
           color: t.text,
           overflow: "hidden",
@@ -1887,7 +1894,7 @@ function MiniCard({
             style={{
               marginLeft: 6,
               fontSize: FS_SM,
-              fontWeight: 500,
+              fontWeight: FW_MEDIUM,
               color: t.textMuted,
               fontFamily: FF_MONO,
               letterSpacing: 0,
@@ -1900,15 +1907,15 @@ function MiniCard({
       {context.is_current && (
         <span
           style={{
-            fontFamily: FF_MONO,
+            fontFamily: LABEL_FONT,
             fontSize: FS_XS,
             color: t.accent,
             background: t.accentSoft,
             padding: "1px 5px",
             borderRadius: R_SM,
-            fontWeight: 600,
-            textTransform: "uppercase",
-            letterSpacing: 0.4,
+            fontWeight: labelWeight(FW_SEMIBOLD),
+            textTransform: LABEL_CASE,
+            letterSpacing: labelTracking(0.4),
             flexShrink: 0,
           }}
         >
@@ -2053,7 +2060,7 @@ function FleetRow({
         <span
           style={{
             fontSize: FS_MD,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             letterSpacing: -0.2,
             color: t.text,
             whiteSpace: "nowrap",
@@ -2069,7 +2076,7 @@ function FleetRow({
           <span
             style={{
               fontSize: FS_SM,
-              fontWeight: 500,
+              fontWeight: FW_MEDIUM,
               color: t.textMuted,
               fontFamily: FF_MONO,
               whiteSpace: "nowrap",
@@ -2085,15 +2092,15 @@ function FleetRow({
         {context.is_current && (
           <span
             style={{
-              fontFamily: FF_MONO,
+              fontFamily: LABEL_FONT,
               fontSize: FS_XS,
               color: t.accent,
               background: t.accentSoft,
               padding: "1px 5px",
               borderRadius: R_SM,
-              fontWeight: 600,
-              textTransform: "uppercase",
-              letterSpacing: 0.4,
+              fontWeight: labelWeight(FW_SEMIBOLD),
+              textTransform: LABEL_CASE,
+              letterSpacing: labelTracking(0.4),
               flexShrink: 0,
             }}
           >
@@ -2164,7 +2171,7 @@ function ViewToggle({}: { mode: ThemeMode }) {
               color: selected ? t.accent : t.textMuted,
               fontFamily: "inherit",
               fontSize: FS_SM,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               letterSpacing: 0.2,
               padding: "5px 12px",
               borderRadius: R_MD,

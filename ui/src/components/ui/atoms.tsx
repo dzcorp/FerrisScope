@@ -11,6 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import {
   FF_MONO,
+  FIELD_H,
   FS_LG,
   FS_MD,
   FS_SM,
@@ -20,8 +21,18 @@ import {
   R_SM,
   statusDot,
   type Tokens,
+  FW_BOLD,
+  FW_MEDIUM,
+  FW_NORMAL,
+  FW_SEMIBOLD,
+  shade,
+  LABEL_CASE,
+  LABEL_FONT,
+  labelTracking,
+  TAB_INDICATOR_W,
+  labelWeight,
 } from "../../theme";
-import { useAppStore } from "../../store";
+import { useAppStore, useResolvedTheme } from "../../store";
 import { placeSelectPopover, fixedRectScale } from "../../lib/zoom";
 import { Tooltip } from "./Tooltip";
 
@@ -40,11 +51,11 @@ export function Eyebrow({
     <div
       style={{
         fontSize: FS_XS,
-        fontWeight: 700,
+        fontWeight: labelWeight(FW_BOLD),
         color: t.textMuted,
-        textTransform: "uppercase",
-        letterSpacing: 0.6,
-        fontFamily: FF_MONO,
+        textTransform: LABEL_CASE,
+        letterSpacing: labelTracking(0.6),
+        fontFamily: LABEL_FONT,
         ...style,
       }}
     >
@@ -72,10 +83,10 @@ export function Section({
         alignItems: "center",
         justifyContent: "space-between",
         fontSize: FS_SM,
-        fontWeight: 700,
+        fontWeight: labelWeight(FW_BOLD),
         color: t.textDim,
-        textTransform: "uppercase",
-        letterSpacing: 0.5,
+        textTransform: LABEL_CASE,
+        letterSpacing: labelTracking(0.5),
         marginBottom: 10,
         ...style,
       }}
@@ -149,7 +160,7 @@ export function Chip({
         borderRadius: R_SM,
         background: palette.bg,
         color: palette.fg,
-        fontWeight: 500,
+        fontWeight: FW_MEDIUM,
         fontFamily: mono ? FF_MONO : "inherit",
         ...style,
       }}
@@ -184,11 +195,11 @@ export function Stat({
         style={{
           fontSize: FS_XS,
           color: t.textMuted,
-          fontWeight: 600,
-          textTransform: "uppercase",
-          letterSpacing: 0.5,
+          fontWeight: labelWeight(FW_SEMIBOLD),
+          textTransform: LABEL_CASE,
+          letterSpacing: labelTracking(0.5),
           marginBottom: 2,
-          fontFamily: FF_MONO,
+          fontFamily: LABEL_FONT,
           ...fit,
         }}
       >
@@ -197,7 +208,7 @@ export function Stat({
       <div
         style={{
           fontSize: FS_MD,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
           fontFamily: mono ? FF_MONO : "inherit",
           fontVariantNumeric: "tabular-nums",
           color: t.text,
@@ -262,7 +273,7 @@ export function Checkbox({
         alignItems: "center",
         justifyContent: "center",
         padding: 0,
-        color: "#fff",
+        color: t.onAccent,
         flexShrink: 0,
         transition: "border-color .12s, background .12s",
       }}
@@ -305,19 +316,27 @@ export function Checkbox({
 export function Gauge({
   value,
   size = 36,
-  thickness = 3.5,
+  thickness: thicknessProp,
   color,
   track,
+  rings,
 }: {
   value: number;
   size?: number;
   thickness?: number;
   color: string;
   track: string;
+  /// Inner rings (requests, limits) drawn concentric like Lens's doughnuts.
+  rings?: { value: number; color: string }[];
 }) {
-  const v = Math.max(0, Math.min(1, value));
-  const r = (size - thickness) / 2;
-  const c = 2 * Math.PI * r;
+  const chart = useResolvedTheme().chart;
+  const all = [{ value, color }, ...(rings ?? [])];
+  const multi = all.length > 1;
+  // Lens doughnut cutout by ring count (freelens chart/pie-chart.tsx).
+  const cutout = all.length === 2 ? 0.76 : all.length === 3 ? 0.63 : 0.5;
+  const outer = size / 2;
+  const ringW = multi ? (outer * (1 - cutout)) / all.length : 0;
+  const single = thicknessProp ?? Math.max(1.5, Math.round(size * chart.gaugeRing * 2) / 2);
   return (
     <div
       style={{
@@ -333,26 +352,29 @@ export function Gauge({
         viewBox={`0 0 ${size} ${size}`}
         style={{ transform: "rotate(-90deg)" }}
       >
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={r}
-          stroke={track}
-          strokeWidth={thickness}
-          fill="none"
-        />
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={r}
-          stroke={color}
-          strokeWidth={thickness}
-          fill="none"
-          strokeDasharray={c}
-          strokeDashoffset={c * (1 - v)}
-          strokeLinecap="round"
-          style={{ transition: "stroke-dashoffset .4s ease, stroke .2s" }}
-        />
+        {all.map((ring, i) => {
+          const w = multi ? Math.max(1, ringW - 0.75) : single;
+          const r = multi ? outer - ringW * (i + 0.5) : (size - single) / 2;
+          const c = 2 * Math.PI * r;
+          const v = Math.max(0, Math.min(1, ring.value));
+          return (
+            <g key={i} data-ring={i}>
+              <circle cx={outer} cy={outer} r={r} stroke={track} strokeWidth={w} fill="none" />
+              <circle
+                cx={outer}
+                cy={outer}
+                r={r}
+                stroke={ring.color}
+                strokeWidth={w}
+                fill="none"
+                strokeDasharray={c}
+                strokeDashoffset={c * (1 - v)}
+                strokeLinecap={chart.gaugeCap}
+                style={{ transition: "stroke-dashoffset .4s ease, stroke .2s" }}
+              />
+            </g>
+          );
+        })}
       </svg>
     </div>
   );
@@ -437,8 +459,8 @@ export function Toggle({
 }) {
   const dims =
     size === "sm"
-      ? { w: 22, h: 13, knob: 9, gap: 7, fs: 11, pad: 2 }
-      : { w: 30, h: 18, knob: 14, gap: 10, fs: 12.5, pad: 2 };
+      ? { w: 22, h: 13, knob: 9, gap: 7, fs: FS_SM, pad: 2 }
+      : { w: 30, h: 18, knob: 14, gap: 10, fs: FS_MD, pad: 2 };
   const onColor = tone === "warn" ? t.warn : t.accent;
   return (
     <button
@@ -482,9 +504,9 @@ export function Toggle({
             width: dims.knob,
             height: dims.knob,
             borderRadius: dims.knob / 2,
-            background: "#ffffff",
+            background: t.knob,
             transition: "left .15s",
-            boxShadow: "0 1px 2px rgba(0,0,0,0.15)",
+            boxShadow: `0 1px 2px ${shade(t, 0.15)}`,
           }}
         />
       </span>
@@ -517,7 +539,7 @@ export function TextInput({
   invalid?: boolean;
   ariaLabel?: string;
 }) {
-  const rest = invalid ? t.bad : t.border;
+  const rest = invalid ? t.bad : t.inputBorder;
   return (
     <input
       value={value}
@@ -526,15 +548,15 @@ export function TextInput({
       aria-label={ariaLabel}
       aria-invalid={invalid || undefined}
       onChange={(e) => onChange(e.target.value)}
-      onFocus={(e) => (e.currentTarget.style.borderColor = invalid ? t.bad : t.accent)}
+      onFocus={(e) => (e.currentTarget.style.borderColor = invalid ? t.bad : t.focus)}
       onBlur={(e) => (e.currentTarget.style.borderColor = rest)}
       style={{
-        padding: "7px 10px",
-        height: 32,
+        padding: "0 10px",
+        height: FIELD_H,
         border: `1px solid ${rest}`,
         opacity: disabled ? 0.6 : undefined,
         borderRadius: R_MD,
-        background: t.surface,
+        background: t.input,
         color: t.text,
         fontSize: FS_MD,
         fontFamily: mono ? FF_MONO : "inherit",
@@ -775,11 +797,11 @@ export function Select<V extends string | number>({
   };
 
   const triggerStyle: CSSProperties = {
-    padding: "7px 32px 7px 10px",
-    height: 32,
-    border: `1px solid ${open ? t.accent : t.border}`,
+    padding: "0 32px 0 10px",
+    height: FIELD_H,
+    border: `1px solid ${open ? t.focus : t.inputBorder}`,
     borderRadius: R_MD,
-    background: hover ? t.btnHover : t.surface,
+    background: hover ? t.btnHover : t.input,
     color: t.text,
     fontSize: FS_MD,
     fontFamily: "inherit",
@@ -865,8 +887,8 @@ export function Select<V extends string | number>({
               zIndex: 9000,
               boxShadow:
                 themeMode === "dark"
-                  ? "0 12px 32px rgba(0,0,0,0.45)"
-                  : "0 12px 32px rgba(15,20,30,0.18)",
+                  ? `0 12px 32px ${shade(t, 0.45)}`
+                  : `0 12px 32px ${shade(t, 0.18)}`,
             }}
           >
             {searchable && (
@@ -950,7 +972,7 @@ export function Select<V extends string | number>({
                     textAlign: "left",
                     cursor: "pointer",
                     minHeight: 28,
-                    fontWeight: selected ? 600 : 500,
+                    fontWeight: selected ? FW_SEMIBOLD : FW_MEDIUM,
                   }}
                 >
                   <span
@@ -1025,7 +1047,7 @@ export function Field({
         <div
           style={{
             fontSize: FS_MD,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             color: t.text,
             marginBottom: 3,
           }}
@@ -1060,7 +1082,7 @@ export function SectionHeader({
       <div
         style={{
           fontSize: FS_XL,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
           letterSpacing: -0.2,
           marginBottom: 2,
           color: t.text,
@@ -1120,17 +1142,17 @@ export function TabButton({
       onClick={onClick}
       style={{
         fontSize: FS_SM,
-        fontWeight: 600,
-        fontFamily: FF_MONO,
-        textTransform: "uppercase",
-        letterSpacing: 0.6,
+        fontWeight: labelWeight(FW_SEMIBOLD),
+        fontFamily: LABEL_FONT,
+        textTransform: LABEL_CASE,
+        letterSpacing: labelTracking(0.6),
         padding: "10px 14px",
         marginBottom: -1,
         border: "none",
         background: "transparent",
         cursor: "pointer",
-        color: active ? t.accent : t.textMuted,
-        borderBottom: `2px solid ${active ? t.accent : "transparent"}`,
+        color: active ? t.tabActiveText : t.tabText,
+        borderBottom: `${TAB_INDICATOR_W} solid ${active ? t.tabIndicator : "transparent"}`,
         transition: "color .12s, border-color .12s",
       }}
     >
@@ -1425,7 +1447,7 @@ export function EmptyState({
         color: t.textDim,
       }}
     >
-      <div style={{ fontSize: FS_LG, fontWeight: 600, marginBottom: 4 }}>
+      <div style={{ fontSize: FS_LG, fontWeight: FW_SEMIBOLD, marginBottom: 4 }}>
         {title}
       </div>
       {hint && (
@@ -1499,8 +1521,8 @@ export function ErrorBlock({
             flexWrap: "wrap",
           }}
         >
-          <span style={{ fontWeight: 600 }}>{c.title}</span>
-          <span style={{ color: t.textMuted, fontWeight: 400 }}>{c.body}</span>
+          <span style={{ fontWeight: FW_SEMIBOLD }}>{c.title}</span>
+          <span style={{ color: t.textMuted, fontWeight: FW_NORMAL }}>{c.body}</span>
           {hasMore && (
             <button
               type="button"
@@ -1562,7 +1584,7 @@ export function ErrorBlock({
         className="fs-selectable"
         style={{
           fontSize: FS_LG,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
           color: t.bad,
           cursor: "text",
         }}

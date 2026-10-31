@@ -22,7 +22,7 @@ import {
 } from "react";
 import { api } from "../../../api";
 import { useResolvedTheme } from "../../../store";
-import { FF_MONO, type ThemeMode, type Tokens, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XL, FS_XS } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XL, FS_XS, FW_BOLD, FW_SEMIBOLD, LABEL_CASE, LABEL_FONT, labelTracking, labelWeight } from "../../../theme";
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill, Tooltip } from "../../ui";
 import {
@@ -138,7 +138,7 @@ export function CustomResourceSummary(props: {
           style={{
             fontFamily: FF_MONO,
             fontSize: FS_MD,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             color: t.text,
             wordBreak: "break-all",
           }}
@@ -575,7 +575,7 @@ function TreeView({
                     <span
                       style={{
                         fontSize: FS_XL,
-                        fontWeight: 600,
+                        fontWeight: FW_SEMIBOLD,
                         color: t.text,
                         wordBreak: "break-word",
                         minWidth: 0,
@@ -971,15 +971,15 @@ function ObjectBranch({
   path: string;
 }) {
   const keys = orderedKeys(obj, schema);
-  if (keys.length === 0) return <Mute t={t}>{`{ }`}</Mute>;
   const ctx = useContext(TreeCtx);
   const matchKind = ctx.match(path);
-  if (matchKind === "miss") return null;
   // Default-open: depth≤1, or we're an ancestor of a filtered match, or
   // the user typed a filter (open the world so matches are visible).
   const initialOpen =
     depth <= 1 || matchKind === "ancestor" || ctx.filterActive;
   const { open, setOpen } = useDisclosureState(initialOpen, ctx);
+  if (keys.length === 0) return <Mute t={t}>{`{ }`}</Mute>;
+  if (matchKind === "miss") return null;
   const preview = objectPreview(obj, keys);
   const summary = (
     <SummaryLine
@@ -1032,10 +1032,10 @@ function ArrayBranch({
 }) {
   const ctx = useContext(TreeCtx);
   const matchKind = ctx.match(path);
-  if (matchKind === "miss") return null;
   const initialOpen =
     depth <= 1 || matchKind === "ancestor" || ctx.filterActive;
   const { open, setOpen } = useDisclosureState(initialOpen, ctx);
+  if (matchKind === "miss") return null;
   const itemSchema = schema?.items ?? null;
   const summary = (
     <SummaryLine
@@ -1120,6 +1120,9 @@ function ArrayItem({
 }) {
   const ctx = useContext(TreeCtx);
   const matchKind = ctx.match(path);
+  const initialOpen =
+    depth <= 2 || matchKind === "ancestor" || ctx.filterActive;
+  const { open, setOpen } = useDisclosureState(initialOpen, ctx);
   if (matchKind === "miss") return null;
 
   if (item == null || typeof item !== "object") {
@@ -1142,9 +1145,6 @@ function ArrayItem({
   const obj = item as Record<string, unknown>;
   const title = itemTitle(obj) ?? `item ${index}`;
   const keys = orderedKeys(obj, schema);
-  const initialOpen =
-    depth <= 2 || matchKind === "ancestor" || ctx.filterActive;
-  const { open, setOpen } = useDisclosureState(initialOpen, ctx);
 
   const titleNode = (
     <span style={{ display: "inline-flex", gap: 8, alignItems: "center", minWidth: 0 }}>
@@ -1155,7 +1155,7 @@ function ArrayItem({
         style={{
           fontFamily: FF_MONO,
           fontSize: FS_MD,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
           color: t.text,
           wordBreak: "break-all",
           overflow: "hidden",
@@ -1298,11 +1298,11 @@ function NestedRow({
       <div
         style={{
           fontSize: FS_XS,
-          fontWeight: 700,
+          fontWeight: labelWeight(FW_BOLD),
           color: t.textMuted,
-          textTransform: "uppercase",
-          letterSpacing: 0.5,
-          fontFamily: FF_MONO,
+          textTransform: LABEL_CASE,
+          letterSpacing: labelTracking(0.5),
+          fontFamily: LABEL_FONT,
           alignSelf: "start",
           marginTop: 3,
           minWidth: 0,

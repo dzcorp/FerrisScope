@@ -5,9 +5,12 @@ import type { Toast as ToastT } from "../store";
 import {
   
   FF_MONO,
-  FONT_SANS,
+  FF_SANS,
   type ThemeMode,
-  type Tokens, R_LG, R_MD, FS_MD, FS_XS
+  type Tokens, R_LG, R_MD, FS_MD, FS_XS,
+  FW_MEDIUM,
+  FW_SEMIBOLD,
+  FIELD_H,
 } from "../theme";
 import { IconBtn, Icons } from "./ui";
 
@@ -111,7 +114,7 @@ function HeaderToastCard({
           ? "3px auto 1fr auto auto"
           : "3px auto 1fr auto",
         alignItems: "center",
-        height: 32,
+        height: FIELD_H,
         width: 360,
         background: t.surface,
         color: t.text,
@@ -122,7 +125,7 @@ function HeaderToastCard({
         overflow: "hidden",
         animation: "fs-toast-slide-in .18s cubic-bezier(.2,.7,.2,1)",
         fontSize: FS_MD,
-        fontFamily: FONT_SANS,
+        fontFamily: FF_SANS,
         textAlign: "left",
         padding: 0,
       }}
@@ -147,7 +150,7 @@ function HeaderToastCard({
           textOverflow: "ellipsis",
           minWidth: 0,
           paddingRight: 8,
-          fontWeight: tone === "bad" ? 600 : 500,
+          fontWeight: tone === "bad" ? FW_SEMIBOLD : FW_MEDIUM,
         }}
       >
         {toast.text}

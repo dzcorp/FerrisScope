@@ -9,6 +9,13 @@ import {
   FS_MD,
   FS_SM,
   FS_XS,
+  FW_BOLD,
+  FW_SEMIBOLD,
+  shade,
+  LABEL_CASE,
+  LABEL_FONT,
+  labelTracking,
+  labelWeight,
 } from "../../theme";
 import type { ChatViewMessage } from "./chatStreaming";
 import { Markdown } from "./markdown";
@@ -35,13 +42,16 @@ type Props = {
 // history pays an O(N) reparse on every token delta.
 function MessageBubbleInner({ message }: Props) {
   const t = useResolvedTheme().tokens;
+  // While streaming, render only the safe prefix so half-typed markdown
+  // (mid-link, mid-code) doesn't flash as raw text.
+  const renderText = useMemo(() => {
+    const text = message.content ?? "";
+    if (!message.streaming) return text;
+    return text.slice(0, safePrefixLength(text));
+  }, [message.content, message.streaming]);
 
-  if (message.role === "tool") {
-    // Defensive — MessageList groups tool messages into ToolGroupBubble
-    // before they reach here. Returning null avoids a duplicate render
-    // path if a tool message ever slips through.
-    return null;
-  }
+  // MessageList renders tool messages via ToolGroupBubble.
+  if (message.role === "tool") return null;
 
   const isUser = message.role === "user";
   // User: tinted with the accent so it pops as "your turn". Assistant:
@@ -54,17 +64,6 @@ function MessageBubbleInner({ message }: Props) {
   const labelColor = isUser ? t.accent : t.textDim;
   const hasContent = (message.content ?? "").trim().length > 0;
   const hasToolCalls = !!message.toolCalls && message.toolCalls.length > 0;
-
-  // While streaming, render only the safe-prefix slice so partial
-  // markdown constructs (mid-link, mid-code, mid-row…) don't flash as
-  // raw text and then re-render. Once streaming settles we render the
-  // full content unconditionally. The slice is memoized so unrelated
-  // bubble re-renders don't recompute it.
-  const renderText = useMemo(() => {
-    const text = message.content ?? "";
-    if (!message.streaming) return text;
-    return text.slice(0, safePrefixLength(text));
-  }, [message.content, message.streaming]);
 
   // Pure-tool-call assistant message. While streaming we surface a tiny
   // "calling…" strip so the operator sees activity; once streaming settles
@@ -116,8 +115,8 @@ function MessageBubbleInner({ message }: Props) {
           lineHeight: 1.55,
           wordBreak: "break-word",
           boxShadow: isUser
-            ? "0 1px 2px rgba(15,20,30,0.04)"
-            : "0 1px 3px rgba(15,20,30,0.05)",
+            ? `0 1px 2px ${shade(t, 0.04)}`
+            : `0 1px 3px ${shade(t, 0.05)}`,
           // Paint containment: tells the browser the bubble's contents
           // can't affect layout / paint outside its box. Long
           // transcripts with shadows otherwise force the whole list to
@@ -127,13 +126,13 @@ function MessageBubbleInner({ message }: Props) {
       >
         <div
           style={{
-            fontFamily: FF_MONO,
+            fontFamily: LABEL_FONT,
             fontSize: FS_XS,
             color: labelColor,
-            letterSpacing: 0.6,
-            textTransform: "uppercase",
+            letterSpacing: labelTracking(0.6),
+            textTransform: LABEL_CASE,
             marginBottom: 5,
-            fontWeight: 700,
+            fontWeight: labelWeight(FW_BOLD),
             opacity: 0.85,
           }}
         >
@@ -289,7 +288,7 @@ function ToolCallStrip({
       <span style={{ color: t.textDim }}>›</span>
       <span>calling</span>
       {names.map((n, i) => (
-        <span key={`${n}-${i}`} style={{ color: t.accent, fontWeight: 600 }}>
+        <span key={`${n}-${i}`} style={{ color: t.accent, fontWeight: FW_SEMIBOLD }}>
           {n}
           {i < names.length - 1 ? "," : ""}
         </span>

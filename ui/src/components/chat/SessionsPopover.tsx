@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useResolvedTheme } from "../../store";
-import { tokens, FF_MONO, FONT_SANS, type ThemeMode, R_LG, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { tokens, FF_MONO, FF_SANS, type ThemeMode, R_LG, R_MD, FS_MD, FS_SM, FS_XS, FW_NORMAL, FW_SEMIBOLD, shade, LABEL_CASE, LABEL_FONT, labelTracking } from "../../theme";
 import { Btn, Icons } from "../ui";
 import type { SessionMeta } from "../../types";
 import { useEscLayer } from "../../lib/escStack";
@@ -115,13 +115,13 @@ export function SessionsPopover({
         background: t.surface,
         border: `1px solid ${t.border}`,
         borderRadius: R_LG,
-        boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+        boxShadow: `0 8px 24px ${shade(t, 0.18)}`,
         marginTop: 4,
         maxHeight: 420,
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
-        fontFamily: FONT_SANS,
+        fontFamily: FF_SANS,
       }}
     >
       <div
@@ -139,9 +139,9 @@ export function SessionsPopover({
             flex: 1,
             color: t.textMuted,
             fontSize: FS_SM,
-            fontFamily: FF_MONO,
-            letterSpacing: 0.5,
-            textTransform: "uppercase",
+            fontFamily: LABEL_FONT,
+            letterSpacing: labelTracking(0.5),
+            textTransform: LABEL_CASE,
           }}
         >
           Sessions
@@ -196,7 +196,7 @@ export function SessionsPopover({
               width: "100%",
               boxSizing: "border-box",
               fontSize: FS_MD,
-              fontFamily: FONT_SANS,
+              fontFamily: FF_SANS,
               color: t.text,
               background: t.surfaceAlt,
               border: `1px solid ${t.borderSoft}`,
@@ -243,9 +243,9 @@ export function SessionsPopover({
                   borderBottom: `1px solid ${t.borderSoft}`,
                   color: t.textMuted,
                   fontSize: FS_XS,
-                  fontFamily: FF_MONO,
-                  letterSpacing: 0.5,
-                  textTransform: "uppercase",
+                  fontFamily: LABEL_FONT,
+                  letterSpacing: labelTracking(0.5),
+                  textTransform: LABEL_CASE,
                 }}
               >
                 {g.label}
@@ -310,7 +310,7 @@ export function SessionsPopover({
                             borderRadius: R_MD,
                             padding: "3px 6px",
                             outline: "none",
-                            fontFamily: FONT_SANS,
+                            fontFamily: FF_SANS,
                           }}
                         />
                       ) : (
@@ -318,7 +318,7 @@ export function SessionsPopover({
                           style={{
                             color: isCurrent ? t.text : t.textMuted,
                             fontSize: FS_MD,
-                            fontWeight: isCurrent ? 600 : 400,
+                            fontWeight: isCurrent ? FW_SEMIBOLD : FW_NORMAL,
                             overflow: "hidden",
                             textOverflow: "ellipsis",
                             whiteSpace: "nowrap",

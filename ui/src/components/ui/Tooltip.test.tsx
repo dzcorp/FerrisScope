@@ -137,3 +137,29 @@ describe("Tooltip", () => {
     expect(onFocus).toHaveBeenCalled();
   });
 });
+
+describe("Tooltip palette roles", () => {
+  it("paints the palette's tooltip surface, ink and border", async () => {
+    const { useAppStore } = await import("../../store");
+    const initial = useAppStore.getState();
+    act(() => useAppStore.getState().setTheme("lens"));
+    vi.useFakeTimers();
+    try {
+      const { getByRole } = render(
+        <Tooltip label="hint" delay={0}>
+          <button>btn</button>
+        </Tooltip>,
+      );
+      fireEvent.mouseEnter(getByRole("button"));
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      const tip = document.querySelector('[role="tooltip"]') as HTMLElement;
+      expect(tip.style.background).toBe("rgb(24, 25, 28)");
+      expect(tip.style.color).toBe("rgb(255, 255, 255)");
+    } finally {
+      vi.useRealTimers();
+      act(() => useAppStore.setState({ ...initial }));
+    }
+  });
+});

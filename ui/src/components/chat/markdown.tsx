@@ -1,6 +1,6 @@
 import { logErr } from "../../lib/log";
 import { memo, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { FF_MONO, type Tokens, R_MD, R_SM, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { FF_MONO, type Tokens, R_MD, R_SM, FS_MD, FS_SM, FS_XS, FW_SEMIBOLD, LABEL_CASE, LABEL_FONT, labelTracking } from "../../theme";
 import { api } from "../../api";
 import { useAppStore } from "../../store";
 
@@ -227,7 +227,7 @@ function renderBlock(b: Block, key: number, t: Tokens): ReactNode {
           key={key}
           style={{
             fontSize: fs,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             color: t.text,
             marginTop: 4,
             lineHeight: 1.4,
@@ -333,7 +333,7 @@ function TableBlock({
                   padding: cellPad,
                   borderBottom: `1px solid ${t.border}`,
                   background: t.surfaceAlt,
-                  fontWeight: 600,
+                  fontWeight: FW_SEMIBOLD,
                   color: t.text,
                   // Headers are short labels — keep them on one line so
                   // single-word captions like "Status" don't break apart
@@ -435,11 +435,11 @@ function CodeBlock({
             background: "transparent",
             border: "none",
             color: copied ? t.good : t.textDim,
-            fontFamily: FF_MONO,
+            fontFamily: LABEL_FONT,
             fontSize: FS_XS,
             cursor: "pointer",
-            letterSpacing: 0.4,
-            textTransform: "uppercase",
+            letterSpacing: labelTracking(0.4),
+            textTransform: LABEL_CASE,
             padding: "0 2px",
           }}
         >

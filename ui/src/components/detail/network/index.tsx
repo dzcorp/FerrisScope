@@ -6,7 +6,7 @@
 import { useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS, FW_BOLD, FW_SEMIBOLD, LABEL_CASE, LABEL_FONT, labelTracking, labelWeight } from "../../../theme";
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
@@ -775,7 +775,7 @@ export function EndpointsSummary(props: {
           style={{
             fontFamily: FF_MONO,
             fontSize: FS_MD,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             color: totalReady > 0 ? t.good : totalNotReady > 0 ? t.warn : t.bad,
           }}
         >
@@ -948,7 +948,7 @@ function EndpointAddressRow({
           padding: "1px 7px",
           borderRadius: R_SM,
           fontSize: FS_SM,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
           background:
             tone === "good"
               ? "rgba(16,185,129,0.16)"
@@ -1046,7 +1046,7 @@ export function EndpointSliceSummary(props: {
           style={{
             fontFamily: FF_MONO,
             fontSize: FS_MD,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             color: ready === total && total > 0 ? t.good : ready === 0 ? t.bad : t.warn,
           }}
         >
@@ -1200,11 +1200,11 @@ function EndpointSliceEntryRow({
         <span
           style={{
             fontSize: FS_XS,
-            fontWeight: 700,
+            fontWeight: labelWeight(FW_BOLD),
             color: t.textMuted,
-            fontFamily: FF_MONO,
-            letterSpacing: 0.4,
-            textTransform: "uppercase",
+            fontFamily: LABEL_FONT,
+            letterSpacing: labelTracking(0.4),
+            textTransform: LABEL_CASE,
           }}
         >
           #{index + 1}
@@ -1494,11 +1494,11 @@ function IngressRuleBlock({
         <span
           style={{
             fontSize: FS_XS,
-            fontWeight: 700,
+            fontWeight: labelWeight(FW_BOLD),
             color: t.textMuted,
-            textTransform: "uppercase",
-            letterSpacing: 0.4,
-            fontFamily: FF_MONO,
+            textTransform: LABEL_CASE,
+            letterSpacing: labelTracking(0.4),
+            fontFamily: LABEL_FONT,
           }}
         >
           Host
@@ -1509,7 +1509,7 @@ function IngressRuleBlock({
               style={{
                 fontFamily: FF_MONO,
                 fontSize: FS_MD,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 wordBreak: "break-all",
               }}
             >
@@ -1666,7 +1666,7 @@ export function IngressClassSummary(props: {
             style={{
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.text,
               wordBreak: "break-all",
             }}
@@ -1985,11 +1985,11 @@ function NetPolicyRuleBlock({
       <div
         style={{
           fontSize: FS_XS,
-          fontWeight: 700,
+          fontWeight: labelWeight(FW_BOLD),
           color: t.textMuted,
-          fontFamily: FF_MONO,
-          letterSpacing: 0.4,
-          textTransform: "uppercase",
+          fontFamily: LABEL_FONT,
+          letterSpacing: labelTracking(0.4),
+          textTransform: LABEL_CASE,
           marginBottom: 6,
         }}
       >

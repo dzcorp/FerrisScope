@@ -4,12 +4,11 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import { Mono } from "./primitives";
 import { api, onMetrics, onPrometheusChanged } from "../../api";
-import { FF_MONO, type ThemeMode, type Tokens, R_SM, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_SM, FS_MD, FS_SM, FS_XS, shade, bucketColor, volumeBucket, hexWithAlpha, FF_SANS, LABEL_CASE, LABEL_FONT, labelTracking } from "../../theme";
 import type {
   MetricsSnapshot,
   PromBackend,
@@ -50,6 +49,7 @@ function backendShortLabel(b: PromBackend): string {
 import { DetailRow, Mute } from "./primitives";
 import { ErrorBlock, IconBtn, Icons, Section } from "../ui";
 import { useAppStore, useResolvedTheme } from "../../store";
+import { ksmQuery } from "../../lib/promql";
 
 // Per-pod / per-PVC metrics surface. CPU + memory come exclusively from
 // Prometheus (PromQL range queries) — metrics-server is not used here, by
@@ -386,8 +386,8 @@ function usePromRangeMulti(
 // purely categorical (per-mountpoint, per-device). Status-coded tones
 // (`bad` / `warn`) come last so the eye doesn't pre-attach meaning when
 // only one or two series are present.
-function seriesPalette(t: Tokens): string[] {
-  return [t.accent, t.good, t.info, t.warn, t.bad];
+function seriesPalette(t: Tokens): readonly string[] {
+  return t.chartSeries;
 }
 
 function useMetricsSnapshot(
@@ -698,6 +698,13 @@ function PromPodHistory({
   const mem = usePromRange(clusterId, memQuery, range.windowMin, range.stepSec);
   const rx = usePromRange(clusterId, rxQuery, range.windowMin, range.stepSec);
   const tx = usePromRange(clusterId, txQuery, range.windowMin, range.stepSec);
+  const podSel = `namespace="${namespace}",pod="${name}"`;
+  const ksm = (k: "requests" | "limits", r: "cpu" | "memory") =>
+    target ? ksmQuery(k, r, podSel) : null;
+  const cpuReq = usePromRange(clusterId, ksm("requests", "cpu"), range.windowMin, range.stepSec);
+  const cpuLim = usePromRange(clusterId, ksm("limits", "cpu"), range.windowMin, range.stepSec);
+  const memReq = usePromRange(clusterId, ksm("requests", "memory"), range.windowMin, range.stepSec);
+  const memLim = usePromRange(clusterId, ksm("limits", "memory"), range.windowMin, range.stepSec);
 
   if (entry === undefined) {
     return (
@@ -723,8 +730,12 @@ function PromPodHistory({
         title="CPU"
         state={cpu}
         unit="m"
-        stroke={t.accent}
+        stroke={t.chartCpu}
         windowLabel={range.label}
+        refs={[
+          { state: cpuReq, stroke: t.chartRequests, label: "Requests" },
+          { state: cpuLim, stroke: t.chartLimits, label: "Limits" },
+        ]}
       />
       <div style={{ marginTop: 22 }}>
         <MetricSection
@@ -732,8 +743,12 @@ function PromPodHistory({
           title="Memory"
           state={mem}
           unit="MiB"
-          stroke={t.good}
+          stroke={t.chartMemory}
           windowLabel={range.label}
+          refs={[
+            { state: memReq, stroke: t.chartRequests, label: "Requests" },
+            { state: memLim, stroke: t.chartLimits, label: "Limits" },
+          ]}
         />
       </div>
       <div style={{ marginTop: 22 }}>
@@ -742,7 +757,7 @@ function PromPodHistory({
           title="Network RX"
           state={rx}
           unit="KiB/s"
-          stroke={t.info}
+          stroke={t.chartNetRx}
           windowLabel={range.label}
         />
       </div>
@@ -752,7 +767,7 @@ function PromPodHistory({
           title="Network TX"
           state={tx}
           unit="KiB/s"
-          stroke={t.warn}
+          stroke={t.chartNetTx}
           windowLabel={range.label}
         />
       </div>
@@ -859,6 +874,20 @@ function NodeMetrics({
   const mem = usePromRange(clusterId, memQuery, range.windowMin, range.stepSec);
   const rx = usePromRange(clusterId, rxQuery, range.windowMin, range.stepSec);
   const tx = usePromRange(clusterId, txQuery, range.windowMin, range.stepSec);
+  const nodeSel = `node="${name}"`;
+  const nodeRef = (k: "requests" | "allocatable" | "capacity", r: "cpu" | "memory") =>
+    target ? ksmQuery(k, r, nodeSel) : null;
+  const cpuReq = usePromRange(clusterId, nodeRef("requests", "cpu"), range.windowMin, range.stepSec);
+  const cpuAlloc = usePromRange(clusterId, nodeRef("allocatable", "cpu"), range.windowMin, range.stepSec);
+  const cpuCap = usePromRange(clusterId, nodeRef("capacity", "cpu"), range.windowMin, range.stepSec);
+  const memReq = usePromRange(clusterId, nodeRef("requests", "memory"), range.windowMin, range.stepSec);
+  const memAlloc = usePromRange(clusterId, nodeRef("allocatable", "memory"), range.windowMin, range.stepSec);
+  const memCap = usePromRange(clusterId, nodeRef("capacity", "memory"), range.windowMin, range.stepSec);
+  // Allocation charts need kube-state-metrics; without it they'd repeat the
+  // workload fallback above, so they stay hidden.
+  const hasAllocation = [cpuReq, cpuAlloc, cpuCap, memReq, memAlloc, memCap].some(
+    (r) => r.samples.length >= 2,
+  );
   const fsUsage = usePromRangeMulti(
     clusterId,
     fsUsageQuery,
@@ -903,7 +932,7 @@ function NodeMetrics({
       <FallbackChart
         t={t}
         title="CPU"
-        stroke={t.accent}
+        stroke={t.chartCpu}
         windowLabel={range.label}
         primary={{ state: machineCpu, unit: "%", source: "machine" }}
         fallback={{ state: cpu, unit: "m", source: "workloads" }}
@@ -912,17 +941,51 @@ function NodeMetrics({
         <FallbackChart
           t={t}
           title="Memory"
-          stroke={t.good}
+          stroke={t.chartMemory}
           windowLabel={range.label}
           primary={{ state: machineMem, unit: "GiB", source: "machine" }}
           fallback={{ state: mem, unit: "MiB", source: "workloads" }}
         />
       </div>
+      {hasAllocation && (
+        <>
+          <div style={{ marginTop: 22 }}>
+            <MetricSection
+              t={t}
+              title="CPU allocation"
+              state={cpu}
+              unit="m"
+              stroke={t.chartCpu}
+              windowLabel={range.label}
+              refs={[
+                { state: cpuReq, stroke: t.chartRequests, label: "Requests" },
+                { state: cpuAlloc, stroke: t.chartAllocatable, label: "Allocatable" },
+                { state: cpuCap, stroke: t.chartCapacity, label: "Capacity" },
+              ]}
+            />
+          </div>
+          <div style={{ marginTop: 22 }}>
+            <MetricSection
+              t={t}
+              title="Memory allocation"
+              state={mem}
+              unit="MiB"
+              stroke={t.chartMemory}
+              windowLabel={range.label}
+              refs={[
+                { state: memReq, stroke: t.chartRequests, label: "Requests" },
+                { state: memAlloc, stroke: t.chartAllocatable, label: "Allocatable" },
+                { state: memCap, stroke: t.chartCapacity, label: "Capacity" },
+              ]}
+            />
+          </div>
+        </>
+      )}
       <div style={{ marginTop: 22 }}>
         <FallbackChart
           t={t}
           title="Network RX"
-          stroke={t.info}
+          stroke={t.chartNetRx}
           windowLabel={range.label}
           primary={{ state: machineRx, unit: "KiB/s", source: "machine" }}
           fallback={{ state: rx, unit: "KiB/s", source: "workloads" }}
@@ -932,7 +995,7 @@ function NodeMetrics({
         <FallbackChart
           t={t}
           title="Network TX"
-          stroke={t.warn}
+          stroke={t.chartNetTx}
           windowLabel={range.label}
           primary={{ state: machineTx, unit: "KiB/s", source: "machine" }}
           fallback={{ state: tx, unit: "KiB/s", source: "workloads" }}
@@ -1042,7 +1105,7 @@ function NamespaceMetrics({
         title="CPU"
         state={cpu}
         unit="m"
-        stroke={t.accent}
+        stroke={t.chartCpu}
         windowLabel={range.label}
       />
       <div style={{ marginTop: 22 }}>
@@ -1051,7 +1114,7 @@ function NamespaceMetrics({
           title="Memory"
           state={mem}
           unit="MiB"
-          stroke={t.good}
+          stroke={t.chartMemory}
           windowLabel={range.label}
         />
       </div>
@@ -1061,7 +1124,7 @@ function NamespaceMetrics({
           title="Network RX"
           state={rx}
           unit="KiB/s"
-          stroke={t.info}
+          stroke={t.chartNetRx}
           windowLabel={range.label}
         />
       </div>
@@ -1071,7 +1134,7 @@ function NamespaceMetrics({
           title="Network TX"
           state={tx}
           unit="KiB/s"
-          stroke={t.warn}
+          stroke={t.chartNetTx}
           windowLabel={range.label}
         />
       </div>
@@ -1081,7 +1144,7 @@ function NamespaceMetrics({
           title="Pods"
           state={pods}
           unit="count"
-          stroke={t.accent}
+          stroke={t.chartSeries[0]!}
           windowLabel={range.label}
         />
       </div>
@@ -1129,6 +1192,13 @@ function WorkloadMetrics({
   const rxFbQuery = target ? q.rxFallback : null;
   const txFbQuery = target ? q.txFallback : null;
 
+  const ownerJoin = workloadOwnerJoin(controllerKind, namespace, name);
+  const wl = (k: "requests" | "limits", r: "cpu" | "memory") =>
+    target ? ksmQuery(k, r, `namespace="${namespace}"`, ownerJoin) : null;
+  const cpuReq = usePromRange(clusterId, wl("requests", "cpu"), range.windowMin, range.stepSec);
+  const cpuLim = usePromRange(clusterId, wl("limits", "cpu"), range.windowMin, range.stepSec);
+  const memReq = usePromRange(clusterId, wl("requests", "memory"), range.windowMin, range.stepSec);
+  const memLim = usePromRange(clusterId, wl("limits", "memory"), range.windowMin, range.stepSec);
   const cpu = usePromRange(clusterId, cpuQuery, range.windowMin, range.stepSec);
   const mem = usePromRange(clusterId, memQuery, range.windowMin, range.stepSec);
   const rx = usePromRange(clusterId, rxQuery, range.windowMin, range.stepSec);
@@ -1206,7 +1276,11 @@ function WorkloadMetrics({
       <FallbackChart
         t={t}
         title="CPU"
-        stroke={t.accent}
+        refs={[
+          { state: cpuReq, stroke: t.chartRequests, label: "Requests" },
+          { state: cpuLim, stroke: t.chartLimits, label: "Limits" },
+        ]}
+        stroke={t.chartCpu}
         windowLabel={range.label}
         primary={{ state: cpu, unit: "m", source: "owner refs" }}
         fallback={{ state: cpuFb, unit: "m", source: "name match" }}
@@ -1215,7 +1289,11 @@ function WorkloadMetrics({
         <FallbackChart
           t={t}
           title="Memory"
-          stroke={t.good}
+          refs={[
+            { state: memReq, stroke: t.chartRequests, label: "Requests" },
+            { state: memLim, stroke: t.chartLimits, label: "Limits" },
+          ]}
+          stroke={t.chartMemory}
           windowLabel={range.label}
           primary={{ state: mem, unit: "MiB", source: "owner refs" }}
           fallback={{ state: memFb, unit: "MiB", source: "name match" }}
@@ -1225,7 +1303,7 @@ function WorkloadMetrics({
         <FallbackChart
           t={t}
           title="Network RX"
-          stroke={t.info}
+          stroke={t.chartNetRx}
           windowLabel={range.label}
           primary={{ state: rx, unit: "KiB/s", source: "owner refs" }}
           fallback={{ state: rxFb, unit: "KiB/s", source: "name match" }}
@@ -1235,7 +1313,7 @@ function WorkloadMetrics({
         <FallbackChart
           t={t}
           title="Network TX"
-          stroke={t.warn}
+          stroke={t.chartNetTx}
           windowLabel={range.label}
           primary={{ state: tx, unit: "KiB/s", source: "owner refs" }}
           fallback={{ state: txFb, unit: "KiB/s", source: "name match" }}
@@ -1550,6 +1628,7 @@ function FallbackChart({
   windowLabel,
   primary,
   fallback,
+  refs,
 }: {
   t: Tokens;
   title: string;
@@ -1557,6 +1636,8 @@ function FallbackChart({
   windowLabel?: string;
   primary: { state: PromState; unit: string; source: string };
   fallback: { state: PromState; unit: string; source: string };
+  /// Only for charts whose primary and fallback share a unit.
+  refs?: RefSeries[];
 }) {
   const usingFallback =
     primary.state.samples.length < 2 &&
@@ -1571,14 +1652,15 @@ function FallbackChart({
       unit={active.unit}
       stroke={stroke}
       windowLabel={windowLabel}
+      refs={refs}
       extraRight={
         <span
           style={{
             fontSize: FS_XS,
-            fontFamily: FF_MONO,
+            fontFamily: LABEL_FONT,
             color: t.textMuted,
-            letterSpacing: 0.4,
-            textTransform: "uppercase",
+            letterSpacing: labelTracking(0.4),
+            textTransform: LABEL_CASE,
           }}
         >
           {active.source}
@@ -1620,7 +1702,7 @@ function PromPvcHistory({
           title="Used"
           state={used}
           unit="bytes"
-          stroke={t.accent}
+          stroke={t.chartDisk}
           windowLabel={range.label}
         />
       </div>
@@ -1663,7 +1745,7 @@ function RangePicker({
               fontFamily: FF_MONO,
               fontVariantNumeric: "tabular-nums",
               background: active ? t.accent : "transparent",
-              color: active ? "#fff" : t.textMuted,
+              color: active ? t.onAccent : t.textMuted,
               border: `1px solid ${active ? t.accent : t.border}`,
               borderRadius: R_SM,
               cursor: "pointer",
@@ -1719,13 +1801,13 @@ function PromBadge({ t }: { t: Tokens }) {
     <span
       style={{
         fontSize: FS_XS,
-        fontFamily: FF_MONO,
+        fontFamily: LABEL_FONT,
         color: t.accent,
         background: t.accentSoft,
         padding: "2px 6px",
         borderRadius: R_SM,
-        letterSpacing: 0.4,
-        textTransform: "uppercase",
+        letterSpacing: labelTracking(0.4),
+        textTransform: LABEL_CASE,
       }}
     >
       {backendShortLabel(backend)}
@@ -1749,8 +1831,8 @@ function PromChart({
       <div
         style={{
           padding: "8px 10px",
-          background: "rgba(244,63,94,0.08)",
-          border: `1px solid rgba(244,63,94,0.4)`,
+          background: hexWithAlpha(t.bad, 0.08),
+          border: `1px solid ${hexWithAlpha(t.bad, 0.4)}`,
           borderRadius: R_SM,
         }}
       >
@@ -1803,8 +1885,8 @@ function PromMultiChart({
       <div
         style={{
           padding: "8px 10px",
-          background: "rgba(244,63,94,0.08)",
-          border: `1px solid rgba(244,63,94,0.4)`,
+          background: hexWithAlpha(t.bad, 0.08),
+          border: `1px solid ${hexWithAlpha(t.bad, 0.4)}`,
           color: t.text,
           fontSize: FS_SM,
           borderRadius: R_SM,
@@ -1856,6 +1938,7 @@ function MetricSection({
   stroke,
   windowLabel = "1h",
   extraRight,
+  refs,
 }: {
   t: Tokens;
   title: string;
@@ -1864,8 +1947,12 @@ function MetricSection({
   stroke: string;
   windowLabel?: string;
   extraRight?: React.ReactNode;
+  /// Reference series (requests, limits, capacity) — kept only when they
+  /// have data, so a cluster without kube-state-metrics shows usage alone.
+  refs?: RefSeries[];
 }) {
   const last = state.samples[state.samples.length - 1] ?? null;
+  const shownRefs = (refs ?? []).filter((r) => r.state.samples.length >= 2);
   return (
     <>
       <Section
@@ -1892,10 +1979,31 @@ function MetricSection({
           </span>
         }
       />
-      <PromChart t={t} state={state} stroke={stroke} unit={unit} />
+      {shownRefs.length > 0 && state.samples.length >= 2 && !state.error ? (
+        <Chart
+          t={t}
+          unit={unit}
+          series={[
+            { samples: state.samples, stroke, label: "Usage" },
+            ...shownRefs.map((r) => ({
+              samples: r.state.samples,
+              stroke: r.stroke,
+              label: r.label,
+              ref: true,
+            })),
+          ]}
+          windowStartMs={state.windowStartMs}
+          windowEndMs={state.windowEndMs}
+        />
+      ) : (
+        <PromChart t={t} state={state} stroke={stroke} unit={unit} />
+      )}
     </>
   );
 }
+
+type RefSeries = { state: PromState; stroke: string; label: string };
+
 
 // Multi-series sibling of MetricSection. Used for charts where one query
 // returns several series (per-mountpoint, per-device) — strokes cycle
@@ -1953,8 +2061,8 @@ function MultiSeriesSection({
         <div
           style={{
             padding: "8px 10px",
-            background: "rgba(244,63,94,0.08)",
-            border: `1px solid rgba(244,63,94,0.4)`,
+            background: hexWithAlpha(t.bad, 0.08),
+            border: `1px solid ${hexWithAlpha(t.bad, 0.4)}`,
             borderRadius: R_SM,
           }}
         >
@@ -2131,9 +2239,7 @@ function Bar({
 }
 
 function gaugeTone(t: Tokens, pct: number): string {
-  if (pct >= 0.9) return t.bad;
-  if (pct >= 0.75) return t.warn;
-  return t.good;
+  return bucketColor(volumeBucket(pct), t);
 }
 
 function fmtBytes(b: number): string {
@@ -2156,8 +2262,8 @@ function UnavailableBanner({
     <div
       style={{
         padding: "10px 12px",
-        background: "rgba(245,158,11,0.12)",
-        border: `1px solid rgba(245,158,11,0.4)`,
+        background: t.warnSoft,
+        border: `1px solid ${hexWithAlpha(t.warn, 0.4)}`,
         color: t.text,
         fontSize: FS_MD,
         borderRadius: R_SM,
@@ -2194,6 +2300,9 @@ type ChartSeries = {
   samples: ChartSample[];
   stroke: string;
   label: string;
+  /// Requests / limits / capacity: drawn behind usage, dashed where the
+  /// theme's `chart.refDash` says so.
+  ref?: boolean;
 };
 
 // Map a viewport (clientX) coordinate into the SVG's user-space x.
@@ -2226,11 +2335,11 @@ export function clientXToSvgX(svg: SVGSVGElement, clientX: number): number {
   return ((clientX - rect.left) / rect.width) * viewBoxWidth;
 }
 
-function Chart({
+export function Chart({
   t,
   series,
   unit,
-  height = 130,
+  height: heightProp,
   windowStartMs,
   windowEndMs,
 }: {
@@ -2245,12 +2354,15 @@ function Chart({
   windowStartMs?: number;
   windowEndMs?: number;
 }) {
-  const wrapRef = useRef<HTMLDivElement>(null);
+  const style = useResolvedTheme().chart;
+  const height = heightProp ?? style.height;
+  // State, not a ref: the wrapper mounts only once there are 2+ samples.
+  const [wrap, setWrap] = useState<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(560);
   const [hover, setHover] = useState<{ idx: number } | null>(null);
 
   useEffect(() => {
-    const el = wrapRef.current;
+    const el = wrap;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
@@ -2260,7 +2372,7 @@ function Chart({
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [wrap]);
 
   // Use the longest series as the time/index reference. All series share
   // the same Prom step, so they line up sample-for-sample anyway.
@@ -2287,7 +2399,10 @@ function Chart({
       if (p.v > vMax) vMax = p.v;
     }
   }
-  if (vMin === vMax) {
+  if (style.yFromZero && vMin >= 0) {
+    vMin = 0;
+    vMax = vMax === 0 ? 1 : vMax * 1.06;
+  } else if (vMin === vMax) {
     const pad = vMin === 0 ? 1 : Math.abs(vMin) * 0.1;
     vMin -= pad;
     vMax += pad;
@@ -2317,16 +2432,45 @@ function Chart({
   const yOf = (s: ChartSample) =>
     PAD_T + ((vMax - s.v) / valSpan) * innerH;
 
+  const baseY = PAD_T + innerH;
+  const step = style.kind === "step";
+  const dashed = (i: number) => style.refDash && !!series[i]!.ref;
+  // Refs first so usage paints on top (Chart.js draws dataset 0 last).
+  const order = series.map((_, i) => i).sort((a, b) => Number(!!series[b]!.ref) - Number(!!series[a]!.ref));
   const paths = series.map((sr) => {
     let p = "";
     for (let i = 0; i < sr.samples.length; i++) {
       const s = sr.samples[i]!;
-      p += `${i === 0 ? "M" : "L"}${xOf(s).toFixed(1)},${yOf(s).toFixed(1)} `;
+      const x = xOf(s).toFixed(1);
+      const y = yOf(s).toFixed(1);
+      p += i === 0 ? `M${x},${y} ` : step ? `H${x} V${y} ` : `L${x},${y} `;
     }
     return p.trim();
   });
+  const areas =
+    style.areaOpacity > 0
+      ? series.map((sr, i) => {
+          const first = sr.samples[0];
+          const last = sr.samples[sr.samples.length - 1];
+          if (!first || !last) return "";
+          return `${paths[i]} V${baseY.toFixed(1)} H${xOf(first).toFixed(1)} Z`;
+        })
+      : null;
+  const stripes: { x: number; w: number }[] = [];
+  if (style.stripes && t.chartStripe !== "transparent") {
+    for (let i = 0; i + 1 < ref.samples.length; i += 20) {
+      const a = xOf(ref.samples[i]!);
+      const b = xOf(ref.samples[Math.min(i + 10, ref.samples.length - 1)]!);
+      stripes.push({ x: a, w: b - a });
+    }
+  }
 
-  const yTicks = [vMax, (vMax + vMin) / 2, vMin];
+  const tickCount = Math.max(2, style.yTicks);
+  const yTicks = Array.from(
+    { length: tickCount },
+    (_, i) => vMax - (i / (tickCount - 1)) * valSpan,
+  );
+  const axisFont = style.axisMono ? FF_MONO : FF_SANS;
   // When we have an explicit window, ticks anchor to the window edges
   // (start / midpoint / now) — that way the labels match the picker even
   // if VM trimmed the response. Otherwise pin to actual samples (legacy).
@@ -2366,11 +2510,11 @@ function Chart({
 
   const hoveredRef = hover ? ref.samples[hover.idx] : null;
   const hx = hoveredRef ? xOf(hoveredRef) : 0;
-  const gridColor = t.borderSoft;
-  const axisTextColor = t.textMuted;
+  const gridColor = t.chartGrid;
+  const axisTextColor = t.chartAxis;
 
   return (
-    <div ref={wrapRef} style={{ position: "relative" }}>
+    <div ref={setWrap} style={{ position: "relative" }}>
       <svg
         width={width}
         height={height}
@@ -2379,6 +2523,16 @@ function Chart({
         onMouseLeave={() => setHover(null)}
         style={{ display: "block" }}
       >
+        {stripes.map((b, i) => (
+          <rect
+            key={`z-${i}`}
+            x={b.x}
+            y={PAD_T}
+            width={Math.max(0, b.w)}
+            height={innerH}
+            fill={t.chartStripe}
+          />
+        ))}
         {yTicks.map((v, i) => {
           const y = PAD_T + ((vMax - v) / valSpan) * innerH;
           return (
@@ -2390,13 +2544,15 @@ function Chart({
                 y2={y}
                 stroke={gridColor}
                 strokeWidth={1}
-                strokeDasharray={i === 1 ? "2 4" : undefined}
+                strokeDasharray={
+                  style.gridDash && i > 0 && i < yTicks.length - 1 ? "2 4" : undefined
+                }
               />
               <text
                 x={PAD_L - 6}
                 y={y + 3.5}
-                fontSize={10}
-                fontFamily={FF_MONO}
+                fontSize={style.axisSize}
+                fontFamily={axisFont}
                 fill={axisTextColor}
                 textAnchor="end"
               >
@@ -2415,8 +2571,8 @@ function Chart({
               key={`x-${i}`}
               x={x}
               y={PAD_T + innerH + 14}
-              fontSize={10}
-              fontFamily={FF_MONO}
+              fontSize={style.axisSize}
+              fontFamily={axisFont}
               fill={axisTextColor}
               textAnchor={anchor}
             >
@@ -2425,13 +2581,26 @@ function Chart({
           );
         })}
 
-        {paths.map((d, i) => (
+        {areas &&
+          order.map((i) =>
+            dashed(i) ? null : (
+              <path
+                key={`a-${i}`}
+                d={areas[i]}
+                fill={series[i]!.stroke}
+                fillOpacity={style.areaOpacity}
+                stroke="none"
+              />
+            ),
+          )}
+        {order.map((i) => (
           <path
             key={`p-${i}`}
-            d={d}
+            d={paths[i]}
             fill="none"
             stroke={series[i]!.stroke}
-            strokeWidth={1.5}
+            strokeWidth={dashed(i) ? Math.min(style.strokeWidth, 1.25) : style.strokeWidth}
+            strokeDasharray={dashed(i) ? "4 3" : undefined}
             strokeLinejoin="round"
             strokeLinecap="round"
           />
@@ -2444,7 +2613,7 @@ function Chart({
               x2={hx}
               y1={PAD_T}
               y2={PAD_T + innerH}
-              stroke={t.textMuted}
+              stroke={t.chartCrosshair}
               strokeDasharray="2 3"
               strokeWidth={1}
             />
@@ -2473,20 +2642,24 @@ function Chart({
               const y = height - 8;
               return (
                 <g key={`l-${i}`}>
-                  <line
-                    x1={x}
-                    x2={x + 14}
-                    y1={y - 3}
-                    y2={y - 3}
-                    stroke={sr.stroke}
-                    strokeWidth={2}
-                  />
+                  {style.legendSwatch === "square" ? (
+                    <rect x={x + 3} y={y - 7} width={8} height={8} rx={2} fill={sr.stroke} />
+                  ) : (
+                    <line
+                      x1={x}
+                      x2={x + 14}
+                      y1={y - 3}
+                      y2={y - 3}
+                      stroke={sr.stroke}
+                      strokeWidth={2}
+                    />
+                  )}
                   <text
                     x={x + 18}
                     y={y}
-                    fontSize={10}
-                    fontFamily={FF_MONO}
-                    fill={t.textMuted}
+                    fontSize={style.axisSize}
+                    fontFamily={axisFont}
+                    fill={t.chartAxis}
                   >
                     {sr.label}
                   </text>
@@ -2503,20 +2676,20 @@ function Chart({
             position: "absolute",
             left: Math.min(Math.max(hx + 10, PAD_L), width - 170),
             top: 4,
-            background: t.surface,
-            border: `1px solid ${t.border}`,
+            background: t.chartTooltip,
+            border: `1px solid ${t.chartTooltipBorder}`,
             padding: "5px 9px",
             fontSize: FS_SM,
             fontFamily: FF_MONO,
             borderRadius: R_SM,
             pointerEvents: "none",
             whiteSpace: "nowrap",
-            boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
-            color: t.text,
+            boxShadow: `0 2px 6px ${shade(t, 0.15)}`,
+            color: t.chartTooltipText,
             fontVariantNumeric: "tabular-nums",
           }}
         >
-          <div style={{ color: t.textMuted, fontSize: FS_XS, marginBottom: 2 }}>
+          <div style={{ color: t.chartTooltipMuted, fontSize: FS_XS, marginBottom: 2 }}>
             {formatRelTime(hoveredRef.t, tLast)}
           </div>
           {series.map((sr, i) => {
@@ -2542,7 +2715,7 @@ function Chart({
                   }}
                 />
                 {showLegend && (
-                  <span style={{ color: t.textMuted, minWidth: 60 }}>
+                  <span style={{ color: t.chartTooltipMuted, minWidth: 60 }}>
                     {sr.label}
                   </span>
                 )}

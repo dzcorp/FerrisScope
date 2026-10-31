@@ -15,7 +15,7 @@ type ResizeDir =
   | "SouthWest"
   | "West"
   | "NorthWest";
-import { FONT_SANS, type ThemeMode, type Tokens, FS_SM } from "../theme";
+import { FF_SANS, type ThemeMode, type Tokens, FS_SM, FW_SEMIBOLD } from "../theme";
 import { Icons } from "./ui";
 
 // Linux-only window chrome. Tauri strips GTK's client-side decorations on
@@ -44,6 +44,7 @@ export const TITLEBAR_INSET_PX = IS_LINUX_TITLEBAR ? HEIGHT : 0;
 
 export function TitleBar({}: { mode: ThemeMode }) {
   const [maximized, setMaximized] = useState(false);
+  const t = useResolvedTheme().tokens;
 
   useEffect(() => {
     if (!IS_LINUX_TITLEBAR) return;
@@ -64,7 +65,6 @@ export function TitleBar({}: { mode: ThemeMode }) {
 
   if (!IS_LINUX_TITLEBAR) return null;
 
-  const t = useResolvedTheme().tokens;
   const w = getCurrentWindow();
 
   // Explicit `startDragging()` rather than `data-tauri-drag-region`: the
@@ -96,7 +96,7 @@ export function TitleBar({}: { mode: ThemeMode }) {
         borderBottom: `1px solid ${t.border}`,
         userSelect: "none",
         WebkitUserSelect: "none",
-        fontFamily: FONT_SANS,
+        fontFamily: FF_SANS,
       }}
     >
       <div
@@ -105,7 +105,7 @@ export function TitleBar({}: { mode: ThemeMode }) {
           alignItems: "center",
           paddingLeft: 12,
           fontSize: FS_SM,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
           letterSpacing: 0.2,
           color: t.textDim,
         }}
@@ -241,7 +241,7 @@ function CtlButton({
 }) {
   const [hover, setHover] = useState(false);
   const bg = hover ? (danger ? t.bad : t.btnHover) : "transparent";
-  const fg = hover && danger ? "#fff" : t.textDim;
+  const fg = hover && danger ? t.onBad : t.textDim;
   return (
     <button
       type="button"

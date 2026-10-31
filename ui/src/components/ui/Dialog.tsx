@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useAppStore } from "../../store";
-import { FONT_SANS, FS_MD, FS_SM, R_LG, type Tokens } from "../../theme";
+import { FF_SANS, FS_MD, FS_SM, R_LG, type Tokens, FW_SEMIBOLD, shade } from "../../theme";
 import { IconBtn } from "./Btn";
 import { Icons } from "./icons";
 
@@ -106,10 +106,10 @@ export function Dialog({
           color: t.text,
           border: `1px solid ${t.border}`,
           borderRadius: R_LG,
-          boxShadow: "0 24px 60px rgba(0,0,0,0.35)",
+          boxShadow: `0 24px 60px ${shade(t, 0.35)}`,
           zIndex: 59,
           animation: "fs-modal-drop .18s cubic-bezier(.2,.7,.2,1)",
-          fontFamily: FONT_SANS,
+          fontFamily: FF_SANS,
           outline: "none",
         }}
       >
@@ -125,7 +125,7 @@ export function Dialog({
           <div style={{ flex: 1, minWidth: 0 }}>
             <div
               id={titleId}
-              style={{ fontSize: FS_MD, fontWeight: 600, wordBreak: "break-word" }}
+              style={{ fontSize: FS_MD, fontWeight: FW_SEMIBOLD, wordBreak: "break-word" }}
             >
               {title}
             </div>

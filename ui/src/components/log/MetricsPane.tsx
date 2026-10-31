@@ -1,7 +1,7 @@
 import { useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppStore, useResolvedTheme } from "../../store";
-import { FF_MONO, FS_SM, FS_XS, clusterAccent } from "../../theme";
+import { FF_MONO, FS_SM, FS_XS, clusterAccent, FW_SEMIBOLD, LABEL_CASE, labelTracking } from "../../theme";
 import type { Tokens } from "../../theme";
 import { BarGauge, EmptyState, LoadingLine } from "../ui";
 import { useMetricsSubscriptions } from "../../lib/useMetricsSubscription";
@@ -398,16 +398,16 @@ function PodMetricRowView({
       <MetricCell
         value={r.metric ? formatCpuMilli(r.metric.cpu_milli) : null}
         ratio={r.metric ? r.metric.cpu_milli / maxCpu : 0}
-        accent={t.accent}
-        track={t.borderSoft}
+        accent={t.chartCpu}
+        track={t.chartTrack}
         dim={t.textMuted}
         text={t.textDim}
       />
       <MetricCell
         value={r.metric ? formatMemMib(r.metric.mem_mib) : null}
         ratio={r.metric ? r.metric.mem_mib / maxMem : 0}
-        accent={t.accent}
-        track={t.borderSoft}
+        accent={t.chartMemory}
+        track={t.chartTrack}
         dim={t.textMuted}
         text={t.textDim}
       />
@@ -431,15 +431,15 @@ function TotalStat({
       <div
         style={{
           fontSize: FS_XS,
-          textTransform: "uppercase",
-          letterSpacing: 0.6,
+          textTransform: LABEL_CASE,
+          letterSpacing: labelTracking(0.6),
           color: dim,
           marginBottom: 2,
         }}
       >
         {label}
       </div>
-      <div style={{ fontSize: FS_SM, fontWeight: 600, color: text }}>
+      <div style={{ fontSize: FS_SM, fontWeight: FW_SEMIBOLD, color: text }}>
         {value}
       </div>
     </div>

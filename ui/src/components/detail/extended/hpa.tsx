@@ -11,6 +11,7 @@ import {
   R_LG,
   type ThemeMode,
   type Tokens,
+  FW_SEMIBOLD,
 } from "../../../theme";
 import { BarGauge, ErrorBlock, Eyebrow, LoadingLine, Section, StatusPill } from "../../ui";
 import {
@@ -93,7 +94,7 @@ function Caption({ t, children, title }: { t: Tokens; children: React.ReactNode;
 const BIG = {
   fontFamily: FF_MONO,
   fontSize: FS_LG,
-  fontWeight: 600,
+  fontWeight: FW_SEMIBOLD,
   fontVariantNumeric: "tabular-nums",
 } as const;
 
@@ -147,7 +148,7 @@ export function HpaOverview({
             marker={moving ? (desired ?? 0) / d.max_replicas : undefined}
             markerColor={t.accent}
             color={pinned ? t.warn : t.good}
-            track={t.borderSoft}
+            track={t.chartTrack}
             width="100%"
             height={6}
           />
@@ -226,7 +227,7 @@ export function HpaMetricCard({ t, metric: m }: { t: Tokens; metric: HpaMetric }
               marker={1 / scale}
               markerColor={t.text}
               color={over ? t.warn : t.accent}
-              track={t.borderSoft}
+              track={t.chartTrack}
               width="100%"
               height={6}
             />

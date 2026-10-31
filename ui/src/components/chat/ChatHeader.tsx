@@ -1,4 +1,4 @@
-import { FF_MONO, type ThemeMode, R_MD, FS_MD, FS_XS } from "../../theme";
+import { FF_MONO, type ThemeMode, R_MD, FS_MD, FS_XS, FW_SEMIBOLD } from "../../theme";
 import { useResolvedTheme } from "../../store";
 import { totalToolCount, type McpStatus } from "./chatStreaming";
 import { Btn, Icons } from "../ui";
@@ -110,7 +110,7 @@ export function ChatHeader({
             style={{
               color: t.text,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",

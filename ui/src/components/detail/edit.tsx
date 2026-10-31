@@ -17,7 +17,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { FF_MONO, type Tokens, R_SM, FS_MD, FS_SM } from "../../theme";
+import { FF_MONO, type Tokens, R_SM, FS_MD, FS_SM, FW_BOLD, FW_SEMIBOLD, LABEL_CASE, LABEL_FONT, labelTracking, labelWeight } from "../../theme";
 import { useEditSession } from "./editSession";
 import { Icons, inertProps } from "../ui";
 
@@ -172,12 +172,12 @@ function chipBtnStyle(t: Tokens): CSSProperties {
     border: "none",
     background: t.chip,
     color: t.textDim,
-    fontFamily: FF_MONO,
+    fontFamily: LABEL_FONT,
     fontSize: FS_SM,
-    fontWeight: 700,
-    letterSpacing: 0.4,
+    fontWeight: labelWeight(FW_BOLD),
+    letterSpacing: labelTracking(0.4),
     cursor: "pointer",
-    textTransform: "uppercase",
+    textTransform: LABEL_CASE,
   };
 }
 
@@ -311,7 +311,7 @@ export function AddRowButton({
         borderRadius: R_SM,
         fontFamily: FF_MONO,
         fontSize: FS_SM,
-        fontWeight: 600,
+        fontWeight: FW_SEMIBOLD,
         cursor: "pointer",
       }}
     >
@@ -354,7 +354,7 @@ export function ConflictBanner({
       }}
     >
       <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-        <span style={{ color: t.warn, fontWeight: 700 }}>Conflict</span>
+        <span style={{ color: t.warn, fontWeight: FW_BOLD }}>Conflict</span>
         <span style={{ color: t.textDim }}>
           {conflict.managers.length > 0
             ? `with ${conflict.managers.join(", ")}`

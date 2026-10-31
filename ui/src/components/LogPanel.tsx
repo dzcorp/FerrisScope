@@ -12,7 +12,7 @@ import {
   useConsoleTokens,
   useResolvedTheme,
 } from "../store";
-import { tokens, FF_MONO, type ThemeMode, FS_LG, FS_SM, FS_XS } from "../theme";
+import { tokens, FF_MONO, type ThemeMode, FS_LG, FS_SM, FS_XS, FW_SEMIBOLD, shade } from "../theme";
 import {
   Btn,
   EmptyState,
@@ -542,8 +542,8 @@ export function LogPanel({
           borderLeft: `1px solid ${t.border}`,
           boxShadow:
             mode === "dark"
-              ? "-12px 0 32px rgba(0,0,0,0.4)"
-              : "-12px 0 32px rgba(15,20,30,0.12)",
+              ? `-12px 0 32px ${shade(t, 0.4)}`
+              : `-12px 0 32px ${shade(t, 0.12)}`,
           display: "flex",
           flexDirection: "column",
           zIndex: 31,
@@ -587,7 +587,7 @@ export function LogPanel({
             <div
               style={{
                 fontSize: FS_LG,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 fontFamily: FF_MONO,
                 wordBreak: "break-all",
                 lineHeight: 1.3,

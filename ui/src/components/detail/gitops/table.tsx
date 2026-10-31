@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { FS_SM, FS_XS, R_MD, type Tokens } from "../../../theme";
+import { FS_SM, FS_XS, R_MD, type Tokens, FW_BOLD, LABEL_CASE, labelTracking, labelWeight } from "../../../theme";
 
 // Bordered, responsive table shell shared by the GitOps / Helm history and
 // result lists. Columns use minmax so narrow panels shrink instead of overflow.
@@ -34,10 +34,10 @@ export function DataTable({
           gap: 8,
           padding: "6px 12px",
           fontSize: FS_XS,
-          fontWeight: 700,
+          fontWeight: labelWeight(FW_BOLD),
           color: t.textDim,
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
+          textTransform: LABEL_CASE,
+          letterSpacing: labelTracking(0.4),
           background: t.surfaceAlt,
           borderBottom: `1px solid ${t.border}`,
         }}

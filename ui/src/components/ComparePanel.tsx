@@ -24,10 +24,13 @@ import {
   R_MD,
   type ThemeMode,
   type Tokens,
+  FW_SEMIBOLD,
+  shade,
 } from "../theme";
 import { Btn, ErrorBlock, IconBtn, Icons, LoadingLine } from "./ui";
 import { useEscLayer } from "../lib/escStack";
 import { useDrawerEdge } from "../lib/drawerEdge";
+import { defineMonacoThemes, useMonacoTheme } from "../lib/monacoTheme";
 
 export type CompareSide = {
   clusterId: string;
@@ -113,6 +116,7 @@ type Props = {
 };
 
 export function ComparePanel({ mode, target, onClose, onMinimize }: Props) {
+  const monacoTheme = useMonacoTheme();
   const resolved = useResolvedTheme();
   const t = resolved.tokens;
   const monoFont = resolved.typography.fontMono;
@@ -169,8 +173,8 @@ export function ComparePanel({ mode, target, onClose, onMinimize }: Props) {
           borderLeft: `1px solid ${t.border}`,
           boxShadow:
             mode === "dark"
-              ? "-12px 0 32px rgba(0,0,0,0.4)"
-              : "-12px 0 32px rgba(15,20,30,0.12)",
+              ? `-12px 0 32px ${shade(t, 0.4)}`
+              : `-12px 0 32px ${shade(t, 0.12)}`,
           display: "flex",
           flexDirection: "column",
           zIndex: 31,
@@ -192,7 +196,7 @@ export function ComparePanel({ mode, target, onClose, onMinimize }: Props) {
             <div
               style={{
                 fontSize: FS_MD,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 color: t.text,
                 letterSpacing: -0.2,
               }}
@@ -271,7 +275,8 @@ export function ComparePanel({ mode, target, onClose, onMinimize }: Props) {
             <DiffEditor
               height="100%"
               language="yaml"
-              theme={mode === "dark" ? "vs-dark" : "light"}
+              theme={monacoTheme}
+              beforeMount={defineMonacoThemes}
               original={leftState.status === "ok" ? leftState.yaml : ""}
               modified={rightState.status === "ok" ? rightState.yaml : ""}
               options={{

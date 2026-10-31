@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useResolvedTheme } from "../store";
-import { FF_MONO, FONT_SANS, FS_MD, FS_SM, FS_XS, R_LG, R_MD, type Tokens } from "../theme";
+import { FF_MONO, FF_SANS, FS_MD, FS_SM, FS_XS, R_LG, R_MD, type Tokens, FW_SEMIBOLD, shade, LABEL_CASE, LABEL_FONT, labelTracking } from "../theme";
 import type { ColumnDef } from "../types";
 import { Checkbox, Icons } from "./ui";
 import { labelColumnHeader } from "../lib/labelColumns";
@@ -135,12 +135,12 @@ export function ColumnPicker({
               borderRadius: R_LG,
               boxShadow:
                 mode === "dark"
-                  ? "0 12px 32px rgba(0,0,0,0.45)"
-                  : "0 12px 32px rgba(15,20,30,0.18)",
+                  ? `0 12px 32px ${shade(t, 0.45)}`
+                  : `0 12px 32px ${shade(t, 0.18)}`,
               display: "flex",
               flexDirection: "column",
               overflow: "hidden",
-              fontFamily: FONT_SANS,
+              fontFamily: FF_SANS,
             }}
           >
             <div
@@ -158,9 +158,9 @@ export function ColumnPicker({
                   style={{
                     color: t.textMuted,
                     fontSize: FS_SM,
-                    fontFamily: FF_MONO,
-                    letterSpacing: 0.5,
-                    textTransform: "uppercase",
+                    fontFamily: LABEL_FONT,
+                    letterSpacing: labelTracking(0.5),
+                    textTransform: LABEL_CASE,
                   }}
                 >
                   Columns
@@ -178,7 +178,7 @@ export function ColumnPicker({
                     borderRadius: R_MD,
                     color: t.textMuted,
                     fontSize: FS_XS,
-                    fontFamily: FONT_SANS,
+                    fontFamily: FF_SANS,
                     padding: "3px 8px",
                     cursor: "pointer",
                   }}
@@ -237,9 +237,9 @@ function SectionLabel({ t, children }: { t: Tokens; children: string }) {
         padding: "8px 10px 4px",
         color: t.textMuted,
         fontSize: FS_XS,
-        fontFamily: FF_MONO,
-        letterSpacing: 0.5,
-        textTransform: "uppercase",
+        fontFamily: LABEL_FONT,
+        letterSpacing: labelTracking(0.5),
+        textTransform: LABEL_CASE,
         borderBottom: `1px solid ${t.borderSoft}`,
       }}
     >
@@ -281,7 +281,7 @@ function PickRow({
         clicking the rest of the row toggles via the row handler. */}
       <Checkbox t={t} checked={checked} onChange={onToggle} />
       <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
-        <span style={{ ...PICK_ELLIPSIS, color: t.text, fontSize: FS_MD, fontWeight: 600 }}>
+        <span style={{ ...PICK_ELLIPSIS, color: t.text, fontSize: FS_MD, fontWeight: FW_SEMIBOLD }}>
           {label}
         </span>
         {sub && (

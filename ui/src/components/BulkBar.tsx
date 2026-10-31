@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useResolvedTheme } from "../store";
-import { type ThemeMode, R_LG, R_MD, FS_MD, FS_SM } from "../theme";
+import { type ThemeMode, R_LG, R_MD, FS_MD, FS_SM, FW_BOLD, FW_MEDIUM, shade, hexWithAlpha } from "../theme";
 import { Icons, inertProps } from "./ui";
 import type { AccessAction } from "../types";
 
@@ -45,14 +45,14 @@ export function BulkBar({ count, actions, onClear, children }: Props) {
         left: "50%",
         transform: "translateX(-50%)",
         background: t.bulkBg,
-        color: "#fff",
+        color: t.bulkText,
         borderRadius: R_LG,
         padding: "8px 8px 8px 16px",
         display: "flex",
         alignItems: "center",
         gap: 10,
         boxShadow:
-          "0 12px 36px rgba(0,0,0,0.25), 0 0 0 1px rgba(255,255,255,0.06)",
+          `0 12px 36px ${shade(t, 0.25)}, 0 0 0 1px ${hexWithAlpha(t.bulkText, 0.06)}`,
         zIndex: 35,
         animation: "fs-bulk-rise .18s cubic-bezier(.2,.7,.2,1)",
       }}
@@ -63,7 +63,7 @@ export function BulkBar({ count, actions, onClear, children }: Props) {
           alignItems: "center",
           gap: 8,
           fontSize: FS_MD,
-          fontWeight: 500,
+          fontWeight: FW_MEDIUM,
         }}
       >
         <span
@@ -74,10 +74,10 @@ export function BulkBar({ count, actions, onClear, children }: Props) {
             minWidth: 20,
             height: 20,
             padding: "0 6px",
-            background: "rgba(255,255,255,0.16)",
+            background: hexWithAlpha(t.bulkText, 0.16),
             borderRadius: R_LG,
             fontSize: FS_SM,
-            fontWeight: 700,
+            fontWeight: FW_BOLD,
             fontVariantNumeric: "tabular-nums",
           }}
         >
@@ -95,7 +95,7 @@ export function BulkBar({ count, actions, onClear, children }: Props) {
               style={{
                 width: 1,
                 height: 18,
-                background: "rgba(255,255,255,0.14)",
+                background: hexWithAlpha(t.bulkText, 0.14),
               }}
             />
           )}
@@ -114,7 +114,7 @@ export function BulkBar({ count, actions, onClear, children }: Props) {
         style={{
           width: 1,
           height: 18,
-          background: "rgba(255,255,255,0.14)",
+          background: hexWithAlpha(t.bulkText, 0.14),
         }}
       />
       <button
@@ -122,7 +122,7 @@ export function BulkBar({ count, actions, onClear, children }: Props) {
         title="Clear selection (Esc)"
         onClick={onClear}
         onMouseEnter={(e) =>
-          (e.currentTarget.style.background = "rgba(255,255,255,0.10)")
+          (e.currentTarget.style.background = hexWithAlpha(t.bulkText, 0.1))
         }
         onMouseLeave={(e) =>
           (e.currentTarget.style.background = "transparent")
@@ -133,7 +133,7 @@ export function BulkBar({ count, actions, onClear, children }: Props) {
           borderRadius: R_MD,
           border: "none",
           background: "transparent",
-          color: "rgba(255,255,255,0.7)",
+          color: hexWithAlpha(t.bulkText, 0.7),
           cursor: "pointer",
           display: "inline-flex",
           alignItems: "center",
@@ -161,6 +161,7 @@ function BulkActionButton({
   disabled?: boolean;
   disabledReason?: string;
 }) {
+  const t = useResolvedTheme().tokens;
   const [hover, setHover] = useState(false);
   const showHover = hover && !disabled;
   const title = disabled ? (disabledReason ?? "Cluster unavailable — reconnect to run this") : undefined;
@@ -183,13 +184,13 @@ function BulkActionButton({
         border: "none",
         background: showHover
           ? danger
-            ? "rgba(244,63,94,0.18)"
-            : "rgba(255,255,255,0.10)"
+            ? hexWithAlpha(t.bad, 0.18)
+            : hexWithAlpha(t.bulkText, 0.1)
           : "transparent",
-        color: danger ? (showHover ? "#fca5a5" : "#f87171") : "#ffffff",
+        color: danger ? (showHover ? t.bulkDangerHover : t.bulkDanger) : t.bulkText,
         fontFamily: "inherit",
         fontSize: FS_MD,
-        fontWeight: 500,
+        fontWeight: FW_MEDIUM,
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.4 : 1,
         transition: "background .12s, color .12s",

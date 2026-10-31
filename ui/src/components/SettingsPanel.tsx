@@ -18,9 +18,19 @@ import {
   UI_SCALE_MAX,
   UI_SCALE_MIN,
   getTheme,
+  getPalette,
   resolveTheme,
   type ThemeMode,
-  type Tokens, R_LG, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XL, FS_XS
+  type Tokens, R_LG, R_MD, R_SM, FS_LG, FS_MD, FS_SM, FS_XL, FS_XS,
+  FW_BOLD,
+  FW_MEDIUM,
+  FW_SEMIBOLD,
+  shade,
+  FIELD_H,
+  LABEL_CASE,
+  LABEL_FONT,
+  labelTracking,
+  labelWeight,
 } from "../theme";
 import { toast } from "../lib/dialog";
 import type {
@@ -48,6 +58,7 @@ import { MOD_KEY, SHIFT_KEY, ALT_KEY } from "../lib/keyboard";
 import { AiSection } from "./settings/AiSection";
 import { ToolsSection } from "./settings/ToolsSection";
 import { ReleaseNotes } from "./ReleaseNotes";
+import { PaletteSwatch, ThemePreview } from "./settings/ThemePreview";
 
 // Re-export from `types.ts` so the rest of the app uses one canonical
 // `SettingsSectionId` (the store typed `openSettings(target)` against
@@ -171,8 +182,8 @@ export function SettingsPanel({ mode, onClose }: Props) {
           borderLeft: `1px solid ${t.border}`,
           boxShadow:
             mode === "dark"
-              ? "-12px 0 32px rgba(0,0,0,0.4)"
-              : "-12px 0 32px rgba(15,20,30,0.12)",
+              ? `-12px 0 32px ${shade(t, 0.4)}`
+              : `-12px 0 32px ${shade(t, 0.12)}`,
           display: "flex",
           flexDirection: "column",
           zIndex: 37,
@@ -191,7 +202,7 @@ export function SettingsPanel({ mode, onClose }: Props) {
           <div
             style={{
               fontSize: FS_LG,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               letterSpacing: -0.2,
               color: t.text,
             }}
@@ -236,7 +247,7 @@ export function SettingsPanel({ mode, onClose }: Props) {
                     color: isActive ? t.text : t.textDim,
                     fontFamily: "inherit",
                     fontSize: FS_MD,
-                    fontWeight: isActive ? 600 : 500,
+                    fontWeight: isActive ? FW_SEMIBOLD : FW_MEDIUM,
                     textAlign: "left",
                     cursor: "pointer",
                     boxShadow: isActive ? `0 0 0 1px ${t.borderSoft}` : "none",
@@ -402,7 +413,10 @@ function AppearanceSection({}: { mode: ThemeMode }) {
   const atMin = settings.uiScale <= UI_SCALE_MIN + 1e-6;
   const atMax = settings.uiScale >= UI_SCALE_MAX - 1e-6;
   const atDefault = Math.abs(settings.uiScale - UI_SCALE_DEFAULT) < 1e-6;
+  // Stored ids may be stale (a retired palette) or from a newer build; show what resolves.
   const activeTheme = getTheme(themeId);
+  const activePalette = getPalette(activeTheme, paletteId);
+  const paletteNote = activePalette.note?.[themeMode];
 
   return (
     <div>
@@ -411,88 +425,82 @@ function AppearanceSection({}: { mode: ThemeMode }) {
         title="Appearance"
         sub="Theme, palette, density. Identifiers always render in mono per design rule R-07."
       />
-      <Field t={t} label="Theme" hint="Pick a look. Palette and mode swap below.">
+      <Field
+        t={t}
+        stack
+        label="Theme"
+        hint="Typography, sizing and chrome. Lens follows Freelens; VS Code follows the workbench."
+      >
         <div
+          role="radiogroup"
+          aria-label="Theme"
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(2, 1fr)",
-            gap: 8,
+            gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+            gap: 10,
           }}
         >
           {THEMES.map((th) => {
-            const isActive = themeId === th.id;
-            // Three-swatch preview from this theme's default palette in the
-            // current mode — surface, accent, text.
+            const isActive = activeTheme.id === th.id;
+            // The active theme previews the chosen palette; others their default.
             const preview = resolveTheme({
               themeId: th.id,
-              paletteId: th.defaultPaletteId,
+              paletteId: isActive ? activePalette.id : th.defaultPaletteId,
               mode: themeMode,
             });
             return (
               <button
                 key={th.id}
                 type="button"
+                role="radio"
+                aria-checked={isActive}
+                aria-label={th.name}
                 title={th.description}
                 onClick={() => setTheme(th.id)}
                 style={{
                   textAlign: "left",
-                  padding: 10,
-                  borderRadius: R_MD,
+                  padding: 8,
+                  borderRadius: R_LG,
                   border: `1px solid ${isActive ? t.accent : t.border}`,
-                  background: isActive ? t.accentSoft : t.surface,
-                  color: isActive ? t.accent : t.text,
+                  boxShadow: isActive ? `0 0 0 3px ${t.accentSoft}` : "none",
+                  background: t.surface,
+                  color: t.text,
                   fontFamily: "inherit",
                   cursor: "pointer",
                   display: "flex",
                   flexDirection: "column",
-                  gap: 6,
+                  gap: 8,
                   minWidth: 0,
+                  transition: "border-color .12s, box-shadow .12s",
                 }}
               >
-                {/* Row 1: name on the left, swatches on the right. */}
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 8,
-                  }}
-                >
-                  <span
+                <ThemePreview theme={preview} />
+                <div style={{ padding: "0 2px 2px", minWidth: 0 }}>
+                  <div
                     style={{
-                      // `flex: 1 + minWidth: 0` lets the name ellipsis-truncate
-                      // instead of pushing the swatches off the right edge at
-                      // larger base font sizes (Readable theme).
-                      flex: 1,
-                      minWidth: 0,
                       fontSize: FS_MD,
-                      fontWeight: 600,
+                      fontWeight: FW_SEMIBOLD,
+                      color: isActive ? t.accent : t.text,
                       whiteSpace: "nowrap",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
+                      fontFamily: preview.typography.fontSans,
                     }}
                   >
                     {th.name}
-                  </span>
-                  <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-                    <Swatch color={preview.tokens.surface} ring={t.border} />
-                    <Swatch color={preview.tokens.accent} ring={t.border} />
-                    <Swatch color={preview.tokens.text} ring={t.border} />
-                  </span>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: FS_SM,
+                      color: t.textDim,
+                      lineHeight: 1.35,
+                      marginTop: 2,
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {th.description}
+                  </div>
                 </div>
-                {/* Row 2: description on a new line. */}
-                <span
-                  style={{
-                    fontSize: FS_SM,
-                    color: isActive ? t.accent : t.textDim,
-                    lineHeight: 1.35,
-                    whiteSpace: "normal",
-                    overflowWrap: "anywhere",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  {th.description}
-                </span>
               </button>
             );
           })}
@@ -500,18 +508,34 @@ function AppearanceSection({}: { mode: ThemeMode }) {
       </Field>
       <Field
         t={t}
+        stack
         label="Palette"
-        hint="Swap colors inside the current theme without changing typography or density."
+        hint="Colours inside the current theme; typography and density stay."
       >
-        <Select<string>
-          t={t}
-          value={paletteId}
-          onChange={(v) => setPalette(v)}
-          options={activeTheme.palettes.map((p) => ({
-            value: p.id,
-            label: p.name,
-          }))}
-        />
+        <div
+          role="radiogroup"
+          aria-label="Palette"
+          style={{ display: "flex", flexWrap: "wrap", gap: 6 }}
+        >
+          {activeTheme.palettes.map((p) => (
+            <PaletteSwatch
+              key={p.id}
+              t={t}
+              name={p.name}
+              active={activePalette.id === p.id}
+              onClick={() => setPalette(p.id)}
+              theme={resolveTheme({ themeId: activeTheme.id, paletteId: p.id, mode: themeMode })}
+            />
+          ))}
+        </div>
+        {paletteNote && (
+          <div
+            role="note"
+            style={{ marginTop: 8, fontSize: FS_SM, color: t.textMuted, lineHeight: 1.4 }}
+          >
+            {paletteNote}
+          </div>
+        )}
       </Field>
       <Field
         t={t}
@@ -537,14 +561,14 @@ function AppearanceSection({}: { mode: ThemeMode }) {
                   alignItems: "center",
                   justifyContent: "center",
                   padding: "6px 8px",
-                  minHeight: 32,
+                  minHeight: FIELD_H,
                   borderRadius: R_MD,
                   border: `1px solid ${isActive ? t.accent : t.border}`,
                   background: isActive ? t.accentSoft : t.surface,
                   color: isActive ? t.accent : t.text,
                   fontFamily: "inherit",
                   fontSize: FS_MD,
-                  fontWeight: 500,
+                  fontWeight: FW_MEDIUM,
                   cursor: "pointer",
                   textTransform: "capitalize",
                 }}
@@ -580,14 +604,14 @@ function AppearanceSection({}: { mode: ThemeMode }) {
                   alignItems: "center",
                   justifyContent: "center",
                   padding: "6px 8px",
-                  minHeight: 32,
+                  minHeight: FIELD_H,
                   borderRadius: R_MD,
                   border: `1px solid ${isActive ? t.accent : t.border}`,
                   background: isActive ? t.accentSoft : t.surface,
                   color: isActive ? t.accent : t.text,
                   fontFamily: "inherit",
                   fontSize: FS_MD,
-                  fontWeight: 500,
+                  fontWeight: FW_MEDIUM,
                   cursor: "pointer",
                 }}
               >
@@ -678,7 +702,7 @@ function AppearanceSection({}: { mode: ThemeMode }) {
             style={{
               minWidth: 56,
               padding: "4px 10px",
-              minHeight: 32,
+              minHeight: FIELD_H,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -706,7 +730,7 @@ function AppearanceSection({}: { mode: ThemeMode }) {
             disabled={atDefault}
             style={{
               marginLeft: 6,
-              minHeight: 32,
+              minHeight: FIELD_H,
               padding: "6px 12px",
               display: "inline-flex",
               alignItems: "center",
@@ -717,7 +741,7 @@ function AppearanceSection({}: { mode: ThemeMode }) {
               color: atDefault ? t.textMuted : t.text,
               fontFamily: "inherit",
               fontSize: FS_MD,
-              fontWeight: 500,
+              fontWeight: FW_MEDIUM,
               cursor: atDefault ? "default" : "pointer",
               opacity: atDefault ? 0.6 : 1,
             }}
@@ -727,22 +751,6 @@ function AppearanceSection({}: { mode: ThemeMode }) {
         </div>
       </Field>
     </div>
-  );
-}
-
-function Swatch({ color, ring }: { color: string; ring: string }) {
-  return (
-    <span
-      aria-hidden
-      style={{
-        display: "inline-block",
-        width: 14,
-        height: 14,
-        borderRadius: R_MD,
-        background: color,
-        boxShadow: `inset 0 0 0 1px ${ring}`,
-      }}
-    />
   );
 }
 
@@ -766,15 +774,15 @@ function ScaleStepBtn({
       disabled={disabled}
       aria-label={ariaLabel}
       style={{
-        width: 32,
-        height: 32,
+        width: FIELD_H,
+        height: FIELD_H,
         borderRadius: R_MD,
         border: `1px solid ${t.border}`,
         background: t.surface,
         color: disabled ? t.textMuted : t.text,
         fontFamily: "inherit",
         fontSize: FS_LG,
-        fontWeight: 600,
+        fontWeight: FW_SEMIBOLD,
         lineHeight: 1,
         cursor: disabled ? "default" : "pointer",
         opacity: disabled ? 0.5 : 1,
@@ -892,7 +900,7 @@ function KubeconfigSection({}: { mode: ThemeMode }) {
             style={{
               flex: 1,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.text,
             }}
           >
@@ -1069,15 +1077,15 @@ function SourceRow({
     >
       <span
         style={{
-          fontFamily: FF_MONO,
+          fontFamily: LABEL_FONT,
           fontSize: FS_XS,
           padding: "2px 6px",
           borderRadius: R_SM,
           background: t.chip,
           color: t.textDim,
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
-          fontWeight: 600,
+          textTransform: LABEL_CASE,
+          letterSpacing: labelTracking(0.4),
+          fontWeight: labelWeight(FW_SEMIBOLD),
           flexShrink: 0,
         }}
       >
@@ -1325,7 +1333,7 @@ function AddSshSourceModal({
         right: 0,
         bottom: 0,
         left: 0,
-        background: "rgba(0,0,0,0.45)",
+        background: t.scrim,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -1345,13 +1353,13 @@ function AddSshSourceModal({
           border: `1px solid ${t.border}`,
           borderRadius: R_LG,
           padding: 18,
-          boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+          boxShadow: `0 10px 30px ${shade(t, 0.35)}`,
         }}
       >
         <div
           style={{
             fontSize: FS_LG,
-            fontWeight: 600,
+            fontWeight: FW_SEMIBOLD,
             marginBottom: 4,
           }}
         >
@@ -1671,7 +1679,7 @@ function ShortcutsSection({}: { mode: ThemeMode }) {
                   style={{
                     padding: "2px 7px",
                     border: `1px solid ${t.borderSoft}`,
-                    fontWeight: 500,
+                    fontWeight: FW_MEDIUM,
                   }}
                 >
                   {k}
@@ -1902,7 +1910,7 @@ function ObservabilitySection({}: { mode: ThemeMode }) {
           <div
             style={{
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.text,
               marginBottom: 8,
             }}
@@ -2100,7 +2108,7 @@ function AboutSection({}: { mode: ThemeMode }) {
             height: 44,
             borderRadius: R_LG,
             background: t.accent,
-            color: "white",
+            color: t.onAccent,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -2112,7 +2120,7 @@ function AboutSection({}: { mode: ThemeMode }) {
           <div
             style={{
               fontSize: FS_XL,
-              fontWeight: 700,
+              fontWeight: FW_BOLD,
               letterSpacing: -0.3,
               color: t.text,
             }}
@@ -2333,7 +2341,7 @@ function SystemInstallHint({
         borderRadius: R_MD,
       }}
     >
-      <div style={{ fontSize: FS_SM, color: t.textMuted, fontWeight: 600 }}>
+      <div style={{ fontSize: FS_SM, color: t.textMuted, fontWeight: FW_SEMIBOLD }}>
         Installed via {label} — update through it:
       </div>
       <div

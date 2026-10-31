@@ -3,7 +3,7 @@ import { useAppStore, useResolvedTheme } from "../store";
 import type { Notification, NotificationDetail, NotificationMeta } from "../store";
 import {
   FF_MONO,
-  FONT_SANS,
+  FF_SANS,
   type ThemeMode,
   type Tokens,
   R_SM,
@@ -11,6 +11,8 @@ import {
   FS_MD,
   FS_SM,
   FS_XS,
+  FW_SEMIBOLD,
+  shade,
 } from "../theme";
 import { Btn, Eyebrow, IconBtn, Icons, EmptyState } from "./ui";
 import { useEscLayer } from "../lib/escStack";
@@ -61,13 +63,13 @@ export function NotificationsPanel({ mode }: Props) {
           borderLeft: `1px solid ${t.border}`,
           boxShadow:
             mode === "dark"
-              ? "-12px 0 32px rgba(0,0,0,0.4)"
-              : "-12px 0 32px rgba(15,20,30,0.12)",
+              ? `-12px 0 32px ${shade(t, 0.4)}`
+              : `-12px 0 32px ${shade(t, 0.12)}`,
           display: "flex",
           flexDirection: "column",
           zIndex: 31,
           animation: "fs-slide-from-right .22s cubic-bezier(.2,.7,.2,1)",
-          fontFamily: FONT_SANS,
+          fontFamily: FF_SANS,
         }}
       >
         <header
@@ -86,7 +88,7 @@ export function NotificationsPanel({ mode }: Props) {
               style={{
                 marginTop: 2,
                 fontSize: FS_MD,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
                 color: t.text,
               }}
             >
@@ -203,7 +205,7 @@ function Row({ t, n }: { t: Tokens; n: Notification }) {
                 whiteSpace: "pre-wrap",
                 wordBreak: "break-word",
                 lineHeight: 1.5,
-                fontWeight: 600,
+                fontWeight: FW_SEMIBOLD,
               }}
             >
               {n.text}
@@ -300,7 +302,7 @@ function DetailLine({ t, d }: { t: Tokens; d: NotificationDetail }) {
         style={{
           fontSize: FS_SM,
           color: t.text,
-          fontFamily: d.mono ? FF_MONO : FONT_SANS,
+          fontFamily: d.mono ? FF_MONO : FF_SANS,
           whiteSpace: "pre-wrap",
           wordBreak: "break-word",
           lineHeight: 1.45,

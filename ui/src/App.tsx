@@ -25,12 +25,14 @@ import {
 } from "./store";
 import type { AppInfo } from "./types";
 import {
-  FONT_SANS,
+  FF_SANS,
   UI_SCALE_BASELINE,
   UI_SCALE_DEFAULT,
   R_LG,
   FS_MD,
   clusterAccent,
+  FW_MEDIUM,
+  shade,
 } from "./theme";
 import { AppHeader } from "./components/AppHeader";
 import {
@@ -953,7 +955,7 @@ export default function App() {
         // vibrancy material show through; the <main> content repaints t.bg.
         background: IS_MAC ? "transparent" : t.bg,
         color: t.text,
-        fontFamily: FONT_SANS,
+        fontFamily: FF_SANS,
         overflow: "hidden",
       }}
     >
@@ -1199,15 +1201,15 @@ export default function App() {
             border: `1px solid ${t.border}`,
             background: t.surface,
             color: t.text,
-            fontFamily: FONT_SANS,
+            fontFamily: FF_SANS,
             fontSize: FS_MD,
-            fontWeight: 500,
+            fontWeight: FW_MEDIUM,
             fontVariantNumeric: "tabular-nums",
             cursor: "pointer",
             boxShadow:
               themeMode === "dark"
-                ? "0 4px 12px rgba(0,0,0,0.35)"
-                : "0 4px 12px rgba(15,20,30,0.12)",
+                ? `0 4px 12px ${shade(t, 0.35)}`
+                : `0 4px 12px ${shade(t, 0.12)}`,
           }}
         >
           {Math.round(uiScale * 100)}% · Reset

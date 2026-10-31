@@ -5,7 +5,7 @@
 import { useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, R_LG, R_SM, FS_MD, FS_SM, FS_XS, FW_SEMIBOLD } from "../../../theme";
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, LoadingLine, Section, StatusPill } from "../../ui";
 import {
@@ -504,7 +504,7 @@ function NodeConditionRow({
           padding: "1px 7px",
           borderRadius: R_SM,
           fontSize: FS_SM,
-          fontWeight: 600,
+          fontWeight: FW_SEMIBOLD,
           background: bg,
           color: fg,
         }}
@@ -692,7 +692,7 @@ export function EventSummary(props: {
       >
         <StatusPill status={d.type} t={t} mode={props.mode} />
         {d.reason && (
-          <span style={{ fontSize: FS_MD, fontWeight: 600, color: t.text }}>
+          <span style={{ fontSize: FS_MD, fontWeight: FW_SEMIBOLD, color: t.text }}>
             {d.reason}
           </span>
         )}

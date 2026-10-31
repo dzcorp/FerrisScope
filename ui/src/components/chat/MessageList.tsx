@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { useResolvedTheme } from "../../store";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { tokens, FF_MONO, type ThemeMode, R_LG, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { tokens, FF_MONO, type ThemeMode, R_LG, FS_MD, FS_SM, FS_XS, FW_BOLD, shade, LABEL_CASE, LABEL_FONT, labelTracking, labelWeight } from "../../theme";
 import { Eyebrow } from "../ui";
 import {
   shouldRenderMessage,
@@ -350,14 +350,14 @@ function JumpToLatestButton({
         fontSize: FS_SM,
         color: t.text,
         cursor: "pointer",
-        boxShadow: "0 2px 8px rgba(15,20,30,0.18)",
+        boxShadow: `0 2px 8px ${shade(t, 0.18)}`,
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
         zIndex: 2,
       }}
     >
-      <span style={{ color: t.accent, fontWeight: 700 }}>↓</span>
+      <span style={{ color: t.accent, fontWeight: FW_BOLD }}>↓</span>
       <span>{streaming ? "follow latest" : "jump to latest"}</span>
     </button>
   );
@@ -391,18 +391,18 @@ function ThinkingPlaceholder({ t }: { t: ReturnType<typeof tokens> }) {
           color: t.text,
           fontSize: FS_MD,
           lineHeight: 1.55,
-          boxShadow: "0 1px 3px rgba(15,20,30,0.05)",
+          boxShadow: `0 1px 3px ${shade(t, 0.05)}`,
         }}
       >
         <div
           style={{
-            fontFamily: FF_MONO,
+            fontFamily: LABEL_FONT,
             fontSize: FS_XS,
             color: t.textDim,
-            letterSpacing: 0.6,
-            textTransform: "uppercase",
+            letterSpacing: labelTracking(0.6),
+            textTransform: LABEL_CASE,
             marginBottom: 5,
-            fontWeight: 700,
+            fontWeight: labelWeight(FW_BOLD),
             opacity: 0.85,
           }}
         >
@@ -431,18 +431,18 @@ function CompactingBubble({ t }: { t: ReturnType<typeof tokens> }) {
           color: t.text,
           fontSize: FS_MD,
           lineHeight: 1.55,
-          boxShadow: "0 1px 3px rgba(15,20,30,0.05)",
+          boxShadow: `0 1px 3px ${shade(t, 0.05)}`,
         }}
       >
         <div
           style={{
-            fontFamily: FF_MONO,
+            fontFamily: LABEL_FONT,
             fontSize: FS_XS,
             color: t.textDim,
-            letterSpacing: 0.6,
-            textTransform: "uppercase",
+            letterSpacing: labelTracking(0.6),
+            textTransform: LABEL_CASE,
             marginBottom: 5,
-            fontWeight: 700,
+            fontWeight: labelWeight(FW_BOLD),
             opacity: 0.85,
           }}
         >
@@ -521,18 +521,18 @@ function RetryBubble({
           color: t.text,
           fontSize: FS_MD,
           lineHeight: 1.55,
-          boxShadow: "0 1px 3px rgba(15,20,30,0.05)",
+          boxShadow: `0 1px 3px ${shade(t, 0.05)}`,
         }}
       >
         <div
           style={{
-            fontFamily: FF_MONO,
+            fontFamily: LABEL_FONT,
             fontSize: FS_XS,
             color: t.warn,
-            letterSpacing: 0.6,
-            textTransform: "uppercase",
+            letterSpacing: labelTracking(0.6),
+            textTransform: LABEL_CASE,
             marginBottom: 5,
-            fontWeight: 700,
+            fontWeight: labelWeight(FW_BOLD),
             opacity: 0.9,
           }}
         >

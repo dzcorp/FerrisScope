@@ -60,3 +60,40 @@ describe("applyThemeCssVars", () => {
     expect(document.body.style.fontSize).toBe(`${r.typography.base}px`);
   });
 });
+
+describe("applyThemeCssVars — table, field and colour vars", () => {
+  it("publishes the table typography, field heights, focus and scrollbar colours", () => {
+    const r = resolveTheme({ themeId: "vscode", paletteId: "modern", mode: "dark" });
+    applyThemeCssVars(r, "dark", { isMac: false, titlebarInsetPx: 0 });
+    const root = document.documentElement.style;
+    expect(root.getPropertyValue("--fs-table-fs")).toBe("13px");
+    expect(root.getPropertyValue("--fs-table-fs-mono")).toBe("12.5px");
+    expect(root.getPropertyValue("--fs-field-h")).toBe("26px");
+    expect(root.getPropertyValue("--fs-field-h-sm")).toBe("22px");
+    expect(root.getPropertyValue("--fs-focus")).toBe(r.tokens.focus);
+    expect(root.getPropertyValue("--fs-accent")).toBe(r.tokens.accent);
+    expect(root.getPropertyValue("--fs-scroll-thumb")).toBe(r.tokens.scrollThumb);
+    expect(root.getPropertyValue("--fs-scroll-thumb-active")).toBe(r.tokens.scrollThumbActive);
+    expect(root.getPropertyValue("--fs-accent-ring")).toMatch(/^rgba\(0, 120, 212, 0\.32\)$/);
+  });
+});
+
+describe("applyThemeCssVars — weights, labels, tabs", () => {
+  it("publishes weight, label and tab-indicator vars, and clears an unset label weight", () => {
+    const lens = resolveTheme({ themeId: "lens", paletteId: "lens", mode: "dark" });
+    applyThemeCssVars(lens, "dark", { isMac: false, titlebarInsetPx: 0 });
+    const root = document.documentElement.style;
+    expect(root.getPropertyValue("--fs-label-case")).toBe("none");
+    expect(root.getPropertyValue("--fs-label-font")).toBe("var(--fs-font-sans)");
+    expect(root.getPropertyValue("--fs-label-ls")).toBe("0");
+    expect(root.getPropertyValue("--fs-label-fw")).toBe("500");
+    expect(root.getPropertyValue("--fs-tab-indicator")).toBe("3px");
+    expect(root.getPropertyValue("--fs-fw-semibold")).toBe("500");
+
+    const def = resolveTheme({ themeId: "default", paletteId: "default", mode: "dark" });
+    applyThemeCssVars(def, "dark", { isMac: false, titlebarInsetPx: 0 });
+    expect(root.getPropertyValue("--fs-label-case")).toBe("uppercase");
+    expect(root.getPropertyValue("--fs-label-fw")).toBe("");
+    expect(root.getPropertyValue("--fs-fw-medium")).toBe("500");
+  });
+});

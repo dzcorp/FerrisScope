@@ -14,6 +14,11 @@ import {
   FS_SM,
   FS_XS,
   type Tokens,
+  FW_BOLD,
+  LABEL_CASE,
+  LABEL_FONT,
+  labelTracking,
+  labelWeight,
 } from "../../theme";
 import { Copyable, Mute } from "../detail";
 import { EmptyState } from "../ui";
@@ -229,12 +234,12 @@ function HeadCell({
         width,
         flexShrink: 0,
         padding: "8px 12px",
-        fontFamily: FF_MONO,
+        fontFamily: LABEL_FONT,
         fontSize: FS_XS,
-        fontWeight: 700,
+        fontWeight: labelWeight(FW_BOLD),
         color: t.textMuted,
-        textTransform: "uppercase",
-        letterSpacing: 0.6,
+        textTransform: LABEL_CASE,
+        letterSpacing: labelTracking(0.6),
         overflow: "hidden",
         ...(sticky
           ? { position: "sticky" as const, left: 0, background: t.surface, zIndex: 1 }

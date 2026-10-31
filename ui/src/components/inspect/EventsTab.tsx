@@ -17,6 +17,11 @@ import {
   FS_XS,
   type ThemeMode,
   type Tokens,
+  FW_BOLD,
+  LABEL_CASE,
+  LABEL_FONT,
+  labelTracking,
+  labelWeight,
 } from "../../theme";
 import { EmptyState, ErrorBlock, LoadingLine, StatusPill } from "../ui";
 import { ageFromIso } from "../detail";
@@ -181,12 +186,12 @@ export function EventsTab({
                   top: 0,
                   background: t.surface,
                   borderBottom: `1px solid ${t.border}`,
-                  fontFamily: FF_MONO,
+                  fontFamily: LABEL_FONT,
                   fontSize: FS_XS,
-                  fontWeight: 700,
+                  fontWeight: labelWeight(FW_BOLD),
                   color: t.textMuted,
-                  textTransform: "uppercase",
-                  letterSpacing: 0.6,
+                  textTransform: LABEL_CASE,
+                  letterSpacing: labelTracking(0.6),
                 }}
               >
                 {label}

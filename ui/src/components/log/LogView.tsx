@@ -20,6 +20,8 @@ import {
   FS_XS,
   hexWithAlpha,
   type Tokens,
+  FW_SEMIBOLD,
+  shade,
 } from "../../theme";
 import { ErrorBlock, Select } from "../ui";
 import { ansiToReact, stripAnsi } from "../../lib/ansi";
@@ -1046,7 +1048,7 @@ const LogLine = memo(function LogLine({
         {srcLabel != null && srcLabel.length > 0 && (
           <span
             className="fs-log-src"
-            style={{ color: srcColor, fontWeight: 600 }}
+            style={{ color: srcColor, fontWeight: FW_SEMIBOLD }}
           >
             {srcLabel}{" "}
           </span>
@@ -1165,7 +1167,7 @@ function LogFindBar({
         background: t.surface,
         border: `1px solid ${t.border}`,
         borderRadius: 6,
-        boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
+        boxShadow: `0 6px 18px ${shade(t, 0.35)}`,
       }}
     >
       <input

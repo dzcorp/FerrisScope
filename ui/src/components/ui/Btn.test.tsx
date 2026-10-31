@@ -206,3 +206,38 @@ describe("disabled buttons keep their tooltip reachable", () => {
     expect(getByRole("button")).toBe(before);
   });
 });
+
+describe("Btn theme tokens", () => {
+  it("primary ink is the palette's onAccent and height the theme's field var", () => {
+    const k = { ...tokens("dark"), onAccent: "#272822" };
+    const { getByRole } = render(
+      <Btn t={k} variant="primary">
+        Apply
+      </Btn>,
+    );
+    const b = getByRole("button", { name: "Apply" });
+    expect(b.style.color).toBe("rgb(39, 40, 34)");
+    expect(b.style.height).toBe("var(--fs-field-h, 32px)");
+  });
+
+  it("small buttons use the small field height", () => {
+    const { getByRole } = render(
+      <Btn t={tokens("light")} size="sm">
+        Go
+      </Btn>,
+    );
+    expect(getByRole("button", { name: "Go" }).style.height).toBe("var(--fs-field-h-sm, 26px)");
+  });
+
+  it("danger hover tints from the palette's bad colour", () => {
+    const k = { ...tokens("dark"), bad: "#dc322f" };
+    const { getByRole } = render(
+      <Btn t={k} variant="danger">
+        Delete
+      </Btn>,
+    );
+    const b = getByRole("button", { name: "Delete" });
+    fireEvent.mouseEnter(b);
+    expect(b.style.background).toBe("rgba(220, 50, 47, 0.12)");
+  });
+});

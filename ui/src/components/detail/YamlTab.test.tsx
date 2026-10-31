@@ -66,7 +66,6 @@ function Host({
   const [error, setError] = useState<string | null>(null);
   return (
     <YamlTab
-      mode="dark"
       t={t}
       yaml={serverYaml}
       yamlRaw={`${serverYaml}  uid: abc\n`}

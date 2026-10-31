@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Roboto:wght@400;500;700&display=swap");
 @import "tailwindcss";
 
 html,
@@ -164,18 +164,18 @@ textarea,
    control without the surface flashing distractingly. */
 @keyframes fs-anchor-pulse-kf {
   0% {
-    box-shadow: 0 0 0 0 rgba(99, 179, 237, 0);
+    box-shadow: 0 0 0 0 transparent;
   }
   20% {
-    box-shadow: 0 0 0 4px rgba(99, 179, 237, 0.32);
+    box-shadow: 0 0 0 4px var(--fs-accent-ring, rgba(99, 179, 237, 0.32));
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(99, 179, 237, 0);
+    box-shadow: 0 0 0 0 transparent;
   }
 }
 .fs-anchor-pulse {
   animation: fs-anchor-pulse-kf 1100ms ease-out;
-  border-radius: 6px;
+  border-radius: var(--fs-radius-md, 6px);
 }
 /* Streaming-cursor blink for the AI chat in-flight assistant message. */
 @keyframes fs-blink {
@@ -238,13 +238,13 @@ textarea,
    activity in this group" without the surface strobing. */
 @keyframes fs-tool-group-flash-kf {
   0% {
-    box-shadow: 0 0 0 0 rgba(99, 179, 237, 0);
+    box-shadow: 0 0 0 0 transparent;
   }
   25% {
-    box-shadow: 0 0 0 3px rgba(99, 179, 237, 0.28);
+    box-shadow: 0 0 0 3px var(--fs-accent-ring, rgba(99, 179, 237, 0.28));
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(99, 179, 237, 0);
+    box-shadow: 0 0 0 0 transparent;
   }
 }
 .fs-tool-group-flash {
@@ -314,14 +314,11 @@ textarea,
   }
 }
 
-/* Global thin overlay scrollbars — replaces the OS chrome everywhere so
-   scroll gutters don't fight the dense layout. Firefox / spec via
-   scrollbar-* properties; WebKit / WebKitGTK via ::-webkit-scrollbar.
-   Translucent gray works on both light and dark themes. Grows on hover
-   of the scrollable container so the thumb is easier to grab. */
+/* Thin overlay scrollbars coloured by the theme (`scrollThumb*` tokens);
+   the thumb grows while the container is hovered. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(127, 127, 127, 0.22) transparent;
+  scrollbar-color: var(--fs-scroll-thumb, rgba(127, 127, 127, 0.22)) transparent;
 }
 *::-webkit-scrollbar {
   width: 6px;
@@ -331,7 +328,7 @@ textarea,
   background: transparent;
 }
 *::-webkit-scrollbar-thumb {
-  background: rgba(127, 127, 127, 0.28);
+  background: var(--fs-scroll-thumb, rgba(127, 127, 127, 0.28));
   border-radius: 5px;
   border: 1px solid transparent;
   background-clip: content-box;
@@ -345,12 +342,12 @@ textarea,
   height: 12px;
 }
 *:hover::-webkit-scrollbar-thumb {
-  background: rgba(127, 127, 127, 0.45);
+  background: var(--fs-scroll-thumb-hover, rgba(127, 127, 127, 0.45));
   border: 3px solid transparent;
   background-clip: content-box;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: rgba(127, 127, 127, 0.65);
+  background: var(--fs-scroll-thumb-active, rgba(127, 127, 127, 0.65));
   border: 3px solid transparent;
   background-clip: content-box;
 }
@@ -377,6 +374,14 @@ textarea,
   width: 0;
   height: 0;
   display: none;
+}
+
+/* Keyboard focus ring in the theme's focus colour. Controls set `outline:
+   none` inline for mouse use, so the ring needs `!important`; editors and
+   terminals draw their own. */
+:is(button, a, [role="tab"], [role="switch"], [role="checkbox"], [role="option"], [tabindex]:not([tabindex="-1"])):focus-visible:not(.monaco-editor *, .xterm *) {
+  outline: 2px solid var(--fs-focus, #3b82f6) !important;
+  outline-offset: 1px;
 }
 
 /* Rail items highlight on hover in CSS, not React state (a re-render per

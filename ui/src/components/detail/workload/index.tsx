@@ -6,7 +6,7 @@
 import { useState } from "react";
 import { useResolvedTheme } from "../../../store";
 import { api } from "../../../api";
-import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS } from "../../../theme";
+import { FF_MONO, type ThemeMode, type Tokens, FS_MD, FS_SM, FS_XS, FW_SEMIBOLD } from "../../../theme";
 import {  } from "../../../theme";
 import { Chip, ErrorBlock, Section, StatusPill, LoadingLine } from "../../ui";
 import {
@@ -1159,7 +1159,7 @@ export function CronJobSummary(props: {
             style={{
               fontFamily: FF_MONO,
               fontSize: FS_MD,
-              fontWeight: 600,
+              fontWeight: FW_SEMIBOLD,
               color: t.text,
             }}
           >

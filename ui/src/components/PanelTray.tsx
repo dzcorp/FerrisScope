@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { placementOf, useAppStore, useResolvedTheme, type Drawer, type TrayItem } from "../store";
 import { railRank } from "../lib/kindOrder";
 import type { ResourceKind } from "../types";
-import { FS_SM, FS_XS, R_SM, type Tokens } from "../theme";
+import { FS_SM, FS_XS, R_SM, type Tokens, FW_MEDIUM, shade } from "../theme";
 import { IconBtn, Icons, resolveKindIcon } from "./ui";
 import { dockDefaultSize } from "./Dock";
 import { closeDockTabs } from "../lib/dockClose";
@@ -327,7 +327,7 @@ export function PanelTray() {
         borderRight: "none",
         borderTopLeftRadius: 8,
         borderBottomLeftRadius: 8,
-        boxShadow: open ? "-4px 0 16px rgba(15,20,30,0.12)" : "none",
+        boxShadow: open ? `-4px 0 16px ${shade(t, 0.12)}` : "none",
         transition: "width .18s cubic-bezier(.2,.7,.2,1), box-shadow .18s",
         // Above the drawer scrim so hidden panels stay reachable.
         zIndex: drawerOpen ? 32 : 26,
@@ -449,7 +449,7 @@ function TrayRow({ t, row, open, armed }: { t: Tokens; row: Row; open: boolean; 
         <span
           style={{
             fontSize: FS_SM,
-            fontWeight: 500,
+            fontWeight: FW_MEDIUM,
             color: t.text,
             overflow: "hidden",
             textOverflow: "ellipsis",

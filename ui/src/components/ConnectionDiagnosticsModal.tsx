@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { api } from "../api";
 import type { ConnectionDiagnostics } from "../types";
 import type { Tokens } from "../theme";
-import { FS_MD, FS_SM } from "../theme";
+import { FS_MD, FS_SM, FW_SEMIBOLD } from "../theme";
 import { Section, Chip, Btn } from "./ui";
 import { Copyable, Mono, Mute } from "./detail/primitives";
 import { useEscLayer } from "../lib/escStack";
@@ -89,7 +89,7 @@ export function ConnectionDiagnosticsModal({
       >
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ color: t.text, fontSize: FS_MD, fontWeight: 600 }}>
+            <div style={{ color: t.text, fontSize: FS_MD, fontWeight: FW_SEMIBOLD }}>
               Connection diagnostics
             </div>
             <Mute t={t}>{contextName}</Mute>

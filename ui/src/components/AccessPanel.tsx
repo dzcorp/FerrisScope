@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { useAppStore, useResolvedTheme } from "../store";
-import { FF_MONO, FS_SM, FS_XS, R_SM } from "../theme";
+import { FF_MONO, FS_SM, FS_XS, R_SM, FW_MEDIUM } from "../theme";
 import type { AccessAction, AccessIdentity, AccessRulesReview } from "../types";
 import { invalidateAccess, useAccessChecks, type Gate } from "../lib/access";
 import { Btn, Chip, Dialog, ErrorBlock, LoadingLine, Section } from "./ui";
@@ -232,9 +232,9 @@ function Matrix({ clusterId, namespace }: { clusterId: string; namespace: string
     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: FS_SM }}>
       <thead>
         <tr style={{ color: t.textMuted, fontSize: FS_XS }}>
-          <th style={{ textAlign: "left", fontWeight: 500 }}>Resource</th>
+          <th style={{ textAlign: "left", fontWeight: FW_MEDIUM }}>Resource</th>
           {VERBS.map((v) => (
-            <th key={v} style={{ fontWeight: 500 }}>
+            <th key={v} style={{ fontWeight: FW_MEDIUM }}>
               {v}
             </th>
           ))}
@@ -292,10 +292,10 @@ function RulesTable({ rules }: { rules: AccessRulesReview }) {
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: FS_XS, fontFamily: FF_MONO }}>
           <thead>
             <tr style={{ color: t.textMuted, textAlign: "left" }}>
-              <th style={{ fontWeight: 500 }}>Verbs</th>
-              <th style={{ fontWeight: 500 }}>API groups</th>
-              <th style={{ fontWeight: 500 }}>Resources</th>
-              <th style={{ fontWeight: 500 }}>Names</th>
+              <th style={{ fontWeight: FW_MEDIUM }}>Verbs</th>
+              <th style={{ fontWeight: FW_MEDIUM }}>API groups</th>
+              <th style={{ fontWeight: FW_MEDIUM }}>Resources</th>
+              <th style={{ fontWeight: FW_MEDIUM }}>Names</th>
             </tr>
           </thead>
           <tbody>

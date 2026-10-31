@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useResolvedTheme } from "../../store";
-import { FF_MONO, FONT_SANS, type ThemeMode, R_MD, FS_MD, FS_SM, FS_XS } from "../../theme";
+import { FF_MONO, FF_SANS, type ThemeMode, R_MD, FS_MD, FS_SM, FS_XS, FW_SEMIBOLD, shade, LABEL_CASE, LABEL_FONT, labelTracking } from "../../theme";
 import type { ChatTool } from "../../types";
 import type { McpStatus } from "./chatStreaming";
 import { ErrorBlock } from "../ui";
@@ -142,11 +142,11 @@ export function ToolsPopover({
         background: t.surface,
         border: `1px solid ${t.border}`,
         borderRadius: R_MD,
-        boxShadow: `0 6px 20px rgba(0,0,0,0.35)`,
+        boxShadow: `0 6px 20px ${shade(t, 0.35)}`,
         zIndex: 30,
         display: "flex",
         flexDirection: "column",
-        fontFamily: FONT_SANS,
+        fontFamily: FF_SANS,
       }}
     >
       <div
@@ -158,7 +158,7 @@ export function ToolsPopover({
           gap: 8,
         }}
       >
-        <span style={{ color: t.text, fontSize: FS_MD, fontWeight: 600 }}>
+        <span style={{ color: t.text, fontSize: FS_MD, fontWeight: FW_SEMIBOLD }}>
           Tools
         </span>
         <span
@@ -204,9 +204,9 @@ export function ToolsPopover({
         <div
           style={{
             fontSize: FS_XS,
-            fontFamily: FF_MONO,
-            textTransform: "uppercase",
-            letterSpacing: 0.5,
+            fontFamily: LABEL_FONT,
+            textTransform: LABEL_CASE,
+            letterSpacing: labelTracking(0.5),
             color: t.textDim,
           }}
         >
@@ -396,9 +396,9 @@ function SourceGroup({
         style={{
           padding: "8px 10px 2px",
           fontSize: FS_XS,
-          fontFamily: FF_MONO,
-          textTransform: "uppercase",
-          letterSpacing: 0.5,
+          fontFamily: LABEL_FONT,
+          textTransform: LABEL_CASE,
+          letterSpacing: labelTracking(0.5),
           color: t.textDim,
           display: "flex",
           alignItems: "center",
@@ -488,10 +488,10 @@ function ToolRow({
         <span
           style={{
             color: tagColor,
-            fontFamily: FF_MONO,
+            fontFamily: LABEL_FONT,
             fontSize: FS_XS,
-            textTransform: "uppercase",
-            letterSpacing: 0.5,
+            textTransform: LABEL_CASE,
+            letterSpacing: labelTracking(0.5),
           }}
         >
           {tool.category}
