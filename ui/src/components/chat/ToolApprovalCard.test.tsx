@@ -24,7 +24,6 @@ const approval: PendingApproval = {
 
 afterEach(() => {
   cleanup();
-  approveMock.mockClear();
 });
 
 describe("ToolApprovalCard — approve-always scope", () => {

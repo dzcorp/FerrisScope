@@ -2,12 +2,11 @@
 // grouping, the version-range title, the per-version toggle, and the
 // loading/empty/error states — the bits CLAUDE.md calls "finishing the loop".
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
 import { ReleaseNotes } from "./ReleaseNotes";
 import { tokens } from "../theme";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ReleaseNote, ReleaseNotesBundle } from "../types";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
@@ -42,10 +41,6 @@ const MULTI = bundle([
   ]),
   rel("1.0.26", [{ kind: "fix", scope: "watch", text: "keepalive", pr: 44, author: "u" }]),
 ]);
-
-beforeEach(() => {
-  vi.mocked(openUrl).mockClear();
-});
 
 afterEach(() => {
   resetMockInvoke();

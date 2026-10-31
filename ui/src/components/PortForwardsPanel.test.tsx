@@ -34,7 +34,6 @@ const session: GlobalForwardSession = {
 };
 
 beforeEach(() => {
-  vi.mocked(openUrl).mockClear();
   useAppStore.setState({
     forwards: {},
     forwardsOpen: true,
