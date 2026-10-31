@@ -3,7 +3,7 @@ import { Mono } from "./detail";
 import type { ContextInfo, ClusterInfo } from "../types";
 import { tokens, FF_MONO, type ThemeMode, R_LG, R_MD, FS_MD, FS_XS } from "../theme";
 import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
-import { Stat, StatusPill, Gauge, Icons, Kbd, Tooltip } from "./ui";
+import { Stat, STAT_ELLIPSIS, StatusPill, Gauge, Icons, Kbd, Tooltip } from "./ui";
 import { makeTerminalTab, makeYamlTab } from "./Dock";
 import { CloudIdentityModal } from "./CloudIdentityPanel";
 import { MOD_KEY, SHIFT_KEY } from "../lib/keyboard";
@@ -90,6 +90,8 @@ export function ClusterBar({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+  const version =
+    state.status === "ok" && state.info.server_version ? state.info.server_version : "—";
   const showUser = width >= 1100;
   const showVersion = width >= 950;
   const showNodes = width >= 820;
@@ -158,30 +160,28 @@ export function ClusterBar({
         <Stat
           t={t}
           label="Version"
-          value={
-            state.status === "ok" && state.info.server_version
-              ? state.info.server_version
-              : "—"
-          }
+          value={version}
+          title={version}
           mono
+          shrink
         />
       )}
       <Stat
         t={t}
         label="Cluster"
+        title={context.cluster}
+        shrink
         value={
-          // Two lines instead of one 50-character string that wraps
-          // mid-token: the cluster segment on top, the coordinate it was
-          // stripped of (project · region) dim underneath. Falls back to the
-          // single kubeconfig cluster name when nothing was shortened.
+          // Two lines instead of one 50-character string: the cluster segment
+          // on top, the coordinate it was stripped of (project · region) dim
+          // underneath. Falls back to the single kubeconfig cluster name when
+          // nothing was shortened.
           clusterQualifier ? (
-            <span
-              title={context.cluster}
-              style={{ display: "flex", flexDirection: "column", lineHeight: 1.25 }}
-            >
-              <Mono>{clusterShort}</Mono>
+            <>
+              <Mono style={CLUSTER_LINE}>{clusterShort}</Mono>
               <span
                 style={{
+                  ...CLUSTER_LINE,
                   fontFamily: FF_MONO,
                   fontSize: FS_XS,
                   fontWeight: 500,
@@ -190,7 +190,7 @@ export function ClusterBar({
               >
                 {clusterQualifier}
               </span>
-            </span>
+            </>
           ) : (
             <Mono>{context.cluster}</Mono>
           )
@@ -200,11 +200,9 @@ export function ClusterBar({
         <Stat
           t={t}
           label="User"
-          value={
-            <Mono>
-              {context.user}
-            </Mono>
-          }
+          title={context.user}
+          shrink
+          value={<Mono>{context.user}</Mono>}
         />
       )}
 
@@ -212,13 +210,14 @@ export function ClusterBar({
         <Stat
           t={t}
           label="Identity"
+          shrink
           value={
-            <Tooltip label="Change the cloud identity this context uses">
+            <Tooltip label={`${pinnedIdentity} — change the cloud identity this context uses`}>
               <button
                 type="button"
                 aria-label="Change cloud identity"
                 onClick={() => setIdentityOpen(true)}
-                style={{ all: "unset", cursor: "pointer" }}
+                style={{ all: "unset", cursor: "pointer", display: "block", ...STAT_ELLIPSIS }}
               >
                 <Mono>{pinnedIdentity}</Mono>
               </button>
@@ -356,6 +355,8 @@ export function ClusterBar({
     </div>
   );
 }
+
+const CLUSTER_LINE: CSSProperties = { ...STAT_ELLIPSIS, display: "block", lineHeight: 1.25 };
 
 // ── Shared bar controls ─────────────────────────────────────────────────────
 // The single-cluster ClusterBar and the multi-cluster VirtualClusterBar must

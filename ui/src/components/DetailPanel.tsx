@@ -58,6 +58,7 @@ import {
   GlobalSaveBar,
   KeyValueChips,
   LinkValue,
+  ControlledByRow,
   Mute,
   SubGrid,
   ageFromIso,
@@ -2375,25 +2376,12 @@ function PodSummary({
           keyValidate={(k) => /^([a-z0-9.-]+\/)?[A-Za-z0-9._-]+$/.test(k)}
           collapsedAsCount
         />
-        {d.controlled_by && (
-          <DetailRow t={t} label="Controlled By">
-            <span style={{ fontSize: FS_MD }}>{d.controlled_by.kind}</span>{" "}
-            <LinkValue
-              t={t}
-              onClick={() =>
-                onNavigate?.(
-                  d.controlled_by!.kind,
-                  d.namespace,
-                  d.controlled_by!.name,
-                )
-              }
-              copyText={d.controlled_by.name}
-              enabled={!!onNavigate}
-            >
-              {d.controlled_by.name}
-            </LinkValue>
-          </DetailRow>
-        )}
+        <ControlledByRow
+          t={t}
+          owner={d.controlled_by}
+          namespace={d.namespace}
+          onNavigate={onNavigate}
+        />
         <DetailRow t={t} label="Status">
           <StatusPill
             status={d.status_phase ?? "Unknown"}

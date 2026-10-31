@@ -10,6 +10,7 @@ export {
   Kbd,
   Chip,
   Stat,
+  STAT_ELLIPSIS,
   Checkbox,
   BarGauge,
   Gauge,

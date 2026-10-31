@@ -1918,11 +1918,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       const key = `${clusterId}::${kindId}`;
       const next = { ...s.tableViews };
       // Prune a view only when it carries nothing worth persisting. A view
-      // with custom label columns but no sort/sizing must survive.
+      // with custom or hidden columns but no sort/sizing must survive.
       if (
         view.sorting.length === 0 &&
         Object.keys(view.column_sizing).length === 0 &&
-        (view.label_columns?.length ?? 0) === 0
+        (view.label_columns?.length ?? 0) === 0 &&
+        (view.hidden_columns?.length ?? 0) === 0
       ) {
         delete next[key];
       } else {

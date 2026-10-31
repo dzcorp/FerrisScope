@@ -3,7 +3,7 @@
 // would drag in TanStack, the store, and the resize observer; the cell
 // renderer is the unit where the cross-kind link behaviour lives.
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
 import {
   renderCell,
@@ -12,8 +12,10 @@ import {
   tableComparator,
 } from "./ResourceTable";
 import { tokens, usageColor } from "../theme";
-import type { ColumnDef, MetricsSnapshot, ResourceRow } from "../types";
+import type { ColumnDef, MetricsSnapshot, ResourceKind, ResourceRow } from "../types";
 import type { ScopedRow } from "../lib/multiCluster";
+import { useAppStore } from "../store";
+import { toast } from "../lib/dialog";
 
 const t = tokens("dark");
 
@@ -146,6 +148,130 @@ describe("renderCell — node link", () => {
     const { container } = render(
       <>{cell(col, { uid: "u", namespace: "default", name: "p", node: null }, nav, setNs)}</>,
     );
+    fireEvent.click(container.firstChild as Element);
+    expect(nav).not.toHaveBeenCalled();
+  });
+});
+
+describe("renderCell — controlled by link", () => {
+  const col: ColumnDef = { id: "controlled_by", header: "Controlled By", kind: "text" };
+  const CID = "default::prod";
+  const kind = (id: string, k: string, group: string, namespaced = true): ResourceKind => ({
+    id,
+    group,
+    version: "v1",
+    kind: k,
+    plural: id,
+    namespaced,
+    category: "Workloads",
+    columns: [],
+  });
+  const owned = (k: string, name: string, group: string): ResourceRow => ({
+    uid: "u",
+    namespace: "web",
+    name: "p",
+    controlled_by: k,
+    controller_name: name,
+    controller_group: group,
+    __clusterId: CID,
+  });
+  beforeEach(() =>
+    useAppStore.setState({
+      kinds: [
+        kind("replicasets", "ReplicaSet", "apps"),
+        kind("nodes", "Node", "", false),
+        kind("helm_releases", "HelmRelease", "helm.sh"),
+        kind("crd:flux-hr", "HelmRelease", "helm.toolkit.fluxcd.io"),
+      ],
+      kindClusters: { "crd:flux-hr": [CID] },
+    }),
+  );
+
+  it("shows the kind, names the owner on hover, and opens it in the row's namespace", () => {
+    const nav = vi.fn<NavFn>();
+    const rowClick = vi.fn();
+    const { getByText } = render(
+      <div onClick={rowClick}>
+        {cell(col, owned("ReplicaSet", "web-7d9f", "apps"), nav, vi.fn<SetNsFn>())}
+      </div>,
+    );
+    const el = getByText("ReplicaSet");
+    expect(el.title).toBe("ReplicaSet web-7d9f");
+    fireEvent.click(el);
+    expect(nav).toHaveBeenCalledWith("replicasets", "web", "web-7d9f", CID);
+    expect(rowClick).not.toHaveBeenCalled();
+  });
+
+  it("opens a cluster-scoped owner without a namespace", () => {
+    const nav = vi.fn<NavFn>();
+    const { getByText } = render(<>{cell(col, owned("Node", "n1", ""), nav, vi.fn<SetNsFn>())}</>);
+    fireEvent.click(getByText("Node"));
+    expect(nav).toHaveBeenCalledWith("nodes", null, "n1", CID);
+  });
+
+  it("tells same-named kinds apart by API group", () => {
+    const nav = vi.fn<NavFn>();
+    const { getByText } = render(
+      <>{cell(col, owned("HelmRelease", "app", "helm.toolkit.fluxcd.io"), nav, vi.fn<SetNsFn>())}</>,
+    );
+    fireEvent.click(getByText("HelmRelease"));
+    expect(nav).toHaveBeenCalledWith("crd:flux-hr", "web", "app", CID);
+  });
+
+  it("warns instead of navigating when the kind isn't served", () => {
+    const nav = vi.fn<NavFn>();
+    const warn = vi.spyOn(toast, "warn").mockImplementation(() => "");
+    const { getByText } = render(
+      <>{cell(col, owned("CloneSet", "c1", "apps.kruise.io"), nav, vi.fn<SetNsFn>())}</>,
+    );
+    fireEvent.click(getByText("CloneSet"));
+    expect(nav).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("CloneSet c1"));
+    warn.mockRestore();
+  });
+
+  it("hands the owner to the store: kind switch, pending detail, namespace kept in view", () => {
+    useAppStore.setState({ selectedNamespaces: new Set(["other"]), pendingDetail: null });
+    const { getByText } = render(
+      <>
+        {cell(
+          col,
+          owned("ReplicaSet", "web-7d9f", "apps"),
+          useAppStore.getState().navigateToDetail,
+          vi.fn<SetNsFn>(),
+        )}
+      </>,
+    );
+    fireEvent.click(getByText("ReplicaSet"));
+    const s = useAppStore.getState();
+    expect(s.selectedKindId).toBe("replicasets");
+    expect(s.pendingDetail).toEqual({
+      clusterId: CID,
+      kindId: "replicasets",
+      namespace: "web",
+      name: "web-7d9f",
+    });
+    expect(s.selectedNamespaces).toEqual(new Set(["other", "web"]));
+  });
+
+  it("won't look up a namespaced owner without the row's namespace", () => {
+    const nav = vi.fn<NavFn>();
+    const warn = vi.spyOn(toast, "warn").mockImplementation(() => "");
+    const { getByText } = render(
+      <>{cell(col, { ...owned("ReplicaSet", "web-7d9f", "apps"), namespace: "" }, nav, vi.fn<SetNsFn>())}</>,
+    );
+    fireEvent.click(getByText("ReplicaSet"));
+    expect(nav).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("an unowned pod renders the placeholder and is not clickable", () => {
+    const nav = vi.fn<NavFn>();
+    const { container } = render(
+      <>{cell(col, { uid: "u", namespace: "web", name: "p", controlled_by: null }, nav, vi.fn<SetNsFn>())}</>,
+    );
+    expect(container.textContent).toBe("—");
     fireEvent.click(container.firstChild as Element);
     expect(nav).not.toHaveBeenCalled();
   });

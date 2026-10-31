@@ -1065,12 +1065,13 @@ describe("metrics + prefs + table views", () => {
     });
   });
 
-  it("setTableView forwards label_columns intact", async () => {
+  it("setTableView forwards label_columns and hidden_columns intact", async () => {
     const cap = captureNext({});
     const view: Parameters<typeof api.setTableView>[2] = {
       sorting: [],
       column_sizing: {},
       label_columns: ["topology.kubernetes.io/zone", "kubernetes.io/arch"],
+      hidden_columns: ["roles"],
     };
     await api.setTableView("ctx", "nodes", view);
     expect(cap.calls[0]?.cmd).toBe("set_table_view");

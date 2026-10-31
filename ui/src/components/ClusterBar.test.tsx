@@ -4,7 +4,7 @@
 // report a green "Running" over exactly that state — the visible half of the
 // dead-end this suite guards.
 
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { ClusterBar } from "./ClusterBar";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
@@ -168,5 +168,75 @@ describe("ClusterBar identity chip", () => {
     fireEvent.click(screen.getByRole("button", { name: /pin new@example\.com/i }));
     await waitFor(() => expect(onIdentityChanged).toHaveBeenCalledTimes(1));
     expect(pinned).toEqual([{ name: CID, identity: "new@example.com" }]);
+  });
+});
+
+describe("ClusterBar long values", () => {
+  const LONG = "gke_development-d83ab4a8_europe-west4_infrastructure-01";
+  const EMAIL = "someone.with.a.long.name@example.com";
+  const GKE = {
+    ...CTX,
+    name: LONG,
+    cluster: LONG,
+    user: LONG,
+    cloud_identity: { provider: "gcloud", pinned: EMAIL },
+  } as ContextInfo;
+  const VERSION = "v1.35.8-gke.1439001";
+  // A stat is its caption over its value.
+  const stat = (caption: string) => screen.getByText(caption).parentElement!;
+  const value = (caption: string) => stat(caption).children[1] as HTMLElement;
+
+  const width = window.innerWidth;
+  beforeEach(() => {
+    // Wide enough that the bar shows every stat.
+    Object.defineProperty(window, "innerWidth", { value: 1600, configurable: true });
+    useAppStore.setState({ contexts: [GKE] });
+    setMockInvoke(() => undefined);
+    render(
+      <ClusterBar
+        mode="dark"
+        context={GKE}
+        state={{ status: "ok", info: { server_version: VERSION, node_count: 12 } }}
+        onIdentityChanged={() => {}}
+      />,
+    );
+  });
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+  });
+
+  it("ellipsizes version, cluster and user on one line, full text on hover", () => {
+    for (const [caption, full] of [
+      ["Version", VERSION],
+      ["Cluster", LONG],
+      ["User", LONG],
+    ]) {
+      expect(stat(caption!).title).toBe(full);
+      expect(stat(caption!).style.minWidth).toBe("0px");
+      expect(value(caption!).style.whiteSpace).toBe("nowrap");
+      expect(value(caption!).style.textOverflow).toBe("ellipsis");
+    }
+    // Shortened to the cluster segment over its project · region, each line
+    // clipped on its own.
+    for (const line of value("Cluster").children) {
+      expect((line as HTMLElement).style.textOverflow).toBe("ellipsis");
+    }
+    expect(value("Cluster").textContent).toContain("infrastructure-01");
+  });
+
+  it("keeps status and nodes whole", () => {
+    expect(stat("Status").style.flexShrink).toBe("0");
+    expect(stat("Nodes").style.flexShrink).toBe("0");
+    expect(value("Status").style.overflow).toBe("");
+  });
+
+  it("clips the identity and names it in the tooltip", async () => {
+    const button = screen.getByRole("button", { name: /change cloud identity/i });
+    expect(stat("Identity").style.minWidth).toBe("0px");
+    expect(button.style.textOverflow).toBe("ellipsis");
+    fireEvent.mouseEnter(button);
+    expect(
+      await screen.findByText(`${EMAIL} — change the cloud identity this context uses`),
+    ).toBeTruthy();
   });
 });

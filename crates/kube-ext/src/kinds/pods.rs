@@ -1,5 +1,6 @@
 use ferrisscope_core::quantity::parse_quantity;
 use k8s_openapi::api::core::v1::{Container, ContainerStatus, Pod, Probe};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use serde_json::{json, Value};
 
 use crate::registry::{Category, ColumnDef, ColumnKind, KindSpec, ResourceKind};
@@ -19,7 +20,8 @@ impl KindSpec for PodSpec {
             namespaced: true,
             category: Category::Workloads,
             // Column order mirrors the design's HV2PodTable:
-            // Name · Namespace · Status · Ready · Restarts · CPU · Mem · Node · Age.
+            // Name · Namespace · Status · Ready · Restarts · CPU · Mem ·
+            // Controlled By · Node · Age.
             // CPU and Mem are placeholders until metrics-server is wired.
             columns: vec![
                 ColumnDef {
@@ -58,6 +60,11 @@ impl KindSpec for PodSpec {
                     kind: Some(ColumnKind::Number),
                 },
                 ColumnDef {
+                    id: "controlled_by",
+                    header: "Controlled By",
+                    kind: Some(ColumnKind::Text),
+                },
+                ColumnDef {
                     id: "node",
                     header: "Node",
                     kind: Some(ColumnKind::Text),
@@ -89,6 +96,7 @@ impl KindSpec for PodSpec {
         // status.{init_,}container_statuses for live state.
         let containers = build_containers(pod);
         let (cpu_request, mem_request) = usage_requests(pod);
+        let owner = controller_ref(meta);
 
         json!({
             "namespace": meta.namespace.clone().unwrap_or_default(),
@@ -103,6 +111,10 @@ impl KindSpec for PodSpec {
             // Millicores / MiB, so the table can tint usage against them.
             "cpu_request": cpu_request,
             "mem_request": mem_request,
+            // Kind is the cell; name + API group let the cell link to it.
+            "controlled_by": owner.map(|o| o.kind.as_str()),
+            "controller_name": owner.map(|o| o.name.as_str()),
+            "controller_group": owner.map(|o| api_group(&o.api_version)),
             "node": pod.spec.as_ref().and_then(|s| s.node_name.clone()),
             "creation_timestamp": meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),
             // Single source of truth for this pod's containers: every entry
@@ -112,6 +124,19 @@ impl KindSpec for PodSpec {
             "container_states": containers,
         })
     }
+}
+
+// The managing controller (`controller: true`), else the first owner.
+fn controller_ref(meta: &ObjectMeta) -> Option<&OwnerReference> {
+    let owners = meta.owner_references.as_deref()?;
+    owners
+        .iter()
+        .find(|o| o.controller == Some(true))
+        .or_else(|| owners.first())
+}
+
+fn api_group(api_version: &str) -> &str {
+    api_version.rsplit_once('/').map_or("", |(g, _)| g)
 }
 
 // CPU (millicores) and memory (MiB) requested by what metrics-server reports
@@ -226,11 +251,8 @@ pub fn project_detail(pod: &Pod) -> Value {
         .unwrap_or_default();
     let annotations = crate::kinds::pod_template::project_annotations(meta.annotations.as_ref());
 
-    let controlled_by = meta
-        .owner_references
-        .as_ref()
-        .and_then(|owners| owners.first())
-        .map(|o| json!({ "kind": o.kind, "name": o.name }));
+    let controlled_by = controller_ref(meta)
+        .map(|o| json!({ "kind": o.kind, "name": o.name, "group": api_group(&o.api_version) }));
 
     let host_ips: Vec<String> = status
         .and_then(|s| s.host_ips.as_ref())
@@ -942,6 +964,51 @@ mod tests {
             build_resource_totals(&p)["requests"],
             json!({ "cpu": "300m", "memory": "192Mi" })
         );
+    }
+
+    fn owned(owners: Value) -> Pod {
+        serde_json::from_value(json!({
+            "metadata": { "name": "p", "ownerReferences": owners },
+            "spec": { "containers": [{ "name": "a" }] }
+        }))
+        .expect("pod fixture")
+    }
+
+    #[test]
+    fn controlled_by_prefers_the_controller_owner() {
+        let p = owned(json!([
+            { "apiVersion": "v1", "kind": "Node", "name": "n1", "uid": "1" },
+            { "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "web-7d", "uid": "2", "controller": true }
+        ]));
+        let row = PodSpec::project(&p);
+        assert_eq!(
+            (
+                &row["controlled_by"],
+                &row["controller_name"],
+                &row["controller_group"]
+            ),
+            (&json!("ReplicaSet"), &json!("web-7d"), &json!("apps"))
+        );
+        assert_eq!(
+            project_detail(&p)["controlled_by"],
+            json!({ "kind": "ReplicaSet", "name": "web-7d", "group": "apps" })
+        );
+    }
+
+    #[test]
+    fn controlled_by_falls_back_to_the_first_owner_in_the_core_group() {
+        let p = owned(json!([{ "apiVersion": "v1", "kind": "Node", "name": "n1", "uid": "1" }]));
+        let row = PodSpec::project(&p);
+        assert_eq!(
+            (
+                &row["controlled_by"],
+                &row["controller_name"],
+                &row["controller_group"]
+            ),
+            (&json!("Node"), &json!("n1"), &json!(""))
+        );
+        let bare = PodSpec::project(&pod(json!({ "containers": [{ "name": "a" }] })));
+        assert!(bare["controlled_by"].is_null() && bare["controller_name"].is_null());
     }
 
     #[test]

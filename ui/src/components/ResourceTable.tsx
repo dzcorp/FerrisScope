@@ -74,6 +74,7 @@ import { makeTerminalTab } from "./Dock";
 import { confirm, toast } from "../lib/dialog";
 import { latinLetter } from "../lib/keyboard";
 import { parseTableFilter } from "../lib/tableFilter";
+import { resolveResourceKind } from "../lib/resourceKinds";
 import { isClusterUnavailableError } from "../lib/unavailable";
 import {
   cellRaw,
@@ -779,8 +780,26 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     );
   }, []);
 
-  // Clear all custom columns back to the default (none).
-  const resetLabelColumns = useCallback(() => setLabelColumns([]), []);
+  // Built-in columns the operator turned off; Name always stays.
+  const [hiddenColumns, setHiddenColumns] = useState<string[]>(
+    () => persistedView?.hidden_columns ?? [],
+  );
+  const toggleColumn = useCallback(
+    (id: string) => {
+      if (id === "name") return;
+      const hiding = !hiddenColumns.includes(id);
+      setHiddenColumns(hiding ? [...hiddenColumns, id] : hiddenColumns.filter((c) => c !== id));
+      // A hidden column has no comparator or header to undo its sort.
+      if (hiding && sorting[0]?.id === id) setSorting(defaultSorting(kind));
+    },
+    [hiddenColumns, sorting, kind],
+  );
+
+  // Back to the kind's own columns: no label columns, nothing hidden.
+  const resetColumns = useCallback(() => {
+    setLabelColumns([]);
+    setHiddenColumns([]);
+  }, []);
 
   // When the kind / view scope changes, reset to whatever was persisted for
   // the new (scope, kind). Without this the sort (and custom columns) from
@@ -789,20 +808,26 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     setSorting(sortingFromPersisted(persistedView?.sorting, kind));
     setColumnSizing({});
     setLabelColumns(persistedView?.label_columns ?? []);
+    setHiddenColumns(persistedView?.hidden_columns ?? []);
     userResizedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewScopeId, kind.id]);
 
-  // Debounced persistence (sorting + custom label columns — widths stay in
-  // memory). `label_columns` must ride along or this write would clobber it.
+  // Debounced persistence (sorting + column choices — widths stay in
+  // memory). Every field must ride along or this write would clobber it.
   useEffect(() => {
     const timeout = setTimeout(() => {
-      const view = { sorting, column_sizing: {}, label_columns: labelColumns };
+      const view = {
+        sorting,
+        column_sizing: {},
+        label_columns: labelColumns,
+        hidden_columns: hiddenColumns,
+      };
       setTableView(viewScopeId, kind.id, view);
       api.setTableView(viewScopeId, kind.id, view).catch(logErr("table"));
     }, 200);
     return () => clearTimeout(timeout);
-  }, [sorting, labelColumns, viewScopeId, kind.id, setTableView]);
+  }, [sorting, labelColumns, hiddenColumns, viewScopeId, kind.id, setTableView]);
 
   // Refs so the cell renderer can read fresh values without triggering a
   // columns-memo recompute (which invalidates TanStack's entire row model
@@ -831,8 +856,9 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // `kind.columns` directly.
   const isMultiCluster = clusters.length > 1;
   const visibleColumns = useMemo<ColumnDef[]>(() => {
+    const hidden = new Set(hiddenColumns);
     const base = kind.columns.filter(
-      (c) => !(singleNs && c.id === "namespace"),
+      (c) => !(singleNs && c.id === "namespace") && (c.id === "name" || !hidden.has(c.id)),
     );
     // Custom label columns slot in just before the trailing Age column (so Age
     // stays rightmost), in the operator's chosen order.
@@ -846,7 +872,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       ...base.slice(insertAt),
     ];
     return placeLabelColumns(withCluster, labelCols);
-  }, [kind, singleNs, isMultiCluster, labelColumns]);
+  }, [kind, singleNs, isMultiCluster, labelColumns, hiddenColumns]);
 
   const columns = useMemo<TanColumnDef<TableFeats, ScopedRow>[]>(() => {
     const cols: TanColumnDef<TableFeats, ScopedRow>[] = visibleColumns.map((c) => {
@@ -1437,10 +1463,13 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
               body's matching paddingRight. As a flex child it stretches to the
               full header height (no measurement, no half-height bug). */}
           <ColumnPicker
+            columns={kind.columns}
+            hidden={hiddenColumns}
+            onToggleColumn={toggleColumn}
             available={labelKeys}
             enabled={labelColumns}
             onToggle={toggleLabelColumn}
-            onReset={resetLabelColumns}
+            onReset={resetColumns}
           />
         </div>
 
@@ -2929,18 +2958,24 @@ export function renderCell(
             c.id === "uid" ||
             c.id === "ip" ||
             c.id === "cluster_ip"));
-      // Namespace cells globally pin the namespace filter; node cells open the
-      // node's detail panel. Both stop propagation so the delegated row click
-      // (which opens *this* row's detail) doesn't also fire. Style stays as is
-      // — only a pointer cursor signals the affordance.
+      // Namespace cells globally pin the namespace filter; node and owner
+      // cells open that object's detail panel. All stop propagation so the
+      // delegated row click (which opens *this* row's detail) doesn't also
+      // fire. Style stays as is — only a pointer cursor signals the affordance.
       const isNsLink = c.id === "namespace" && raw !== "";
       const isNodeLink = c.id === "node" && raw !== "";
-      const clickable = isNsLink || isNodeLink;
+      const ownerName =
+        c.id === "controlled_by" && typeof row.controller_name === "string"
+          ? row.controller_name
+          : null;
+      const clickable = isNsLink || isNodeLink || (ownerName != null && raw !== "");
       const onClick = clickable
         ? (e: React.MouseEvent) => {
             e.stopPropagation();
             if (isNsLink) {
               setSelectedNamespaces(new Set([raw]));
+            } else if (ownerName != null) {
+              openOwner(row, raw, ownerName, navigateToDetail);
             } else if (isNodeLink) {
               // Node links resolve on the row's own cluster — in a merged
               // multi-cluster table two members can have same-named nodes.
@@ -2955,12 +2990,14 @@ export function renderCell(
         : undefined;
       return (
         <span
-          title={isQty && raw !== "" ? raw : undefined}
+          title={
+            isQty && raw !== "" ? raw : ownerName != null ? `${raw} ${ownerName}` : undefined
+          }
           onClick={onClick}
           style={{
             fontFamily: mono ? FF_MONO : "inherit",
             fontSize: mono ? 11.5 : 12,
-            color: c.id === "namespace" ? t.textDim : t.text,
+            color: c.id === "namespace" || c.id === "controlled_by" ? t.textDim : t.text,
             fontVariantNumeric: isQty ? "tabular-nums" : undefined,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -2972,6 +3009,37 @@ export function renderCell(
       );
     }
   }
+}
+
+// Resolved against the kinds the row's cluster serves; the API group keeps
+// same-named kinds apart (Flux HelmRelease vs the Helm releases view).
+function openOwner(
+  row: ResourceRow,
+  kindName: string,
+  name: string,
+  navigateToDetail: (
+    kindId: string,
+    namespace: string | null,
+    name: string,
+    clusterId?: string | null,
+  ) => void,
+) {
+  const cid = typeof row.__clusterId === "string" ? row.__clusterId : null;
+  const { kinds, kindClusters } = useAppStore.getState();
+  const target = resolveResourceKind(
+    kinds,
+    kindClusters,
+    kindName,
+    cid ?? "",
+    typeof row.controller_group === "string" ? row.controller_group : undefined,
+  );
+  const ns = typeof row.namespace === "string" && row.namespace !== "" ? row.namespace : null;
+  // A namespaced lookup without a namespace would match any same-named object.
+  if (!target || (target.namespaced && ns == null)) {
+    toast.warn(`Can't open ${kindName} ${name}: kind not available in this cluster`);
+    return;
+  }
+  navigateToDetail(target.id, target.namespaced ? ns : null, name, cid);
 }
 
 function formatMi(mb: number): string {

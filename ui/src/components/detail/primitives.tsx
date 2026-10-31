@@ -440,6 +440,37 @@ export function Copyable({
   );
 }
 
+// ── ControlledByRow ────────────────────────────────────────────────────────
+// Owner kind, then a link to the owner. `group` keeps same-named kinds apart
+// (Flux HelmRelease vs the Helm releases view); a cluster-scoped owner drops
+// the namespace when it resolves.
+export function ControlledByRow({
+  t,
+  owner,
+  namespace,
+  onNavigate,
+}: {
+  t: Tokens;
+  owner: { kind: string; name: string; group?: string } | null;
+  namespace: string | null;
+  onNavigate?: DetailNavigate;
+}) {
+  if (!owner) return null;
+  return (
+    <DetailRow t={t} label="Controlled By">
+      <span style={{ fontSize: FS_MD }}>{owner.kind}</span>{" "}
+      <LinkValue
+        t={t}
+        onClick={() => onNavigate?.(owner.kind, namespace, owner.name, undefined, owner.group)}
+        copyText={owner.name}
+        enabled={!!onNavigate}
+      >
+        {owner.name}
+      </LinkValue>
+    </DetailRow>
+  );
+}
+
 // ── LinkValue ──────────────────────────────────────────────────────────────
 // A value that's both a navigation target (left-click → opens that object's
 // detail panel) and copyable (Cmd/Ctrl-click → copies without navigating).

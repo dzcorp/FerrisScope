@@ -30,6 +30,7 @@ import {
   ChipStrip,
   ChipWrap,
   CollapsibleCard,
+  ControlledByRow,
   Copyable,
   DetailRow,
   ExpandableList,
@@ -158,25 +159,12 @@ export function MetaSection({
             </Copyable>
           </DetailRow>
         )}
-        {meta.controlled_by && (
-          <DetailRow t={t} label="Controlled By">
-            <span style={{ fontSize: FS_MD }}>{meta.controlled_by.kind}</span>{" "}
-            <LinkValue
-              t={t}
-              onClick={() =>
-                onNavigate?.(
-                  meta.controlled_by!.kind,
-                  meta.namespace,
-                  meta.controlled_by!.name,
-                )
-              }
-              copyText={meta.controlled_by.name}
-              enabled={!!onNavigate}
-            >
-              {meta.controlled_by.name}
-            </LinkValue>
-          </DetailRow>
-        )}
+        <ControlledByRow
+          t={t}
+          owner={meta.controlled_by}
+          namespace={meta.namespace}
+          onNavigate={onNavigate}
+        />
         <ManagedByRow t={t} managers={meta.managers ?? []} />
 
         <MetaPairsRow

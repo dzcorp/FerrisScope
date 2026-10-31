@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useResolvedTheme } from "../store";
-import { FF_MONO, FONT_SANS, FS_MD, FS_SM, FS_XS, R_LG, R_MD } from "../theme";
+import { FF_MONO, FONT_SANS, FS_MD, FS_SM, FS_XS, R_LG, R_MD, type Tokens } from "../theme";
+import type { ColumnDef } from "../types";
 import { Checkbox, Icons } from "./ui";
 import { labelColumnHeader } from "../lib/labelColumns";
 import { useEscLayer } from "../lib/escStack";
 
 type Props = {
+  /// The kind's own columns; Name is always shown, so it isn't offered.
+  columns: ColumnDef[];
+  /// Built-in column ids turned off.
+  hidden: string[];
+  onToggleColumn: (id: string) => void;
   /// Distinct label keys present on the current rows (the universe to pick
   /// from), sorted.
   available: string[];
@@ -14,15 +20,23 @@ type Props = {
   enabled: string[];
   /// Toggle one key on/off. The parent owns the persisted list.
   onToggle: (key: string) => void;
-  /// Clear all custom columns back to none.
+  /// Back to the kind's own columns: none hidden, no label columns.
   onReset: () => void;
 };
 
 // ColumnPicker — the table header's right-edge "⋯" control. Opens a dropdown
-// listing every label key found on the current rows; checking one adds a
-// custom column reading that label, unchecking removes it. The chosen set is
-// owned + persisted per (scope, kind) by the parent ResourceTable.
-export function ColumnPicker({ available, enabled, onToggle, onReset }: Props) {
+// that turns the kind's own columns on/off and adds custom columns from the
+// label keys found on the current rows. The choices are owned + persisted per
+// (scope, kind) by the parent ResourceTable.
+export function ColumnPicker({
+  columns,
+  hidden,
+  onToggleColumn,
+  available,
+  enabled,
+  onToggle,
+  onReset,
+}: Props) {
   const resolved = useResolvedTheme();
   const t = resolved.tokens;
   const mode = resolved.mode;
@@ -56,6 +70,8 @@ export function ColumnPicker({ available, enabled, onToggle, onReset }: Props) {
   }, [open]);
 
   const enabledSet = useMemo(() => new Set(enabled), [enabled]);
+  const hiddenSet = useMemo(() => new Set(hidden), [hidden]);
+  const builtIn = useMemo(() => columns.filter((c) => c.id !== "name"), [columns]);
   // Union of available + enabled, so a key that was persisted but is no
   // longer present on any current row can still be unchecked here. Sorted
   // for stable scanning.
@@ -147,19 +163,14 @@ export function ColumnPicker({ available, enabled, onToggle, onReset }: Props) {
                     textTransform: "uppercase",
                   }}
                 >
-                  Custom columns
-                </div>
-                <div
-                  style={{ color: t.textDim, fontSize: FS_XS, marginTop: 2 }}
-                >
-                  From resource labels
+                  Columns
                 </div>
               </div>
-              {enabled.length > 0 && (
+              {(enabled.length > 0 || hidden.length > 0) && (
                 <button
                   type="button"
                   onClick={onReset}
-                  title="Remove all custom columns"
+                  title="Show the default columns"
                   style={{
                     flexShrink: 0,
                     background: "transparent",
@@ -176,7 +187,18 @@ export function ColumnPicker({ available, enabled, onToggle, onReset }: Props) {
                 </button>
               )}
             </div>
-            <div style={{ overflow: "auto", maxHeight: 320 }}>
+            <div style={{ overflow: "auto", maxHeight: 420 }}>
+              <SectionLabel t={t}>Built-in</SectionLabel>
+              {builtIn.map((c) => (
+                <PickRow
+                  key={c.id}
+                  t={t}
+                  label={c.header}
+                  checked={!hiddenSet.has(c.id)}
+                  onToggle={() => onToggleColumn(c.id)}
+                />
+              ))}
+              <SectionLabel t={t}>From labels</SectionLabel>
               {keys.length === 0 ? (
                 <div
                   style={{
@@ -189,67 +211,16 @@ export function ColumnPicker({ available, enabled, onToggle, onReset }: Props) {
                   No labels on these resources.
                 </div>
               ) : (
-                keys.map((key) => {
-                  const checked = enabledSet.has(key);
-                  return (
-                    <div
-                      key={key}
-                      role="menuitemcheckbox"
-                      aria-checked={checked}
-                      aria-label={key}
-                      onClick={() => onToggle(key)}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 8,
-                        padding: "7px 10px",
-                        borderBottom: `1px solid ${t.borderSoft}`,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {/* Checkbox stops click propagation, so a direct hit
-                        toggles once; clicking the rest of the row toggles via
-                        the row handler. */}
-                      <Checkbox
-                        t={t}
-                        checked={checked}
-                        onChange={() => onToggle(key)}
-                      />
-                      <div
-                        style={{
-                          minWidth: 0,
-                          display: "flex",
-                          flexDirection: "column",
-                        }}
-                      >
-                        <span
-                          style={{
-                            color: t.text,
-                            fontSize: FS_MD,
-                            fontWeight: 600,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {labelColumnHeader(key)}
-                        </span>
-                        <span
-                          style={{
-                            color: t.textDim,
-                            fontSize: FS_XS,
-                            fontFamily: FF_MONO,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {key}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })
+                keys.map((key) => (
+                  <PickRow
+                    key={key}
+                    t={t}
+                    label={labelColumnHeader(key)}
+                    sub={key}
+                    checked={enabledSet.has(key)}
+                    onToggle={() => onToggle(key)}
+                  />
+                ))
               )}
             </div>
           </div>,
@@ -258,3 +229,73 @@ export function ColumnPicker({ available, enabled, onToggle, onReset }: Props) {
     </div>
   );
 }
+
+function SectionLabel({ t, children }: { t: Tokens; children: string }) {
+  return (
+    <div
+      style={{
+        padding: "8px 10px 4px",
+        color: t.textMuted,
+        fontSize: FS_XS,
+        fontFamily: FF_MONO,
+        letterSpacing: 0.5,
+        textTransform: "uppercase",
+        borderBottom: `1px solid ${t.borderSoft}`,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+// `sub` is the full label key under its short header; built-in rows have none.
+function PickRow({
+  t,
+  label,
+  sub,
+  checked,
+  onToggle,
+}: {
+  t: Tokens;
+  label: string;
+  sub?: string;
+  checked: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div
+      role="menuitemcheckbox"
+      aria-checked={checked}
+      aria-label={sub ?? label}
+      onClick={onToggle}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "7px 10px",
+        borderBottom: `1px solid ${t.borderSoft}`,
+        cursor: "pointer",
+      }}
+    >
+      {/* Checkbox stops click propagation, so a direct hit toggles once;
+        clicking the rest of the row toggles via the row handler. */}
+      <Checkbox t={t} checked={checked} onChange={onToggle} />
+      <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
+        <span style={{ ...PICK_ELLIPSIS, color: t.text, fontSize: FS_MD, fontWeight: 600 }}>
+          {label}
+        </span>
+        {sub && (
+          <span style={{ ...PICK_ELLIPSIS, color: t.textDim, fontSize: FS_XS, fontFamily: FF_MONO }}>
+            {sub}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const PICK_ELLIPSIS = {
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+} as const;

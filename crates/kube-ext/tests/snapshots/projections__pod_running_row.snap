@@ -32,6 +32,9 @@ expression: value
       "state": "Running"
     }
   ],
+  "controlled_by": "ReplicaSet",
+  "controller_group": "apps",
+  "controller_name": "web-7d9f",
   "cpu": null,
   "cpu_request": null,
   "creation_timestamp": "2026-04-15T10:00:00Z",

@@ -1,17 +1,29 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, cleanup, fireEvent } from "@testing-library/react";
 import { ColumnPicker } from "./ColumnPicker";
+import type { ColumnDef } from "../types";
 
 afterEach(cleanup);
+
+const COLUMNS: ColumnDef[] = [
+  { id: "name", header: "Name", kind: "text" },
+  { id: "node", header: "Node", kind: "text" },
+  { id: "creation_timestamp", header: "Age", kind: "age" },
+];
 
 function renderPicker(props: {
   available?: string[];
   enabled?: string[];
+  hidden?: string[];
   onToggle?: (key: string) => void;
+  onToggleColumn?: (id: string) => void;
   onReset?: () => void;
 }) {
   return render(
     <ColumnPicker
+      columns={COLUMNS}
+      hidden={props.hidden ?? []}
+      onToggleColumn={props.onToggleColumn ?? (() => {})}
       available={props.available ?? []}
       enabled={props.enabled ?? []}
       onToggle={props.onToggle ?? (() => {})}
@@ -80,6 +92,29 @@ describe("ColumnPicker", () => {
       enabled: ["zone"],
       onReset,
     });
+    fireEvent.click(getByRole("button", { name: "Customize columns" }));
+    fireEvent.click(getByRole("button", { name: "Reset" }));
+    expect(onReset).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers the kind's own columns except Name, checked while shown", () => {
+    const onToggleColumn = vi.fn();
+    const { getByRole, queryByRole } = renderPicker({ hidden: ["node"], onToggleColumn });
+    fireEvent.click(getByRole("button", { name: "Customize columns" }));
+    expect(queryByRole("menuitemcheckbox", { name: "Name" })).toBeNull();
+    expect(getByRole("menuitemcheckbox", { name: "Node" }).getAttribute("aria-checked")).toBe(
+      "false",
+    );
+    expect(getByRole("menuitemcheckbox", { name: "Age" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    fireEvent.click(getByRole("menuitemcheckbox", { name: "Age" }));
+    expect(onToggleColumn).toHaveBeenCalledWith("creation_timestamp");
+  });
+
+  it("offers Reset while a built-in column is hidden", () => {
+    const onReset = vi.fn();
+    const { getByRole } = renderPicker({ hidden: ["node"], onReset });
     fireEvent.click(getByRole("button", { name: "Customize columns" }));
     fireEvent.click(getByRole("button", { name: "Reset" }));
     expect(onReset).toHaveBeenCalledTimes(1);
