@@ -60,6 +60,8 @@ fn pod_row(i: usize) -> Value {
         "restarts": 0,
         "cpu": Value::Null,
         "mem": Value::Null,
+        "cpu_request": 250,
+        "mem_request": 192,
         "node": format!("ip-10-0-{}-{}.eu-central-1.compute.internal", i % 250, i % 99),
         "creation_timestamp": "2026-07-20T11:04:33Z",
         "containers": ["coredns", "istio-proxy"],

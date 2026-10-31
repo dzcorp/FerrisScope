@@ -33,8 +33,10 @@ expression: value
     }
   ],
   "cpu": null,
+  "cpu_request": null,
   "creation_timestamp": "2026-04-15T10:00:00Z",
   "mem": null,
+  "mem_request": null,
   "name": "web-7d9f8",
   "namespace": "default",
   "node": "node-1",

@@ -1,3 +1,4 @@
+use ferrisscope_core::quantity::parse_quantity;
 use k8s_openapi::api::core::v1::{Container, ContainerStatus, Pod, Probe};
 use serde_json::{json, Value};
 
@@ -87,6 +88,7 @@ impl KindSpec for PodSpec {
         // container-state dots. We pull spec for shape (init/main/sidecar) and
         // status.{init_,}container_statuses for live state.
         let containers = build_containers(pod);
+        let (cpu_request, mem_request) = usage_requests(pod);
 
         json!({
             "namespace": meta.namespace.clone().unwrap_or_default(),
@@ -98,6 +100,9 @@ impl KindSpec for PodSpec {
             // Until then we render the column as "—" rather than fake values.
             "cpu": Value::Null,
             "mem": Value::Null,
+            // Millicores / MiB, so the table can tint usage against them.
+            "cpu_request": cpu_request,
+            "mem_request": mem_request,
             "node": pod.spec.as_ref().and_then(|s| s.node_name.clone()),
             "creation_timestamp": meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),
             // Single source of truth for this pod's containers: every entry
@@ -107,6 +112,43 @@ impl KindSpec for PodSpec {
             "container_states": containers,
         })
     }
+}
+
+// CPU (millicores) and memory (MiB) requested by what metrics-server reports
+// usage for: main containers plus native sidecars, or the pod-level request
+// where one is set. `None` when nothing requests the resource.
+fn usage_requests(pod: &Pod) -> (Option<i64>, Option<i64>) {
+    let Some(spec) = pod.spec.as_ref() else {
+        return (None, None);
+    };
+    let pod_level = spec.resources.as_ref().and_then(|r| r.requests.as_ref());
+    let total = |key: &str| -> f64 {
+        if let Some(q) = pod_level.and_then(|r| r.get(key)) {
+            return parse_quantity(&q.0).unwrap_or(0.0);
+        }
+        long_running_containers(pod)
+            .filter_map(|c| c.resources.as_ref()?.requests.as_ref()?.get(key))
+            .filter_map(|q| parse_quantity(&q.0))
+            .sum()
+    };
+    let cpu = (total("cpu") * 1000.0).round() as i64;
+    let mem = (total("memory") / (1024.0 * 1024.0)).round() as i64;
+    ((cpu > 0).then_some(cpu), (mem > 0).then_some(mem))
+}
+
+// Main containers plus native sidecars (init containers with
+// `restartPolicy: Always`), which keep running alongside them.
+fn long_running_containers(pod: &Pod) -> impl Iterator<Item = &Container> {
+    let spec = pod.spec.as_ref();
+    let sidecars = spec
+        .and_then(|s| s.init_containers.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .filter(|c| c.restart_policy.as_deref() == Some("Always"));
+    spec.map(|s| s.containers.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .chain(sidecars)
 }
 
 // Distinguish init/main/sidecar from Pod spec + the K8s 1.29 native sidecar
@@ -293,21 +335,15 @@ pub fn project_detail(pod: &Pod) -> Value {
     })
 }
 
-// Sum container resource requests + limits at the pod level, so the
-// summary surfaces a "this pod needs N CPU + M memory" line instead of
-// forcing operators to mentally add per-container rows. Init containers
-// are excluded — they don't contribute to long-running scheduling cost
-// (kubelet picks max(initContainers) vs sum(containers), which is more
-// nuance than the summary needs; sum-of-main is the closer match to what
-// metrics-server will eventually report).
+// Requests + limits summed over the long-running containers (main + native
+// sidecars), the set metrics-server reports usage for; one-shot init
+// containers don't hold resources once the pod runs. A pod-level value
+// (`spec.resources`) replaces the sum for its resource, as the kubelet does.
 fn build_resource_totals(pod: &Pod) -> Value {
     use std::collections::BTreeMap;
-    let Some(spec) = pod.spec.as_ref() else {
-        return json!({ "requests": {}, "limits": {} });
-    };
     let mut requests: BTreeMap<String, (i64, &'static str)> = BTreeMap::new();
     let mut limits: BTreeMap<String, (i64, &'static str)> = BTreeMap::new();
-    for c in &spec.containers {
+    for c in long_running_containers(pod) {
         if let Some(r) = c.resources.as_ref() {
             if let Some(req) = r.requests.as_ref() {
                 for (k, v) in req {
@@ -318,6 +354,14 @@ fn build_resource_totals(pod: &Pod) -> Value {
                 for (k, v) in lim {
                     accumulate(&mut limits, k, &v.0);
                 }
+            }
+        }
+    }
+    if let Some(r) = pod.spec.as_ref().and_then(|s| s.resources.as_ref()) {
+        for (acc, set) in [(&mut requests, &r.requests), (&mut limits, &r.limits)] {
+            for (k, v) in set.iter().flatten() {
+                acc.remove(k);
+                accumulate(acc, k, &v.0);
             }
         }
     }
@@ -836,4 +880,75 @@ fn derive_state(st: Option<&ContainerStatus>) -> (String, Option<String>) {
         }
     }
     ("Unknown".to_owned(), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pod(spec: Value) -> Pod {
+        serde_json::from_value(json!({ "metadata": { "name": "p" }, "spec": spec }))
+            .expect("pod fixture")
+    }
+
+    fn requests(cpu: &str, mem: &str) -> Value {
+        json!({ "requests": { "cpu": cpu, "memory": mem } })
+    }
+
+    #[test]
+    fn requests_sum_long_running_containers_and_native_sidecars() {
+        let p = pod(json!({
+            "containers": [
+                { "name": "a", "resources": requests("250m", "128Mi") },
+                { "name": "b", "resources": requests("0.5", "1Gi") },
+                { "name": "c" }
+            ],
+            "initContainers": [
+                { "name": "migrate", "resources": requests("4", "8Gi") },
+                { "name": "proxy", "restartPolicy": "Always", "resources": requests("50m", "64Mi") }
+            ]
+        }));
+        assert_eq!(usage_requests(&p), (Some(800), Some(1216)));
+        let row = PodSpec::project(&p);
+        assert_eq!(
+            (row["cpu_request"].clone(), row["mem_request"].clone()),
+            (json!(800), json!(1216))
+        );
+    }
+
+    #[test]
+    fn a_pod_level_request_wins_per_resource() {
+        let p = pod(json!({
+            "resources": { "requests": { "cpu": "2" } },
+            "containers": [{ "name": "a", "resources": requests("250m", "100M") }]
+        }));
+        assert_eq!(usage_requests(&p), (Some(2000), Some(95)));
+        assert_eq!(
+            build_resource_totals(&p)["requests"],
+            json!({ "cpu": "2000m", "memory": "95Mi" })
+        );
+    }
+
+    #[test]
+    fn detail_totals_count_native_sidecars_not_one_shot_inits() {
+        let p = pod(json!({
+            "containers": [{ "name": "a", "resources": requests("250m", "128Mi") }],
+            "initContainers": [
+                { "name": "migrate", "resources": requests("4", "8Gi") },
+                { "name": "proxy", "restartPolicy": "Always", "resources": requests("50m", "64Mi") }
+            ]
+        }));
+        assert_eq!(
+            build_resource_totals(&p)["requests"],
+            json!({ "cpu": "300m", "memory": "192Mi" })
+        );
+    }
+
+    #[test]
+    fn nothing_requested_projects_null() {
+        let p = pod(json!({ "containers": [{ "name": "a" }] }));
+        assert_eq!(usage_requests(&p), (None, None));
+        let row = PodSpec::project(&p);
+        assert!(row["cpu_request"].is_null() && row["mem_request"].is_null());
+    }
 }
