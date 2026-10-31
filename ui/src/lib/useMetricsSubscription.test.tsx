@@ -7,7 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, act } from "@testing-library/react";
-import { useMetricsSubscription } from "./useMetricsSubscription";
+import { useMetricsSubscription, useMetricsSubscriptions } from "./useMetricsSubscription";
 import { setMockInvoke, resetMockInvoke } from "../test/tauri-mock";
 import {
   emitMock,
@@ -150,5 +150,97 @@ describe("useMetricsSubscription", () => {
     });
     expect(listenerCount("metrics://ctx-a")).toBe(0);
     expect(listenerCount("metrics://ctx-b")).toBe(1);
+  });
+
+  it("unmounted before the subscribe went out: neither subscribe nor unsubscribe", async () => {
+    const seen: string[] = [];
+    setMockInvoke((cmd) => {
+      seen.push(cmd);
+      return null;
+    });
+    const utils = render(<Harness clusterId="ctx" />);
+    utils.unmount();
+    await act(async () => {});
+    expect(seen).toEqual([]);
+    expect(listenerCount("metrics://ctx")).toBe(0);
+  });
+
+  it("unmounted mid-subscribe: unsubscribes once the subscribe has landed", async () => {
+    const seen: string[] = [];
+    let land: (() => void) | null = null;
+    setMockInvoke((cmd) => {
+      seen.push(cmd);
+      if (cmd !== "subscribe_metrics") return undefined;
+      return new Promise((r) => {
+        land = () => r(null);
+      });
+    });
+    let utils: ReturnType<typeof render> | null = null;
+    await act(async () => {
+      utils = render(<Harness clusterId="ctx" />);
+    });
+    expect(seen).toEqual(["subscribe_metrics"]);
+    utils!.unmount();
+    await act(async () => {});
+    // Sent before the subscribe it pairs with, it would release nothing and
+    // leave that subscribe counted for good.
+    expect(seen).toEqual(["subscribe_metrics"]);
+    await act(async () => {
+      land!();
+    });
+    expect(seen).toEqual(["subscribe_metrics", "unsubscribe_metrics"]);
+    expect(listenerCount("metrics://ctx")).toBe(0);
+  });
+
+  it("a failed subscribe is never unsubscribed", async () => {
+    const seen: string[] = [];
+    setMockInvoke((cmd) => {
+      seen.push(cmd);
+      if (cmd === "subscribe_metrics") throw new Error("cluster unavailable");
+      return undefined;
+    });
+    let utils: ReturnType<typeof render> | null = null;
+    await act(async () => {
+      utils = render(<Harness clusterId="ctx" />);
+    });
+    await act(async () => {
+      utils!.unmount();
+    });
+    expect(seen).toEqual(["subscribe_metrics"]);
+    expect(listenerCount("metrics://ctx")).toBe(0);
+  });
+});
+
+function ManyHarness({ ids }: { ids: string[] }) {
+  useMetricsSubscriptions(ids, "pods");
+  return null;
+}
+
+describe("useMetricsSubscriptions", () => {
+  it("pairs every unsubscribe with a subscribe that landed", async () => {
+    const seen: { cmd: string; id: unknown }[] = [];
+    setMockInvoke((cmd, args) => {
+      seen.push({ cmd, id: (args as { clusterId: string }).clusterId });
+      if (cmd === "subscribe_metrics" && (args as { clusterId: string }).clusterId === "b") {
+        throw new Error("unavailable");
+      }
+      return null;
+    });
+    let utils: ReturnType<typeof render> | null = null;
+    await act(async () => {
+      utils = render(<ManyHarness ids={["a", "b"]} />);
+    });
+    await act(async () => {
+      utils!.unmount();
+    });
+    expect(seen.filter((c) => c.cmd === "unsubscribe_metrics")).toEqual([
+      { cmd: "unsubscribe_metrics", id: "a" },
+    ]);
+    expect(listenerCount("metrics://a") + listenerCount("metrics://b")).toBe(0);
+
+    seen.length = 0;
+    render(<ManyHarness ids={["a"]} />).unmount();
+    await act(async () => {});
+    expect(seen).toEqual([]);
   });
 });
