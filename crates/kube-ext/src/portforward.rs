@@ -649,9 +649,22 @@ mod tests {
         assert_ne!(probe_local_port(port).await, LocalPortProbe::Free);
     }
 
+    /// A held port below every OS's ephemeral range (Linux 32768+, macOS and
+    /// Windows 49152+). macOS hands out `:0` ports sequentially, so the
+    /// neighbour of an ephemeral port is the next one a parallel test gets.
+    async fn held_static_port() -> (TcpListener, u16) {
+        let base = 20_000 + (std::process::id() % 10_000) as u16;
+        for port in base..base + 2_000 {
+            if let Ok(l) = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
+                return (l, port);
+            }
+        }
+        panic!("no free loopback port in {base}..{}", base + 2_000);
+    }
+
     #[tokio::test]
     async fn suggestion_skips_the_busy_port_and_is_bindable() {
-        let (_l, port) = held_port().await;
+        let (_l, port) = held_static_port().await;
         let s = suggest_local_port(port).await.expect("suggestion");
         assert_ne!(s, port);
         assert!(s >= 1024);
