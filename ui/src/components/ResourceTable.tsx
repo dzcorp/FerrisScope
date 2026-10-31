@@ -780,8 +780,26 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     );
   }, []);
 
-  // Clear all custom columns back to the default (none).
-  const resetLabelColumns = useCallback(() => setLabelColumns([]), []);
+  // Built-in columns the operator turned off; Name always stays.
+  const [hiddenColumns, setHiddenColumns] = useState<string[]>(
+    () => persistedView?.hidden_columns ?? [],
+  );
+  const toggleColumn = useCallback(
+    (id: string) => {
+      if (id === "name") return;
+      const hiding = !hiddenColumns.includes(id);
+      setHiddenColumns(hiding ? [...hiddenColumns, id] : hiddenColumns.filter((c) => c !== id));
+      // A hidden column has no comparator or header to undo its sort.
+      if (hiding && sorting[0]?.id === id) setSorting(defaultSorting(kind));
+    },
+    [hiddenColumns, sorting, kind],
+  );
+
+  // Back to the kind's own columns: no label columns, nothing hidden.
+  const resetColumns = useCallback(() => {
+    setLabelColumns([]);
+    setHiddenColumns([]);
+  }, []);
 
   // When the kind / view scope changes, reset to whatever was persisted for
   // the new (scope, kind). Without this the sort (and custom columns) from
@@ -790,20 +808,26 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
     setSorting(sortingFromPersisted(persistedView?.sorting, kind));
     setColumnSizing({});
     setLabelColumns(persistedView?.label_columns ?? []);
+    setHiddenColumns(persistedView?.hidden_columns ?? []);
     userResizedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewScopeId, kind.id]);
 
-  // Debounced persistence (sorting + custom label columns — widths stay in
-  // memory). `label_columns` must ride along or this write would clobber it.
+  // Debounced persistence (sorting + column choices — widths stay in
+  // memory). Every field must ride along or this write would clobber it.
   useEffect(() => {
     const timeout = setTimeout(() => {
-      const view = { sorting, column_sizing: {}, label_columns: labelColumns };
+      const view = {
+        sorting,
+        column_sizing: {},
+        label_columns: labelColumns,
+        hidden_columns: hiddenColumns,
+      };
       setTableView(viewScopeId, kind.id, view);
       api.setTableView(viewScopeId, kind.id, view).catch(logErr("table"));
     }, 200);
     return () => clearTimeout(timeout);
-  }, [sorting, labelColumns, viewScopeId, kind.id, setTableView]);
+  }, [sorting, labelColumns, hiddenColumns, viewScopeId, kind.id, setTableView]);
 
   // Refs so the cell renderer can read fresh values without triggering a
   // columns-memo recompute (which invalidates TanStack's entire row model
@@ -832,8 +856,9 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // `kind.columns` directly.
   const isMultiCluster = clusters.length > 1;
   const visibleColumns = useMemo<ColumnDef[]>(() => {
+    const hidden = new Set(hiddenColumns);
     const base = kind.columns.filter(
-      (c) => !(singleNs && c.id === "namespace"),
+      (c) => !(singleNs && c.id === "namespace") && (c.id === "name" || !hidden.has(c.id)),
     );
     // Custom label columns slot in just before the trailing Age column (so Age
     // stays rightmost), in the operator's chosen order.
@@ -847,7 +872,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       ...base.slice(insertAt),
     ];
     return placeLabelColumns(withCluster, labelCols);
-  }, [kind, singleNs, isMultiCluster, labelColumns]);
+  }, [kind, singleNs, isMultiCluster, labelColumns, hiddenColumns]);
 
   const columns = useMemo<TanColumnDef<TableFeats, ScopedRow>[]>(() => {
     const cols: TanColumnDef<TableFeats, ScopedRow>[] = visibleColumns.map((c) => {
@@ -1438,10 +1463,13 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
               body's matching paddingRight. As a flex child it stretches to the
               full header height (no measurement, no half-height bug). */}
           <ColumnPicker
+            columns={kind.columns}
+            hidden={hiddenColumns}
+            onToggleColumn={toggleColumn}
             available={labelKeys}
             enabled={labelColumns}
             onToggle={toggleLabelColumn}
-            onReset={resetLabelColumns}
+            onReset={resetColumns}
           />
         </div>
 

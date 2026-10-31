@@ -320,6 +320,8 @@ export type TableView = {
   // on the wire so older backends (no `label_columns`) round-trip; the
   // current backend always sends an array (possibly empty).
   label_columns?: string[];
+  // Built-in column ids turned off for this (scope, kind).
+  hidden_columns?: string[];
 };
 export type TableViewsFile = {
   views: Record<string, TableView>;

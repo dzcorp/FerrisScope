@@ -1,4 +1,4 @@
-//! Per-(cluster, kind) table view state — sort + column widths.
+//! Per-(cluster, kind) table view state — sort, custom and hidden columns.
 //!
 //! One global JSON file at `<config-dir>/table_views.json`. Keyed by
 //! `"<cluster_id>::<kind_id>"` so a single file covers every table the
@@ -30,6 +30,20 @@ pub struct TableView {
     /// legacy files thanks to `serde(default)`.
     #[serde(default)]
     pub label_columns: Vec<String>,
+    /// Built-in column ids the operator turned off.
+    #[serde(default)]
+    pub hidden_columns: Vec<String>,
+}
+
+impl TableView {
+    /// Nothing worth keeping on disk.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sorting.is_empty()
+            && self.column_sizing.is_empty()
+            && self.label_columns.is_empty()
+            && self.hidden_columns.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -94,10 +108,29 @@ mod tests {
                 "topology.kubernetes.io/zone".into(),
                 "node-role.kubernetes.io/control-plane".into(),
             ],
+            hidden_columns: vec!["node".into()],
         };
         let json = serde_json::to_string(&view).expect("serialize");
         let back: TableView = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.label_columns, view.label_columns);
+        assert_eq!(back.hidden_columns, view.hidden_columns);
+    }
+
+    #[test]
+    fn a_view_with_only_column_choices_is_not_empty() {
+        assert!(TableView::default().is_empty());
+        let labels = TableView {
+            label_columns: vec!["app".into()],
+            ..TableView::default()
+        };
+        let hidden = TableView {
+            hidden_columns: vec!["node".into()],
+            ..TableView::default()
+        };
+        assert!(!labels.is_empty() && !hidden.is_empty());
+        let legacy: TableView =
+            serde_json::from_str(r#"{ "sorting": [] }"#).expect("legacy view parses");
+        assert!(legacy.hidden_columns.is_empty());
     }
 
     #[test]

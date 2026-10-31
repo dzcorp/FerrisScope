@@ -843,6 +843,23 @@ describe("tableViews", () => {
     ]);
   });
 
+  it("keeps a view whose only choice is a hidden built-in column", () => {
+    useAppStore.getState().setTableView("ctx", "pods", {
+      sorting: [],
+      column_sizing: {},
+      label_columns: [],
+      hidden_columns: ["node"],
+    });
+    expect(useAppStore.getState().tableViews["ctx::pods"]?.hidden_columns).toEqual(["node"]);
+    useAppStore.getState().setTableView("ctx", "pods", {
+      sorting: [],
+      column_sizing: {},
+      label_columns: [],
+      hidden_columns: [],
+    });
+    expect(useAppStore.getState().tableViews["ctx::pods"]).toBeUndefined();
+  });
+
   it("prunes once label columns are also cleared", () => {
     useAppStore.getState().setTableView("ctx", "nodes", {
       sorting: [],

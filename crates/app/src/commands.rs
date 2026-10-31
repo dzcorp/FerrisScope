@@ -3951,7 +3951,7 @@ pub(crate) async fn set_table_view(
 ) -> Result<(), String> {
     let mut file = table_views::load().await;
     let key = table_views::key(&cluster_id, &kind_id);
-    if view.sorting.is_empty() && view.column_sizing.is_empty() {
+    if view.is_empty() {
         file.views.remove(&key);
     } else {
         file.views.insert(key, view);
