@@ -138,7 +138,9 @@ describe("IconBtn", () => {
         <svg />
       </IconBtn>,
     );
-    await userEvent.click(getByRole("button"));
+    const btn = getByRole("button");
+    expect(btn).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(btn);
     expect(onClick).not.toHaveBeenCalled();
   });
 
@@ -152,5 +154,55 @@ describe("IconBtn", () => {
     fireEvent.mouseEnter(btn);
     // jsdom normalises #f43f5e → rgb(244, 63, 94). Compare the rgb form.
     expect(btn.style.color).toBe("rgb(244, 63, 94)");
+  });
+});
+
+describe("disabled buttons keep their tooltip reachable", () => {
+  const t = tokens("dark");
+
+  it("IconBtn: a disabled button with a title stays hoverable and inert", async () => {
+    const onClick = vi.fn();
+    const { getByRole, findByText } = render(
+      <IconBtn t={t} title="Delete — Not permitted: cannot delete pods" disabled onClick={onClick}>
+        <span>x</span>
+      </IconBtn>,
+    );
+    const btn = getByRole("button", { name: "Delete — Not permitted: cannot delete pods" });
+    expect(btn).toHaveAttribute("aria-disabled", "true");
+    expect(btn).toBeDisabled();
+    // Not natively disabled, or the engine would swallow the hover.
+    expect((btn as HTMLButtonElement).disabled).toBe(false);
+    await userEvent.hover(btn);
+    expect(await findByText("Delete — Not permitted: cannot delete pods")).toBeTruthy();
+    await userEvent.click(btn);
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
+  it("Btn: a disabled submit button with a title doesn't submit its form", async () => {
+    const onSubmit = vi.fn((e: React.FormEvent) => e.preventDefault());
+    const { getByRole } = render(
+      <form onSubmit={onSubmit}>
+        <Btn t={t} type="submit" disabled title="Not permitted">
+          Apply
+        </Btn>
+      </form>,
+    );
+    await userEvent.click(getByRole("button", { name: "Apply" }));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("toggling disabled keeps the same button element", () => {
+    const { getByRole, rerender } = render(
+      <Btn t={t} title="Apply">
+        Apply
+      </Btn>,
+    );
+    const before = getByRole("button");
+    rerender(
+      <Btn t={t} title="Apply" disabled>
+        Apply
+      </Btn>,
+    );
+    expect(getByRole("button")).toBe(before);
   });
 });

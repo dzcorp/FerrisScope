@@ -71,6 +71,8 @@ type Props = {
   // it can be saved once reconnected). Viewing, Discard, and the server-fields
   // toggle stay live.
   readOnly?: boolean;
+  /// Why `readOnly`, shown in the status line; defaults to "cluster unavailable".
+  readOnlyReason?: string | null;
 };
 
 export function YamlTab({
@@ -96,6 +98,7 @@ export function YamlTab({
   setError,
   onResync,
   readOnly = false,
+  readOnlyReason = null,
 }: Props) {
   const monoFont = useResolvedTheme().typography.fontMono;
 
@@ -203,9 +206,8 @@ export function YamlTab({
   if (showRaw) {
     statusText = "read-only · all server fields shown";
   } else if (readOnly) {
-    statusText = dirty
-      ? "read-only · cluster unavailable · changes kept"
-      : "read-only · cluster unavailable";
+    const why = readOnlyReason ?? "cluster unavailable";
+    statusText = dirty ? `read-only · ${why} · changes kept` : `read-only · ${why}`;
     statusTone = "bad";
   } else if (!editable) {
     statusText = "read-only · server YAML could not be parsed";

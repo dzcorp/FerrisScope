@@ -483,6 +483,9 @@ export type PromChangedEvent = {
 export type ClusterInfo = {
   server_version: string;
   node_count: number;
+  /// Connected, but the identity can't list namespaces cluster-wide: the
+  /// apiserver's 403 verbatim. Absent on the background info refresh.
+  restricted?: string | null;
 };
 
 // Per-cluster apiserver heartbeat status. The backend probes `/version`
@@ -686,6 +689,8 @@ export type MetricsSnapshot = {
   pvcs: Record<string, VolumeMetric>;
   /// metrics-server (CPU / memory) availability.
   available: boolean;
+  /// Why `available` is false when RBAC refused the read (the 403).
+  forbidden?: string | null;
   /// kubelet stats/summary (volumes) availability; `null` until a
   /// subscriber that asked for volumes gets its first volume poll.
   volumes_available: boolean | null;
@@ -3186,6 +3191,72 @@ export type ChatEvent =
 export type WorkloadPods = {
   rows: ResourceRow[];
   truncated: boolean;
+};
+
+/// A UI verb the backend maps to every API request it really makes
+/// (`crates/kube-ext/src/access.rs::requirements`).
+export type AccessAction =
+  | "get"
+  | "list"
+  | "watch"
+  | "create"
+  | "update"
+  | "patch"
+  | "delete"
+  | "logs"
+  | "exec"
+  | "attach"
+  | "portForward"
+  | "evict"
+  | "restart"
+  | "cordon"
+  | "drain"
+  | "nodeShell"
+  | "nodeProxy"
+  | "trigger"
+  | "rerun"
+  | "suspend"
+  | "helmInstall"
+  | "helmUpgrade"
+  | "helmRollback"
+  | "helmUninstall";
+
+export type AccessRequest = {
+  kindId: string;
+  action: AccessAction;
+  /// Omitted / null on a namespaced kind asks about every namespace.
+  namespace?: string | null;
+  name?: string | null;
+};
+
+/// `unknown` means the check itself failed; treat as allowed.
+export type AccessDecision =
+  | { state: "allowed" }
+  | { state: "denied"; reason: string }
+  | { state: "unknown"; error: string };
+
+export type AccessIdentity = {
+  username: string | null;
+  uid: string | null;
+  groups: string[];
+  extra: Record<string, string[]>;
+};
+
+export type AccessRule = {
+  verbs: string[];
+  apiGroups: string[];
+  resources: string[];
+  resourceNames: string[];
+};
+
+export type AccessRulesReview = {
+  namespace: string;
+  rules: AccessRule[];
+  nonResourceRules: { verbs: string[]; urls: string[] }[];
+  /// A webhook authorizer (GKE IAM, EKS access entries, Azure RBAC) can't
+  /// enumerate its grants, so some may be missing from `rules`.
+  incomplete: boolean;
+  evaluationError: string | null;
 };
 
 export type ObjectStatusRef = {

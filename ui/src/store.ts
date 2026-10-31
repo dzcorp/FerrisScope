@@ -393,6 +393,10 @@ type AppState = {
 
   paletteOpen: boolean;
   nsModalOpen: boolean;
+  /// Cluster whose "My permissions" panel is open; null when closed.
+  accessPanelCluster: string | null;
+  /// Clusters whose "Limited access" strip the operator hid this session.
+  restrictedDismissed: ReadonlySet<string>;
   settingsOpen: boolean;
   /// Live mirror of the active tab's drawer and tray (see `ScopeSlice`).
   drawer: Drawer | null;
@@ -676,6 +680,9 @@ type AppState = {
   closeFilterEditor: () => void;
   openNsModal: () => void;
   closeNsModal: () => void;
+  openAccessPanel: (clusterId: string) => void;
+  closeAccessPanel: () => void;
+  dismissRestricted: (clusterId: string) => void;
   openSettings: (target?: SettingsTarget) => void;
   closeSettings: () => void;
   /// Returns the pending settings target and clears it. SettingsPanel
@@ -1016,6 +1023,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   paletteOpen: false,
   nsModalOpen: false,
+  accessPanelCluster: null,
+  restrictedDismissed: new Set<string>(),
   settingsOpen: false,
   drawer: null,
   drawerId: null,
@@ -1477,6 +1486,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   closeFilterEditor: () => set({ filterEditing: false }),
   openNsModal: () => set({ nsModalOpen: true }),
   closeNsModal: () => set({ nsModalOpen: false }),
+  openAccessPanel: (clusterId) => set({ accessPanelCluster: clusterId }),
+  closeAccessPanel: () => set({ accessPanelCluster: null }),
+  dismissRestricted: (clusterId) =>
+    set((s) =>
+      s.restrictedDismissed.has(clusterId)
+        ? s
+        : { restrictedDismissed: new Set([...s.restrictedDismissed, clusterId]) },
+    ),
   openSettings: (target) =>
     set({
       settingsOpen: true,

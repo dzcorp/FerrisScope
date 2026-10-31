@@ -1865,6 +1865,7 @@ dependencies = [
  "ferrisscope-test-support",
  "flate2",
  "futures",
+ "http",
  "insta",
  "k8s-openapi",
  "kube",
@@ -1877,6 +1878,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-test",
+ "tower",
  "tracing",
  "which",
 ]

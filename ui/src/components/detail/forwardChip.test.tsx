@@ -5,7 +5,7 @@
 // chrome, since the color *is* the feature here.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { ForwardChip, forwardId, parseLocalPort, portIssue } from "./forwardChip";
 import { api } from "../../api";
 import { useAppStore } from "../../store";
@@ -393,3 +393,62 @@ function toRgb(hex: string): string {
   const b = parseInt(m[3]!, 16);
   return `rgb(${r}, ${g}, ${b})`;
 }
+
+describe("ForwardChip RBAC", () => {
+  it("disables starting a forward the identity may not open", async () => {
+    const { resetAccessCache } = await import("../../lib/access");
+    const { setMockInvoke, resetMockInvoke } = await import("../../test/tauri-mock");
+    resetAccessCache();
+    const reqs: unknown[] = [];
+    const cmds: string[] = [];
+    setMockInvoke((cmd, args) => {
+      cmds.push(cmd);
+      if (cmd !== "access_check_cmd") return undefined;
+      reqs.push(...(args?.requests as unknown[]));
+      return [{ state: "denied", reason: "cannot create pods/portforward in default" }];
+    });
+    render(<ForwardChip t={t} clusterId={clusterId} target={target} remotePort={remotePort} />);
+    await waitFor(() => expect(chipButton()).toBeDisabled());
+    const pick = screen.getByRole("button", { name: "Pick local port" });
+    expect(pick).toBeDisabled();
+    // Hoverable so the tooltip can say why, but inert.
+    expect((chipButton() as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(chipButton());
+    fireEvent.click(pick);
+    expect(reqs).toEqual([{ kindId: "pods", action: "portForward", namespace: "default", name: "api-0" }]);
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(cmds.filter((c) => c !== "access_check_cmd")).toEqual([]);
+    // A refused control doesn't light up on hover.
+    fireEvent.mouseEnter(chipButton());
+    expect(chipButton().style.background).toBe("transparent");
+    cleanup();
+    resetMockInvoke();
+    resetAccessCache();
+  });
+
+  it("a denial landing after the picker opened blocks starting from it", async () => {
+    const { resetAccessCache } = await import("../../lib/access");
+    const { setMockInvoke, resetMockInvoke } = await import("../../test/tauri-mock");
+    resetAccessCache();
+    let answer: (d: unknown[]) => void = () => {};
+    const cmds: string[] = [];
+    setMockInvoke((cmd, args) => {
+      cmds.push(cmd);
+      if (cmd === "pf_check_local_port") return portCheck(Number(args?.port), { kind: "free" });
+      if (cmd !== "access_check_cmd") return undefined;
+      return new Promise((r) => (answer = r));
+    });
+    render(<ForwardChip t={t} clusterId={clusterId} target={target} remotePort={remotePort} />);
+    fireEvent.click(screen.getByRole("button", { name: "Pick local port" }));
+    await waitFor(() => expect(cmds).toContain("access_check_cmd"));
+    await act(async () => answer([{ state: "denied", reason: "cannot create pods/portforward in default" }]));
+    const ok = screen.getByRole("button", { name: "Start forward" });
+    expect(ok).toBeDisabled();
+    fireEvent.click(ok);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Local port" }), { key: "Enter" });
+    expect(cmds).not.toContain("pf_start");
+    cleanup();
+    resetMockInvoke();
+    resetAccessCache();
+  });
+});

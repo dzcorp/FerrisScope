@@ -152,6 +152,8 @@ pub(crate) struct ClusterEntry {
     /// a dead client. Cleared by dropping the `ClusterEntry` (manual
     /// reconnect path).
     pub(crate) unavailable: AtomicBool,
+    /// RBAC decisions for this connection's identity; dies with the entry.
+    pub(crate) access: ferrisscope_kube_ext::access::AccessCache,
     /// One-shot guard for connect-time probes (cluster.info background
     /// fetch + pod-list bench). The cluster can be cached either by an
     /// explicit `connect_context` call *or* lazily by `state.entry()` if
@@ -215,12 +217,14 @@ impl ClusterEntry {
     fn new(cluster: Cluster) -> Arc<Self> {
         let cluster = Arc::new(cluster);
         let health = ClusterHealth::start(cluster.client());
+        let access = ferrisscope_kube_ext::access::AccessCache::new(cluster.client());
         Arc::new(Self {
             cluster,
             kinds: Mutex::new(HashMap::new()),
             metrics: Mutex::new(MetricsSlot::default()),
             health,
             unavailable: AtomicBool::new(false),
+            access,
             connect_probes_done: AtomicBool::new(false),
             health_wired: AtomicBool::new(false),
             namespaces_pinned: AtomicBool::new(false),

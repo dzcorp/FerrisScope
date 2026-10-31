@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import {
   useActiveClusterEpoch,
@@ -24,6 +24,7 @@ import { compareApiGroups } from "../lib/crdGroups";
 import { resourceKindLabel } from "../lib/resourceKinds";
 import { ErrorBlock, Icons, Tooltip, resolveKindIcon } from "./ui";
 import { OpenClustersStrip } from "./OpenClustersStrip";
+import { decidedGate, gatedTitle, useScopesAccess } from "../lib/access";
 import { CATEGORY_ORDER, groupKinds } from "../lib/kindOrder";
 import { RAIL_COLLAPSED_W, RAIL_EASE, RAIL_OPEN_W, useRailEdge } from "../lib/railEdge";
 
@@ -44,6 +45,19 @@ type Props = {
 // operator hovers the CustomResources group, which always force-expands the
 // rail (every CRD falls back to the same icon, so the collapsed list would
 // be a stack of indistinguishable glyphs).
+/// Where the rail asks "may I watch this kind?" — the question the table asks
+/// before subscribing, so the two agree: each active cluster serving the kind,
+/// at each selected namespace (cluster-wide when none is, or for a
+/// cluster-scoped kind).
+type RailAccess = {
+  clusterIds: string[];
+  namespaces: (string | null)[];
+  kindClusters: Record<string, string[]>;
+};
+const RailScopes = createContext<RailAccess>({ clusterIds: [], namespaces: [null], kindClusters: {} });
+
+const WATCH_ACTION = ["watch"] as const;
+
 export function Rail({}: Props) {
   const resolved = useResolvedTheme();
   const t = resolved.tokens;
@@ -67,6 +81,17 @@ export function Rail({}: Props) {
   // leaves `activeClusterKey` unchanged — still re-runs discovery and clears a
   // stale "CRD discovery: …" auth error once the reconnect fixes the client.
   const reconnectEpoch = useActiveClusterEpoch();
+  const selectedNamespaces = useAppStore((s) => s.selectedNamespaces);
+  const kindClusters = useAppStore((s) => s.kindClusters);
+  const accessScopes = useMemo<RailAccess>(
+    () => ({
+      clusterIds: activeClusterIds,
+      namespaces: selectedNamespaces.size > 0 ? Array.from(selectedNamespaces).sort() : [null],
+      kindClusters,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeClusterKey, selectedNamespaces, kindClusters],
+  );
   const setKinds = useAppStore((s) => s.setKinds);
   const setKindClusters = useAppStore((s) => s.setKindClusters);
   const setKindsLoading = useAppStore((s) => s.setKindsLoading);
@@ -236,6 +261,7 @@ export function Rail({}: Props) {
   const isPinned = railMode === "pinned";
 
   return (
+    <RailScopes.Provider value={accessScopes}>
     <div
       onMouseEnter={onRailEnter}
       onMouseLeave={onRailLeave}
@@ -353,6 +379,7 @@ export function Rail({}: Props) {
         />
       </div>
     </div>
+    </RailScopes.Provider>
   );
 }
 
@@ -803,13 +830,27 @@ const RailItem = memo(function RailItem({
     [kind.kind, kind.group, category],
   );
   const label = resourceKindLabel(kind);
-  const tooltip = `${label} (${kind.group ? `${kind.group}/` : ""}${kind.version})`;
+  // Denied kinds stay clickable — the table explains — but read as dimmed.
+  const railAccess = useContext(RailScopes);
+  const servedBy = railAccess.kindClusters[kind.id];
+  const scopes = useMemo(() => {
+    const ids = servedBy ? railAccess.clusterIds.filter((c) => servedBy.includes(c)) : railAccess.clusterIds;
+    const nss = kind.namespaced ? railAccess.namespaces : [null];
+    return ids.flatMap((clusterId) => nss.map((namespace) => ({ clusterId, namespace })));
+  }, [railAccess, servedBy, kind.namespaced]);
+  const { watch: list } = useScopesAccess(kind.id, scopes, WATCH_ACTION, decidedGate);
+  const tooltip = gatedTitle(
+    `${label} (${kind.group ? `${kind.group}/` : ""}${kind.version})`,
+    list,
+  );
   return (
     <Tooltip label={tooltip} side="right" disabled={open}>
       <button
         type="button"
         className="fs-rail-item"
         data-active={active || undefined}
+        data-denied={!list.allowed || undefined}
+        title={open && !list.allowed ? tooltip : undefined}
         onClick={() => onSelect(kind.id)}
         style={{
           display: "flex",
@@ -826,7 +867,8 @@ const RailItem = memo(function RailItem({
           minHeight: 32,
           position: "relative",
           textAlign: "left",
-          transition: "background .12s, color .12s",
+          transition: "background .12s, color .12s, opacity .12s",
+          opacity: list.allowed ? 1 : 0.45,
         }}
       >
         {active && (

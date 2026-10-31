@@ -35,8 +35,8 @@ use tokio::time::{interval, MissedTickBehavior};
 /// One canonical "is this cluster actually usable" check. Lists
 /// Namespaces with `limit=1` — exercises the same code path the
 /// resource watchers use (LIST → WATCH against a real apiserver
-/// resource), so a probe success means the eager namespaces watcher
-/// will succeed too.
+/// resource), so `Alive` means the eager namespaces watcher will succeed
+/// too; `Restricted` only that the apiserver is up.
 ///
 /// Why not `/version` or `/api`: both are commonly served from cache
 /// by an LB or by the apiserver itself even when etcd is dead or the
@@ -44,16 +44,54 @@ use tokio::time::{interval, MissedTickBehavior};
 /// "apiserver answers /api in 50ms but pod LIST hangs forever";
 /// `/version` and `/api` can't catch that. A real LIST does.
 ///
-/// Note: requires `list namespaces` cluster-wide RBAC. Operators
-/// without that permission will see this as a 403 — which is still a
-/// signal the apiserver is responding (Api(_) error vs Service(_)),
-/// but we treat all errors as failure for simplicity. If false-positive
-/// 403s become a real complaint, switch to `Api(_) is alive,
-/// Service(_) is dead`.
-pub async fn liveness_probe(client: &Client) -> Result<(), kube::Error> {
+/// A 403 still proves the apiserver answered and authenticated us: it is
+/// the normal answer for a namespace-scoped identity, so it counts as alive.
+pub async fn liveness_probe(client: &Client) -> Result<Liveness, kube::Error> {
     let api: Api<Namespace> = Api::all(client.clone());
-    api.list(&ListParams::default().limit(1)).await?;
-    Ok(())
+    match api.list(&ListParams::default().limit(1)).await {
+        Ok(_) => Ok(Liveness::Alive),
+        // A kubeconfig without usable credentials, on a cluster that allows
+        // anonymous requests, is refused as `system:anonymous`: an auth
+        // failure, not a restricted identity.
+        Err(e) if is_forbidden(&e) && !is_anonymous(&e) => {
+            ready_probe(client).await?;
+            Ok(Liveness::Restricted(e.to_string()))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn is_anonymous(e: &kube::Error) -> bool {
+    matches!(e, kube::Error::Api(s) if s.message.contains("\"system:anonymous\""))
+}
+
+/// The probe for an identity that can't list namespaces. `/readyz` includes
+/// the etcd check and every authenticated identity may read it
+/// (`system:public-info-viewer`); where a hardened cluster hides it, its 403
+/// still proves the apiserver answered.
+pub async fn ready_probe(client: &Client) -> Result<(), kube::Error> {
+    let req = http::Request::get("/readyz")
+        .body(Vec::new())
+        .map_err(kube::Error::HttpError)?;
+    match client.request_text(req).await {
+        Ok(_) => Ok(()),
+        Err(e) if is_forbidden(&e) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Liveness {
+    Alive,
+    /// Alive, but this identity can't list namespaces cluster-wide. Carries
+    /// the apiserver's 403 verbatim (cloud-identity hints parse its `User`).
+    Restricted(String),
+}
+
+/// An apiserver authorization denial. A proxy or WAF answering 403 with an
+/// HTML page parses without the apiserver's `Forbidden` reason.
+fn is_forbidden(e: &kube::Error) -> bool {
+    matches!(e, kube::Error::Api(s) if s.code == 403 && s.reason == "Forbidden")
 }
 
 /// How often to probe the apiserver. 5s gives us 6 attempts inside the
@@ -157,21 +195,28 @@ impl ClusterHealth {
                 // declaring "healthy" 0ms after start adds no signal.
                 tick.tick().await;
 
-                let mut first_failure_at: Option<Instant> = None;
+                let mut first_failure_at: Option<tokio::time::Instant> = None;
                 let mut last_reason: Option<String> = None;
                 let mut failure_streak: u32 = 0;
+                let mut restricted = false;
                 loop {
                     tick.tick().await;
-                    // Real LIST (limit=1) — same path the watchers use.
-                    // `/api` and `/version` can both succeed against a
-                    // wedged cluster while a real LIST hangs (etcd
-                    // dead, watch broken, LB in front of dead replicas).
+                    // Real LIST (limit=1), or `/readyz` once restricted.
                     // See `liveness_probe` doc.
                     let probe = if beacon.seen_within(PROBE_INTERVAL) {
-                        Ok(Ok(()))
+                        Ok(Ok(Liveness::Alive))
+                    } else if restricted {
+                        // Skip the LIST we know is refused: it only fills
+                        // the audit log.
+                        tokio::time::timeout(PROBE_TIMEOUT, ready_probe(&client))
+                            .await
+                            .map(|r| r.map(|()| Liveness::Restricted(String::new())))
                     } else {
                         tokio::time::timeout(PROBE_TIMEOUT, liveness_probe(&client)).await
                     };
+                    if let Ok(Ok(Liveness::Restricted(_))) = &probe {
+                        restricted = true;
+                    }
                     match probe {
                         Ok(Ok(_info)) => {
                             // Recovery path: only emit if we'd previously
@@ -216,7 +261,8 @@ impl ClusterHealth {
                     }
 
                     if last_reason.is_some() {
-                        let started = *first_failure_at.get_or_insert_with(Instant::now);
+                        let started =
+                            *first_failure_at.get_or_insert_with(tokio::time::Instant::now);
                         if started.elapsed() >= UNHEALTHY_AFTER {
                             let reason = last_reason.take();
                             let evt = ClusterHealthEvent {
@@ -265,6 +311,115 @@ impl ClusterHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FORBIDDEN: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"namespaces is forbidden: User \"dev@x.io\" cannot list resource \"namespaces\"","reason":"Forbidden","code":403}"#;
+
+    /// A fake apiserver: `namespaces` answers the LIST, `/readyz` its code.
+    fn mock(namespaces: (u16, &'static str), readyz: u16) -> Client {
+        let svc = tower::service_fn(move |req: http::Request<kube::client::Body>| async move {
+            let (code, body) = if req.uri().path() == "/readyz" {
+                (readyz, if readyz == 403 { FORBIDDEN } else { "ok" })
+            } else {
+                namespaces
+            };
+            Ok::<_, std::convert::Infallible>(
+                http::Response::builder()
+                    .status(code)
+                    .body(kube::client::Body::from(body.as_bytes().to_vec()))
+                    .unwrap(),
+            )
+        });
+        Client::new(svc, "default")
+    }
+
+    #[tokio::test]
+    async fn forbidden_probe_is_alive_but_restricted() {
+        match liveness_probe(&mock((403, FORBIDDEN), 200)).await {
+            Ok(Liveness::Restricted(m)) => assert!(m.contains("dev@x.io"), "{m}"),
+            other => panic!("expected restricted, got {other:?}"),
+        }
+        // /readyz hidden on a hardened cluster: the 403 still proves life.
+        let hidden = mock((403, FORBIDDEN), 403);
+        assert!(matches!(
+            liveness_probe(&hidden).await,
+            Ok(Liveness::Restricted(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn restricted_probe_still_sees_a_dead_backend() {
+        assert!(liveness_probe(&mock((403, FORBIDDEN), 500)).await.is_err());
+        assert!(ready_probe(&mock((403, FORBIDDEN), 503)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_anonymous_403_is_an_auth_failure() {
+        const ANON: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"namespaces is forbidden: User \"system:anonymous\" cannot list resource \"namespaces\"","reason":"Forbidden","code":403}"#;
+        assert!(liveness_probe(&mock((403, ANON), 200)).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restricted_heartbeat_probes_readyz_and_still_sees_a_dead_backend() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        let lists = Arc::new(AtomicUsize::new(0));
+        let readyz = Arc::new(AtomicUsize::new(0));
+        let ready = Arc::new(AtomicBool::new(true));
+        let (l, r, up) = (lists.clone(), readyz.clone(), ready.clone());
+        let svc = tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let (l, r, up) = (l.clone(), r.clone(), up.clone());
+            async move {
+                let (code, body) = if req.uri().path() == "/readyz" {
+                    r.fetch_add(1, Ordering::SeqCst);
+                    if up.load(Ordering::SeqCst) {
+                        (200, "ok")
+                    } else {
+                        (500, "[-]etcd failed")
+                    }
+                } else {
+                    l.fetch_add(1, Ordering::SeqCst);
+                    (403, FORBIDDEN)
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(code)
+                        .body(kube::client::Body::from(body.as_bytes().to_vec()))
+                        .unwrap(),
+                )
+            }
+        });
+        let health = ClusterHealth::start(Client::new(svc, "default"));
+        let mut rx = health.subscribe();
+        tokio::time::sleep(PROBE_INTERVAL * 4 + Duration::from_millis(100)).await;
+        assert_eq!(
+            lists.load(Ordering::SeqCst),
+            1,
+            "the refused LIST is asked once"
+        );
+        assert!(readyz.load(Ordering::SeqCst) >= 3);
+
+        ready.store(false, Ordering::SeqCst);
+        let down = tokio::time::timeout(UNHEALTHY_AFTER * 3, async {
+            loop {
+                let e = rx.recv().await.unwrap();
+                if e.status == ClusterHealthStatus::Unavailable {
+                    return e;
+                }
+            }
+        })
+        .await
+        .expect("a dead backend is noticed");
+        assert!(down.reason.is_some());
+        assert_eq!(lists.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_proxy_403_is_not_the_apiserver() {
+        let html = mock((403, "<html>Access denied by proxy</html>"), 200);
+        assert!(liveness_probe(&html).await.is_err());
+        assert!(liveness_probe(&mock((401, "Unauthorized"), 200))
+            .await
+            .is_err());
+    }
 
     #[test]
     fn beacon_counts_only_recent_marks() {

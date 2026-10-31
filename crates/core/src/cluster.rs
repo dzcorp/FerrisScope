@@ -360,6 +360,9 @@ pub struct ClusterInfo {
     /// e.g. `v1.30.4`
     pub server_version: String,
     pub node_count: usize,
+    /// Set by connect when the identity can't list namespaces cluster-wide:
+    /// the apiserver's 403, verbatim.
+    pub restricted: Option<String>,
 }
 
 /// How many distinct watcher-Clients (HTTP/2 connection pools) to keep per
@@ -570,7 +573,9 @@ impl Cluster {
         let nodes: Api<Node> = Api::all(self.client.clone());
         let started = std::time::Instant::now();
         let (version, node_count) =
-            tokio::try_join!(self.client.apiserver_version(), count_objects(&nodes))?;
+            tokio::join!(self.client.apiserver_version(), count_objects(&nodes));
+        let version = version?;
+        let node_count = node_count_or_unknown(node_count)?;
         tracing::debug!(
             elapsed_ms = started.elapsed().as_millis() as u64,
             "cluster.info: version + node count"
@@ -578,6 +583,7 @@ impl Cluster {
         Ok(ClusterInfo {
             server_version: version.git_version,
             node_count,
+            restricted: None,
         })
     }
 
@@ -667,6 +673,14 @@ impl Cluster {
             }
         }
         pool.get(idx).cloned()
+    }
+}
+
+/// A namespace-scoped identity can't list nodes; 0 is the UI's "unknown".
+fn node_count_or_unknown(count: kube::Result<usize>) -> kube::Result<usize> {
+    match count {
+        Err(kube::Error::Api(s)) if s.code == 403 => Ok(0),
+        other => other,
     }
 }
 
@@ -960,6 +974,20 @@ pub fn diagnose_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forbidden_node_list_leaves_the_count_unknown() {
+        let api = |code| {
+            Err(kube::Error::Api(
+                kube::core::Status::failure("nodes is forbidden", "Forbidden")
+                    .with_code(code)
+                    .boxed(),
+            ))
+        };
+        assert_eq!(node_count_or_unknown(api(403)).unwrap(), 0);
+        assert!(node_count_or_unknown(api(500)).is_err());
+        assert_eq!(node_count_or_unknown(Ok(3)).unwrap(), 3);
+    }
 
     #[test]
     fn page_count_uses_remaining_item_count() {

@@ -19,7 +19,7 @@ import {
 } from "react";
 import { FF_MONO, type Tokens, R_SM, FS_MD, FS_SM } from "../../theme";
 import { useEditSession } from "./editSession";
-import { Icons } from "../ui";
+import { Icons, inertProps } from "../ui";
 
 export type ApplyTarget = {
   clusterId: string;
@@ -62,7 +62,9 @@ export function EditModeChrome({
   // Pencil self-disables when the cluster can't take writes. Reads the session
   // directly so no editor has to thread the flag through; degrades to enabled
   // when rendered outside a provider (session is null).
-  const readOnly = useEditSession()?.readOnly ?? false;
+  const session = useEditSession();
+  const readOnly = session?.readOnly ?? false;
+  const readOnlyReason = session?.readOnlyReason ?? "Cluster unavailable — reconnect to edit";
   if (!editing) {
     return (
       <span
@@ -89,9 +91,8 @@ export function EditModeChrome({
         )}
         <button
           type="button"
-          onClick={onEnter}
-          disabled={readOnly}
-          title={readOnly ? "Cluster unavailable — reconnect to edit" : "Edit"}
+          {...inertProps(readOnly, readOnlyReason, onEnter)}
+          title={readOnly ? readOnlyReason : "Edit"}
           style={{
             ...iconBtnStyle(t),
             color: readOnly ? t.textMuted : t.textDim,

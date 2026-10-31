@@ -17,6 +17,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "../../api";
+import { useDebounced } from "../../lib/useDebounced";
 import { useAppStore, useClusterLabels } from "../../store";
 import type { Tokens } from "../../theme";
 import { FS_SM, FS_XS } from "../../theme";
@@ -24,6 +25,8 @@ import type { ServicePick } from "../../types";
 import { Select, TextInput } from "../ui/atoms";
 import { Btn } from "../ui/Btn";
 import { DetailRow } from "../detail/primitives";
+import { FORWARD_KIND_IDS } from "../detail/forwardChip";
+import { useKindAccess } from "../../lib/access";
 import {
   KvEditor,
   kvBufferFromPairs,
@@ -32,6 +35,8 @@ import {
 } from "../detail/edit";
 
 type Mode = "simple" | "global";
+
+const PF_ACTION = ["portForward"] as const;
 
 const KINDS = [
   "Pod",
@@ -117,6 +122,18 @@ export function NewForwardForm({ t, onDone }: { t: Tokens; onDone: () => void })
   const [localPort, setLocalPort] = useState("");
   const [selector, setSelector] = useState<KvBuffer>(() => kvBufferFromPairs([]));
   const [busy, setBusy] = useState(false);
+  // Asked once typing pauses: per-keystroke checks would each cost a review.
+  // A namespaced target without a namespace can't run, so it isn't asked
+  // about (an empty global one means every namespace).
+  const ns = useDebounced(namespace.trim(), 300) || null;
+  // With the name too: a grant may be scoped to one object (resourceNames).
+  const settledName = useDebounced(name.trim(), 300) || null;
+  const gate = useKindAccess(
+    clusterId && (ns || (mode === "global" && !name.trim())) ? clusterId : null,
+    mode === "simple" ? FORWARD_KIND_IDS[kind] : name.trim() ? "services" : "namespaces",
+    PF_ACTION,
+    mode === "global" && !name.trim() ? { name: ns } : { namespace: ns, name: settledName },
+  ).portForward;
   const [error, setError] = useState<string | null>(null);
 
   // Live pickers. `null` = not loaded yet; `[]` = loaded-but-empty or the list
@@ -515,9 +532,12 @@ export function NewForwardForm({ t, onDone }: { t: Tokens; onDone: () => void })
       {error && (
         <div style={{ color: t.bad, fontSize: FS_XS, margin: "6px 0 2px" }}>{error}</div>
       )}
+      {!gate.allowed && (
+        <div style={{ color: t.textMuted, fontSize: FS_XS, margin: "6px 0 2px" }}>{gate.reason}</div>
+      )}
 
       <div style={{ display: "flex", gap: 8, marginTop: 10, fontSize: FS_SM }}>
-        <Btn t={t} variant="primary" size="sm" disabled={busy} onClick={submit}>
+        <Btn t={t} variant="primary" size="sm" disabled={busy || !gate.allowed} onClick={submit}>
           {busy ? "Forwarding…" : "Forward"}
         </Btn>
         <Btn t={t} variant="ghost" size="sm" disabled={busy} onClick={onDone}>

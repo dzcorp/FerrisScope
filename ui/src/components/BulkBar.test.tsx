@@ -41,8 +41,30 @@ describe("BulkBar", () => {
       />,
     );
     const btn = screen.getByText("Delete").closest("button") as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
+    expect(btn).toBeDisabled();
+    // Hoverable, so its reason shows.
+    expect(btn.disabled).toBe(false);
     fireEvent.click(btn);
     expect(onClick).not.toHaveBeenCalled();
+  });
+});
+
+describe("BulkBar disabled reasons", () => {
+  it("shows an RBAC reason instead of the degraded-cluster default", () => {
+    render(
+      <BulkBar
+        mode="dark"
+        count={1}
+        onClear={() => {}}
+        actions={[
+          { icon: null, label: "Drain", onClick: () => {}, disabled: true, disabledReason: "Not permitted: y" },
+          { icon: null, label: "Delete", onClick: () => {}, disabled: true },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Drain").closest("button")?.title).toBe("Not permitted: y");
+    expect(screen.getByText("Delete").closest("button")?.title).toBe(
+      "Cluster unavailable — reconnect to run this",
+    );
   });
 });

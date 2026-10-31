@@ -5,6 +5,7 @@ import { VALUES_CONFIRM } from "./useHelmRelease";
 import { useAppStore } from "../../../store";
 import { tokens } from "../../../theme";
 import { resetMockInvoke, setMockInvoke } from "../../../test/tauri-mock";
+import { resetAccessCache } from "../../../lib/access";
 import type { HelmReleaseDetail, HelmRollbackResult, HelmUpgradeResult } from "../../../types";
 
 vi.mock("@monaco-editor/react", () => ({
@@ -343,6 +344,24 @@ describe("Helm release gating", () => {
     expect(screen.getByRole("button", { name: "Rollback… — Cluster unavailable" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Upgrade to 6.6.0 — Cluster unavailable" })).toBeDisabled();
     expect(screen.getByText("read-only · cluster unavailable")).toBeInTheDocument();
+  });
+
+  it("grays out writes the identity may not make, with the reason", async () => {
+    resetAccessCache();
+    const d = release();
+    setMockInvoke((cmd, args) => {
+      if (cmd === "access_check_cmd")
+        return (args?.requests as unknown[]).map(() => ({ state: "denied", reason: "cannot update secrets in prod" }));
+      if (cmd === "get_helm_release_detail_cmd") return d;
+      if (cmd === "resolve_object_statuses_cmd") return { items: [] };
+      return undefined;
+    });
+    render(<Harness />);
+    const why = "Not permitted: cannot update secrets in prod";
+    expect(await screen.findByRole("button", { name: `Rollback… — ${why}` })).toBeDisabled();
+    expect(screen.getByRole("button", { name: `Upgrade to 6.6.0 — ${why}` })).toBeDisabled();
+    cleanup();
+    resetAccessCache();
   });
 
   it("disables helm actions and offers setup when the CLI is missing", async () => {

@@ -308,7 +308,9 @@ function Values({ t, d, ctl }: { t: Tokens; d: HelmReleaseDetail; ctl: HelmContr
       ? "read-only · operation in progress"
       : reason === "Cluster unavailable"
         ? "read-only · cluster unavailable"
-        : null;
+        : reason?.startsWith("Not permitted")
+          ? `read-only · ${reason}`
+          : null;
 
   const save = () => {
     if (!draft || parseError) return;

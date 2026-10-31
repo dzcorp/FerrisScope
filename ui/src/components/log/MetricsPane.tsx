@@ -113,8 +113,9 @@ export function MetricsPane({
   // them will sit at "—" forever, so say why.
   const unavailable = clusterIds.filter((cid) => {
     const snap = metricsByCluster[cid];
-    return snap != null && !snap.available;
+    return snap != null && !snap.available && !snap.forbidden;
   });
+  const forbidden = clusterIds.filter((cid) => metricsByCluster[cid]?.forbidden);
   const anySnapshot = clusterIds.some((cid) => metricsByCluster[cid] != null);
 
   if (pods.length === 0) {
@@ -146,6 +147,15 @@ export function MetricsPane({
         >
           metrics-server not detected on{" "}
           {unavailable.map((cid) => clusterMeta[cid]?.name ?? cid).join(", ")}
+        </div>
+      )}
+      {forbidden.length > 0 && (
+        <div
+          title={forbidden.map((cid) => metricsByCluster[cid]?.forbidden).join("\n")}
+          style={{ marginBottom: 10, fontSize: FS_SM, fontFamily: FF_MONO, color: t.warn }}
+        >
+          Not permitted to read metrics on{" "}
+          {forbidden.map((cid) => clusterMeta[cid]?.name ?? cid).join(", ")}
         </div>
       )}
       {!anySnapshot ? (

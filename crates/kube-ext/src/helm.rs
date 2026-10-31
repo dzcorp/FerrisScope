@@ -194,17 +194,23 @@ pub fn upgrade_args(spec: &UpgradeSpec<'_>, target: KubeTarget<'_>) -> Vec<OsStr
     a
 }
 
+/// `create_namespace` only when the namespace is known to be missing:
+/// `--create-namespace` POSTs a Namespace, which a namespace-scoped identity
+/// is refused even when it already exists.
 pub fn install_args(
     release: &str,
     namespace: &str,
     chart: &OsStr,
     values_file: &Path,
     version: Option<&str>,
+    create_namespace: bool,
     target: KubeTarget<'_>,
 ) -> Vec<OsString> {
     let mut a = Vec::with_capacity(20);
     push_common(&mut a, "install", namespace, target);
-    a.push("--create-namespace".into());
+    if create_namespace {
+        a.push("--create-namespace".into());
+    }
     a.push("--values".into());
     a.push(values_file.into());
     a.push("--output".into());
@@ -753,8 +759,20 @@ mod tests {
             OsStr::new("repo/c"),
             &values,
             None,
+            true,
             target(None),
         ));
+        assert!(install.iter().any(|a| a == "--create-namespace"));
+        let existing = strs(&install_args(
+            "r",
+            "ns",
+            OsStr::new("repo/c"),
+            &values,
+            None,
+            false,
+            target(None),
+        ));
+        assert!(!existing.iter().any(|a| a == "--create-namespace"));
         let rollback = strs(&rollback_args("r", "ns", Some(3), target(None)));
         let uninstall = strs(&uninstall_args("r", "ns", target(None)));
         for argv in [&install, &rollback, &uninstall] {

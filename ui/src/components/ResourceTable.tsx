@@ -64,12 +64,14 @@ import type { DetailTarget } from "./DetailPanel";
 import type { ObserveTarget } from "./LogPanel";
 import { ContextMenu, type MenuPosition } from "./ContextMenu";
 import {
+  rowAccessActions,
   actionsForRow,
   actionsForSelection,
   menuScopeFor,
   selectionMenuHeader,
 } from "./rowActions";
-import { bulkActionsFor } from "./bulkActions";
+import { bulkActionsFor, gateBulkActions, menuAccessActions } from "./bulkActions";
+import { useAccessChecks, useKindAccess, useScopesAccess } from "../lib/access";
 import { makeTerminalTab } from "./Dock";
 import { confirm, toast } from "../lib/dialog";
 import { latinLetter } from "../lib/keyboard";
@@ -327,6 +329,28 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
   // Per-table multi-select lives on the store too so the bulk-action bar can
   // be rendered at App level.
   const selection = useTabSlice((v) => v.selection);
+  // RBAC for the open menu only.
+  const menuRow = menu?.scope === "row" ? menu.row : null;
+  const rowGates = useKindAccess(
+    menuRow?.__clusterId ?? null,
+    kind.id,
+    useMemo(() => rowAccessActions(kind.id), [kind.id]),
+    {
+      namespace: typeof menuRow?.namespace === "string" ? menuRow.namespace : null,
+      name: menuRow ? String(menuRow.name ?? "") : null,
+    },
+  );
+  const selectionGates = useScopesAccess(
+    menu?.scope === "selection" ? kind.id : null,
+    useMemo(
+      () =>
+        menu?.scope === "selection"
+          ? Array.from(selection.values(), (m) => ({ clusterId: m.clusterId, namespace: m.namespace }))
+          : [],
+      [selection, menu?.scope],
+    ),
+    useMemo(() => menuAccessActions(kind.id), [kind.id]),
+  );
   const toggleSelection = useAppStore((s) => s.toggleSelection);
   const setSelection = useAppStore((s) => s.setSelection);
   const clearSelection = useAppStore((s) => s.clearSelection);
@@ -444,6 +468,31 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
       .map((s) => (s == null ? "all" : `ns:${s[0]}`))
       .join("|");
   }, [subscribeScopes]);
+
+  // A denied watch retries its 403 forever; ask up front instead of spinning.
+  const listChecks = useMemo(
+    () =>
+      clusterIds.flatMap((clusterId) =>
+        subscribeScopes.map((sc) => ({
+          clusterId,
+          kindId: kind.id,
+          action: "watch" as const,
+          namespace: sc?.[0] ?? null,
+        })),
+      ),
+    [clusterIds, subscribeScopes, kind.id],
+  );
+  const listGates = useAccessChecks(listChecks);
+  const deniedScopes = listChecks.filter((_, i) => listGates[i] && !listGates[i].allowed);
+  const listDenied = listChecks.length > 0 && deniedScopes.length === listChecks.length;
+  const accessNotes = listDenied
+    ? []
+    : deniedScopes.map(
+        (c) =>
+          `${clusterIds.length > 1 ? `${clusterMeta[c.clusterId]?.name ?? c.clusterId}: ` : ""}no access to ${kind.plural}${
+            c.namespace ? ` in ${c.namespace}` : " cluster-wide"
+          }`,
+      );
 
   useEffect(() => {
     let cancelled = false;
@@ -1476,7 +1525,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
         {/* Partial-data strip: some members of a merged view failed to
             subscribe but at least one is serving rows. Full failure goes
             through load.kind === "error" below instead. */}
-        {Object.keys(subErrors).length > 0 && load.kind !== "error" && (
+        {(Object.keys(subErrors).length > 0 || accessNotes.length > 0) && load.kind !== "error" && (
           <div
             role="alert"
             style={{
@@ -1507,14 +1556,20 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
             />
             <span
               style={{ overflow: "hidden", textOverflow: "ellipsis" }}
-              title={Object.entries(subErrors)
-                .map(([cid, msg]) => `${clusterMeta[cid]?.name ?? cid}: ${msg}`)
-                .join("\n")}
+              title={[
+                ...Object.entries(subErrors).map(
+                  ([cid, msg]) => `${clusterMeta[cid]?.name ?? cid}: ${msg}`,
+                ),
+                ...accessNotes,
+              ].join("\n")}
             >
               Partial data —{" "}
-              {Object.entries(subErrors)
-                .map(([cid, msg]) => `${clusterMeta[cid]?.name ?? cid}: ${msg}`)
-                .join("; ")}
+              {[
+                ...Object.entries(subErrors).map(
+                  ([cid, msg]) => `${clusterMeta[cid]?.name ?? cid}: ${msg}`,
+                ),
+                ...accessNotes,
+              ].join("; ")}
             </span>
           </div>
         )}
@@ -1577,6 +1632,19 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
               t={t}
               message={load.message}
               kindLabel={kind.plural}
+            />
+          ) : listDenied && filtered.length === 0 ? (
+            <EmptyState
+              t={t}
+              title={`No access to ${kind.plural}`}
+              hint={
+                <>
+                  {listGates.find((g) => !g.allowed)?.reason}
+                  {kind.namespaced && selectedNamespaces.size === 0
+                    ? " — this identity may only read some namespaces: pick one with the namespace selector."
+                    : ""}
+                </>
+              }
             />
           ) : load.kind === "loading" && filtered.length === 0 ? (
             // First-paint loading. R-01: no spinners on poll — but we are
@@ -1774,16 +1842,19 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
           items={actionsForSelection({
             kind,
             count: selection.size,
-            bulk: bulkActionsFor(
-              kind,
-              selection,
-              confirmDestructive,
-              clearSelection,
-              clusterLabel,
-              selectSelectionDegraded(
-                { clusterHealth, clusterReconnecting },
+            bulk: gateBulkActions(
+              bulkActionsFor(
+                kind,
                 selection,
+                confirmDestructive,
+                clearSelection,
+                clusterLabel,
+                selectSelectionDegraded(
+                  { clusterHealth, clusterReconnecting },
+                  selection,
+                ),
               ),
+              selectionGates,
             ),
           })}
         />
@@ -1825,6 +1896,7 @@ export function ResourceTable({ mode, clusters, viewScopeId, kind }: Props) {
                 { clusterHealth, clusterReconnecting },
                 menu.row.__clusterId,
               ),
+              access: rowGates,
             },
           )}
         />

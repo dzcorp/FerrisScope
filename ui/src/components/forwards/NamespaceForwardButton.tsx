@@ -13,6 +13,9 @@ import type { Tokens } from "../../theme";
 import { IconBtn } from "../ui/Btn";
 import { Icons } from "../ui/icons";
 import { toast } from "../../lib/dialog";
+import { gatedTitle, useKindAccess } from "../../lib/access";
+
+const PF_ACTION = ["portForward"] as const;
 
 export function NamespaceForwardButton({
   t,
@@ -33,6 +36,8 @@ export function NamespaceForwardButton({
   const removeGlobalForward = useAppStore((s) => s.removeGlobalForward);
   const openForwardsPanel = useAppStore((s) => s.openForwardsPanel);
   const [busy, setBusy] = useState(false);
+  // Listing + watching the namespace's Services, then forwarding to pods.
+  const gate = useKindAccess(clusterId, "namespaces", PF_ACTION, { name: namespace }).portForward;
 
   // The namespace session is the one whose label matches this namespace.
   const session = useMemo(
@@ -72,7 +77,7 @@ export function NamespaceForwardButton({
     ? "Working…"
     : session
       ? `Forwarding · ${count} service${plural} · click to stop`
-      : "Forward all services (DNS)";
+      : gatedTitle("Forward all services (DNS)", gate);
 
   return (
     <IconBtn
@@ -80,7 +85,7 @@ export function NamespaceForwardButton({
       size="lg"
       title={title}
       active={!!session}
-      disabled={busy || (disabled && !session)}
+      disabled={busy || ((disabled || !gate.allowed) && !session)}
       onClick={toggle}
     >
       {Icons.forward}

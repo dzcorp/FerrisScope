@@ -1360,3 +1360,25 @@ describe("log streaming", () => {
     expect(cap.calls[0]?.args).toHaveProperty("tailLines", null);
   });
 });
+
+describe("RBAC access", () => {
+  it("accessCheck ships requests verbatim", async () => {
+    const cap = captureNext([{ state: "allowed" }]);
+    const requests = [{ kindId: "pods", action: "delete" as const, namespace: "x", name: "p" }];
+    const res = await api.accessCheck("ctx", requests);
+    expect(cap.calls[0]).toEqual({ cmd: "access_check_cmd", args: { clusterId: "ctx", requests } });
+    expect(res).toEqual([{ state: "allowed" }]);
+  });
+
+  it("accessInvalidate / accessWhoami / accessRules", async () => {
+    const cap = captureNext(null);
+    await api.accessInvalidate("ctx");
+    await api.accessWhoami("ctx");
+    await api.accessRules("ctx", "ns");
+    expect(cap.calls).toEqual([
+      { cmd: "access_invalidate_cmd", args: { clusterId: "ctx" } },
+      { cmd: "access_whoami_cmd", args: { clusterId: "ctx" } },
+      { cmd: "access_rules_cmd", args: { clusterId: "ctx", namespace: "ns" } },
+    ]);
+  });
+});

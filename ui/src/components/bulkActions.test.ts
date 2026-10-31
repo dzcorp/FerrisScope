@@ -8,7 +8,7 @@
 // possible outcome.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildGenericBulkActions } from "./bulkActions";
+import { bulkAccessActions, bulkActionsFor, buildGenericBulkActions, gateBulkActions, menuAccessActions } from "./bulkActions";
 import { resetMockInvoke, setMockInvoke } from "../test/tauri-mock";
 import type { SelectionMeta } from "../store";
 import type { ResourceKind } from "../types";
@@ -279,5 +279,52 @@ describe("buildGenericBulkActions — suspend direction", () => {
     );
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]?.args?.name).toBe("live");
+  });
+});
+
+describe("bulk RBAC gates", () => {
+  const no = { allowed: false, reason: "Not permitted: cannot delete configmaps in a", pending: false, error: null };
+
+  it("tags every mutating action with the verb it needs", () => {
+    const tagged = Object.fromEntries(build(CRONJOBS, selectionOf("a")).map((a) => [a.label, a.access]));
+    expect(tagged).toMatchObject({ "Run now": "trigger", Suspend: "suspend", Delete: "delete" });
+    expect(tagged["Copy names"]).toBeUndefined();
+  });
+
+  it("disables only denied actions, with the reason", () => {
+    const gated = gateBulkActions(build(CONFIGMAPS, selectionOf("a")), { delete: no });
+    expect(gated.find((a) => a.label === "Delete")).toMatchObject({
+      disabled: true,
+      disabledReason: no.reason,
+    });
+    expect(gated.find((a) => a.label === "Copy names")?.disabled).toBeFalsy();
+  });
+
+  it("helm releases uninstall under helmUninstall; chart rows offer no delete", () => {
+    const rel = build(kindOf("helm_releases", "HelmRelease", "secrets"), selectionOf("a"));
+    expect(rel.find((a) => a.label === "Delete")?.access).toBe("helmUninstall");
+    const charts = build(kindOf("helm_charts", "HelmChart", "secrets"), selectionOf("a"));
+    expect(charts.map((a) => a.label)).not.toContain("Delete");
+    expect(bulkAccessActions("helm_charts")).toEqual([]);
+  });
+
+  it("the selection menu asks exactly the verbs its actions carry", () => {
+    for (const [id, kind, plural] of [
+      ["pods", "Pod", "pods"],
+      ["nodes", "Node", "nodes"],
+      ["jobs", "Job", "jobs"],
+      ["cronjobs", "CronJob", "cronjobs"],
+      ["deployments", "Deployment", "deployments"],
+      ["statefulsets", "StatefulSet", "statefulsets"],
+      ["daemonsets", "DaemonSet", "daemonsets"],
+      ["replicasets", "ReplicaSet", "replicasets"],
+      ["helm_releases", "HelmRelease", "secrets"],
+      ["helm_charts", "HelmChart", "secrets"],
+      ["configmaps", "ConfigMap", "configmaps"],
+    ] as const) {
+      const built = bulkActionsFor(kindOf(id, kind, plural), selectionOf("a"), false, () => {}, () => "", false);
+      const carried = [...new Set(built.flatMap((a) => (a.access ? [a.access] : [])))].sort();
+      expect([...menuAccessActions(id)].sort(), id).toEqual(carried);
+    }
   });
 });

@@ -15,7 +15,7 @@ import { useEditSession } from "./editSession";
 export function GlobalSaveBar({ t }: { t: Tokens }) {
   const session = useEditSession();
   if (!session) return null;
-  const { dirty, saving, conflict, error, saveAll, cancelAll, readOnly } =
+  const { dirty, saving, conflict, error, saveAll, cancelAll, readOnly, readOnlyReason } =
     session;
   if (dirty === 0 && !conflict && !error) return null;
   return (
@@ -51,7 +51,7 @@ export function GlobalSaveBar({ t }: { t: Tokens }) {
           }}
         >
           {readOnly
-            ? "Cluster unavailable — reconnect to save"
+            ? (readOnlyReason ?? "Cluster unavailable — reconnect to save")
             : dirty > 0
               ? `${dirty} pending change${dirty === 1 ? "" : "s"}`
               : conflict

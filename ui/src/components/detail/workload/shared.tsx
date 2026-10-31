@@ -1539,11 +1539,12 @@ export function ReplicasEditor({
       ) : (
         <div
           onClick={() => edit.enter()}
+          title={edit.readOnly ? (edit.readOnlyReason ?? undefined) : `Edit ${label}`}
           style={{
             display: "flex",
             alignItems: "center",
             gap: 6,
-            cursor: "pointer",
+            cursor: edit.readOnly ? "default" : "pointer",
             userSelect: "none",
             width: "100%",
           }}
@@ -1567,7 +1568,7 @@ export function ReplicasEditor({
             style={{
               display: "inline-flex",
               alignItems: "center",
-              opacity: hovered ? 1 : 0,
+              opacity: hovered && !edit.readOnly ? 1 : 0,
               transform: hovered ? "translateX(0)" : "translateX(-2px)",
               transition: "opacity .15s, transform .15s",
               color: t.textDim,

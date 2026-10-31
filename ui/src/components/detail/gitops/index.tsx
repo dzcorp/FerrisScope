@@ -700,12 +700,13 @@ const ACTION_ICON = {
 
 /** Argo CD's Delete choices; cascade is set through the resources finalizer. */
 export function argoDeleteItems(ctl: GitOpsController, name: string): MenuItem[] {
-  const blocked = !!ctl.blocked();
+  const blocked = ctl.blocked() ?? undefined;
   const del = (label: string, cascade: "foreground" | "background" | "non_cascading", body: string) => ({
     kind: "item" as const,
     label,
     danger: true,
-    disabled: blocked,
+    disabled: !!blocked,
+    title: blocked,
     onClick: () => void ctl.request("Delete", { type: "delete_app", cascade }, body),
   });
   return [

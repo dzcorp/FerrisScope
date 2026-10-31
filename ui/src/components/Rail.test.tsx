@@ -333,3 +333,60 @@ describe("Rail expand / collapse", () => {
     expect(railWidth()).toBe("56px");
   });
 });
+
+describe("Rail RBAC", () => {
+  it("dims kinds the identity can't list, and keeps them clickable", async () => {
+    const { resetAccessCache } = await import("../lib/access");
+    resetAccessCache();
+    const pods: ResourceKind = { id: "pods", kind: "Pod", group: "", version: "v1", plural: "pods", namespaced: true, category: "Workloads", columns: [] };
+    const secrets: ResourceKind = { ...pods, id: "secrets", kind: "Secret", plural: "secrets", category: "Config" };
+    setMockInvoke((cmd, args) => {
+      if (cmd === "list_resource_kinds") return [pods, secrets];
+      if (cmd === "list_custom_resource_kinds") return [];
+      if (cmd === "access_check_cmd") {
+        return (args?.requests as { kindId: string; action: string }[]).map((r) => {
+          expect(r.action).toBe("watch");
+          return r.kindId === "secrets"
+            ? { state: "denied", reason: "cannot list secrets (cluster-wide)" }
+            : { state: "allowed" };
+        });
+      }
+      return undefined;
+    });
+    act(() => useAppStore.setState({ selectedContext: "default::a", selectedVirtualContextId: null, scopeExtras: [], railMode: "pinned", selectedNamespaces: new Set(), contexts: [{ id: "default::a", name: "a", cluster: "a", user: null, namespace: null, is_current: true, group: "Default", source_id: "default", source_path: null }] }));
+    await act(async () => { render(<Rail mode="dark" />); });
+    await act(async () => {});
+    const secret = screen.getByRole("button", { name: "Secret" });
+    expect(secret.getAttribute("data-denied")).toBe("true");
+    expect(secret.style.opacity).toBe("0.45");
+    expect(secret.getAttribute("title")).toContain("Not permitted: cannot list secrets");
+    expect(screen.getByRole("button", { name: "Pod" }).getAttribute("data-denied")).toBeNull();
+    fireEvent.click(secret);
+    expect(useAppStore.getState().selectedKindId).toBe("secrets");
+  });
+
+  it("a member that can't answer doesn't hide another member's denial", async () => {
+    const { resetAccessCache } = await import("../lib/access");
+    resetAccessCache();
+    const secrets: ResourceKind = { id: "secrets", kind: "Secret", group: "", version: "v1", plural: "secrets", namespaced: true, category: "Config", columns: [] };
+    setMockInvoke((cmd, args) => {
+      if (cmd === "list_resource_kinds") return [secrets];
+      if (cmd === "list_custom_resource_kinds") return [];
+      if (cmd === "access_check_cmd") {
+        return (args?.requests as unknown[]).map(() =>
+          args?.clusterId === "default::b"
+            ? { state: "unknown", error: "cluster not connected" }
+            : { state: "denied", reason: "cannot list secrets" },
+        );
+      }
+      return undefined;
+    });
+    const ctx = (id: string) => ({ id, name: id, cluster: id, user: null, namespace: null, is_current: false, group: "Default", source_id: "default", source_path: null });
+    act(() => useAppStore.setState({ selectedContext: "default::a", selectedVirtualContextId: null, scopeExtras: ["default::b"], railMode: "pinned", selectedNamespaces: new Set(), contexts: [ctx("default::a"), ctx("default::b")] }));
+    await act(async () => { render(<Rail mode="dark" />); });
+    await act(async () => {});
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "Secret" }).getAttribute("data-denied")).toBe("true");
+    act(() => useAppStore.setState({ scopeExtras: [] }));
+  });
+});

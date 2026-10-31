@@ -68,20 +68,31 @@ export function ClusterPanel({ mode, context }: Props) {
             autoReconnect={autoReconnect}
             diagnoseContext={context}
           >
-            {selectedKind ? (
-              <ResourceTable
-                mode={mode}
-                clusters={clusters}
-                viewScopeId={context.id}
-                kind={selectedKind}
-              />
-            ) : (
-              <EmptyState
-                t={t}
-                title="Pick a resource kind"
-                hint="Hover the left rail to expand it, then choose a kind."
-              />
-            )}
+            <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+              {state.info.restricted && (
+                <RestrictedStrip
+                  context={context}
+                  reason={state.info.restricted}
+                  onReconnect={reconnect}
+                />
+              )}
+              <div style={{ flex: 1, minHeight: 0 }}>
+                {selectedKind ? (
+                  <ResourceTable
+                    mode={mode}
+                    clusters={clusters}
+                    viewScopeId={context.id}
+                    kind={selectedKind}
+                  />
+                ) : (
+                  <EmptyState
+                    t={t}
+                    title="Pick a resource kind"
+                    hint="Hover the left rail to expand it, then choose a kind."
+                  />
+                )}
+              </div>
+            </div>
           </UnavailableOverlay>
         ) : state.status === "error" ? (
           autoReconnect ? (
@@ -376,6 +387,62 @@ export function UnavailableOverlay({
       >
         {children}
       </div>
+    </div>
+  );
+}
+
+/// Connected, but `list namespaces` was refused — the normal shape of a
+/// namespace-scoped identity. Points at the namespace picker (which accepts a
+/// typed name) and, when the 403 smells like the wrong cloud account, the
+/// identity note's remedy.
+export function RestrictedStrip({
+  context,
+  reason,
+  onReconnect,
+}: {
+  context: ContextInfo;
+  reason: string;
+  onReconnect: () => void;
+}) {
+  const t = useResolvedTheme().tokens;
+  const openNsModal = useAppStore((s) => s.openNsModal);
+  const openAccessPanel = useAppStore((s) => s.openAccessPanel);
+  const dismissed = useAppStore((s) => s.restrictedDismissed.has(context.id));
+  const dismiss = useAppStore((s) => s.dismissRestricted);
+  if (dismissed) return null;
+  return (
+    <div
+      role="status"
+      style={{
+        padding: "6px 14px",
+        background: t.surfaceAlt,
+        borderBottom: `1px solid ${t.warn}`,
+        fontSize: FS_MD,
+        color: t.textDim,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ flex: 1, minWidth: 200 }}>
+          Limited access — this identity can't list namespaces cluster-wide. Pick or type a
+          namespace you can use.
+        </span>
+        <Btn t={t} size="sm" variant="secondary" onClick={openNsModal}>
+          Pick namespace
+        </Btn>
+        <Btn t={t} size="sm" variant="ghost" onClick={() => openAccessPanel(context.id)}>
+          My permissions
+        </Btn>
+        <Btn t={t} size="sm" variant="ghost" onClick={() => dismiss(context.id)} title="Hide">
+          Dismiss
+        </Btn>
+      </div>
+      <CloudIdentityNote
+        t={t}
+        contextId={context.id}
+        contextName={context.name}
+        reason={reason}
+        onReconnect={onReconnect}
+      />
     </div>
   );
 }

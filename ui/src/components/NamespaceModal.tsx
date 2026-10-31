@@ -25,6 +25,13 @@ type Props = {
   // the member's identity accent). Namespaces present everywhere have no
   // entry and render unchanged.
   clusterTags?: Record<string, { label: string; color: string }[]>;
+  /// Namespaces worth offering even when they can't be listed — the
+  /// kubeconfig contexts' default namespaces. A namespace-scoped identity
+  /// gets a 403 on `list namespaces`, so this may be all it can pick from.
+  suggested?: string[];
+  /// Why the namespace list is empty for this identity (a `list namespaces`
+  /// denial); unset while the list may still be loading.
+  unlistable?: string | null;
   initial: Set<string>;
   onApply: (next: Set<string>) => void;
   onClose: () => void;
@@ -35,10 +42,14 @@ type Props = {
 // namespaces" pseudo-row clears to the empty set. Empty selection means "all"
 // (matches HV2 semantics). Apply is the canonical action (P2); Clear is
 // secondary; Esc cancels. Selected-at-open namespaces float to the top.
+const DNS1123_LABEL = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+
 export function NamespaceModal({
-  namespaces,
+  namespaces: listed,
   counts,
   clusterTags,
+  suggested,
+  unlistable,
   initial,
   onApply,
   onClose,
@@ -54,6 +65,16 @@ export function NamespaceModal({
   // the next time the modal is shown.
   const [pinned] = useState<Set<string>>(() => new Set(initial));
   const inputRef = useRef<HTMLInputElement | null>(null);
+  // Listed namespaces plus the current selection (a restricted identity may
+  // have typed it), and kubeconfig defaults when nothing could be listed.
+  const listless = listed.length === 0 || !!unlistable;
+  const namespaces = useMemo(() => {
+    const extra = [...(listless ? (suggested ?? []) : []), ...initial].filter((n) => !listed.includes(n));
+    return extra.length === 0 ? listed : [...new Set([...listed, ...extra])].sort();
+  }, [listed, listless, suggested, initial]);
+  const typed = q.trim();
+  const validTyped = DNS1123_LABEL.test(typed);
+  const canUseTyped = validTyped && !namespaces.includes(typed);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -119,7 +140,13 @@ export function NamespaceModal({
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      apply();
+      // A typed name wins unless the operator picked rows meanwhile, or it's
+      // a search prefix over a namespace list that could be read.
+      const untouched = draft.size === initial.size && [...draft].every((n) => initial.has(n));
+      const exact = validTyped && namespaces.includes(typed);
+      if ((untouched && exact) || (canUseTyped && (filtered.length === 0 || (untouched && listless))))
+        onApply(new Set([typed]));
+      else apply();
     }
   };
 
@@ -221,7 +248,7 @@ export function NamespaceModal({
               ref={inputRef}
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search namespaces…"
+              placeholder="Search or type a namespace…"
               style={{
                 width: "100%",
                 boxSizing: "border-box",
@@ -304,17 +331,55 @@ export function NamespaceModal({
         </button>
 
         <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
-          {filtered.length === 0 ? (
+          {listed.length === 0 && unlistable && (
             <div
+              title={unlistable}
               style={{
-                padding: "24px 18px",
-                textAlign: "center",
+                padding: "10px 18px",
                 color: t.textMuted,
-                fontSize: FS_MD,
+                fontSize: FS_SM,
+                borderBottom: `1px solid ${t.borderSoft}`,
               }}
             >
-              No namespaces match "{q}"
+              No namespaces could be listed — this identity may only have access to
+              specific ones. Type a namespace name to use it.
             </div>
+          )}
+          {canUseTyped && (
+            <button
+              type="button"
+              onClick={() => onApply(new Set([typed]))}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                width: "100%",
+                padding: "8px 18px",
+                border: "none",
+                background: "transparent",
+                color: t.accent,
+                fontFamily: "inherit",
+                fontSize: FS_MD,
+                textAlign: "left",
+                cursor: "pointer",
+              }}
+            >
+              Use namespace <span style={{ fontFamily: FF_MONO }}>{typed}</span>
+            </button>
+          )}
+          {filtered.length === 0 ? (
+            canUseTyped ? null : (
+              <div
+                style={{
+                  padding: "24px 18px",
+                  textAlign: "center",
+                  color: t.textMuted,
+                  fontSize: FS_MD,
+                }}
+              >
+                {q ? `No namespaces match "${q}"` : "No namespaces"}
+              </div>
+            )
           ) : (
             filtered.map((ns) => {
               const checked = draft.has(ns);

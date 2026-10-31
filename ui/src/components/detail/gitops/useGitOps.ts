@@ -9,6 +9,9 @@ import type {
   MergePatchResult,
 } from "../../../types";
 import { useDetail, type LoadState } from "../useDetail";
+import { useKindAccess } from "../../../lib/access";
+
+const PATCH_ACTION = ["patch"] as const;
 
 export type GitOpsTarget = {
   clusterId: string;
@@ -49,6 +52,11 @@ export function useGitOps(
   const degraded = useAppStore((s) =>
     selectClusterDegraded(s, target.clusterId),
   );
+  // Every GitOps operation reads the object and merge-patches it.
+  const patchGate = useKindAccess(enabled ? target.clusterId : null, target.kindId, PATCH_ACTION, {
+    namespace: target.namespace,
+    name: target.name,
+  }).patch;
   const confirmDestructive = useAppStore(
     (s) => s.settings.confirmDestructive,
   );
@@ -98,6 +106,7 @@ export function useGitOps(
 
   const blocked = (action?: GitOpsAction): string | null => {
     if (degraded) return "Cluster unavailable";
+    if (!patchGate.allowed) return patchGate.reason ?? "Not permitted";
     if (action?.disabled_reason) return action.disabled_reason;
     if (busy !== null) return "Another request is in flight";
     if (!rv) return "Object has no resourceVersion yet";

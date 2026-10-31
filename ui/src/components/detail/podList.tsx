@@ -22,6 +22,7 @@ import {
   FS_XS,
 } from "../../theme";
 import { ErrorBlock, LoadingLine, Section, StatusPill } from "../ui";
+import { inertProps } from "../ui/Btn";
 import {
   DetailRow,
   LinkValue,
@@ -30,7 +31,10 @@ import {
   type DetailNavigate,
   type LoadState,
 } from ".";
+import { gatedTitle, useKindAccess } from "../../lib/access";
 import type { ResourceRow } from "../../types";
+
+const EVICT_ACTION = ["evict"] as const;
 
 /// What `fetchPods` yields: the rows, plus whether the source capped them.
 export type PodFetch = { rows: ResourceRow[]; truncated?: boolean };
@@ -474,6 +478,11 @@ function PodRow({
   // cluster is unavailable / mid auto-reconnect.
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
   const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
+  // Namespace-level, not per pod: a node can host hundreds of them.
+  const evictGate = useKindAccess(enableEvict ? clusterId : null, "pods", EVICT_ACTION, {
+    namespace: ns,
+  }).evict;
+  const evictBlocked = degraded || !evictGate.allowed;
   const phase = typeof row.phase === "string" ? row.phase : "Unknown";
   const ready = typeof row.ready === "string" ? row.ready : "";
   const restarts =
@@ -620,28 +629,26 @@ function PodRow({
       {enableEvict && (
         <button
           type="button"
-          disabled={degraded}
-          onClick={(e) => {
+          {...inertProps(evictBlocked, "evict", (e) => {
             e.stopPropagation();
-            if (degraded) return;
             doEvict();
-          }}
+          })}
           title={
             degraded
               ? "Cluster unavailable — can't evict right now"
-              : "Evict pod (graceful, PDB-aware)"
+              : gatedTitle("Evict pod (graceful, PDB-aware)", evictGate)
           }
           style={{
             marginLeft: created ? 8 : "auto",
             fontFamily: FF_MONO,
             fontSize: FS_XS,
-            color: degraded ? t.textMuted : t.bad,
+            color: evictBlocked ? t.textMuted : t.bad,
             background: "transparent",
             border: `1px solid ${t.border}`,
             borderRadius: R_SM,
             padding: "1px 8px",
-            cursor: degraded ? "not-allowed" : "pointer",
-            opacity: degraded ? 0.5 : 1,
+            cursor: evictBlocked ? "not-allowed" : "pointer",
+            opacity: evictBlocked ? 0.5 : 1,
             lineHeight: 1.6,
           }}
         >
