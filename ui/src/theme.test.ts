@@ -16,6 +16,7 @@ import {
   usageColor,
   vibrantSurface,
   vibrancyAlpha,
+  chromeSurface,
   MAC_VIBRANCY_ALPHA_DARK,
   MAC_VIBRANCY_ALPHA_LIGHT,
   UI_SCALE_DEFAULT,
@@ -51,6 +52,24 @@ describe("Helm release statuses", () => {
       expect(statusIsTransient(s)).toBe(true);
     }
     expect(statusBucket("unknown")).toBe("unknown");
+  });
+});
+
+describe("chromeSurface", () => {
+  it("frosts chrome on macOS only when nothing but the window material is beneath", () => {
+    expect(chromeSurface("#11141a", "dark", { isMac: true, overContent: false })).toBe(
+      vibrantSurface("#11141a", "dark"),
+    );
+  });
+
+  it("stays opaque on macOS while floating over content", () => {
+    expect(chromeSurface("#11141a", "dark", { isMac: true, overContent: true })).toBe("#11141a");
+    expect(chromeSurface("#ffffff", "light", { isMac: true, overContent: true })).toBe("#ffffff");
+  });
+
+  it("is always opaque off macOS", () => {
+    expect(chromeSurface("#11141a", "dark", { isMac: false, overContent: false })).toBe("#11141a");
+    expect(chromeSurface("#11141a", "dark", { isMac: false, overContent: true })).toBe("#11141a");
   });
 });
 

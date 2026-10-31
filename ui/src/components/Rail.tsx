@@ -17,7 +17,7 @@ import {
   FS_MD,
   FS_SM,
   FS_XS,
-  vibrantSurface,
+  chromeSurface,
 } from "../theme";
 import { IS_MAC } from "../lib/keyboard";
 import { compareApiGroups } from "../lib/crdGroups";
@@ -26,7 +26,13 @@ import { ErrorBlock, Icons, Tooltip, resolveKindIcon } from "./ui";
 import { OpenClustersStrip } from "./OpenClustersStrip";
 import { decidedGate, gatedTitle, useScopesAccess } from "../lib/access";
 import { CATEGORY_ORDER, groupKinds } from "../lib/kindOrder";
-import { RAIL_COLLAPSED_W, RAIL_EASE, RAIL_OPEN_W, useRailEdge } from "../lib/railEdge";
+import {
+  RAIL_COLLAPSED_W,
+  RAIL_DURATION,
+  RAIL_EASE,
+  RAIL_OPEN_W,
+  useRailEdge,
+} from "../lib/railEdge";
 
 
 /// Dwell before an auto-hide rail expands under the pointer.
@@ -259,6 +265,7 @@ export function Rail({}: Props) {
   // content — collapsed only opens for the CR exception, which is transient.
   const reservedWidth = railMode === "pinned" ? W_OPEN : W_COLLAPSED;
   const isPinned = railMode === "pinned";
+  const floating = open && !isPinned;
 
   return (
     <RailScopes.Provider value={accessScopes}>
@@ -283,15 +290,17 @@ export function Rail({}: Props) {
           bottom: 0,
           left: 0,
           width: open ? W_OPEN : W_COLLAPSED,
-          // Translucent on macOS so the vibrancy material shows through the
-          // sidebar; opaque elsewhere. The <main> content stays opaque.
-          background: IS_MAC ? vibrantSurface(t.rail, themeMode) : t.rail,
+          backgroundColor: chromeSurface(t.rail, themeMode, {
+            isMac: IS_MAC,
+            overContent: floating,
+          }),
           borderRight: `1px solid ${t.border}`,
-          boxShadow:
-            open && !isPinned ? "4px 0 16px rgba(15,20,30,0.08)" : "none",
+          boxShadow: floating ? "4px 0 16px rgba(15,20,30,0.08)" : "none",
           display: "flex",
           flexDirection: "column",
-          transition: `width ${RAIL_EASE}, box-shadow .18s`,
+          // Opaque at once on open; translucent only once the shrink is done,
+          // so the table never shows through the closing panel.
+          transition: `width ${RAIL_EASE}, box-shadow .18s, background-color 0s linear ${floating ? "0s" : RAIL_DURATION}`,
           overflow: "hidden",
         }}
       >

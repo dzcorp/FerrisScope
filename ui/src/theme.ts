@@ -1202,6 +1202,17 @@ export function vibrantSurface(color: string, mode: ThemeMode): string {
   return hexWithAlpha(color, vibrancyAlpha(mode));
 }
 
+// The vibrancy material sits behind the window, not behind the webview's own
+// content, so a translucent surface floating over <main> shows the table
+// through it instead of frost. Overlays stay opaque.
+export function chromeSurface(
+  color: string,
+  mode: ThemeMode,
+  opts: { isMac: boolean; overContent: boolean },
+): string {
+  return opts.isMac && !opts.overContent ? vibrantSurface(color, mode) : color;
+}
+
 /// Mix a color toward black by `amount` (0 = original, 1 = black). Used
 /// for the light-mode pill foreground so the bucket color stays vivid on
 /// dark themes but darkens on light ones for contrast.
