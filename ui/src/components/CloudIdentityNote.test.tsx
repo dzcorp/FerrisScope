@@ -15,6 +15,8 @@ const GCLOUD: ConnectHint = {
   authenticated_as: "ops@example.net",
   identities: ["dev@example.com", "ops@example.net"],
   active_identity: "dev@example.com",
+  pinned_identity: null,
+  suggested_identity: "dev@example.com",
   pin: {
     noun: "account",
     effects: [
@@ -34,6 +36,8 @@ const AWS: ConnectHint = {
   authenticated_as: "arn:aws:sts::111122223333:assumed-role/Dev/session",
   identities: ["default", "dev"],
   active_identity: "dev",
+  pinned_identity: null,
+  suggested_identity: "dev",
   pin: {
     noun: "profile",
     effects: [
@@ -53,6 +57,8 @@ const AZURE: ConnectHint = {
   authenticated_as: "ops@example.net",
   identities: ["guest@example.com", "ops@example.net"],
   active_identity: "ops@example.net",
+  pinned_identity: null,
+  suggested_identity: "guest@example.com",
   // The whole point of the Azure case: nothing to write, so no button.
   pin: null,
   reauth: null,
@@ -69,6 +75,8 @@ const REAUTH: ConnectHint = {
   authenticated_as: null,
   identities: ["dev@example.com", "ops@example.net"],
   active_identity: "dev@example.com",
+  pinned_identity: "ops@example.net",
+  suggested_identity: "dev@example.com",
   pin: null,
   reauth: {
     command: "gcloud auth login --account=ops@example.net",
@@ -85,6 +93,8 @@ const BLOCKED: ConnectHint = {
   authenticated_as: null,
   identities: [],
   active_identity: null,
+  pinned_identity: null,
+  suggested_identity: null,
   pin: null,
   reauth: null,
   unblock: {
@@ -93,6 +103,22 @@ const BLOCKED: ConnectHint = {
       "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
     command:
       "xattr -r -d com.apple.quarantine '/Users/u/Downloads/google-cloud-sdk'",
+  },
+};
+
+// A 403 on a context already pinned: maybe the wrong account pinned.
+const PINNED_403: ConnectHint = {
+  ...GCLOUD,
+  title: "Pinned Google account was refused",
+  detail: "This context is pinned to ops@example.net, and the apiserver refused it.",
+  pinned_identity: "ops@example.net",
+  suggested_identity: "dev@example.com",
+  pin: {
+    noun: "account",
+    effects: [
+      "replace the account this context's exec entry names in your kubeconfig",
+      "keep a .ferrisscope-backup copy of the kubeconfig",
+    ],
   },
 };
 
@@ -113,6 +139,11 @@ function renderNote(onReconnect = () => {}) {
 beforeEach(() => {
   resetMockInvoke();
 });
+
+/// The pin is followed by a context-list refresh, so it isn't the last call.
+function pinCall(calls: { cmd: string; args?: Record<string, unknown> }[]) {
+  return calls.find((c) => c.cmd === "pin_cloud_identity_cmd");
+}
 
 describe("CloudIdentityNote", () => {
   it("renders nothing when the backend doesn't recognise the failure", async () => {
@@ -201,7 +232,7 @@ describe("CloudIdentityNote", () => {
     );
 
     await waitFor(() => expect(onReconnect).toHaveBeenCalledTimes(1));
-    expect(calls.at(-1)).toEqual({
+    expect(pinCall(calls)).toEqual({
       cmd: "pin_cloud_identity_cmd",
       args: { name: "default::prod", identity: "dev@example.com" },
     });
@@ -315,12 +346,10 @@ describe("CloudIdentityNote", () => {
     );
   });
 
-  it("never preselects an identity the picker cannot show", async () => {
-    // gcloud builds `identities` from `legacy_credentials/` and
-    // `active_identity` from the configuration file, so `gcloud auth revoke`
-    // leaves an active account with no credentials and no matching option.
-    // Unclamped, the picker renders blank while the enabled button writes that
-    // invisible account into the kubeconfig.
+  it("preselects the backend's suggestion, not the raw active identity", async () => {
+    // The backend clamps the preselection to a listed identity: `gcloud auth
+    // revoke` can leave an active account with no credentials, and a blank
+    // picker over an enabled button would pin that invisible account.
     const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
     setMockInvoke((cmd, args) => {
       calls.push({ cmd, args });
@@ -341,7 +370,7 @@ describe("CloudIdentityNote", () => {
       screen.getByRole("button", { name: /pin dev@example\.com/i }),
     );
     await waitFor(() =>
-      expect(calls.at(-1)?.args).toEqual({
+      expect(pinCall(calls)?.args).toEqual({
         name: "default::prod",
         identity: "dev@example.com",
       }),
@@ -372,7 +401,7 @@ describe("CloudIdentityNote", () => {
     );
 
     await waitFor(() => {
-      expect(calls.at(-1)?.args).toEqual({
+      expect(pinCall(calls)?.args).toEqual({
         name: "default::prod",
         identity: "ops@example.net",
       });
@@ -406,7 +435,7 @@ describe("CloudIdentityNote", () => {
     fireEvent.click(screen.getByRole("button", { name: /pin dev/i }));
 
     await waitFor(() => {
-      expect(calls.at(-1)).toEqual({
+      expect(pinCall(calls)).toEqual({
         cmd: "pin_cloud_identity_cmd",
         args: { name: "default::prod", identity: "dev" },
       });
@@ -528,7 +557,6 @@ describe("CloudIdentityNote", () => {
 
     await waitFor(() => expect(channel).toBeDefined());
     // The failing context's own account, not the CLI's active one.
-    expect(loginArgs?.clusterId).toBe("default::prod");
     expect(loginArgs?.account).toBe("ops@example.net");
     // Button locks while the browser round trip is outstanding, so a second
     // click can't spawn a second gcloud.
@@ -878,5 +906,156 @@ describe("CloudIdentityNote", () => {
     expect(
       screen.getByRole("button", { name: /open privacy settings/i }),
     ).toBeInTheDocument();
+  });
+
+  it("offers a repin when the pinned identity was refused", async () => {
+    const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+    setMockInvoke((cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "connect_hint_cmd") return PINNED_403;
+      return cmd === "list_contexts" ? [] : undefined;
+    });
+    Element.prototype.scrollIntoView ??= () => {};
+    const onReconnect = vi.fn();
+
+    renderNote(onReconnect);
+    await waitFor(() =>
+      expect(screen.getByRole("combobox")).toHaveTextContent("dev@example.com"),
+    );
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent("· pinned");
+    expect(note).not.toHaveTextContent("CLI active");
+
+    // The pinned identity is listed but re-pinning it would be a no-op.
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(
+      screen.getByRole("option", { name: "ops@example.net (current)" }),
+    );
+    expect(screen.getByRole("button", { name: /^pin account$/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByRole("option", { name: "dev@example.com" }));
+    fireEvent.click(screen.getByRole("button", { name: /^pin account$/i }));
+    expect(screen.getByText(/^replace the account/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /pin dev@example\.com/i }));
+
+    await waitFor(() => expect(onReconnect).toHaveBeenCalledTimes(1));
+    expect(pinCall(calls)?.args).toEqual({
+      name: "default::prod",
+      identity: "dev@example.com",
+    });
+  });
+
+  it("opens the identity switcher from a lapsed-session note", async () => {
+    setMockInvoke((cmd) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      expect(cmd).toBe("cloud_identity_status_cmd");
+      return {
+        provider: "gcloud",
+        detail: "This context is pinned to ops@example.net.",
+        pinned_identity: "ops@example.net",
+        active_identity: "dev@example.com",
+        identities: ["dev@example.com", "ops@example.net"],
+        suggested_identity: "dev@example.com",
+        pin: { noun: "account", effects: ["replace the account"] },
+        pin_blocked: null,
+      };
+    });
+
+    renderNote();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /switch identity/i }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /switch identity/i }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("dialog")).toHaveTextContent(
+        "This context is pinned to ops@example.net.",
+      ),
+    );
+    expect(screen.getByRole("dialog")).toHaveTextContent("dev@example.com");
+  });
+
+  it("shares one login between notes waiting on the same account", async () => {
+    // A virtual context's members on one Google account each show this note.
+    // One Log in must spawn one gcloud, show progress everywhere, and
+    // reconnect every member on success.
+    let channel: { onmessage: (m: unknown) => void } | undefined;
+    let opens = 0;
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "terminal_close") {
+        closed.push(args);
+        return undefined;
+      }
+      expect(cmd).toBe("cloud_login_open");
+      opens += 1;
+      channel = args?.onEvent as { onmessage: (m: unknown) => void };
+      return "t20";
+    });
+    const a = vi.fn();
+    const b = vi.fn();
+
+    render(
+      <>
+        <CloudIdentityNote t={t} contextId="default::a" reason={REASON} onReconnect={a} />
+        <CloudIdentityNote t={t} contextId="default::b" reason={REASON} onReconnect={b} />
+      </>,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /^log in$/i })).toHaveLength(2),
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: /^log in$/i })[0]!);
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /waiting for browser/i }),
+      ).toHaveLength(2),
+    );
+    expect(opens).toBe(1);
+
+    channel?.onmessage({ kind: "exit", code: 0 });
+    await waitFor(() => {
+      expect(a).toHaveBeenCalledTimes(1);
+      expect(b).toHaveBeenCalledTimes(1);
+    });
+    expect(closed).toEqual([{ sessionId: "t20" }]);
+  });
+
+  it("keeps a shared login alive while another note still follows it", async () => {
+    const closed: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "connect_hint_cmd") return REAUTH;
+      if (cmd === "cloud_login_open") return "t21";
+      expect(cmd).toBe("terminal_close");
+      closed.push(args);
+      return undefined;
+    });
+
+    const first = render(
+      <CloudIdentityNote t={t} contextId="default::a" reason={REASON} onReconnect={() => {}} />,
+    );
+    const second = render(
+      <CloudIdentityNote t={t} contextId="default::b" reason={REASON} onReconnect={() => {}} />,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /^log in$/i })).toHaveLength(2),
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: /^log in$/i })[0]!);
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /waiting for browser/i }),
+      ).toHaveLength(2),
+    );
+
+    first.unmount();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(closed).toEqual([]);
+
+    second.unmount();
+    await waitFor(() => expect(closed).toEqual([{ sessionId: "t21" }]));
   });
 });

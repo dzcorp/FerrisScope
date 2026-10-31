@@ -7,6 +7,7 @@ import { FS_MD, FS_SM } from "../theme";
 import { Section, Chip, Btn } from "./ui";
 import { Copyable, Mono, Mute } from "./detail/primitives";
 import { useEscLayer } from "../lib/escStack";
+import { CloudIdentityPanel } from "./CloudIdentityPanel";
 
 type LoadState =
   | { status: "loading" }
@@ -22,6 +23,7 @@ export function ConnectionDiagnosticsModal({
   contextId,
   contextName,
   onClose,
+  onIdentityChanged,
 }: {
   t: Tokens;
   /// The composite context id (e.g. "default::prod") — same value passed to
@@ -29,6 +31,9 @@ export function ConnectionDiagnosticsModal({
   contextId: string;
   contextName: string;
   onClose: () => void;
+  /// Reconnects after a repin from the Cloud identity section; the section is
+  /// omitted without it.
+  onIdentityChanged?: () => void;
 }) {
   const [s, setS] = useState<LoadState>({ status: "loading" });
 
@@ -99,6 +104,16 @@ export function ConnectionDiagnosticsModal({
           <div style={{ color: t.bad, fontSize: FS_SM }}>{s.message}</div>
         )}
         {s.status === "loaded" && <DiagnosticsBody t={t} data={s.data} />}
+        {s.status === "loaded" && s.data.exec && onIdentityChanged && (
+          <div>
+            <Section t={t} title="Cloud identity" />
+            <CloudIdentityPanel
+              t={t}
+              contextId={contextId}
+              onPinned={onIdentityChanged}
+            />
+          </div>
+        )}
       </div>
     </div>,
     document.body,

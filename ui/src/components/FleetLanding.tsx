@@ -39,6 +39,7 @@ import {
 import { BulkBar } from "./BulkBar";
 import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
 import { confirm, toast } from "../lib/dialog";
+import { CloudIdentityModal } from "./CloudIdentityPanel";
 
 type Props = {
   mode: ThemeMode;
@@ -75,6 +76,7 @@ export function FleetLanding({ mode, onSelect }: Props) {
 
   const [probes, setProbes] = useState<Record<string, ClusterProbe>>({});
   const [menu, setMenu] = useState<{ pos: MenuPosition; ctx: ContextInfo } | null>(null);
+  const [identityCtx, setIdentityCtx] = useState<ContextInfo | null>(null);
   const [vctxMenu, setVctxMenu] = useState<{
     pos: MenuPosition;
     vctx: VirtualContext;
@@ -381,7 +383,19 @@ export function FleetLanding({ mode, onSelect }: Props) {
           position={menu.pos}
           onClose={() => setMenu(null)}
           rowName={primaryLabel(menu.ctx, labels)}
-          items={fleetMenuItems(menu.ctx, onSelect, togglePick)}
+          items={fleetMenuItems(menu.ctx, onSelect, togglePick, setIdentityCtx)}
+        />
+      )}
+
+      {/* The backend drops a pinned cluster's cached client, so an open tab
+          reconnects as the new identity when it next mounts. */}
+      {identityCtx && (
+        <CloudIdentityModal
+          t={t}
+          contextId={identityCtx.id}
+          contextName={primaryLabel(identityCtx, labels)}
+          onPinned={() => {}}
+          onClose={() => setIdentityCtx(null)}
         />
       )}
 
@@ -495,6 +509,7 @@ function fleetMenuItems(
   c: ContextInfo,
   onSelect: (id: string) => void,
   onTogglePick: (id: string) => void,
+  onCloudIdentity: (c: ContextInfo) => void,
 ): MenuItem[] {
   const isDefault = c.source_id === "default";
   const items: MenuItem[] = [
@@ -522,6 +537,13 @@ function fleetMenuItems(
           toast.bad(`Could not set current: ${String(e)}`);
         }
       },
+    });
+  }
+  if (c.cloud_identity) {
+    items.push({
+      kind: "item",
+      label: "Cloud identity…",
+      onClick: () => onCloudIdentity(c),
     });
   }
   items.push({ kind: "separator" });

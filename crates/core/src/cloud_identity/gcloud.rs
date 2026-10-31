@@ -29,13 +29,18 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    env_nonempty, exec_args, exec_env, flag_value, home_dir, ini_value, set_exec_args, Binding,
-    ConnectHint, Identities, PinOffer, Provider,
+    env_nonempty, exec_args, exec_env, exec_env_pairs, flag_value, has_flag, home_dir, ini_value,
+    set_exec_args, set_exec_env, set_flag_arg, Binding, ConnectHint, Identities, PinOffer,
+    Provider,
 };
 use crate::Result;
 
 /// Exec commands this provider owns.
 pub const OWNS_COMMANDS: &[&str] = &["gke-gcloud-auth-plugin", "gcloud"];
+
+/// The flag and the exec env var that pin an account.
+const ACCOUNT_FLAG: &str = "--account";
+const ACCOUNT_ENV: &str = "CLOUDSDK_CORE_ACCOUNT";
 
 /// Directory under the gcloud config root holding one directory per account
 /// that has credentials on this machine.
@@ -150,7 +155,7 @@ pub fn binding_for(basename: &str, args: &[String], env: &[(String, String)]) ->
     }
     // The exec `env` block is applied to the plugin process, so a
     // CLOUDSDK_CORE_ACCOUNT there pins the identity just as firmly as the flag.
-    let pinned = flag_value(args, "--account").or_else(|| exec_env(env, "CLOUDSDK_CORE_ACCOUNT"));
+    let pinned = flag_value(args, ACCOUNT_FLAG).or_else(|| exec_env(env, ACCOUNT_ENV));
     Some(match pinned {
         Some(identity) => Binding::Pinned { identity },
         None => Binding::FollowsActive,
@@ -208,26 +213,100 @@ pub fn compose_hint(error: &str, accounts: &Identities) -> Option<ConnectHint> {
         authenticated_as,
         identities: accounts.identities.clone(),
         active_identity: active,
-        pin: Some(PinOffer {
-            noun: "account".to_owned(),
-            effects: vec![
-                "add --account to this context's exec entry in your kubeconfig".to_owned(),
-                "keep a .ferrisscope-backup copy next to the kubeconfig it edits — if yours \
-                 is a symlink, that is the real file's directory, not the link's"
-                    .to_owned(),
-                "rewrite the file through a YAML parser, which drops comments and \
-                 expands any anchors/aliases — the backup holds the file as it was \
-                 immediately before this edit, so comments an earlier pin already \
-                 removed are not in it either"
-                    .to_owned(),
-                "delete ~/.kube/gke_gcloud_auth_plugin_cache, which every gcloud-authenticated \
-                 tool regenerates on its next run"
-                    .to_owned(),
-            ],
-        }),
+        pinned_identity: None,
+        suggested_identity: None,
+        pin: Some(pin_offer(false)),
         reauth: None,
         unblock: None,
     })
+}
+
+/// Build the "pinned account refused" note, or `None` when there is no other
+/// account to switch to. Callers have already established a 403 on a context
+/// pinned to `pinned`.
+///
+/// Says nothing about drift or caches: the pin rules both out. What is left is
+/// an account without access here, which is an RBAC gap or the wrong account
+/// pinned — the operator knows which, so the note states the fact and offers
+/// the repin.
+#[must_use]
+pub fn compose_pinned_hint(
+    error: &str,
+    pinned: &str,
+    accounts: &Identities,
+) -> Option<ConnectHint> {
+    if !super::has_alternative(accounts, pinned) {
+        return None;
+    }
+    let authenticated_as = super::forbidden_user(error);
+    let seen = match authenticated_as.as_deref() {
+        Some(user) if user != pinned => format!(" The apiserver saw {user}."),
+        _ => String::new(),
+    };
+    Some(ConnectHint {
+        provider: Provider::Gcloud,
+        title: "Pinned Google account was refused".to_owned(),
+        detail: format!(
+            "This context is pinned to {pinned}, and the apiserver refused it.{seen} Either \
+             that account lacks an RBAC binding on this cluster, or the context is pinned to \
+             the wrong account. If it is the wrong one, pin another below."
+        ),
+        authenticated_as,
+        identities: accounts.identities.clone(),
+        active_identity: accounts.active.clone(),
+        pinned_identity: None,
+        suggested_identity: None,
+        pin: Some(pin_offer(true)),
+        reauth: None,
+        unblock: None,
+    })
+}
+
+/// How a gcloud context picks its account, for the status surfaces.
+#[must_use]
+pub fn status_detail(pinned: Option<&str>, active: Option<&str>) -> String {
+    match (pinned, active) {
+        (Some(p), _) => format!(
+            "This context is pinned to {p}, whatever account gcloud has active. Pin another \
+             account to switch it."
+        ),
+        (None, Some(a)) => format!(
+            "This context has no --account, so it authenticates as your active gcloud account \
+             — {a} right now — and changes whenever that does. Pin an account to fix it."
+        ),
+        (None, None) => "This context has no --account, so it authenticates as whichever \
+             account gcloud has active. Pin an account to fix it."
+            .to_owned(),
+    }
+}
+
+/// What a gcloud pin writes and deletes. `repin` when the entry already names
+/// an account, which the pin then replaces wherever it is written.
+#[must_use]
+pub fn pin_offer(repin: bool) -> PinOffer {
+    let write = if repin {
+        "replace the account this context's exec entry names — its --account flag, or \
+         CLOUDSDK_CORE_ACCOUNT in its env block — in your kubeconfig"
+    } else {
+        "add --account to this context's exec entry in your kubeconfig"
+    };
+    PinOffer {
+        noun: "account".to_owned(),
+        effects: vec![
+            write.to_owned(),
+            "keep a .ferrisscope-backup copy next to the kubeconfig it edits — if yours \
+             is a symlink, that is the real file's directory, not the link's"
+                .to_owned(),
+            "rewrite the file through a YAML parser, which drops comments and \
+             expands any anchors/aliases — the backup holds the file as it was \
+             immediately before this edit, so comments an earlier pin already \
+             removed are not in it either"
+                .to_owned(),
+            "delete ~/.kube/gke_gcloud_auth_plugin_cache, which every gcloud-authenticated \
+             tool regenerates on its next run"
+                .to_owned(),
+        ],
+    }
 }
 
 /// Build the "your Google session expired" note.
@@ -269,6 +348,8 @@ pub fn compose_reauth_hint(account: Option<&str>, accounts: &Identities) -> Conn
         authenticated_as: None,
         identities: accounts.identities.clone(),
         active_identity: accounts.active.clone(),
+        pinned_identity: None,
+        suggested_identity: None,
         pin: None,
         reauth: Some(super::ReauthOffer {
             command,
@@ -388,6 +469,8 @@ pub fn compose_hidden_helper_hint() -> ConnectHint {
         authenticated_as: None,
         identities: Vec::new(),
         active_identity: None,
+        pinned_identity: None,
+        suggested_identity: None,
         pin: None,
         reauth: None,
         unblock: Some(super::UnblockOffer {
@@ -454,6 +537,8 @@ pub fn compose_blocked_hint(path: Option<&str>) -> ConnectHint {
         authenticated_as: None,
         identities: Vec::new(),
         active_identity: None,
+        pinned_identity: None,
+        suggested_identity: None,
         pin: None,
         reauth: None,
         unblock: Some(super::UnblockOffer {
@@ -474,39 +559,27 @@ pub fn compose_blocked_hint(path: Option<&str>) -> ConnectHint {
 pub const MACOS_PRIVACY_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
 
-/// Write `--account=<identity>` into an exec mapping, replacing any prior form.
+/// Pin an exec mapping to `identity`.
+///
+/// Every place that already names an account is rewritten — the flag and the
+/// env var alike — so whichever the plugin honours, a repin takes. Rewriting
+/// only the flag would leave a stale `CLOUDSDK_CORE_ACCOUNT` disagreeing with
+/// it. An entry naming neither gains the flag.
 ///
 /// # Errors
 ///
 /// Never — the signature matches the other providers' so the dispatcher can
 /// treat them uniformly.
 pub fn write_pin(exec: &mut serde_yaml::Mapping, identity: &str) -> Result<()> {
-    let args = set_account_arg(&exec_args(exec), identity);
-    set_exec_args(exec, args);
-    Ok(())
-}
-
-/// Replace or append `--account=<account>`, dropping any prior form.
-fn set_account_arg(args: &[String], account: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::with_capacity(args.len() + 1);
-    let mut skip_next = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if arg.starts_with("--account=") {
-            continue;
-        }
-        if arg == "--account" {
-            // Drop the flag and its detached value.
-            skip_next = true;
-            continue;
-        }
-        out.push(arg.clone());
+    let args = exec_args(exec);
+    let in_env = exec_env(&exec_env_pairs(exec), ACCOUNT_ENV).is_some();
+    if in_env {
+        set_exec_env(exec, ACCOUNT_ENV, identity);
     }
-    out.push(format!("--account={account}"));
-    out
+    if !in_env || has_flag(&args, ACCOUNT_FLAG) {
+        set_exec_args(exec, set_flag_arg(&args, ACCOUNT_FLAG, identity));
+    }
+    Ok(())
 }
 
 /// Delete the `gke-gcloud-auth-plugin` global token cache.
@@ -1035,27 +1108,29 @@ mod tests {
     }
 
     #[test]
-    fn set_account_arg_replaces_every_prior_form() {
-        assert_eq!(set_account_arg(&[], "a@b.io"), vec!["--account=a@b.io"]);
+    fn set_flag_arg_replaces_every_prior_form() {
+        let set = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+            set_flag_arg(&args, ACCOUNT_FLAG, "a@b.io")
+        };
+        assert_eq!(set(&[]), vec!["--account=a@b.io"]);
+        assert_eq!(set(&["--account=old@b.io"]), vec!["--account=a@b.io"]);
+        assert_eq!(set(&["--account", "old@b.io"]), vec!["--account=a@b.io"]);
+        // Unrelated args survive, in order — including one that merely
+        // starts with the flag's name.
         assert_eq!(
-            set_account_arg(&["--account=old@b.io".to_owned()], "a@b.io"),
-            vec!["--account=a@b.io"]
-        );
-        assert_eq!(
-            set_account_arg(&["--account".to_owned(), "old@b.io".to_owned()], "a@b.io"),
-            vec!["--account=a@b.io"]
-        );
-        // Unrelated args survive, in order.
-        assert_eq!(
-            set_account_arg(
-                &[
-                    "--verbosity=debug".to_owned(),
-                    "--account=old@b.io".to_owned(),
-                    "--quiet".to_owned()
-                ],
-                "a@b.io"
-            ),
-            vec!["--verbosity=debug", "--quiet", "--account=a@b.io"]
+            set(&[
+                "--verbosity=debug",
+                "--account=old@b.io",
+                "--accounts-file=x",
+                "--quiet"
+            ]),
+            vec![
+                "--verbosity=debug",
+                "--accounts-file=x",
+                "--quiet",
+                "--account=a@b.io"
+            ]
         );
     }
 

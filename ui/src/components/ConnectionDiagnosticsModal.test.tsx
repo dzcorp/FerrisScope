@@ -87,4 +87,54 @@ describe("ConnectionDiagnosticsModal", () => {
       expect(screen.getByText(/boom: kubeconfig unreadable/)).toBeInTheDocument();
     });
   });
+
+  it("hosts the cloud identity switcher when it can reconnect", async () => {
+    setMockInvoke((cmd) => {
+      if (cmd === "diagnose_connection_cmd") return SAMPLE;
+      expect(cmd).toBe("cloud_identity_status_cmd");
+      return {
+        provider: "gcloud",
+        detail: "This context has no --account.",
+        pinned_identity: null,
+        active_identity: "a@example.com",
+        identities: ["a@example.com"],
+        suggested_identity: "a@example.com",
+        pin: { noun: "account", effects: ["add --account"] },
+        pin_blocked: null,
+      };
+    });
+    render(
+      <ConnectionDiagnosticsModal
+        t={t}
+        contextId="default::prod"
+        contextName="prod"
+        onClose={() => {}}
+        onIdentityChanged={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("This context has no --account.")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Cloud identity")).toBeInTheDocument();
+  });
+
+  it("leaves the switcher out for a context without an exec plugin", async () => {
+    setMockInvoke((cmd) => {
+      expect(cmd).toBe("diagnose_connection_cmd");
+      return { ...SAMPLE, exec: null };
+    });
+    render(
+      <ConnectionDiagnosticsModal
+        t={t}
+        contextId="default::prod"
+        contextName="prod"
+        onClose={() => {}}
+        onIdentityChanged={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/without an exec credential plugin/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("Cloud identity")).not.toBeInTheDocument();
+  });
 });

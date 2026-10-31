@@ -120,6 +120,18 @@ pub fn binding_for(basename: &str, args: &[String], env: &[(String, String)]) ->
     (mode == AZURECLI_LOGIN).then_some(Binding::FollowsActive)
 }
 
+/// How an azurecli-mode context picks its account, for the status surfaces.
+/// There is nothing to pin, so this names the command that switches it.
+#[must_use]
+pub fn status_detail(active: Option<&str>) -> String {
+    let current = active.map_or_else(String::new, |a| format!(" — {a} right now"));
+    format!(
+        "kubelogin's azurecli mode has no per-context account: this context uses whichever \
+         account `az account set` last selected{current}. Switch it with `az account set \
+         --subscription <id>` in a terminal, then reconnect."
+    )
+}
+
 /// Build the "wrong Azure account" note, or `None` when this isn't that
 /// problem. Callers have already established a 403 and an azurecli binding.
 ///
@@ -155,6 +167,8 @@ pub fn compose_hint(error: &str, accounts: &Identities) -> Option<ConnectHint> {
         authenticated_as,
         identities: accounts.identities.clone(),
         active_identity: active,
+        pinned_identity: None,
+        suggested_identity: None,
         // No per-context pin exists for kubelogin. Offering one would mean
         // mutating global `az` state behind a button that looks like a
         // kubeconfig edit.

@@ -199,23 +199,31 @@ export function VirtualClusterPanel({ mode, title, viewScopeId, contexts }: Prop
       ))}
 
       {/* Per-member failure strips. One row per broken member with its own
-          Reconnect; the table below keeps rendering the healthy members. */}
-      {failed.map((c) => {
-        const st = conns[c.id]?.state;
-        return (
-          <ReconnectBanner
-            key={c.id}
-            mode={mode}
-            title={
-              st?.status === "cancelled"
-                ? `${shortName(c)}: connection cancelled`
-                : `${shortName(c)}: could not connect`
-            }
-            reason={st?.status === "error" ? st.message : null}
-            onReconnect={() => conns[c.id]?.reconnect()}
-          />
-        );
-      })}
+          Reconnect; the table below keeps rendering the healthy members. A
+          failed (not cancelled) member gets Diagnose and the cloud identity
+          note — members on one lapsed Google account share a single login.
+          Capped so a fleet of notes can't push the table off screen. */}
+      {failed.length > 0 && (
+        <div style={{ flexShrink: 0, maxHeight: "40%", overflowY: "auto" }}>
+          {failed.map((c) => {
+            const st = conns[c.id]?.state;
+            return (
+              <ReconnectBanner
+                key={c.id}
+                mode={mode}
+                title={
+                  st?.status === "cancelled"
+                    ? `${shortName(c)}: connection cancelled`
+                    : `${shortName(c)}: could not connect`
+                }
+                reason={st?.status === "error" ? st.message : null}
+                onReconnect={() => conns[c.id]?.reconnect()}
+                diagnoseContext={st?.status === "error" ? c : undefined}
+              />
+            );
+          })}
+        </div>
+      )}
       {unavailable.map((c) => (
         <ReconnectBanner
           key={c.id}

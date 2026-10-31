@@ -5,6 +5,7 @@ import { tokens, FF_MONO, type ThemeMode, R_LG, R_MD, FS_MD, FS_XS } from "../th
 import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
 import { Stat, StatusPill, Gauge, Icons, Kbd, Tooltip } from "./ui";
 import { makeTerminalTab, makeYamlTab } from "./Dock";
+import { CloudIdentityModal } from "./CloudIdentityPanel";
 import { MOD_KEY, SHIFT_KEY } from "../lib/keyboard";
 import { useMetricsSubscription } from "../lib/useMetricsSubscription";
 import { useTabActive, useTabSlice } from "../lib/tabScope";
@@ -20,11 +21,20 @@ type Props = {
   context: ContextInfo;
   state: ConnectState;
   style?: CSSProperties;
+  /// Reconnects after the identity chip repins the context — the live client
+  /// keeps the identity it was built with. The chip is hidden without it.
+  onIdentityChanged?: () => void;
 };
 
 // Cluster context bar — always shows where the operator is standing (P6).
 // Hosts the namespace filter button and the "+" menu (terminal / YAML).
-export function ClusterBar({ mode, context, state, style }: Props) {
+export function ClusterBar({
+  mode,
+  context,
+  state,
+  style,
+  onIdentityChanged,
+}: Props) {
   const t = useResolvedTheme().tokens;
   // Short names for the "Add cluster…" list and for dock-tab titles — a
   // terminal tab labelled with a 50-character GKE context is unreadable.
@@ -84,6 +94,9 @@ export function ClusterBar({ mode, context, state, style }: Props) {
   const showVersion = width >= 950;
   const showNodes = width >= 820;
   const showGauges = width >= 720;
+
+  const [identityOpen, setIdentityOpen] = useState(false);
+  const pinnedIdentity = onIdentityChanged ? context.cloud_identity?.pinned : null;
 
   // Close the "+" menu on outside click.
   const menuWrapRef = useRef<HTMLDivElement | null>(null);
@@ -192,6 +205,34 @@ export function ClusterBar({ mode, context, state, style }: Props) {
               {context.user}
             </Mono>
           }
+        />
+      )}
+
+      {showVersion && pinnedIdentity && (
+        <Stat
+          t={t}
+          label="Identity"
+          value={
+            <Tooltip label="Change the cloud identity this context uses">
+              <button
+                type="button"
+                aria-label="Change cloud identity"
+                onClick={() => setIdentityOpen(true)}
+                style={{ all: "unset", cursor: "pointer" }}
+              >
+                <Mono>{pinnedIdentity}</Mono>
+              </button>
+            </Tooltip>
+          }
+        />
+      )}
+      {identityOpen && onIdentityChanged && (
+        <CloudIdentityModal
+          t={t}
+          contextId={context.id}
+          contextName={context.name}
+          onPinned={onIdentityChanged}
+          onClose={() => setIdentityOpen(false)}
         />
       )}
 
