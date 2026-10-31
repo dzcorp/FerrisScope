@@ -4,7 +4,8 @@ export const RAIL_COLLAPSED_W = 56;
 export const RAIL_OPEN_W = 220;
 
 /// The rail's open/close animation, shared by anything that follows it.
-export const RAIL_EASE = ".18s cubic-bezier(.2,.7,.2,1)";
+export const RAIL_DURATION = ".18s";
+export const RAIL_EASE = `${RAIL_DURATION} cubic-bezier(.2,.7,.2,1)`;
 
 const VAR = "--fs-rail-w";
 
