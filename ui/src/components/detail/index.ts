@@ -9,6 +9,7 @@ export {
   DetailRow,
   Copyable,
   LinkValue,
+  ControlledByRow,
   ChipWrap,
   Mute,
   Mono,

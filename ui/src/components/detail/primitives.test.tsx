@@ -9,6 +9,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import {
   ChipStrip,
   ConditionChip,
+  ControlledByRow,
   Copyable,
   copyHint,
   DetailRow,
@@ -195,6 +196,31 @@ describe("ExpandableList", () => {
     expect(screen.getByText("b")).toBeInTheDocument();
     expect(screen.queryByText("c")).not.toBeInTheDocument();
     expect(screen.getByRole("button")).toHaveTextContent("Show 1 more");
+  });
+});
+
+describe("ControlledByRow", () => {
+  it("shows the owner and opens it with its API group", () => {
+    const nav = vi.fn();
+    render(
+      <ControlledByRow
+        t={t}
+        owner={{ kind: "ReplicaSet", name: "web-7d", group: "apps" }}
+        namespace="prod"
+        onNavigate={nav}
+      />,
+    );
+    expect(screen.getByText("Controlled By")).toBeInTheDocument();
+    expect(screen.getByText("ReplicaSet")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("web-7d"));
+    expect(nav).toHaveBeenCalledWith("ReplicaSet", "prod", "web-7d", undefined, "apps");
+  });
+
+  it("renders nothing without an owner", () => {
+    const { container } = render(
+      <ControlledByRow t={t} owner={null} namespace="prod" onNavigate={vi.fn()} />,
+    );
+    expect(container).toBeEmptyDOMElement();
   });
 });
 

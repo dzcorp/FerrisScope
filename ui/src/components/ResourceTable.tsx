@@ -74,6 +74,7 @@ import { makeTerminalTab } from "./Dock";
 import { confirm, toast } from "../lib/dialog";
 import { latinLetter } from "../lib/keyboard";
 import { parseTableFilter } from "../lib/tableFilter";
+import { resolveResourceKind } from "../lib/resourceKinds";
 import { isClusterUnavailableError } from "../lib/unavailable";
 import {
   cellRaw,
@@ -2929,18 +2930,24 @@ export function renderCell(
             c.id === "uid" ||
             c.id === "ip" ||
             c.id === "cluster_ip"));
-      // Namespace cells globally pin the namespace filter; node cells open the
-      // node's detail panel. Both stop propagation so the delegated row click
-      // (which opens *this* row's detail) doesn't also fire. Style stays as is
-      // — only a pointer cursor signals the affordance.
+      // Namespace cells globally pin the namespace filter; node and owner
+      // cells open that object's detail panel. All stop propagation so the
+      // delegated row click (which opens *this* row's detail) doesn't also
+      // fire. Style stays as is — only a pointer cursor signals the affordance.
       const isNsLink = c.id === "namespace" && raw !== "";
       const isNodeLink = c.id === "node" && raw !== "";
-      const clickable = isNsLink || isNodeLink;
+      const ownerName =
+        c.id === "controlled_by" && typeof row.controller_name === "string"
+          ? row.controller_name
+          : null;
+      const clickable = isNsLink || isNodeLink || (ownerName != null && raw !== "");
       const onClick = clickable
         ? (e: React.MouseEvent) => {
             e.stopPropagation();
             if (isNsLink) {
               setSelectedNamespaces(new Set([raw]));
+            } else if (ownerName != null) {
+              openOwner(row, raw, ownerName, navigateToDetail);
             } else if (isNodeLink) {
               // Node links resolve on the row's own cluster — in a merged
               // multi-cluster table two members can have same-named nodes.
@@ -2955,12 +2962,14 @@ export function renderCell(
         : undefined;
       return (
         <span
-          title={isQty && raw !== "" ? raw : undefined}
+          title={
+            isQty && raw !== "" ? raw : ownerName != null ? `${raw} ${ownerName}` : undefined
+          }
           onClick={onClick}
           style={{
             fontFamily: mono ? FF_MONO : "inherit",
             fontSize: mono ? 11.5 : 12,
-            color: c.id === "namespace" ? t.textDim : t.text,
+            color: c.id === "namespace" || c.id === "controlled_by" ? t.textDim : t.text,
             fontVariantNumeric: isQty ? "tabular-nums" : undefined,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -2972,6 +2981,37 @@ export function renderCell(
       );
     }
   }
+}
+
+// Resolved against the kinds the row's cluster serves; the API group keeps
+// same-named kinds apart (Flux HelmRelease vs the Helm releases view).
+function openOwner(
+  row: ResourceRow,
+  kindName: string,
+  name: string,
+  navigateToDetail: (
+    kindId: string,
+    namespace: string | null,
+    name: string,
+    clusterId?: string | null,
+  ) => void,
+) {
+  const cid = typeof row.__clusterId === "string" ? row.__clusterId : null;
+  const { kinds, kindClusters } = useAppStore.getState();
+  const target = resolveResourceKind(
+    kinds,
+    kindClusters,
+    kindName,
+    cid ?? "",
+    typeof row.controller_group === "string" ? row.controller_group : undefined,
+  );
+  const ns = typeof row.namespace === "string" && row.namespace !== "" ? row.namespace : null;
+  // A namespaced lookup without a namespace would match any same-named object.
+  if (!target || (target.namespaced && ns == null)) {
+    toast.warn(`Can't open ${kindName} ${name}: kind not available in this cluster`);
+    return;
+  }
+  navigateToDetail(target.id, target.namespaced ? ns : null, name, cid);
 }
 
 function formatMi(mb: number): string {

@@ -700,6 +700,7 @@ export type ContainerKind = "init" | "main" | "sidecar";
 export type PodOwnerRef = {
   kind: string;
   name: string;
+  group: string;
 };
 
 export type PodToleration = {
