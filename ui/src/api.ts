@@ -5,6 +5,10 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
+  AccessDecision,
+  AccessIdentity,
+  AccessRequest,
+  AccessRulesReview,
   AiSettingsPatch,
   AiSettingsWire,
   ApplyResult,
@@ -606,6 +610,17 @@ export const api = {
   // Reads warm caches, falls back to bounded LISTs; never starts a watch.
   resolveObjectStatuses: (clusterId: string, refs: ObjectStatusRef[]) =>
     invoke<ObjectStatuses>("resolve_object_statuses_cmd", { clusterId, refs }),
+
+  // RBAC: decisions in request order; never rejects for a denied action.
+  // Components go through `lib/access.ts`, which batches and caches.
+  accessCheck: (clusterId: string, requests: AccessRequest[]) =>
+    invoke<AccessDecision[]>("access_check_cmd", { clusterId, requests }),
+  accessInvalidate: (clusterId: string) =>
+    invoke<void>("access_invalidate_cmd", { clusterId }),
+  accessWhoami: (clusterId: string) =>
+    invoke<AccessIdentity>("access_whoami_cmd", { clusterId }),
+  accessRules: (clusterId: string, namespace: string) =>
+    invoke<AccessRulesReview>("access_rules_cmd", { clusterId, namespace }),
 
   // Delete a single resource. `gracePeriodSeconds = 0` is a force delete;
   // `null` uses the kind's default grace period.

@@ -1,4 +1,4 @@
-export { Btn, IconBtn } from "./Btn";
+export { Btn, IconBtn, inertProps } from "./Btn";
 export { Dialog } from "./Dialog";
 export type { BtnVariant, BtnSize } from "./Btn";
 export { ErrorBoundary } from "./ErrorBoundary";

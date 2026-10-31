@@ -8,10 +8,12 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { GitOpsActions, GitOpsSummary, useGitOps } from ".";
+import { GitOpsActions, GitOpsSummary, argoDeleteItems, useGitOps } from ".";
+import type { GitOpsController } from "./useGitOps";
 import { useAppStore } from "../../../store";
 import { tokens } from "../../../theme";
 import { resetMockInvoke, setMockInvoke } from "../../../test/tauri-mock";
+import { resetAccessCache } from "../../../lib/access";
 import type { DetailNavigate } from "..";
 import type {
   GitOpsDetail,
@@ -552,6 +554,23 @@ describe("GitOps actions", () => {
     ).toBeDisabled();
   });
 
+  it("grays out every action the identity may not patch", async () => {
+    resetAccessCache();
+    const d = detail();
+    setMockInvoke((cmd, args) => {
+      if (cmd === "get_well_known_detail_cmd") return d;
+      if (cmd === "access_check_cmd")
+        return (args?.requests as unknown[]).map(() => ({ state: "denied", reason: "cannot patch it in flux-system" }));
+      return undefined;
+    });
+    render(<Harness />);
+    expect(
+      await screen.findByRole("button", { name: "Suspend — Not permitted: cannot patch it in flux-system" }),
+    ).toBeDisabled();
+    cleanup();
+    resetAccessCache();
+  });
+
   it("renders Argo sync and a refresh menu with hard refresh", async () => {
     const d = detail();
     d.actions = [
@@ -634,5 +653,15 @@ describe("GitOps actions", () => {
     render(<Harness />);
     await screen.findByText("./clusters/production");
     expect(screen.queryByRole("button", { name: /Reconcile|Suspend/ })).toBeNull();
+  });
+});
+
+describe("argoDeleteItems", () => {
+  it("each blocked choice says why", () => {
+    const reason = "Not permitted: cannot delete applications";
+    const ctl = { blocked: () => reason, request: vi.fn() } as unknown as GitOpsController;
+    const items = argoDeleteItems(ctl, "web").filter((i) => i.kind === "item");
+    expect(items).toHaveLength(3);
+    for (const i of items) expect(i).toMatchObject({ disabled: true, title: reason });
   });
 });

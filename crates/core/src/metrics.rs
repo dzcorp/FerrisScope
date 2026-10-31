@@ -151,6 +151,10 @@ pub struct MetricsSnapshot {
     pub pvcs: HashMap<String, VolumeMetric>,
     /// false when metrics-server isn't available (e.g. not installed).
     pub available: bool,
+    /// Set when `available` is false because RBAC refused the metrics read:
+    /// the apiserver's 403, so the UI doesn't claim metrics-server is absent.
+    #[serde(default)]
+    pub forbidden: Option<String>,
     /// `None` while no subscriber wants volumes (or before the first volume
     /// poll); `Some(false)` when no kubelet `stats/summary` could be reached
     /// (RBAC denied `nodes/proxy`, every node refused, or zero nodes).
@@ -175,6 +179,7 @@ impl MetricsSnapshot {
             && self.pods == other.pods
             && self.pod_volumes == other.pod_volumes
             && self.pvcs == other.pvcs
+            && self.forbidden == other.forbidden
     }
 }
 
@@ -439,6 +444,7 @@ async fn poll(client: &Client, cache: &mut PollCache, wants: Wants) -> MetricsSn
     // `available` tracks the per-pod list when it was polled (the table joins
     // on it), else NodeMetrics. (ClusterBar gates its gauge on
     // `available && cluster`, and `cluster` requires both node calls below.)
+    let forbidden = forbidden_reading(pods_res.as_ref().map(Result::as_ref), nodes_res.as_ref());
     let (available, pods) = match pods_res {
         Some(Ok(p)) => (true, p),
         Some(Err(e)) => {
@@ -476,8 +482,25 @@ async fn poll(client: &Client, cache: &mut PollCache, wants: Wants) -> MetricsSn
         pod_volumes,
         pvcs,
         available,
+        forbidden,
         volumes_available,
         fetched_at_unix_ms: now_ms(),
+    }
+}
+
+/// The apiserver's refusal of whichever read `available` follows.
+fn forbidden_reading<P, N>(
+    pods: Option<Result<P, &MetricsError>>,
+    nodes: Result<N, &MetricsError>,
+) -> Option<String> {
+    match (pods, nodes) {
+        (Some(Err(MetricsError::Kube(kube::Error::Api(err)))), _)
+        | (None, Err(MetricsError::Kube(kube::Error::Api(err))))
+            if err.code == 403 && err.reason == "Forbidden" =>
+        {
+            Some(err.message.clone())
+        }
+        _ => None,
     }
 }
 
@@ -1111,6 +1134,7 @@ mod tests {
             pod_volumes: HashMap::new(),
             pvcs: HashMap::new(),
             available: true,
+            forbidden: None,
             volumes_available: None,
             fetched_at_unix_ms: at,
         };
@@ -1142,6 +1166,37 @@ mod tests {
         let mut volumes_polled = snap(5, 1);
         volumes_polled.volumes_available = Some(false);
         assert!(!snap(5, 1).same_readings(&volumes_polled));
+        // A 503 turning into a 403 must reach the UI.
+        let mut forbidden = snap(5, 1);
+        forbidden.forbidden = Some("pods.metrics.k8s.io is forbidden".into());
+        assert!(!snap(5, 1).same_readings(&forbidden));
+    }
+
+    #[test]
+    fn forbidden_follows_the_read_available_follows() {
+        let api = |code: u16, reason: &str| {
+            MetricsError::Kube(kube::Error::Api(
+                kube::core::Status::failure("pods.metrics.k8s.io is forbidden", reason)
+                    .with_code(code)
+                    .boxed(),
+            ))
+        };
+        let denied = api(403, "Forbidden");
+        let msg = Some("pods.metrics.k8s.io is forbidden".to_owned());
+        assert_eq!(forbidden_reading::<(), ()>(Some(Err(&denied)), Ok(())), msg);
+        assert_eq!(forbidden_reading::<(), ()>(None, Err(&denied)), msg);
+        // Pods answered: a node-metrics 403 doesn't make pod metrics forbidden.
+        assert_eq!(
+            forbidden_reading::<(), ()>(Some(Ok(())), Err(&denied)),
+            None
+        );
+        // A proxy's 403 isn't RBAC.
+        let proxy = api(403, "");
+        assert_eq!(forbidden_reading::<(), ()>(Some(Err(&proxy)), Ok(())), None);
+        assert_eq!(
+            forbidden_reading::<(), ()>(None, Err(&api(503, "ServiceUnavailable"))),
+            None
+        );
     }
 
     #[test]
@@ -1154,6 +1209,7 @@ mod tests {
             pod_volumes: HashMap::new(),
             pvcs: HashMap::new(),
             available: false,
+            forbidden: None,
             volumes_available: None,
             fetched_at_unix_ms: 1_700_000_000_000,
         };
@@ -1161,5 +1217,6 @@ mod tests {
         assert_eq!(j["available"], false);
         assert_eq!(j["volumes_available"], serde_json::Value::Null);
         assert_eq!(j["fetched_at_unix_ms"], 1_700_000_000_000_i64);
+        assert_eq!(j["forbidden"], serde_json::Value::Null);
     }
 }

@@ -10,6 +10,7 @@ import { placeMenuAtCursor, rootZoom } from "../lib/zoom";
 
 import { useResolvedTheme } from "../store";
 import { useEscLayer } from "../lib/escStack";
+import { inertProps } from "./ui";
 export type MenuItem =
   | {
       kind: "item";
@@ -17,6 +18,8 @@ export type MenuItem =
       onClick: () => void;
       disabled?: boolean;
       danger?: boolean;
+      /// Tooltip; carries the reason when `disabled` (e.g. an RBAC denial).
+      title?: string;
     }
   | { kind: "separator" };
 
@@ -123,6 +126,7 @@ export function ContextMenu({ mode, position, items, onClose, rowName }: Props) 
             t={t}
             danger={!!it.danger}
             disabled={!!it.disabled}
+            title={it.title}
             onClick={() => {
               if (it.disabled) return;
               it.onClick();
@@ -141,12 +145,14 @@ function MenuRow({
   t,
   danger,
   disabled,
+  title,
   onClick,
   children,
 }: {
   t: ReturnType<typeof tokens>;
   danger: boolean;
   disabled: boolean;
+  title?: string;
   onClick: () => void;
   children: React.ReactNode;
 }) {
@@ -157,7 +163,7 @@ function MenuRow({
     alignItems: "center",
     padding: "6px 12px",
     border: "none",
-    background: hover
+    background: hover && !disabled
       ? danger
         ? "rgba(244,63,94,0.10)"
         : t.hover
@@ -174,8 +180,8 @@ function MenuRow({
     <button
       type="button"
       role="menuitem"
-      disabled={disabled}
-      onClick={onClick}
+      {...inertProps(disabled, title, onClick)}
+      title={title}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={baseStyle}

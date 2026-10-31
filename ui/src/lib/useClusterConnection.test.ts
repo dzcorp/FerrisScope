@@ -11,6 +11,8 @@ const connectContext = vi.fn();
 const cancelConnect = vi.fn().mockResolvedValue(undefined);
 const reconnectCluster = vi.fn().mockResolvedValue(undefined);
 const getClusterHealth = vi.fn();
+const accessCheck = vi.fn();
+const accessInvalidate = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("../api", () => ({
   api: {
@@ -18,6 +20,8 @@ vi.mock("../api", () => ({
     cancelConnect: (...a: unknown[]) => cancelConnect(...a),
     reconnectCluster: (...a: unknown[]) => reconnectCluster(...a),
     getClusterHealth: (...a: unknown[]) => getClusterHealth(...a),
+    accessCheck: (...a: unknown[]) => accessCheck(...a),
+    accessInvalidate: (...a: unknown[]) => accessInvalidate(...a),
   },
   onClusterHealth: vi.fn((_id: string, h: (e: ClusterHealthEvent) => void) => {
     healthHandler = h;
@@ -30,6 +34,7 @@ vi.mock("../api", () => ({
 
 import { useClusterConnection } from "./useClusterConnection";
 import { useAppStore } from "../store";
+import { readDecision, requestAccess, resetAccessCache } from "./access";
 
 const CTX: ContextInfo = {
   id: "src::test-cluster",
@@ -94,6 +99,24 @@ describe("useClusterConnection auto-reconnect", () => {
     expect(result.current.state.status).toBe("ok");
     expect(result.current.autoReconnect).toBeNull();
     expect(reconnectCluster).not.toHaveBeenCalled();
+  });
+
+  it("a connect re-asks permissions without forgetting the old answers", async () => {
+    resetAccessCache();
+    accessCheck.mockReset().mockResolvedValue([{ state: "denied", reason: "no" }]);
+    const check = { clusterId: CTX.id, kindId: "pods", action: "delete" as const };
+    requestAccess([check]);
+    await flush();
+    expect(accessCheck).toHaveBeenCalledTimes(1);
+    renderHook(() => useClusterConnection(CTX));
+    await flush();
+    // Still shown while it's re-asked; the backend keeps its own cache.
+    expect(readDecision(check)?.state).toBe("denied");
+    requestAccess([check]);
+    await flush();
+    expect(accessCheck).toHaveBeenCalledTimes(2);
+    expect(accessInvalidate).not.toHaveBeenCalled();
+    resetAccessCache();
   });
 
   it("recovers an unavailable that was emitted while nothing was listening", async () => {

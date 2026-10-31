@@ -13,7 +13,8 @@ import { api } from "../api";
 import { confirm, toast } from "../lib/dialog";
 import { bulkClusterPrefix } from "../lib/multiCluster";
 import type { SelectionMeta } from "../store";
-import type { ResourceKind } from "../types";
+import type { AccessAction, ResourceKind } from "../types";
+import type { Gate } from "../lib/access";
 import type { BulkAction } from "./BulkBar";
 import { Icons } from "./ui";
 
@@ -27,7 +28,7 @@ export function buildPodBulkActions(
   clearSelection: () => void,
   labelFor: (clusterId: string) => string,
   degraded: boolean,
-) {
+): BulkAction[] {
   const entries = Array.from(selection.entries());
   const count = entries.length;
   const prefix = bulkClusterPrefix(entries, labelFor);
@@ -74,6 +75,7 @@ export function buildPodBulkActions(
     {
       icon: Icons.refresh,
       label: "Restart",
+      access: "restart",
       disabled: degraded,
       onClick: () => {
         void (async () => {
@@ -164,6 +166,7 @@ export function buildPodBulkActions(
       // carries the divider that opens the destructive group.
       icon: Icons.podDrain,
       label: "Evict",
+      access: "evict",
       disabled: degraded,
       separatorBefore: true,
       danger: true,
@@ -191,6 +194,7 @@ export function buildPodBulkActions(
     {
       icon: Icons.trash,
       label: "Delete",
+      access: "delete",
       disabled: degraded,
       danger: true,
       onClick: () => {
@@ -223,7 +227,7 @@ export function buildNodeBulkActions(
   clearSelection: () => void,
   labelFor: (clusterId: string) => string,
   degraded: boolean,
-) {
+): BulkAction[] {
   const entries = Array.from(selection.entries());
   const count = entries.length;
   const prefix = bulkClusterPrefix(entries, labelFor);
@@ -296,6 +300,7 @@ export function buildNodeBulkActions(
     {
       icon: Icons.eye,
       label: "Cordon",
+      access: "cordon",
       disabled: degraded,
       onClick: () => {
         void (async () => {
@@ -314,6 +319,7 @@ export function buildNodeBulkActions(
     {
       icon: Icons.check,
       label: "Uncordon",
+      access: "cordon",
       disabled: degraded,
       onClick: () => {
         void runForAll("Uncordon", (m) =>
@@ -324,6 +330,7 @@ export function buildNodeBulkActions(
     {
       icon: Icons.refresh,
       label: "Drain",
+      access: "drain",
       disabled: degraded,
       onClick: () => {
         void (async () => {
@@ -354,6 +361,7 @@ export function buildNodeBulkActions(
     {
       icon: Icons.trash,
       label: "Delete",
+      access: "delete",
       disabled: degraded,
       separatorBefore: true,
       danger: true,
@@ -506,6 +514,7 @@ export function buildGenericBulkActions(
     actions.push({
       icon: isCronJob ? Icons.bolt : Icons.refresh,
       label: isCronJob ? "Run now" : "Re-run",
+      access: isCronJob ? "trigger" : "rerun",
       disabled: degraded,
       onClick: () => {
         void confirmThen(
@@ -554,6 +563,7 @@ export function buildGenericBulkActions(
       actions.push({
         icon: suspend ? Icons.pause : Icons.play,
         label,
+        access: "suspend",
         disabled: degraded,
         onClick: () => {
           void confirmThen(
@@ -593,6 +603,7 @@ export function buildGenericBulkActions(
     actions.push({
       icon: Icons.refresh,
       label: "Restart",
+      access: "restart",
       disabled: degraded,
       onClick: () => {
         void (async () => {
@@ -671,6 +682,7 @@ export function buildGenericBulkActions(
     {
       icon: Icons.trash,
       label: "Delete",
+      access: kind.id === "helm_releases" ? "helmUninstall" : "delete",
       disabled: degraded,
       separatorBefore: true,
       danger: true,
@@ -720,7 +732,9 @@ export function buildGenericBulkActions(
     },
   );
 
-  return actions;
+  // Helm chart rows are catalog entries with no object behind them; the row
+  // menu offers no delete either.
+  return kind.id === "helm_charts" ? actions.filter((a) => a.access !== "delete") : actions;
 }
 
 
@@ -754,4 +768,49 @@ export function bulkActionsFor(
     labelFor,
     degraded,
   );
+}
+
+/// Every RBAC verb a bulk action for `kindId` may carry — what the bulk
+/// surfaces prefetch for the selection.
+export function bulkAccessActions(kindId: string): AccessAction[] {
+  switch (kindId) {
+    case "pods":
+      return ["logs", "restart", "evict", "delete"];
+    case "nodes":
+      return ["cordon", "drain", "delete"];
+    case "jobs":
+      return ["logs", "rerun", "suspend", "delete"];
+    case "cronjobs":
+      return ["trigger", "suspend", "delete"];
+    case "deployments":
+    case "statefulsets":
+    case "daemonsets":
+      return ["logs", "restart", "delete"];
+    case "replicasets":
+      return ["logs", "delete"];
+    case "helm_releases":
+      return ["helmUninstall"];
+    case "helm_charts":
+      return [];
+    default:
+      return ["delete"];
+  }
+}
+
+/// What the table's selection menu asks: `bulkActionsFor`'s verbs. Logs
+/// belongs to the App bulk bar alone.
+export function menuAccessActions(kindId: string): AccessAction[] {
+  return bulkAccessActions(kindId).filter((a) => a !== "logs");
+}
+
+/// Disable each action whose RBAC verb is denied, with the reason as tooltip.
+export function gateBulkActions(
+  actions: BulkAction[],
+  gates: Partial<Record<AccessAction, Gate>>,
+): BulkAction[] {
+  return actions.map((a) => {
+    const g = a.access ? gates[a.access] : undefined;
+    if (!g || g.allowed) return a;
+    return { ...a, disabled: true, disabledReason: g.reason ?? undefined };
+  });
 }

@@ -6,7 +6,7 @@ import {
   useResolvedTheme,
 } from "../store";
 import { FF_MONO, type ThemeMode, R_LG, FS_LG, FS_MD, FS_SM, FS_XS } from "../theme";
-import { Eyebrow, Icons, Kbd, resolveKindIcon } from "./ui";
+import { Eyebrow, Icons, Kbd, KindIcons, resolveKindIcon } from "./ui";
 import { MOD_KEY } from "../lib/keyboard";
 import { api } from "../api";
 import { mergeSearchHits } from "../lib/multiCluster";
@@ -60,6 +60,7 @@ export function CommandPalette({ mode, onClose }: Props) {
   const navigateToDetail = useAppStore((s) => s.navigateToDetail);
   const openSettings = useAppStore((s) => s.openSettings);
   const openNsModal = useAppStore((s) => s.openNsModal);
+  const openAccessPanel = useAppStore((s) => s.openAccessPanel);
   const toggleTheme = useAppStore((s) => s.toggleTheme);
   // Every cluster the app is observing — search fans out across all of
   // them in a multi-cluster view and hits get a per-cluster badge.
@@ -213,6 +214,23 @@ export function CommandPalette({ mode, onClose }: Props) {
         keywords: "namespace filter scope",
         action: () => openNsModal(),
       });
+
+      for (const cid of activeClusterIds) {
+        const name = clusterLabels[cid]?.short ?? contexts.find((c) => c.id === cid)?.name ?? cid;
+        list.push({
+          id: `cmd:access:${cid}`,
+          group: "Actions",
+          icon: (
+            <span style={{ width: 13, height: 13, display: "inline-flex", color: t.textMuted }}>
+              {KindIcons.ClusterRole}
+            </span>
+          ),
+          label: activeClusterIds.length > 1 ? `My permissions — ${name}` : "My permissions",
+          sub: "Who you are on this cluster, what you may do, refresh RBAC checks",
+          keywords: "permissions rbac access whoami can-i auth role forbidden",
+          action: () => openAccessPanel(cid),
+        });
+      }
     }
 
     list.push({
@@ -292,6 +310,8 @@ export function CommandPalette({ mode, onClose }: Props) {
     selectKind,
     openSettings,
     openNsModal,
+    openAccessPanel,
+    activeClusterIds,
     toggleTheme,
     mode,
     t,

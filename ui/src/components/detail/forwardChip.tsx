@@ -20,7 +20,7 @@
 
 import { useEffect, useState, type KeyboardEvent } from "react";
 import { api } from "../../api";
-import { useAppStore } from "../../store";
+import { selectClusterDegraded, useAppStore } from "../../store";
 import {
   type Tokens,
   FF_MONO,
@@ -33,6 +33,21 @@ import {
 import type { ForwardEntry, ForwardTarget, LocalPortCheck } from "../../types";
 import { toast } from "../../lib/dialog";
 import { Icons, Tooltip } from "../ui";
+import { inertProps } from "../ui/Btn";
+import { gatedTitle, useKindAccess } from "../../lib/access";
+
+const PF_ACTION = ["portForward"] as const;
+
+/// `ForwardTarget.kind` → registry kind id, for the RBAC check.
+export const FORWARD_KIND_IDS: Record<string, string> = {
+  Pod: "pods",
+  Service: "services",
+  Deployment: "deployments",
+  StatefulSet: "statefulsets",
+  DaemonSet: "daemonsets",
+  ReplicaSet: "replicasets",
+  Job: "jobs",
+};
 
 type Props = {
   t: Tokens;
@@ -61,6 +76,14 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
   useEffect(() => {
     if (hasEntry) setPicking(false);
   }, [hasEntry]);
+  const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
+  const fwdGate = useKindAccess(clusterId, FORWARD_KIND_IDS[target.kind], PF_ACTION, {
+    namespace: target.namespace,
+    name: target.name,
+  }).portForward;
+  const startBlocked = degraded || !fwdGate.allowed;
+  const startTitle = (label: string) =>
+    degraded ? `${label} — cluster unavailable` : gatedTitle(label, fwdGate);
 
   const draftPort = picking ? parseLocalPort(portDraft) : null;
   useEffect(() => {
@@ -83,6 +106,7 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
   }
 
   const onStart = async (localPort: number | null = null) => {
+    if (startBlocked) return;
     setBusy(true);
     try {
       const ent = await api.pfStart(clusterId, target, remotePort, localPort, false);
@@ -137,7 +161,7 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
     const blocked = invalid || issue?.blocking === true;
     const suggestion = issue && !invalid ? check?.suggestion ?? null : null;
     const submit = () => {
-      if (!blocked && !busy) void onStart(localPort);
+      if (!blocked && !busy && !startBlocked) void onStart(localPort);
     };
     const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
       if (e.key === "Enter") {
@@ -172,16 +196,17 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
             />
           </label>
           <Tooltip
-            label={localPort == null ? "Start on an automatic port" : `Start on local port ${localPort}`}
+            label={startTitle(
+              localPort == null ? "Start on an automatic port" : `Start on local port ${localPort}`,
+            )}
           >
             <button
               type="button"
               aria-label="Start forward"
-              onClick={submit}
-              disabled={busy || blocked}
+              {...inertProps(busy || blocked || startBlocked, startBlocked ? "start" : undefined, submit)}
               onMouseEnter={() => setHover("ok")}
               onMouseLeave={() => setHover(null)}
-              style={segment(t, hover === "ok" && !blocked, true, busy || blocked)}
+              style={segment(t, hover === "ok" && !blocked && !startBlocked, true, busy || blocked || startBlocked)}
             >
               {Icons.check}
             </button>
@@ -218,7 +243,7 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
                     setPortDraft(String(suggestion));
                     void onStart(suggestion);
                   }}
-                  disabled={busy}
+                  disabled={busy || startBlocked}
                   onMouseEnter={() => setHover("suggest")}
                   onMouseLeave={() => setHover(null)}
                   style={{
@@ -243,36 +268,36 @@ export function ForwardChip({ t, clusterId, target, remotePort, protocol }: Prop
 
   if (!entry) {
     return (
-      <span style={splitGroup(t, hover !== null)}>
+      <span style={splitGroup(t, hover !== null && !startBlocked)}>
         <Tooltip
-          label={`Forward ${target.kind} ${target.name}:${remotePort} to an automatic local port`}
+          label={startTitle(
+            `Forward ${target.kind} ${target.name}:${remotePort} to an automatic local port`,
+          )}
         >
           <button
             type="button"
-            onClick={() => void onStart()}
-            disabled={busy}
+            {...inertProps(busy || startBlocked, "forward", () => void onStart())}
             onMouseEnter={() => setHover("main")}
             onMouseLeave={() => setHover(null)}
-            style={segment(t, hover === "main", false, busy)}
+            style={segment(t, hover === "main" && !startBlocked, false, busy || startBlocked)}
           >
             <span style={{ display: "inline-flex" }}>{Icons.forward}</span>
             <span>forward</span>
           </button>
         </Tooltip>
-        <Tooltip label="Forward to a chosen local port">
+        <Tooltip label={startTitle("Forward to a chosen local port")}>
           <button
             type="button"
             aria-label="Pick local port"
-            onClick={() => {
+            {...inertProps(busy || startBlocked, "pick", () => {
               setPortDraft(String(remotePort));
               setCheck(null);
               setPicking(true);
               setHover(null);
-            }}
-            disabled={busy}
+            })}
             onMouseEnter={() => setHover("pick")}
             onMouseLeave={() => setHover(null)}
-            style={{ ...segment(t, hover === "pick", true, busy), padding: "0 5px" }}
+            style={{ ...segment(t, hover === "pick" && !startBlocked, true, busy || startBlocked), padding: "0 5px" }}
           >
             {Icons.chevD}
           </button>

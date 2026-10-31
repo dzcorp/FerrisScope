@@ -5,6 +5,9 @@ import { isPendingStatus, valuesToYaml } from "../../../lib/helm";
 import { selectClusterDegraded, useAppStore } from "../../../store";
 import type { HelmReleaseDetail } from "../../../types";
 import { useDetail, type LoadState } from "../useDetail";
+import { useKindAccess } from "../../../lib/access";
+
+const UPGRADE_ACTION = ["helmUpgrade"] as const;
 
 export type HelmTarget = {
   clusterId: string;
@@ -56,6 +59,10 @@ const identity = (t: HelmTarget) => JSON.stringify([t.clusterId, t.namespace, t.
 // Lives in DetailPanel so the header actions and the Summary share one fetch.
 export function useHelmRelease(target: HelmTarget, enabled: boolean): HelmController | null {
   const degraded = useAppStore((s) => selectClusterDegraded(s, target.clusterId));
+  // Upgrade and rollback write the same release-storage Secrets.
+  const writeGate = useKindAccess(enabled ? target.clusterId : null, "helm_releases", UPGRADE_ACTION, {
+    namespace: target.namespace,
+  }).helmUpgrade;
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
   const [refetch, setRefetch] = useState(0);
   const [busy, setBusy] = useState<HelmOp | null>(null);
@@ -105,6 +112,7 @@ export function useHelmRelease(target: HelmTarget, enabled: boolean): HelmContro
   const blocked = (): string | null => {
     if (!detail) return "Release not loaded";
     if (degraded) return "Cluster unavailable";
+    if (!writeGate.allowed) return writeGate.reason ?? "Not permitted";
     if (!detail.helm_available) return HELM_MISSING;
     if (isPendingStatus(detail.status)) return HELM_PENDING;
     if (busy !== null) return "Another request is in flight";

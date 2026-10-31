@@ -4,6 +4,7 @@ import { parseYaml, stripYaml, type Json } from "../lib/yamlEdit";
 import { selectClusterDegraded, useAppStore, useResolvedTheme, type DetailRef, type DetailView } from "../store";
 import { execContainers, rowLogContainers } from "../lib/podContainers";
 import type {
+  AccessAction,
   Cascade,
   ContainerDetail,
   ContainerLastState,
@@ -35,6 +36,7 @@ import {
   Eyebrow,
   IconBtn,
   Icons,
+  inertProps,
   LoadingLine,
   Section,
   StatusPill,
@@ -45,6 +47,7 @@ import { ContextMenu, type MenuItem, type MenuPosition } from "./ContextMenu";
 import { confirm, toast } from "../lib/dialog";
 import { logErr } from "../lib/log";
 import { useEscLayer } from "../lib/escStack";
+import { gatedTitle, OPEN_GATE, useKindAccess, type Gate } from "../lib/access";
 import {
   Mono,
   ChipStrip,
@@ -531,6 +534,15 @@ export function DetailPanel({
   // every mutating action + exec/forward in the title bar and forces the YAML
   // tab read-only, while reads/navigation/copy stay live.
   const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
+  // Partial: each kind asks only for its own verbs.
+  const accessGates: Partial<Record<AccessAction, Gate>> = useKindAccess(
+    clusterId,
+    kind.id,
+    useMemo(() => detailAccessActions(kind.id), [kind.id]),
+    { namespace: target.namespace, name: target.name },
+  );
+  const access = (a: AccessAction): Gate => accessGates[a] ?? OPEN_GATE;
+  const deleteAction: AccessAction = kind.id === "helm_releases" ? "helmUninstall" : "delete";
   const gitopsShort = wellKnownShort(kind.id);
   const gitops = useGitOps(
     {
@@ -1196,15 +1208,16 @@ export function DetailPanel({
                 ref={shellBtnRef}
                 t={t}
                 size="lg"
-                title={
+                title={gatedTitle(
                   podShellContainers.length === 0
                     ? "No runnable containers"
                     : podShellContainers.length === 1
                       ? `Open shell (${podShellContainers[0]})`
-                      : "Open shell…"
-                }
+                      : "Open shell…",
+                  access("exec"),
+                )}
                 disabled={
-                  podShellContainers.length === 0 || !onOpenExec || degraded
+                  podShellContainers.length === 0 || !onOpenExec || degraded || !access("exec").allowed
                 }
                 active={actionMenu?.kind === "shell"}
                 onClick={() => {
@@ -1222,8 +1235,8 @@ export function DetailPanel({
                 ref={restartBtnRef}
                 t={t}
                 size="lg"
-                title="Rollout restart owner workload"
-                disabled={restarting || !target.namespace || degraded}
+                title={gatedTitle("Rollout restart owner workload", access("restart"))}
+                disabled={restarting || !target.namespace || degraded || !access("restart").allowed}
                 onClick={runRestart}
               >
                 {Icons.refresh}
@@ -1232,9 +1245,9 @@ export function DetailPanel({
                 ref={deleteBtnRef}
                 t={t}
                 size="lg"
-                title="Delete…"
+                title={gatedTitle("Delete…", access("delete"))}
                 danger
-                disabled={deleting || degraded}
+                disabled={deleting || degraded || !access("delete").allowed}
                 active={actionMenu?.kind === "delete"}
                 onClick={() =>
                   openActionMenu("delete", deleteBtnRef.current)
@@ -1270,8 +1283,11 @@ export function DetailPanel({
                 ref={shellBtnRef}
                 t={t}
                 size="lg"
-                title={`Open shell on node (kubectl debug node/${target.name})`}
-                disabled={!onOpenExec || degraded}
+                title={gatedTitle(
+                  `Open shell on node (kubectl debug node/${target.name})`,
+                  access("nodeShell"),
+                )}
+                disabled={!onOpenExec || degraded || !access("nodeShell").allowed}
                 onClick={() => onOpenExec?.(null)}
               >
                 {Icons.shell}
@@ -1280,12 +1296,13 @@ export function DetailPanel({
                 ref={cordonBtnRef}
                 t={t}
                 size="lg"
-                title={
+                title={gatedTitle(
                   nodeCordoned
                     ? "Uncordon node — re-enable scheduling"
-                    : "Cordon node — block new scheduling"
-                }
-                disabled={cordoning || degraded}
+                    : "Cordon node — block new scheduling",
+                  access("cordon"),
+                )}
+                disabled={cordoning || degraded || !access("cordon").allowed}
                 onClick={runCordon}
               >
                 {nodeCordoned ? Icons.nodeUncordon : Icons.nodeCordon}
@@ -1294,8 +1311,8 @@ export function DetailPanel({
                 ref={drainBtnRef}
                 t={t}
                 size="lg"
-                title="Drain node — cordon and evict pods"
-                disabled={draining || degraded}
+                title={gatedTitle("Drain node — cordon and evict pods", access("drain"))}
+                disabled={draining || degraded || !access("drain").allowed}
                 onClick={runDrain}
               >
                 {Icons.nodeDrain}
@@ -1304,9 +1321,9 @@ export function DetailPanel({
                 ref={deleteBtnRef}
                 t={t}
                 size="lg"
-                title="Delete…"
+                title={gatedTitle("Delete…", access("delete"))}
                 danger
-                disabled={deleting || degraded}
+                disabled={deleting || degraded || !access("delete").allowed}
                 active={actionMenu?.kind === "delete"}
                 onClick={() =>
                   openActionMenu("delete", deleteBtnRef.current)
@@ -1345,8 +1362,11 @@ export function DetailPanel({
                 <IconBtn
                   t={t}
                   size="lg"
-                  title={`Run now — create a Job from this CronJob's template`}
-                  disabled={triggering || !target.namespace || degraded}
+                  title={gatedTitle(
+                    "Run now — create a Job from this CronJob's template",
+                    access("trigger"),
+                  )}
+                  disabled={triggering || !target.namespace || degraded || !access("trigger").allowed}
                   onClick={runTrigger}
                 >
                   {Icons.bolt}
@@ -1356,8 +1376,11 @@ export function DetailPanel({
                 <IconBtn
                   t={t}
                   size="lg"
-                  title="Re-run — create a copy of this Job under a new name"
-                  disabled={triggering || !target.namespace || degraded}
+                  title={gatedTitle(
+                    "Re-run — create a copy of this Job under a new name",
+                    access("rerun"),
+                  )}
+                  disabled={triggering || !target.namespace || degraded || !access("rerun").allowed}
                   onClick={runRerun}
                 >
                   {Icons.refresh}
@@ -1367,21 +1390,23 @@ export function DetailPanel({
                 <IconBtn
                   t={t}
                   size="lg"
-                  title={
+                  title={gatedTitle(
                     jobFinished
                       ? "Job has already finished — nothing to suspend"
                       : suspendState === undefined
                         ? "Loading suspend state…"
                         : suspended
                           ? `Resume ${kind.kind.toLowerCase()}`
-                          : `Suspend ${kind.kind.toLowerCase()}`
-                  }
+                          : `Suspend ${kind.kind.toLowerCase()}`,
+                    access("suspend"),
+                  )}
                   disabled={
                     suspending ||
                     !target.namespace ||
                     degraded ||
                     jobFinished ||
-                    suspendState === undefined
+                    suspendState === undefined ||
+                    !access("suspend").allowed
                   }
                   onClick={() => runSuspend(!suspended)}
                 >
@@ -1393,8 +1418,8 @@ export function DetailPanel({
                   ref={restartBtnRef}
                   t={t}
                   size="lg"
-                  title={`Rollout restart ${kind.kind.toLowerCase()}`}
-                  disabled={restarting || !target.namespace || degraded}
+                  title={gatedTitle(`Rollout restart ${kind.kind.toLowerCase()}`, access("restart"))}
+                  disabled={restarting || !target.namespace || degraded || !access("restart").allowed}
                   onClick={runRestartWorkload}
                 >
                   {Icons.refresh}
@@ -1424,11 +1449,12 @@ export function DetailPanel({
                   ref={deleteBtnRef}
                   t={t}
                   size="lg"
-                  title={
-                    kind.id === "helm_releases" ? "Uninstall…" : "Delete…"
-                  }
+                  title={gatedTitle(
+                    kind.id === "helm_releases" ? "Uninstall…" : "Delete…",
+                    access(deleteAction),
+                  )}
                   danger
-                  disabled={deleting || degraded}
+                  disabled={deleting || degraded || !access(deleteAction).allowed}
                   active={actionMenu?.kind === "delete"}
                   onClick={() =>
                     openActionMenu("delete", deleteBtnRef.current)
@@ -1625,7 +1651,8 @@ export function DetailPanel({
                 kindLabel={kind.kind.toLowerCase()}
                 namespace={target.namespace}
                 name={target.name}
-                readOnly={degraded}
+                readOnly={degraded || !access("patch").allowed}
+                readOnlyReason={degraded ? null : access("patch").reason}
                 buffer={yamlBuffer}
                 setBuffer={setYamlBuffer}
                 saving={yamlSaving}
@@ -2203,6 +2230,14 @@ function PodSummary({
   // Disable the inline Evict button while the cluster is unavailable / mid
   // auto-reconnect — same gate the row menu and bulk bar use.
   const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
+  const evictGate = useKindAccess(clusterId, "pods", EVICT_ACTION, {
+    namespace: target.namespace,
+    name: target.name,
+  }).evict;
+  const evictBlocked = degraded || !evictGate.allowed;
+  const evictTitle = degraded
+    ? "Cluster unavailable — can't evict right now"
+    : gatedTitle("Evict this pod off the node (graceful, PDB-aware)", evictGate);
   // Feeds the Resources usage; a parked drawer stops polling.
   useMetricsSubscription(useTabActive() ? clusterId : null, "pods");
   const [state, setState] = useState<DetailState>({ kind: "loading" });
@@ -2413,9 +2448,7 @@ function PodSummary({
             </LinkValue>
             <button
               type="button"
-              disabled={degraded}
-              onClick={() => {
-                if (degraded) return;
+              {...inertProps(evictBlocked, evictTitle, () => {
                 void (async () => {
                   const ns = d.namespace;
                   if (!ns) {
@@ -2439,23 +2472,19 @@ function PodSummary({
                     toast.bad(`Evict failed: ${String(e)}`);
                   }
                 })();
-              }}
-              title={
-                degraded
-                  ? "Cluster unavailable — can't evict right now"
-                  : "Evict this pod off the node (graceful, PDB-aware)"
-              }
+              })}
+              title={evictTitle}
               style={{
                 marginLeft: 8,
                 fontFamily: FF_MONO,
                 fontSize: FS_XS,
-                color: degraded ? t.textMuted : t.bad,
+                color: evictBlocked ? t.textMuted : t.bad,
                 background: "transparent",
                 border: `1px solid ${t.border}`,
                 borderRadius: R_SM,
                 padding: "1px 8px",
-                cursor: degraded ? "not-allowed" : "pointer",
-                opacity: degraded ? 0.5 : 1,
+                cursor: evictBlocked ? "not-allowed" : "pointer",
+                opacity: evictBlocked ? 0.5 : 1,
                 lineHeight: 1.6,
               }}
             >
@@ -3773,6 +3802,33 @@ function WorkloadSummaryDispatch({
 
 // Build the menu items for a given title-bar action button. Each picker is
 // shaped the same way (header → choices) so the user learns the pattern once.
+const EVICT_ACTION = ["evict"] as const;
+
+/// RBAC verbs the detail panel's buttons and editors can use for `kindId`.
+export function detailAccessActions(kindId: string): AccessAction[] {
+  switch (kindId) {
+    case "pods":
+      return ["patch", "exec", "restart", "evict", "delete"];
+    case "nodes":
+      return ["patch", "nodeShell", "cordon", "drain", "delete"];
+    case "cronjobs":
+      return ["patch", "trigger", "suspend", "delete"];
+    case "jobs":
+      return ["patch", "rerun", "suspend", "delete"];
+    case "deployments":
+    case "statefulsets":
+    case "daemonsets":
+      return ["patch", "restart", "delete"];
+    // Upgrade / rollback are gated by `useHelmRelease`.
+    case "helm_releases":
+      return ["helmUninstall"];
+    case "helm_charts":
+      return [];
+    default:
+      return ["patch", "delete"];
+  }
+}
+
 export function buildActionMenuItems(
   menuKind: "shell" | "delete",
   kindLabel: string,

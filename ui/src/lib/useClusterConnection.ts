@@ -1,4 +1,5 @@
 import { logErr } from "./log";
+import { revalidateAccess } from "./access";
 import { isPermanentConnectFailure } from "./connectFailure";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, onClusterHealth, onClusterInfoChanged } from "../api";
@@ -430,7 +431,12 @@ export function useClusterConnection(context: ContextInfo): {
       // Merge into whatever state we're currently in — info can land before
       // *or* after `status: "ok"` because of the race above. If we're not
       // in "ok" yet, defer; otherwise overwrite the placeholder fields.
-      setState((cur) => (cur.status === "ok" ? { status: "ok", info } : cur));
+      // `restricted` is only known to connect; the refresh doesn't carry it.
+      setState((cur) =>
+        cur.status === "ok"
+          ? { status: "ok", info: { ...info, restricted: cur.info.restricted ?? null } }
+          : cur,
+      );
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
@@ -440,6 +446,8 @@ export function useClusterConnection(context: ContextInfo): {
       .connectContext(context.id, connectId)
       .then((info) => {
         if (reqId.current === id) {
+          // A rebuilt entry may carry a different identity.
+          revalidateAccess(context.id);
           setState({ status: "ok", info });
           ctlRef.current?.onConnectResolved("ok");
           hydrateHealth(id);

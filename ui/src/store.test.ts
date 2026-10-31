@@ -675,6 +675,17 @@ describe("settings target & misc open/close pairs", () => {
     s.openForwardsPanel();
     expect(useAppStore.getState().forwardsOpen).toBe(true);
     s.closeForwardsPanel();
+
+    s.openAccessPanel("ctx-a");
+    expect(useAppStore.getState().accessPanelCluster).toBe("ctx-a");
+    s.closeAccessPanel();
+    expect(useAppStore.getState().accessPanelCluster).toBeNull();
+
+    s.dismissRestricted("ctx-a");
+    const once = useAppStore.getState().restrictedDismissed;
+    expect(once.has("ctx-a")).toBe(true);
+    s.dismissRestricted("ctx-a");
+    expect(useAppStore.getState().restrictedDismissed).toBe(once);
   });
 
   it("clearNotifications wipes the log and bumps seen-at", () => {

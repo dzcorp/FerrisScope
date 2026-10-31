@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { HelmChartSummary } from "./chart";
 import { useAppStore } from "../../../store";
 import { resetMockInvoke, setMockInvoke } from "../../../test/tauri-mock";
+import { resetAccessCache } from "../../../lib/access";
 import type { HelmChartDetail, HelmInstallResult, ResourceKind } from "../../../types";
 
 vi.mock("@monaco-editor/react", () => ({
@@ -205,6 +206,32 @@ describe("HelmChartSummary", () => {
     render(<HelmChartSummary clusterId="ctx" uid={UID} detailVersion={0} />);
     expect(await screen.findByRole("textbox", { name: "Namespace" })).toBeDisabled();
     expect(screen.getByText("Cluster unavailable")).toBeInTheDocument();
+  });
+
+  it("asks about the settled target namespace and grays out a refused install", async () => {
+    resetAccessCache();
+    const reqs: { namespace: string | null }[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "get_helm_chart_detail_cmd") return chart();
+      if (cmd === "access_check_cmd") {
+        const rs = args?.requests as { namespace: string | null }[];
+        reqs.push(...rs);
+        return rs.map((r) =>
+          r.namespace === "locked" ? { state: "denied", reason: "cannot create secrets in locked" } : { state: "allowed" },
+        );
+      }
+      return undefined;
+    });
+    render(<HelmChartSummary clusterId="ctx" uid={UID} detailVersion={0} />);
+    const ns = await screen.findByRole("textbox", { name: "Namespace" });
+    fireEvent.change(ns, { target: { value: "loc" } });
+    fireEvent.change(ns, { target: { value: "locked" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Install" })).toBeDisabled());
+    expect(screen.getByText("Not permitted: cannot create secrets in locked")).toBeInTheDocument();
+    // Typing settled before asking: the half-typed "loc" was never reviewed.
+    expect(reqs.some((r) => r.namespace === "loc")).toBe(false);
+    cleanup();
+    resetAccessCache();
   });
 
   it("resets the install form when a different chart opens", async () => {

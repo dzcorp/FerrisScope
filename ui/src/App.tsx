@@ -48,6 +48,8 @@ import {
   buildGenericBulkActions,
   buildNodeBulkActions,
   buildPodBulkActions,
+  bulkAccessActions,
+  gateBulkActions,
 } from "./components/bulkActions";
 import { compareTargetFromSelection } from "./components/ComparePanel";
 import { inspectTargetFromSelection } from "./components/inspect";
@@ -67,6 +69,8 @@ import {
 } from "./lib/multiCluster";
 import { IS_MAC } from "./lib/keyboard";
 import { prunedNamespaceFilter } from "./lib/nsFilter";
+import { useScopesAccess } from "./lib/access";
+import { AccessPanel } from "./components/AccessPanel";
 import { goToFleet } from "./lib/clusterTabs";
 import { hotkeyIntent, intentPreventsDefault, resolveTabHotkey, tabHotkey } from "./lib/hotkeys";
 import { isClusterUnavailableError } from "./lib/unavailable";
@@ -96,6 +100,7 @@ const sessionSaver = createSaver(
 registerFlushOnClose(sessionSaver);
 
 const SettingsPanel = lazy(loadSettingsPanel);
+const NS_LIST_ACTION = ["list"] as const;
 
 // Top-level shell. Owns the global keyboard layer (P3 + R-13) and renders
 // every overlay (palette, settings, namespace modal, bulk bar, dock).
@@ -232,6 +237,8 @@ export default function App() {
   const addMenuOpen = useAppStore((s) => s.addMenuOpen);
   const setAddMenuOpen = useAppStore((s) => s.setAddMenuOpen);
 
+  const accessPanelCluster = useAppStore((s) => s.accessPanelCluster);
+  const closeAccessPanel = useAppStore((s) => s.closeAccessPanel);
   const selection = useAppStore((s) => s.selection);
   const clearSelection = useAppStore((s) => s.clearSelection);
   const bulkClusterHealth = useAppStore((s) => s.clusterHealth);
@@ -249,6 +256,19 @@ export default function App() {
       ),
     [selection, bulkClusterHealth, bulkClusterReconnecting],
   );
+  const bulkGates = useScopesAccess(
+    selectedKind?.id,
+    useMemo(
+      () => Array.from(selection.values(), (m) => ({ clusterId: m.clusterId, namespace: m.namespace })),
+      [selection],
+    ),
+    useMemo(() => (selectedKind ? bulkAccessActions(selectedKind.id) : []), [selectedKind]),
+  );
+  const nsListGate = useScopesAccess(
+    "namespaces",
+    useMemo(() => activeContexts.map((c) => ({ clusterId: c.id, namespace: null })), [activeContexts]),
+    NS_LIST_ACTION,
+  ).list;
   const confirmDestructive = useAppStore((s) => s.settings.confirmDestructive);
   // Display name for a cluster id in bulk-failure prefixes. Imperative read —
   // resolved inside click handlers, so no store subscription is needed.
@@ -334,7 +354,7 @@ export default function App() {
       if (targets.length > 0) openDrawer({ kind: "logs", targets, initialTab });
     };
     return [
-      { icon: Icons.logs, label: "Logs", onClick: open("logs") },
+      { icon: Icons.logs, label: "Logs", access: "logs", onClick: open("logs") },
       { icon: Icons.gauge, label: "Metrics", onClick: open("metrics") },
     ];
   };
@@ -1063,7 +1083,7 @@ export default function App() {
           mode={themeMode}
           count={selection.size}
           onClear={clearSelection}
-          actions={[
+          actions={gateBulkActions([
             ...observeActions(),
             ...inspectActions(),
               ...compareActions(),
@@ -1074,7 +1094,7 @@ export default function App() {
               clusterLabelFor,
               selectionDegraded,
             ),
-          ]}
+          ], bulkGates)}
         />
       )}
       {!bulkHidden &&
@@ -1085,7 +1105,7 @@ export default function App() {
             mode={themeMode}
             count={selection.size}
             onClear={clearSelection}
-            actions={[
+            actions={gateBulkActions([
               ...inspectActions(),
               ...compareActions(),
               ...buildNodeBulkActions(
@@ -1094,7 +1114,7 @@ export default function App() {
                 clusterLabelFor,
                 selectionDegraded,
               ),
-            ]}
+            ], bulkGates)}
           />
         )}
       {/* Generic bulk bar for everything that isn't pods or nodes. Copy +
@@ -1110,7 +1130,7 @@ export default function App() {
             mode={themeMode}
             count={selection.size}
             onClear={clearSelection}
-            actions={[
+            actions={gateBulkActions([
               ...observeActions(),
               ...inspectActions(),
               ...compareActions(),
@@ -1122,7 +1142,7 @@ export default function App() {
                 clusterLabelFor,
                 selectionDegraded,
               ),
-            ]}
+            ], bulkGates)}
           />
         )}
 
@@ -1135,6 +1155,8 @@ export default function App() {
           mode={themeMode}
           namespaces={discoveredNs}
           clusterTags={nsTags}
+          suggested={activeContexts.flatMap((c) => (c.namespace ? [c.namespace] : []))}
+          unlistable={nsListGate.allowed ? null : nsListGate.reason}
           initial={selectedNamespaces}
           onApply={(next) => {
             setSelectedNamespaces(next);
@@ -1142,6 +1164,10 @@ export default function App() {
           }}
           onClose={closeNsModal}
         />
+      )}
+
+      {accessPanelCluster && (
+        <AccessPanel clusterId={accessPanelCluster} onClose={closeAccessPanel} />
       )}
 
       {settingsOpen && (

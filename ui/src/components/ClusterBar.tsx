@@ -3,7 +3,7 @@ import { Mono } from "./detail";
 import type { ContextInfo, ClusterInfo } from "../types";
 import { tokens, FF_MONO, type ThemeMode, R_LG, R_MD, FS_MD, FS_XS } from "../theme";
 import { useAppStore, useClusterLabels, useResolvedTheme } from "../store";
-import { Stat, STAT_ELLIPSIS, StatusPill, Gauge, Icons, Kbd, Tooltip } from "./ui";
+import { Stat, STAT_ELLIPSIS, StatusPill, Gauge, Icons, KindIcons, Kbd, Tooltip } from "./ui";
 import { makeTerminalTab, makeYamlTab } from "./Dock";
 import { CloudIdentityModal } from "./CloudIdentityPanel";
 import { MOD_KEY, SHIFT_KEY } from "../lib/keyboard";
@@ -52,6 +52,7 @@ export function ClusterBar({
   const addMenuOpen = useAppStore((s) => s.addMenuOpen) && tabActive;
   const setAddMenuOpen = useAppStore((s) => s.setAddMenuOpen);
   const addDockTab = useAppStore((s) => s.addDockTab);
+  const openAccessPanel = useAppStore((s) => s.openAccessPanel);
 
   // A connected socket is not a live cluster: the heartbeat can declare the
   // apiserver gone while `connect_context` still reports success (its client
@@ -337,6 +338,16 @@ export function ClusterBar({
               subtitle="Edit and apply a manifest"
               kbd={`${SHIFT_KEY}${MOD_KEY}Y`}
               onClick={() => addDockTab(makeYamlTab(context.id))}
+            />
+            <AddMenuItem
+              t={t}
+              icon={KindIcons.ClusterRole}
+              title="My permissions"
+              subtitle="Who you are here and what you may do"
+              onClick={() => {
+                setAddMenuOpen(false);
+                openAccessPanel(context.id);
+              }}
             />
             <AddMenuItem
               t={t}

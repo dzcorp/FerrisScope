@@ -8,6 +8,32 @@
 //     when a test wants to (overrideable per-test via vi.setSystemTime).
 
 import "@testing-library/jest-dom/vitest";
+import { expect } from "vitest";
+
+// A disabled `Btn` / `IconBtn` with a tooltip is `aria-disabled` rather than
+// `disabled` (so the tooltip can explain why). To a user both are disabled;
+// make `toBeDisabled` say so too, so `.not.toBeDisabled()` still proves a
+// button works.
+const inert = (el: unknown): boolean => {
+  if (!(el instanceof Element)) throw new TypeError(`expected an Element, got ${String(el)}`);
+  return el.matches(":disabled") || el.closest('[aria-disabled="true"]') != null;
+};
+expect.extend({
+  toBeDisabled(received: unknown) {
+    const pass = inert(received);
+    return {
+      pass,
+      message: () => `expected element ${pass ? "not " : ""}to be disabled (disabled or aria-disabled)`,
+    };
+  },
+  toBeEnabled(received: unknown) {
+    const pass = !inert(received);
+    return {
+      pass,
+      message: () => `expected element ${pass ? "not " : ""}to be enabled (neither disabled nor aria-disabled)`,
+    };
+  },
+});
 
 // jsdom doesn't ship ResizeObserver. Headless render of any virtualised
 // table would otherwise throw at mount time.

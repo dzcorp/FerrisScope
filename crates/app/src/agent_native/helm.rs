@@ -18,7 +18,7 @@ use ferrisscope_kube_ext::helm::{self as helm_cli, KubeTarget, UpgradeSpec};
 use ferrisscope_kube_ext::kinds::helm_releases::{
     decode_release_summary, ReleaseKey, ReleaseSummary, HELM_SECRET_TYPE,
 };
-use ferrisscope_kube_ext::{get_helm_release_detail, HelmRollbackResult};
+use ferrisscope_kube_ext::{get_helm_release_detail, needs_create_namespace, HelmRollbackResult};
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, ListParams};
 use serde::Deserialize;
@@ -439,6 +439,18 @@ impl NativeTool for HelmInstall {
         a.validate()?;
         check_helm_available()?;
         let target = resolve_target(&self.app, &self.cluster).await?;
+        // A namespace-scoped identity is refused the namespace POST even when
+        // the namespace exists.
+        let create_namespace = a.create_namespace && {
+            let cluster_id = self.cluster.active().await;
+            let entry = self
+                .app
+                .state::<AppState>()
+                .entry(&cluster_id)
+                .await
+                .map_err(NativeToolError::msg)?;
+            needs_create_namespace(&entry.cluster.client(), &a.namespace).await
+        };
 
         let tmp = tempfile::Builder::new()
             .prefix("ferrisscope-helm-")
@@ -462,7 +474,7 @@ impl NativeTool for HelmInstall {
                 values_file: &values_path,
                 version: a.chart_version.as_deref(),
                 install: true,
-                create_namespace: a.create_namespace,
+                create_namespace,
                 reset_values: true,
                 wait: a.wait,
                 timeout: helm_timeout,

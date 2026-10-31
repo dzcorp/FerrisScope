@@ -749,10 +749,10 @@ pub(crate) async fn connect_context(
         // both succeed against a cluster that hangs on real LIST/WATCH
         // (etcd dead, watch broken, LB in front of dead replicas);
         // the LIST exercises exactly the path the eager namespaces
-        // watcher is about to fire.
+        // watcher is about to fire (`Restricted` when RBAC refuses it).
         const LIVENESS_TIMEOUT: Duration = Duration::from_secs(8);
         let probe_started = std::time::Instant::now();
-        tokio::time::timeout(
+        let liveness = tokio::time::timeout(
             LIVENESS_TIMEOUT,
             ferrisscope_core::health::liveness_probe(&connected.client()),
         )
@@ -764,18 +764,23 @@ pub(crate) async fn connect_context(
             )
         })?
         .map_err(|e| format!("apiserver liveness probe failed: {e}"))?;
+        let restricted = match liveness {
+            ferrisscope_core::health::Liveness::Alive => None,
+            ferrisscope_core::health::Liveness::Restricted(m) => Some(m),
+        };
         tracing::info!(
             context = %context_name,
             auth_ms = auth_done.as_millis() as u64,
             probe_ms = probe_started.elapsed().as_millis() as u64,
             total_ms = started.elapsed().as_millis() as u64,
             reused_entry = matches!(connected, Connected::Entry(_)),
+            restricted = restricted.is_some(),
             "connect_context: Cluster::connect + liveness probe ok"
         );
-        Ok::<_, String>(connected)
+        Ok::<_, String>((connected, restricted))
     };
 
-    let result: Result<Connected, String> = tokio::select! {
+    let result: Result<(Connected, Option<String>), String> = tokio::select! {
         biased;
         _ = rx => Err("cancelled".to_owned()),
         r = timeout(CONNECT_TIMEOUT, work) => match r {
@@ -803,7 +808,7 @@ pub(crate) async fn connect_context(
     }
 
     match result {
-        Ok(connected) => {
+        Ok((connected, restricted)) => {
             // Cache the connected cluster so the next `state.entry(...)` call
             // (e.g. inside `subscribe_resource` when the operator clicks a
             // kind) reuses this client instead of re-running `Cluster::connect`.
@@ -875,6 +880,7 @@ pub(crate) async fn connect_context(
             Ok(ClusterInfo {
                 server_version: String::new(),
                 node_count: 0,
+                restricted,
             })
         }
         Err(e) => Err(e),
@@ -1139,6 +1145,82 @@ pub(crate) async fn resolve_object_statuses_cmd(
         })
         .collect();
     Ok(ferrisscope_kube_ext::resolve_object_statuses(entry.cluster.client(), refs, slots).await)
+}
+
+/// Whether this connection's identity may perform each action, in request
+/// order. Never errors: a check that can't run answers `unknown`, which the
+/// UI treats as allowed. Never connects either — a batch flushed after a
+/// disconnect must not bring the cluster back.
+#[tauri::command]
+pub(crate) async fn access_check_cmd(
+    cluster_id: String,
+    requests: Vec<ferrisscope_kube_ext::access::AccessRequest>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ferrisscope_kube_ext::access::Access>, String> {
+    use ferrisscope_kube_ext::access::Access;
+    match connected_entry(&state, &cluster_id).await {
+        Ok(entry) => Ok(entry.access.check(&requests).await),
+        Err(error) => Ok(vec![Access::Unknown { error }; requests.len()]),
+    }
+}
+
+/// Drop cached RBAC decisions for one cluster (after its grants changed).
+#[tauri::command]
+pub(crate) async fn access_invalidate_cmd(
+    cluster_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if let Some(entry) = state.get_existing(&cluster_id).await {
+        entry.access.invalidate();
+    }
+    Ok(())
+}
+
+const ACCESS_INSPECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn connected_entry(
+    state: &AppState,
+    cluster_id: &str,
+) -> Result<Arc<crate::state::ClusterEntry>, String> {
+    match state.get_existing(cluster_id).await {
+        Some(e) if !e.unavailable.load(Ordering::SeqCst) => Ok(e),
+        Some(_) => Err("cluster unavailable".to_owned()),
+        None => Err("cluster not connected".to_owned()),
+    }
+}
+
+async fn inspect<T>(
+    fut: impl std::future::Future<Output = Result<T, ferrisscope_kube_ext::FetchError>>,
+) -> Result<T, String> {
+    tokio::time::timeout(ACCESS_INSPECT_TIMEOUT, fut)
+        .await
+        .map_err(|_| format!("no answer within {ACCESS_INSPECT_TIMEOUT:?}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// `kubectl auth whoami`.
+#[tauri::command]
+pub(crate) async fn access_whoami_cmd(
+    cluster_id: String,
+    state: State<'_, AppState>,
+) -> Result<ferrisscope_kube_ext::access::Identity, String> {
+    let entry = connected_entry(&state, &cluster_id).await?;
+    inspect(ferrisscope_kube_ext::access::whoami(entry.cluster.client())).await
+}
+
+/// `kubectl auth can-i --list -n <namespace>`.
+#[tauri::command]
+pub(crate) async fn access_rules_cmd(
+    cluster_id: String,
+    namespace: String,
+    state: State<'_, AppState>,
+) -> Result<ferrisscope_kube_ext::access::RulesReview, String> {
+    let entry = connected_entry(&state, &cluster_id).await?;
+    inspect(ferrisscope_kube_ext::access::rules(
+        entry.cluster.client(),
+        &namespace,
+    ))
+    .await
 }
 
 /// Subscribe to live deltas for `(cluster_id, kind_id)`.

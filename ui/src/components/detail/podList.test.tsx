@@ -1,9 +1,11 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetMockInvoke, setMockInvoke } from "../../test/tauri-mock";
+import { resetAccessCache } from "../../lib/access";
 import { emitMock, resetEventMock } from "../../test/tauri-event-mock";
 import { PodListSection } from "./podList";
 import { tokens } from "../../theme";
+import { useAppStore } from "../../store";
 import type { ResourceRow } from "../../types";
 
 afterEach(() => {
@@ -136,6 +138,41 @@ describe("PodListSection", () => {
     await mount();
     expect(await screen.findByText("web-7d9f-abc")).toBeInTheDocument();
     expect(screen.queryByText("Evict")).not.toBeInTheDocument();
+  });
+
+  it("grays out Evict in a namespace the identity may not evict in, asking once per namespace", async () => {
+    resetAccessCache();
+    const asked: unknown[] = [];
+    const cmds: string[] = [];
+    // No confirm dialog: a click leaking through would reach the backend.
+    const prev = useAppStore.getState().settings;
+    useAppStore.setState({ settings: { ...prev, confirmDestructive: false } });
+    const { props } = renderList({ enableEvict: true }, [POD, { ...POD, uid: "pod-2", name: "web-2" }]);
+    setMockInvoke((cmd, args) => {
+      cmds.push(cmd);
+      if (cmd === "subscribe_resource") return { rows: [], init_done: true };
+      if (cmd === "unsubscribe_resource") return undefined;
+      if (cmd === "access_check_cmd") {
+        const rs = args?.requests as unknown[];
+        asked.push(...rs);
+        return rs.map(() => ({ state: "denied", reason: "cannot create pods/eviction in production" }));
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    await act(async () => {
+      render(<PodListSection {...props} />);
+    });
+    await waitFor(() =>
+      expect(screen.getAllByTitle(/Not permitted: cannot create pods\/eviction/)).toHaveLength(2),
+    );
+    for (const b of screen.getAllByRole("button", { name: "Evict" })) expect(b).toBeDisabled();
+    fireEvent.click(screen.getAllByRole("button", { name: "Evict" })[0]!);
+    await act(async () => {});
+    expect(cmds).not.toContain("evict_pod_cmd");
+    expect(asked).toEqual([{ kindId: "pods", action: "evict", namespace: "production", name: null }]);
+    cleanup();
+    resetAccessCache();
+    useAppStore.setState({ settings: prev });
   });
 
   describe("live deltas", () => {

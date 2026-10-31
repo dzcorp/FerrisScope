@@ -1139,6 +1139,21 @@ pub enum HelmInstallResult {
     HelmMissing,
 }
 
+const NAMESPACE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether an install should pass `--create-namespace`. Not when the
+/// namespace exists or can't be read (403): the create would be refused to a
+/// namespace-scoped identity even for an existing namespace. Any other
+/// failure keeps the flag, so a blip doesn't fail a fresh-namespace install.
+pub async fn needs_create_namespace(client: &Client, namespace: &str) -> bool {
+    let api: Api<Namespace> = Api::all(client.clone());
+    match tokio::time::timeout(NAMESPACE_PROBE_TIMEOUT, api.get(namespace)).await {
+        Ok(Ok(_)) => false,
+        Ok(Err(kube::Error::Api(s))) => !(s.code == 403 && s.reason == "Forbidden"),
+        _ => true,
+    }
+}
+
 /// Install a new release. `source` switches the chart resolution path:
 ///
 /// * [`HELM_CLUSTER_SOURCE`] — list every helm release secret in the
@@ -1148,8 +1163,7 @@ pub enum HelmInstallResult {
 /// * `<repo-name>` — pass `<repo>/<chart>` directly to helm; the binary
 ///   pulls from its own cache (no extraction needed).
 ///
-/// Both paths use `--create-namespace` so the operator doesn't get a
-/// confusing failure on a fresh namespace name.
+/// `--create-namespace` follows [`needs_create_namespace`].
 pub async fn helm_install_chart(
     client: Client,
     context_name: &str,
@@ -1185,7 +1199,7 @@ pub async fn helm_install_chart(
                     "no release uses chart {chart_name}@{chart_version}"
                 ))
             })?;
-        let sample = fetch_full_release(client, &hit).await?;
+        let sample = fetch_full_release(client.clone(), &hit).await?;
         match stage_release_chart(&sample, tmp.path()).await? {
             Ok(dir) => (dir.into_os_string(), None),
             Err(fail) => {
@@ -1200,12 +1214,14 @@ pub async fn helm_install_chart(
         (format!("{source}/{chart_name}").into(), Some(chart_version))
     };
 
+    let create_namespace = needs_create_namespace(&client, target_namespace).await;
     let args = crate::helm::install_args(
         target_release,
         target_namespace,
         &chart_arg,
         &values_path,
         version,
+        create_namespace,
         KubeTarget {
             context: context_name,
             kubeconfig: kubeconfig_path,
@@ -1357,8 +1373,12 @@ pub async fn get_custom_resource_definition_detail(
 pub async fn discover_crds(
     client: Client,
 ) -> Result<Vec<crate::registry::DiscoveredCrd>, FetchError> {
-    let api: Api<CustomResourceDefinition> = Api::all(client);
-    let list = api.list(&ListParams::default()).await?;
+    let api: Api<CustomResourceDefinition> = Api::all(client.clone());
+    let list = match api.list(&ListParams::default()).await {
+        Ok(list) => list,
+        Err(kube::Error::Api(s)) if s.code == 403 => return discover_api_kinds(client).await,
+        Err(e) => return Err(e.into()),
+    };
     let mut out = Vec::new();
     for crd in list.items {
         let spec = crd.spec;
@@ -1393,6 +1413,89 @@ pub async fn discover_crds(
         });
     }
     Ok(out)
+}
+
+/// API groups Kubernetes defines. Whatever else discovery lists is a CRD or
+/// an aggregated API.
+const BUILTIN_API_GROUPS: &[&str] = &[
+    "",
+    "admissionregistration.k8s.io",
+    "apiextensions.k8s.io",
+    "apiregistration.k8s.io",
+    "apps",
+    "authentication.k8s.io",
+    "authorization.k8s.io",
+    "autoscaling",
+    "batch",
+    "certificates.k8s.io",
+    "coordination.k8s.io",
+    "discovery.k8s.io",
+    "events.k8s.io",
+    "flowcontrol.apiserver.k8s.io",
+    "internal.apiserver.k8s.io",
+    "metrics.k8s.io",
+    "networking.k8s.io",
+    "node.k8s.io",
+    "policy",
+    "rbac.authorization.k8s.io",
+    "resource.k8s.io",
+    "scheduling.k8s.io",
+    "storage.k8s.io",
+    "storagemigration.k8s.io",
+];
+
+/// Custom kinds for an identity that can't list CRDs (namespace-scoped):
+/// API discovery is readable by every authenticated identity. No printer
+/// columns, so tables get name/namespace/age. A 403 here too (discovery
+/// locked down) means nothing to offer, not an error.
+async fn discover_api_kinds(
+    client: Client,
+) -> Result<Vec<crate::registry::DiscoveredCrd>, FetchError> {
+    use kube::discovery::Discovery;
+    let aggregated = Discovery::new(client.clone())
+        .exclude(BUILTIN_API_GROUPS)
+        .run_aggregated()
+        .await;
+    let discovery = match aggregated {
+        Ok(d) => d,
+        // Pre-1.26 apiservers have no aggregated discovery.
+        Err(_) => match Discovery::new(client)
+            .exclude(BUILTIN_API_GROUPS)
+            .run()
+            .await
+        {
+            Ok(d) => d,
+            Err(kube::Error::Api(s)) if s.code == 403 => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        },
+    };
+    Ok(watchable_kinds(
+        discovery.groups().flat_map(|g| g.recommended_resources()),
+    ))
+}
+
+fn watchable_kinds(
+    resources: impl Iterator<
+        Item = (
+            kube::discovery::ApiResource,
+            kube::discovery::ApiCapabilities,
+        ),
+    >,
+) -> Vec<crate::registry::DiscoveredCrd> {
+    use kube::discovery::{verbs, Scope};
+    resources
+        .filter(|(_, caps)| {
+            caps.supports_operation(verbs::LIST) && caps.supports_operation(verbs::WATCH)
+        })
+        .map(|(ar, caps)| crate::registry::DiscoveredCrd {
+            group: ar.group,
+            version: ar.version,
+            plural: ar.plural,
+            kind: ar.kind,
+            namespaced: matches!(caps.scope, Scope::Namespaced),
+            printer_columns: Vec::new(),
+        })
+        .collect()
 }
 
 /// Fetch a custom resource via the dynamic API plus the matching CRD's
@@ -2518,6 +2621,111 @@ mod run_helm_tests {
         let cmd = std::process::Command::new("ferrisscope-no-such-binary");
         let err = run_helm(cmd, Duration::from_secs(1)).await.unwrap_err();
         assert!(matches!(err, HelmRunError::Spawn(_)), "got {err:?}");
+    }
+}
+
+#[cfg(test)]
+mod crd_discovery_tests {
+    use super::discover_crds;
+    use kube::Client;
+
+    const FORBIDDEN: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"customresourcedefinitions.apiextensions.k8s.io is forbidden","reason":"Forbidden","code":403}"#;
+    const APIS: &str = r#"{"kind":"APIGroupDiscoveryList","apiVersion":"apidiscovery.k8s.io/v2","metadata":{},"items":[
+      {"metadata":{"name":"example.com"},"versions":[{"version":"v1","freshness":"Current","resources":[
+        {"resource":"widgets","responseKind":{"group":"example.com","version":"v1","kind":"Widget"},"scope":"Namespaced","singularResource":"widget","verbs":["get","list","watch"]},
+        {"resource":"reports","responseKind":{"group":"example.com","version":"v1","kind":"Report"},"scope":"Cluster","singularResource":"report","verbs":["create"]}]}]},
+      {"metadata":{"name":"gateway.networking.k8s.io"},"versions":[{"version":"v1","freshness":"Current","resources":[
+        {"resource":"gateways","responseKind":{"group":"gateway.networking.k8s.io","version":"v1","kind":"Gateway"},"scope":"Namespaced","singularResource":"gateway","verbs":["get","list","watch"]}]}]},
+      {"metadata":{"name":"apps"},"versions":[{"version":"v1","freshness":"Current","resources":[
+        {"resource":"deployments","responseKind":{"group":"apps","version":"v1","kind":"Deployment"},"scope":"Namespaced","singularResource":"deployment","verbs":["get","list","watch"]}]}]}]}"#;
+
+    /// CRD listing is refused; `/apis` answers with `apis` (status, body).
+    fn restricted(apis: (u16, &'static str)) -> Client {
+        let svc = tower::service_fn(move |req: http::Request<kube::client::Body>| async move {
+            let (code, body) = if req.uri().path() == "/apis" {
+                apis
+            } else {
+                (403, FORBIDDEN)
+            };
+            Ok::<_, std::convert::Infallible>(
+                http::Response::builder()
+                    .status(code)
+                    .body(kube::client::Body::from(body.as_bytes().to_vec()))
+                    .unwrap(),
+            )
+        });
+        Client::new(svc, "default")
+    }
+
+    #[tokio::test]
+    async fn without_crd_access_custom_kinds_come_from_api_discovery() {
+        let mut got: Vec<(String, String, bool)> = discover_crds(restricted((200, APIS)))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.group, c.kind, c.namespaced))
+            .collect();
+        got.sort();
+        // Built-in groups are left out, and so is what can't be watched.
+        assert_eq!(
+            got,
+            vec![
+                ("example.com".into(), "Widget".into(), true),
+                ("gateway.networking.k8s.io".into(), "Gateway".into(), true),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn locked_down_discovery_offers_nothing_instead_of_failing() {
+        assert!(discover_crds(restricted((403, FORBIDDEN)))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod create_namespace_tests {
+    use super::needs_create_namespace;
+    use kube::Client;
+
+    const NS: &str = r#"{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"team-a"}}"#;
+    const FORBIDDEN: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"namespaces \"team-a\" is forbidden","reason":"Forbidden","code":403}"#;
+    const NOT_FOUND: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"namespaces \"team-a\" not found","reason":"NotFound","code":404}"#;
+    const BROKEN: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"etcd","reason":"InternalError","code":500}"#;
+
+    fn answering(code: u16, body: &'static str) -> Client {
+        let svc = tower::service_fn(move |_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(
+                http::Response::builder()
+                    .status(code)
+                    .body(kube::client::Body::from(body.as_bytes().to_vec()))
+                    .unwrap(),
+            )
+        });
+        Client::new(svc, "default")
+    }
+
+    #[tokio::test]
+    async fn only_a_known_missing_namespace_or_a_failed_read_creates_it() {
+        assert!(needs_create_namespace(&answering(404, NOT_FOUND), "team-a").await);
+        assert!(!needs_create_namespace(&answering(200, NS), "team-a").await);
+        assert!(!needs_create_namespace(&answering(403, FORBIDDEN), "team-a").await);
+        assert!(needs_create_namespace(&answering(500, BROKEN), "team-a").await);
+        // A proxy's HTML 403 isn't the apiserver refusing the read.
+        assert!(needs_create_namespace(&answering(403, "<html>denied</html>"), "team-a").await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_read_keeps_the_flag() {
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async {
+            std::future::pending::<
+                Result<http::Response<kube::client::Body>, std::convert::Infallible>,
+            >()
+            .await
+        });
+        assert!(needs_create_namespace(&Client::new(svc, "default"), "team-a").await);
     }
 }
 

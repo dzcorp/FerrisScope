@@ -107,3 +107,15 @@ describe("buildActionMenuItems — delete", () => {
     }
   });
 });
+
+describe("detailAccessActions", () => {
+  it("asks only for verbs the panel's buttons and editors use", async () => {
+    const { detailAccessActions } = await import("./DetailPanel");
+    expect(detailAccessActions("pods")).toEqual(["patch", "exec", "restart", "evict", "delete"]);
+    expect(detailAccessActions("nodes")).toContain("drain");
+    expect(detailAccessActions("cronjobs")).toContain("trigger");
+    expect(detailAccessActions("helm_releases")).toEqual(["helmUninstall"]);
+    expect(detailAccessActions("helm_charts")).toEqual([]);
+    expect(detailAccessActions("crd:x.io|v1|widgets|Widget|ns")).toEqual(["patch", "delete"]);
+  });
+});

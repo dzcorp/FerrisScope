@@ -3,7 +3,7 @@
 // paths for both Localhost (pf_start) and Global/DNS (gf_enable_service) modes.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { NewForwardForm, kvBufferToSelector } from "./NewForwardForm";
 
 // The Select popover calls scrollIntoView on open; jsdom doesn't implement it.
@@ -12,6 +12,7 @@ import { useAppStore } from "../../store";
 import { tokens } from "../../theme";
 import { kvBufferFromPairs } from "../detail/edit";
 import { setMockInvoke, resetMockInvoke } from "../../test/tauri-mock";
+import { resetAccessCache } from "../../lib/access";
 import type { ContextInfo } from "../../types";
 
 const t = tokens("dark");
@@ -116,6 +117,28 @@ describe("NewForwardForm — simple mode (text fallback)", () => {
     const pf = calls.find((c) => c.cmd === "pf_start")!;
     expect((pf.args!.target as { name: string }).name).toBe("api");
     expect(pf.args!.remotePort).toBe(80);
+  });
+
+  it("asks with the typed target, and grays out a forward it may not open", async () => {
+    resetAccessCache();
+    const reqs: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd === "list_namespaces_cmd" || cmd === "list_services_in_namespace_cmd") return [];
+      if (cmd !== "access_check_cmd") return undefined;
+      const rs = args?.requests as unknown[];
+      reqs.push(...rs);
+      return rs.map(() => ({ state: "denied", reason: "cannot create pods/portforward in default" }));
+    });
+    render(<NewForwardForm t={t} onDone={() => {}} />);
+    // Nothing to ask before a namespace is typed.
+    expect(screen.getByRole("button", { name: "Forward" })).toBeEnabled();
+    fireEvent.change(await screen.findByPlaceholderText("default"), { target: { value: "default" } });
+    fireEvent.change(screen.getByPlaceholderText("my-service"), { target: { value: "api" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Forward" })).toBeDisabled());
+    expect(screen.getByText("Not permitted: cannot create pods/portforward in default")).toBeInTheDocument();
+    expect(reqs.at(-1)).toEqual({ kindId: "services", action: "portForward", namespace: "default", name: "api" });
+    cleanup();
+    resetAccessCache();
   });
 
   it("blocks submit with a validation message when name is missing", async () => {

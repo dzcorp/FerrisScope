@@ -23,8 +23,11 @@ import {
 import type { ReactNode } from "react";
 import { api } from "../../api";
 import { selectClusterDegraded, useAppStore } from "../../store";
+import { useKindAccess } from "../../lib/access";
 import type { ApplyResult } from "../../types";
 import type { ApplyTarget } from "./edit";
+
+const PATCH_ACTION = ["patch"] as const;
 
 export type ConflictInfo = {
   managers: string[];
@@ -56,6 +59,8 @@ type SessionApi = {
   // the global Save is blocked — a doomed SSA against a dead apiserver helps
   // no one. Cleared automatically when the cluster reconnects.
   readOnly: boolean;
+  /// Why `readOnly`: the cluster is degraded, or RBAC denies `patch`.
+  readOnlyReason: string | null;
   // Editor-side: register callbacks (mount/unmount). Returns unregister.
   register(id: string, field: RegisteredField): () => void;
   // Editor-side: tell the session whether this field is currently dirty.
@@ -111,7 +116,18 @@ export function EditSessionProvider({
   // auto-reconnect). Reactive so editors collapse their pencils the moment the
   // health probe flips. Mirrored into a ref so `saveAll` can bail without
   // taking `readOnly` as a dependency (which would churn its identity).
-  const readOnly = useAppStore((s) => selectClusterDegraded(s, target.clusterId));
+  const degraded = useAppStore((s) => selectClusterDegraded(s, target.clusterId));
+  // Every structured edit is an SSA patch of this object.
+  const patchGate = useKindAccess(target.clusterId, target.kindId, PATCH_ACTION, {
+    namespace: target.namespace,
+    name: target.name,
+  }).patch;
+  const readOnly = degraded || !patchGate.allowed;
+  const readOnlyReason = degraded
+    ? "Cluster unavailable — reconnect to edit"
+    : patchGate.allowed
+      ? null
+      : patchGate.reason;
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
 
@@ -291,6 +307,7 @@ export function EditSessionProvider({
     () => ({
       target,
       readOnly,
+      readOnlyReason,
       register,
       setDirty,
       dirty,
@@ -306,6 +323,7 @@ export function EditSessionProvider({
     [
       target,
       readOnly,
+      readOnlyReason,
       register,
       setDirty,
       dirty,
@@ -408,6 +426,7 @@ export function useEditField<B>(opts: {
     // True when the cluster can't take writes. `enter` already no-ops; editors
     // pass this to EditModeChrome so the pencil renders disabled with a hint.
     readOnly: session?.readOnly ?? false,
+    readOnlyReason: session?.readOnlyReason ?? null,
   };
 }
 

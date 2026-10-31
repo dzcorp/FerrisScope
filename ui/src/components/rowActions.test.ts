@@ -7,6 +7,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   actionsForRow,
   actionsForSelection,
+  rowAccessActions,
   menuScopeFor,
   selectionMenuHeader,
   type RowActionContext,
@@ -368,5 +369,51 @@ describe("menuScopeFor", () => {
 
   it("needs no selection at all", () => {
     expect(menuScopeFor(sel(), "a")).toEqual({ scope: "row", clear: false });
+  });
+});
+
+describe("actionsForRow — RBAC gates", () => {
+  const denied = { allowed: false, reason: "Not permitted: cannot delete pods in default", pending: false, error: null };
+  const open = { allowed: true, reason: null, pending: false, error: null };
+
+  it("disables a denied item and carries the reason as its tooltip", () => {
+    const ctx = { ...ctxFor(kindOf("pods", "Pod")), delete: vi.fn(), evict: vi.fn() };
+    const items = actionsForRow(ctx, { access: { delete: denied, evict: open } });
+    const del = items.find((i) => i.kind === "item" && i.label === "Delete pod");
+    const evict = items.find((i) => i.kind === "item" && i.label === "Evict pod");
+    expect(del).toMatchObject({ disabled: true, title: denied.reason });
+    expect(evict).toMatchObject({ disabled: false });
+    expect(evict && "title" in evict ? evict.title : undefined).toBeUndefined();
+  });
+
+  it("an unknown or pending answer leaves the item enabled", () => {
+    const ctx = { ...ctxFor(kindOf("nodes", "Node")), drain: vi.fn() };
+    const items = actionsForRow(ctx, { access: { drain: { allowed: true, reason: null, pending: true, error: null } } });
+    expect(items.find((i) => i.kind === "item" && i.label === "Drain")).toMatchObject({ disabled: false });
+  });
+
+  it("the degraded-cluster gate still wins without an RBAC answer", () => {
+    const ctx = { ...ctxFor(kindOf("pods", "Pod")), delete: vi.fn() };
+    const items = actionsForRow(ctx, { readOnly: true });
+    expect(items.find((i) => i.kind === "item" && i.label === "Delete pod")).toMatchObject({ disabled: true });
+  });
+
+  it("asks only for verbs the kind's menu can show", () => {
+    expect(rowAccessActions("pods")).toEqual(["logs", "exec", "restart", "evict", "patch", "portForward", "delete"]);
+    expect(rowAccessActions("helm_releases")).toEqual(["helmUninstall"]);
+    expect(rowAccessActions("helm_charts")).toEqual([]);
+    expect(rowAccessActions("configmaps")).toEqual(["delete"]);
+  });
+
+  it("selection menu items inherit a bulk action's denial reason", () => {
+    const items = actionsForSelection({
+      kind: kindOf("pods", "Pod"),
+      count: 2,
+      bulk: [{ icon: null, label: "Delete", onClick: vi.fn(), disabled: true, disabledReason: "Not permitted: x" }],
+    });
+    expect(items.find((i) => i.kind === "item" && i.label === "Delete")).toMatchObject({
+      disabled: true,
+      title: "Not permitted: x",
+    });
   });
 });

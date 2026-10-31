@@ -1,6 +1,7 @@
 import { logErr } from "../lib/log";
 import { execContainers, rowLogContainers } from "../lib/podContainers";
-import type { ResourceKind, ResourceRow } from "../types";
+import type { AccessAction, ResourceKind, ResourceRow } from "../types";
+import type { Gate } from "../lib/access";
 import type { MenuItem } from "./ContextMenu";
 import type { BulkAction } from "./BulkBar";
 
@@ -35,9 +36,36 @@ export type RowActionContext = {
 
 // Per HV2PodMenu, pod actions surface in this order with destructive items
 // (Delete) trailing — R-04: never the default action of the group.
+/// RBAC verbs the row menu for `kindId` can show — what the table asks
+/// about when the menu opens.
+export function rowAccessActions(kindId: string): AccessAction[] {
+  switch (kindId) {
+    case "pods":
+      return ["logs", "exec", "restart", "evict", "patch", "portForward", "delete"];
+    case "deployments":
+    case "statefulsets":
+      return ["logs", "patch", "delete"];
+    case "daemonsets":
+    case "replicasets":
+      return ["logs", "delete"];
+    case "jobs":
+      return ["logs", "rerun", "suspend", "delete"];
+    case "cronjobs":
+      return ["trigger", "suspend", "patch", "delete"];
+    case "nodes":
+      return ["nodeShell", "cordon", "drain", "patch", "delete"];
+    case "helm_releases":
+      return ["helmUninstall"];
+    case "helm_charts":
+      return [];
+    default:
+      return ["delete"];
+  }
+}
+
 export function actionsForRow(
   ctx: RowActionContext,
-  opts?: { readOnly?: boolean },
+  opts?: { readOnly?: boolean; access?: Partial<Record<AccessAction, Gate>> },
 ): MenuItem[] {
   const {
     kind,
@@ -52,6 +80,11 @@ export function actionsForRow(
   // Cluster degraded (unavailable / mid auto-reconnect): every mutating item
   // disables, but View details / View logs / Copy stay live.
   const readOnly = opts?.readOnly ?? false;
+  const gate = (action: AccessAction, disabled = readOnly): Pick<MenuItem & { kind: "item" }, "disabled" | "title"> => {
+    const g = opts?.access?.[action];
+    if (g && !g.allowed) return { disabled: true, ...(g.reason ? { title: g.reason } : {}) };
+    return { disabled };
+  };
   const name = String(row.name ?? "");
   const ns = typeof row.namespace === "string" ? row.namespace : null;
   const qualified = ns ? `${ns}/${name}` : name;
@@ -70,58 +103,58 @@ export function actionsForRow(
       kind: "item",
       label: "View logs",
       onClick: openLogs,
-      disabled: logContainers.length === 0,
+      ...gate("logs", logContainers.length === 0),
     });
     if (openExec)
       items.push({
         kind: "item",
         label: "Exec shell",
         onClick: openExec,
-        disabled: shellContainers.length === 0 || readOnly,
+        ...gate("exec", shellContainers.length === 0 || readOnly),
       });
     if (openYamlEdit)
       items.push({
         kind: "item",
         label: "Edit YAML",
         onClick: openYamlEdit,
-        disabled: readOnly,
+        ...gate("patch"),
       });
     if (openPortForward)
       items.push({
         kind: "item",
         label: "Port forward",
         onClick: openPortForward,
-        disabled: readOnly,
+        ...gate("portForward"),
       });
   } else if (kind.id === "deployments" || kind.id === "statefulsets") {
     // Aggregated logs over the workload's pods (resolved via its selector).
-    items.push({ kind: "item", label: "View logs", onClick: openLogs });
+    items.push({ kind: "item", label: "View logs", onClick: openLogs, ...gate("logs", false) });
     if (openYamlEdit)
       items.push({
         kind: "item",
         label: "Edit YAML",
         onClick: openYamlEdit,
-        disabled: readOnly,
+        ...gate("patch"),
       });
   } else if (
     kind.id === "daemonsets" ||
     kind.id === "replicasets" ||
     kind.id === "jobs"
   ) {
-    items.push({ kind: "item", label: "View logs", onClick: openLogs });
+    items.push({ kind: "item", label: "View logs", onClick: openLogs, ...gate("logs", false) });
     if (kind.id === "jobs" && ctx.rerun)
       items.push({
         kind: "item",
         label: "Re-run job",
         onClick: ctx.rerun,
-        disabled: readOnly,
+        ...gate("rerun"),
       });
     if (kind.id === "jobs" && ctx.suspendTo)
       items.push({
         kind: "item",
         label: ctx.suspendTo.target ? "Suspend job" : "Resume job",
         onClick: ctx.suspendTo.run,
-        disabled: readOnly,
+        ...gate("suspend"),
       });
   } else if (kind.id === "cronjobs") {
     // "Run now" leads: it is the reason an operator opens this menu, and it
@@ -131,21 +164,21 @@ export function actionsForRow(
         kind: "item",
         label: "Run now",
         onClick: ctx.trigger,
-        disabled: readOnly,
+        ...gate("trigger"),
       });
     if (ctx.suspendTo)
       items.push({
         kind: "item",
         label: ctx.suspendTo.target ? "Suspend cron job" : "Resume cron job",
         onClick: ctx.suspendTo.run,
-        disabled: readOnly,
+        ...gate("suspend"),
       });
     if (openYamlEdit)
       items.push({
         kind: "item",
         label: "Edit YAML",
         onClick: openYamlEdit,
-        disabled: readOnly,
+        ...gate("patch"),
       });
   } else if (kind.id === "nodes") {
     if (openExec)
@@ -153,28 +186,28 @@ export function actionsForRow(
         kind: "item",
         label: "Node shell (debug)",
         onClick: openExec,
-        disabled: readOnly,
+        ...gate("nodeShell"),
       });
     if (ctx.cordonTo)
       items.push({
         kind: "item",
         label: ctx.cordonTo.target ? "Cordon" : "Uncordon",
         onClick: ctx.cordonTo.run,
-        disabled: readOnly,
+        ...gate("cordon"),
       });
     if (ctx.drain)
       items.push({
         kind: "item",
         label: "Drain",
         onClick: ctx.drain,
-        disabled: readOnly,
+        ...gate("drain"),
       });
     if (openYamlEdit)
       items.push({
         kind: "item",
         label: "Edit YAML",
         onClick: openYamlEdit,
-        disabled: readOnly,
+        ...gate("patch"),
       });
   }
 
@@ -205,7 +238,7 @@ export function actionsForRow(
         kind: "item",
         label: "Restart pod",
         onClick: restart,
-        disabled: readOnly,
+        ...gate("restart"),
       });
     // Evict = graceful, PDB-aware. Sits above Delete (raw DELETE) so the
     // budget-respecting path is the first destructive option operators reach.
@@ -215,7 +248,7 @@ export function actionsForRow(
         label: "Evict pod",
         onClick: ctx.evict,
         danger: true,
-        disabled: readOnly,
+        ...gate("evict"),
       });
     if (ctx.delete)
       items.push({
@@ -223,7 +256,7 @@ export function actionsForRow(
         label: "Delete pod",
         onClick: ctx.delete,
         danger: true,
-        disabled: readOnly,
+        ...gate("delete"),
       });
   } else if (kind.id === "nodes" && ctx.delete) {
     items.push({ kind: "separator" });
@@ -232,7 +265,7 @@ export function actionsForRow(
       label: "Delete node",
       onClick: ctx.delete,
       danger: true,
-      disabled: readOnly,
+      ...gate("delete"),
     });
   } else if (kind.id === "helm_charts") {
     // Helm chart rows are synthetic catalog entries — there's no single
@@ -250,7 +283,7 @@ export function actionsForRow(
       label: "Uninstall release",
       onClick: ctx.delete,
       danger: true,
-      disabled: readOnly,
+      ...gate("helmUninstall"),
     });
   } else if (kind.id !== "pods" && kind.id !== "nodes" && ctx.delete) {
     // Generic Delete for every other kind. The dynamic API in
@@ -263,7 +296,7 @@ export function actionsForRow(
       label: `Delete ${kind.kind.toLowerCase()}`,
       onClick: ctx.delete,
       danger: true,
-      disabled: readOnly,
+      ...gate("delete"),
     });
   }
 
@@ -334,6 +367,7 @@ export function actionsForSelection(opts: {
       // A degraded cluster disables the bulk action itself; readOnly is the
       // table's view of the same condition, so either one is enough.
       ...(action.disabled || opts.readOnly ? { disabled: true } : {}),
+      ...(action.disabled && action.disabledReason ? { title: action.disabledReason } : {}),
     });
   }
 

@@ -50,8 +50,10 @@ export function Btn({
   fullWidth,
   pressed,
 }: BtnProps) {
-  const [hover, setHover] = useState(false);
-  const [active, setActive] = useState(false);
+  const [hoverRaw, setHover] = useState(false);
+  const [activeRaw, setActive] = useState(false);
+  const hover = hoverRaw && !disabled;
+  const active = activeRaw && !disabled;
 
   const sizes =
     size === "sm"
@@ -98,9 +100,8 @@ export function Btn({
   const btn = (
     <button
       type={type}
-      disabled={disabled}
+      {...inertProps(disabled, title, onClick)}
       aria-pressed={pressed}
-      onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {
         setHover(false);
@@ -181,6 +182,28 @@ export function Btn({
   return title ? <Tooltip label={title}>{btn}</Tooltip> : btn;
 }
 
+const swallow = (e: React.MouseEvent) => {
+  e.preventDefault();
+  e.stopPropagation();
+};
+
+/// Engines don't all deliver pointer events to a `disabled` button, yet its
+/// tooltip is often the reason it's disabled (an RBAC denial). One with a
+/// tooltip stays hoverable: `aria-disabled`, and its clicks (or a form's
+/// implicit submit) are swallowed.
+export function inertProps(
+  disabled: boolean | undefined,
+  title: string | undefined,
+  onClick: ((e: React.MouseEvent<HTMLButtonElement>) => void) | undefined,
+) {
+  const explained = !!disabled && !!title;
+  return {
+    disabled: disabled && !explained,
+    "aria-disabled": explained || undefined,
+    onClick: explained ? swallow : onClick,
+  };
+}
+
 export type IconBtnSize = "sm" | "md" | "lg";
 
 type IconBtnProps = {
@@ -247,8 +270,7 @@ export const IconBtn = forwardRef<HTMLButtonElement, IconBtnProps>(
       <button
         ref={ref}
         type="button"
-        onClick={onClick}
-        disabled={disabled}
+        {...inertProps(disabled, title, onClick)}
         // Mirror the tooltip label as the accessible name: the icon is the only
         // content, and `Tooltip` only renders `title` into the DOM on hover, so
         // without this the button has no name for screen readers (or tests).

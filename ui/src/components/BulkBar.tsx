@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { useResolvedTheme } from "../store";
 import { type ThemeMode, R_LG, R_MD, FS_MD, FS_SM } from "../theme";
-import { Icons } from "./ui";
+import { Icons, inertProps } from "./ui";
+import type { AccessAction } from "../types";
 
 export type BulkAction = {
   icon: ReactNode;
@@ -10,8 +11,13 @@ export type BulkAction = {
   danger?: boolean;
   separatorBefore?: boolean;
   // Disabled when the selection spans a degraded cluster (unavailable / mid
-  // auto-reconnect). Read actions (Copy/Compare/Observe) leave this unset.
+  // auto-reconnect) or RBAC denies it for every selected row. Read actions
+  // (Copy/Compare/Observe) leave this unset.
   disabled?: boolean;
+  /// Why it's disabled; defaults to the degraded-cluster explanation.
+  disabledReason?: string;
+  /// The RBAC verb this needs; `gateBulkActions` disables it when denied.
+  access?: AccessAction;
 };
 type Action = BulkAction;
 
@@ -99,6 +105,7 @@ export function BulkBar({ count, actions, onClear, children }: Props) {
             onClick={a.onClick}
             danger={a.danger}
             disabled={a.disabled}
+            disabledReason={a.disabledReason}
           />
         </span>
       ))}
@@ -145,21 +152,23 @@ function BulkActionButton({
   onClick,
   danger,
   disabled = false,
+  disabledReason,
 }: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
   danger?: boolean;
   disabled?: boolean;
+  disabledReason?: string;
 }) {
   const [hover, setHover] = useState(false);
   const showHover = hover && !disabled;
+  const title = disabled ? (disabledReason ?? "Cluster unavailable — reconnect to run this") : undefined;
   return (
     <button
       type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={disabled ? "Cluster unavailable — reconnect to run this" : undefined}
+      {...inertProps(disabled, title, onClick)}
+      title={title}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{

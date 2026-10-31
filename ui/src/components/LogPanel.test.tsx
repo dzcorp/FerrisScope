@@ -717,4 +717,28 @@ describe("LogPanel metrics tab", () => {
       utils.getByText(/metrics-server not detected on prod-eu/),
     ).toBeInTheDocument();
   });
+
+  it("says not permitted, not absent, when RBAC refused the metrics read", async () => {
+    mockBackend({});
+    act(() => {
+      useAppStore.setState({
+        metricsByCluster: {
+          [ctxEu.id]: { ...snapshot({}, false), forbidden: "pods.metrics.k8s.io is forbidden" },
+        },
+      });
+    });
+    let utils!: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(
+        <LogPanel
+          mode="dark"
+          targets={[podTarget("api-0", ["app"])]}
+          initialTab="metrics"
+          onClose={() => {}}
+        />,
+      );
+    });
+    expect(utils.getByText(/Not permitted to read metrics on prod-eu/)).toBeInTheDocument();
+    expect(utils.queryByText(/metrics-server not detected/)).toBeNull();
+  });
 });

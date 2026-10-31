@@ -4,6 +4,7 @@
 //! and a generic reflector that emits JSON-shaped rows so a single Tauri
 //! command pair can serve every browseable kind.
 
+pub mod access;
 pub mod bootstrap;
 pub mod cron_schedule;
 pub mod fetch;
@@ -35,12 +36,13 @@ pub use fetch::{
     helm_uninstall, helm_upgrade, list_config_maps_in_namespace, list_jobs_for_cron_job,
     list_namespace_names, list_object_events, list_persistent_volume_claims_in_namespace,
     list_pods_for_workload, list_pods_on_node, list_secrets_in_namespace,
-    list_services_in_namespace, manual_job_name, merge_patch_resource, rerun_job, rerun_job_name,
-    restart_pod_owner, restart_pods_owners, restart_workload, set_node_cordon, trigger_cron_job,
-    ApplyConflict, ApplyOk, ApplyResult, Cascade, CronJobHistory, DocApplyResult, DrainFailure,
-    DrainReport, DrainSkipped, FetchError, HelmInstallResult, HelmRollbackResult,
-    HelmUpdateAvailable, HelmUpgradeResult, MergePatchResult, RestartFailure, RestartPodsReport,
-    RestartedWorkload, WorkloadPods, FIELD_MANAGER, HELM_CLUSTER_SOURCE,
+    list_services_in_namespace, manual_job_name, merge_patch_resource, needs_create_namespace,
+    rerun_job, rerun_job_name, restart_pod_owner, restart_pods_owners, restart_workload,
+    set_node_cordon, trigger_cron_job, ApplyConflict, ApplyOk, ApplyResult, Cascade,
+    CronJobHistory, DocApplyResult, DrainFailure, DrainReport, DrainSkipped, FetchError,
+    HelmInstallResult, HelmRollbackResult, HelmUpdateAvailable, HelmUpgradeResult,
+    MergePatchResult, RestartFailure, RestartPodsReport, RestartedWorkload, WorkloadPods,
+    FIELD_MANAGER, HELM_CLUSTER_SOURCE,
 };
 pub use log_pods::{
     resolve_log_pods, start_log_pod_watch, LogContainer, LogContainerKind, LogPodEvent,

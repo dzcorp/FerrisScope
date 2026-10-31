@@ -157,3 +157,114 @@ describe("NamespaceModal selection model", () => {
     expect(labels[0]).toBe("web");
   });
 });
+
+describe("NamespaceModal for identities that can't list namespaces", () => {
+  function renderEmpty(suggested?: string[], unlistable: string | null = "Not permitted: cannot list namespaces") {
+    const onApply = vi.fn();
+    render(
+      <NamespaceModal
+        mode="dark"
+        namespaces={[]}
+        suggested={suggested}
+        unlistable={unlistable}
+        initial={new Set<string>(["already-typed"])}
+        onApply={onApply}
+        onClose={() => {}}
+      />,
+    );
+    return onApply;
+  }
+
+  it("explains the empty list and offers kubeconfig + current namespaces", () => {
+    renderEmpty(["team-a"]);
+    expect(screen.getByText(/No namespaces could be listed/)).toBeTruthy();
+    expect(screen.getByText("team-a")).toBeTruthy();
+    expect(screen.getByText("already-typed")).toBeTruthy();
+  });
+
+  it("says nothing about access while the list may still be loading", () => {
+    renderEmpty([], null);
+    expect(screen.queryByText(/No namespaces could be listed/)).toBeNull();
+  });
+
+  it("applies a typed namespace from the row and from Enter", () => {
+    const onApply = renderEmpty();
+    const input = screen.getByPlaceholderText("Search or type a namespace…");
+    fireEvent.change(input, { target: { value: "team-b" } });
+    fireEvent.click(screen.getByText(/Use namespace/));
+    expect(onApply).toHaveBeenLastCalledWith(new Set(["team-b"]));
+    fireEvent.change(input, { target: { value: "team-c" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onApply).toHaveBeenLastCalledWith(new Set(["team-c"]));
+  });
+
+  it("Enter uses the typed name even when it also filters other rows", () => {
+    const onApply = renderEmpty(["team-a"]);
+    const input = screen.getByPlaceholderText("Search or type a namespace…");
+    fireEvent.change(input, { target: { value: "team" } });
+    expect(screen.getByText("team-a")).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onApply).toHaveBeenLastCalledWith(new Set(["team"]));
+  });
+
+  it("Enter applies a typed name that is also offered", () => {
+    const onApply = renderEmpty(["team-a"]);
+    fireEvent.change(screen.getByPlaceholderText("Search or type a namespace…"), {
+      target: { value: "team-a" },
+    });
+    fireEvent.keyDown(screen.getByPlaceholderText("Search or type a namespace…"), { key: "Enter" });
+    expect(onApply).toHaveBeenLastCalledWith(new Set(["team-a"]));
+  });
+
+  it("refuses an invalid namespace name", () => {
+    renderEmpty();
+    fireEvent.change(screen.getByPlaceholderText("Search or type a namespace…"), {
+      target: { value: "Not_Valid" },
+    });
+    expect(screen.queryByText(/Use namespace/)).toBeNull();
+  });
+});
+
+describe("NamespaceModal typed entry for identities that can list namespaces", () => {
+  function renderListed(suggested?: string[]) {
+    const onApply = vi.fn();
+    render(
+      <NamespaceModal
+        mode="dark"
+        namespaces={["default", "kube-system", "web"]}
+        suggested={suggested}
+        initial={new Set<string>(["web"])}
+        onApply={onApply}
+        onClose={() => {}}
+      />,
+    );
+    return { onApply, input: screen.getByPlaceholderText("Search or type a namespace…") };
+  }
+
+  it("Enter on a search prefix keeps the selection", () => {
+    const { onApply, input } = renderListed();
+    fireEvent.change(input, { target: { value: "web-" } });
+    fireEvent.change(input, { target: { value: "de" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onApply).toHaveBeenLastCalledWith(new Set(["web"]));
+  });
+
+  it("Enter applies an exact listed name", () => {
+    const { onApply, input } = renderListed();
+    fireEvent.change(input, { target: { value: "default" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onApply).toHaveBeenLastCalledWith(new Set(["default"]));
+  });
+
+  it("Enter applies a name nothing matches", () => {
+    const { onApply, input } = renderListed();
+    fireEvent.change(input, { target: { value: "new-team" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onApply).toHaveBeenLastCalledWith(new Set(["new-team"]));
+  });
+
+  it("doesn't offer kubeconfig defaults the cluster didn't list", () => {
+    renderListed(["deleted-team"]);
+    expect(screen.queryByText("deleted-team")).toBeNull();
+  });
+});

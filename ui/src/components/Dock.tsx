@@ -38,6 +38,7 @@ import { Btn, ErrorBlock, IconBtn, Icons, Select } from "./ui";
 import { closeDockTabs } from "../lib/dockClose";
 import { api } from "../api";
 import type { DocApplyResult } from "../types";
+import { useYamlApplyAccess } from "../lib/yamlAccess";
 import { IS_WINDOWS, latinLetter } from "../lib/keyboard";
 import {
   installClipboardShortcuts,
@@ -1368,6 +1369,9 @@ function DockYaml({
   const results = st.results ?? null;
   const busy = !!st.busy;
   const validateError = st.validateError ?? null;
+  // Advisory unless every document is denied.
+  const kinds = useAppStore((s) => s.kinds);
+  const { gates: docGates, denied: deniedDocs, allDenied } = useYamlApplyAccess(clusterId, content, kinds);
 
   // Template picker options grouped by category. The Select atom is flat,
   // so we prepend a non-selectable header row per category by encoding it
@@ -1596,13 +1600,23 @@ function DockYaml({
           Dry-run
         </Btn>
         <div style={{ flex: 1 }} />
+        {deniedDocs.length > 0 && (
+          <span
+            title={deniedDocs.map((g) => g.reason).join("\n")}
+            style={{ color: t.warn, fontSize: FS_XS, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}
+          >
+            {deniedDocs.length === docGates.length
+              ? deniedDocs[0]?.reason
+              : `${deniedDocs.length} of ${docGates.length} documents not permitted`}
+          </span>
+        )}
         {hasConflict && (
           <Btn
             t={t}
             variant="secondary"
             size="sm"
             onClick={() => run(false, true)}
-            disabled={busy}
+            disabled={busy || allDenied}
           >
             Force takeover
           </Btn>
@@ -1612,7 +1626,8 @@ function DockYaml({
           variant="primary"
           size="sm"
           onClick={() => run(false, false)}
-          disabled={busy || !clusterId}
+          disabled={busy || !clusterId || allDenied}
+          title={allDenied ? (deniedDocs[0]?.reason ?? undefined) : undefined}
         >
           {busy ? "Applying…" : "Apply"}
         </Btn>

@@ -19,6 +19,10 @@ import { Cell, DataRow, DataTable } from "../gitops/table";
 import { useDetail } from "../useDetail";
 import { ExternalLinks, FailureBlock, Frame, HelmMissingNotice, Keywords, Notice, YamlEditor, sectionGap } from "./shared";
 import type { HelmFailure } from "./useHelmRelease";
+import { useKindAccess } from "../../../lib/access";
+import { useDebounced } from "../../../lib/useDebounced";
+
+const INSTALL_ACTION = ["helmInstall"] as const;
 
 type Props = {
   clusterId: string;
@@ -253,9 +257,23 @@ function Install({
   const nsErr = namespaceError(namespace.trim());
   const valuesErr = valuesYamlError(values);
   const collision = d.used_by.find((r) => r.name === name.trim() && r.namespace === namespace.trim());
+  // Asked once the namespace being typed settles.
+  const settledNs = useDebounced(namespace.trim(), 300);
+  const installGate = useKindAccess(
+    namespaceError(settledNs) ? null : clusterId,
+    "helm_releases",
+    INSTALL_ACTION,
+    { namespace: settledNs },
+  ).helmInstall;
   const locked = !d.helm_available || degraded || saving;
-  const canInstall = !locked && !nameErr && !nsErr && !valuesErr;
-  const why = !d.helm_available ? "helm CLI not found" : degraded ? "Cluster unavailable" : null;
+  const canInstall = !locked && !nameErr && !nsErr && !valuesErr && installGate.allowed;
+  const why = !d.helm_available
+    ? "helm CLI not found"
+    : degraded
+      ? "Cluster unavailable"
+      : installGate.allowed
+        ? null
+        : installGate.reason;
 
   const install = async () => {
     if (!canInstall) return;

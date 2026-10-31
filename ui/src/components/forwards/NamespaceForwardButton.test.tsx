@@ -3,11 +3,12 @@
 // (cluster, namespace) exists. Plus the enable click path.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { NamespaceForwardButton } from "./NamespaceForwardButton";
 import { useAppStore } from "../../store";
 import { tokens } from "../../theme";
 import { setMockInvoke, resetMockInvoke } from "../../test/tauri-mock";
+import { resetAccessCache } from "../../lib/access";
 import type { GlobalForwardSession } from "../../types";
 
 const t = tokens("dark");
@@ -33,6 +34,22 @@ describe("NamespaceForwardButton", () => {
     expect(
       screen.getByRole("button", { name: "Forward all services (DNS)" }),
     ).toBeTruthy();
+  });
+
+  it("asks about the namespace and grays out a forward it may not open", async () => {
+    resetAccessCache();
+    const reqs: unknown[] = [];
+    setMockInvoke((cmd, args) => {
+      if (cmd !== "access_check_cmd") return undefined;
+      reqs.push(...(args?.requests as unknown[]));
+      return [{ state: "denied", reason: "cannot list services in default" }];
+    });
+    render(<NamespaceForwardButton t={t} clusterId="ctx" namespace="default" />);
+    await waitFor(() => expect(screen.getByRole("button")).toBeDisabled());
+    expect(screen.getByRole("button").getAttribute("aria-label")).toContain("Not permitted: cannot list services");
+    expect(reqs).toEqual([{ kindId: "namespaces", action: "portForward", namespace: null, name: "default" }]);
+    cleanup();
+    resetAccessCache();
   });
 
   it("live: reads as forwarding with a count when a matching session exists", () => {

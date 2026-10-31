@@ -15,6 +15,8 @@ import type { ApplyTarget } from "./edit";
 import { tokens } from "../../theme";
 import { useAppStore } from "../../store";
 import { setMockInvoke, resetMockInvoke } from "../../test/tauri-mock";
+import { resetAccessCache } from "../../lib/access";
+import { EditModeChrome } from "./edit";
 
 const t = tokens("dark");
 const TARGET: ApplyTarget = {
@@ -28,6 +30,7 @@ const storeInitial = useAppStore.getState();
 
 beforeEach(() => {
   resetMockInvoke();
+  resetAccessCache();
   useAppStore.setState({
     ...storeInitial,
     clusterHealth: {},
@@ -123,9 +126,35 @@ describe("edit session read-only gating", () => {
       fireEvent.click(getByTestId("direct-save"));
     });
 
-    expect(invokeSpy).not.toHaveBeenCalled();
+    expect(invokeSpy).not.toHaveBeenCalledWith("apply_resource_cmd", expect.anything());
     expect(container.textContent ?? "").toMatch(
       /Cluster unavailable — reconnect to save/,
     );
+  });
+});
+
+describe("edit session RBAC gating", () => {
+  it("a denied patch makes the session read-only and the pencil says why", async () => {
+    const calls: string[] = [];
+    setMockInvoke((cmd) => {
+      calls.push(cmd);
+      return cmd === "access_check_cmd"
+        ? [{ state: "denied", reason: 'cannot patch configmaps "hello" in default' }]
+        : undefined;
+    });
+    const { getByTestId, getByRole } = render(
+      <EditSessionProvider target={TARGET} onSaved={() => {}}>
+        <Editor />
+        <EditModeChrome t={t} editing={false} dirty={0} saving={false} onEnter={() => {}} onCancel={() => {}} />
+      </EditSessionProvider>,
+    );
+    await act(async () => {});
+    expect(getByTestId("readonly").textContent).toBe("true");
+    fireEvent.click(getByTestId("enter"));
+    expect(getByTestId("editing").textContent).toBe("false");
+    expect(
+      getByRole("button", { name: 'Not permitted: cannot patch configmaps "hello" in default' }),
+    ).toBeTruthy();
+    expect(calls).toContain("access_check_cmd");
   });
 });
