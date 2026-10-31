@@ -62,6 +62,23 @@ describe("Eyebrow / Section / SectionHeader / Stat / Kbd / Chip — basic render
     expect(getByText("42")).toBeInTheDocument();
   });
 
+  it("Stat never wraps; a shrinking one ellipsizes and names the full value", () => {
+    const { getByText } = render(
+      <>
+        <Stat t={t} label="Nodes" value={42} />
+        <Stat t={t} label="User" value="a-very-long-user" title="a-very-long-user" shrink />
+      </>,
+    );
+    const fixed = getByText("42");
+    expect(fixed.style.whiteSpace).toBe("nowrap");
+    expect(fixed.style.overflow).toBe("");
+    expect(fixed.parentElement!.style.flexShrink).toBe("0");
+    const long = getByText("a-very-long-user");
+    expect(long.style.textOverflow).toBe("ellipsis");
+    expect(long.parentElement!.style.minWidth).toBe("0px");
+    expect(long.parentElement!.title).toBe("a-very-long-user");
+  });
+
   it("Kbd renders its children", () => {
     const { getByText } = render(<Kbd t={t}>⌘K</Kbd>);
     expect(getByText("⌘K")).toBeInTheDocument();

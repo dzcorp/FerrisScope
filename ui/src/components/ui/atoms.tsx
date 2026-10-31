@@ -160,19 +160,26 @@ export function Chip({
 }
 
 // ── Stat (label + value, used in cluster bar) ──────────────────────────────
+// Never wraps. `shrink` lets it give up width to its row, ellipsizing the
+// value; pass the full text as `title`.
 export function Stat({
   t,
   label,
   value,
   mono,
+  shrink,
+  title,
 }: {
   t: Tokens;
   label: ReactNode;
   value: ReactNode;
   mono?: boolean;
+  shrink?: boolean;
+  title?: string;
 }) {
+  const fit = shrink ? STAT_ELLIPSIS : STAT_NOWRAP;
   return (
-    <div>
+    <div title={title} style={shrink ? STAT_SHRINK : STAT_FIXED}>
       <div
         style={{
           fontSize: FS_XS,
@@ -182,6 +189,7 @@ export function Stat({
           letterSpacing: 0.5,
           marginBottom: 2,
           fontFamily: FF_MONO,
+          ...fit,
         }}
       >
         {label}
@@ -193,6 +201,7 @@ export function Stat({
           fontFamily: mono ? FF_MONO : "inherit",
           fontVariantNumeric: "tabular-nums",
           color: t.text,
+          ...fit,
         }}
       >
         {value}
@@ -200,6 +209,15 @@ export function Stat({
     </div>
   );
 }
+
+const STAT_FIXED: CSSProperties = { flexShrink: 0 };
+const STAT_SHRINK: CSSProperties = { flexShrink: 1, minWidth: 0 };
+const STAT_NOWRAP: CSSProperties = { whiteSpace: "nowrap" };
+export const STAT_ELLIPSIS: CSSProperties = {
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
 
 // ── Checkbox ───────────────────────────────────────────────────────────────
 export function Checkbox({
