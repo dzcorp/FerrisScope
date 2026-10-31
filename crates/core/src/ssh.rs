@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use russh::client::{self, Handle};
-use russh::keys::{self, ssh_key, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::{self, ssh_key, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::ChannelMsg;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -116,8 +116,19 @@ impl client::Handler for HostKeyVerifier {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_key: &PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
+        // We advertise no `*-cert-v01` algorithms and trust no CA, so a host
+        // certificate is unsolicited; pinning its inner key would vouch for
+        // something the certificate, not the key, was meant to prove.
+        let PublicKeyOrCertificate::PublicKey {
+            key: server_public_key,
+            ..
+        } = server_key
+        else {
+            tracing::error!(host = %self.host, "ssh: server sent a host certificate — refusing connect");
+            return Ok(false);
+        };
         // ssh_key's Fingerprint Display is `SHA256:<base64>`; we persist as
         // `sha256:<base64>` (lowercase prefix) for backwards compatibility
         // with values written by previous russh versions.
@@ -682,5 +693,52 @@ mod tests {
         let window = KEEPALIVE_INTERVAL * u32::try_from(KEEPALIVE_MAX + 1).unwrap();
         assert!(window < INACTIVITY_TIMEOUT);
         assert!(CHANNEL_OPEN_TIMEOUT < INACTIVITY_TIMEOUT);
+    }
+
+    const HOST_KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPMb6+eqcTT0m8hoi8sdrEph0iKAZiF3WBwK8EGIY/b6";
+    const HOST_KEY_FP: &str = "sha256:uDyBCRa/AX1Z4rt4FwTFzB1eVEHyIgItAtkbVM4SATc";
+    // HOST_KEY signed as a host certificate by a throwaway CA.
+    const HOST_CERT: &str = "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIDqDxbUc6DSNgT3woipF6wyYOpjzu8MJKFqPMmQO9S31AAAAIPMb6+eqcTT0m8hoi8sdrEph0iKAZiF3WBwK8EGIY/b6AAAAAAAAAAAAAAACAAAABGhvc3QAAAAQAAAADGV4YW1wbGUudGVzdAAAAAAAAAAA//////////8AAAAAAAAAAAAAAAAAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIMm3tNlSXjONK2vWbvAnyeSb5MGiJAKfiU7z0Qg/PdywAAAAUwAAAAtzc2gtZWQyNTUxOQAAAEAkV0FqM1ZfbMFHXe5lFjfBwJ/8AChI5KUWgmerdL/DFOlwY5173xtqd4zvE2rjuheLVPbT7axBvfovQ/6yCPwO";
+
+    fn verifier(pinned: &str) -> HostKeyVerifier {
+        HostKeyVerifier {
+            pinned: Some(pinned.to_owned()),
+            host: "example.test".into(),
+            port: 22,
+            captured: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn host_key() -> PublicKeyOrCertificate {
+        ssh_key::PublicKey::from_openssh(HOST_KEY).unwrap().into()
+    }
+
+    #[tokio::test]
+    async fn pinned_fingerprint_accepts_and_captures() {
+        let mut v = verifier(HOST_KEY_FP);
+        assert!(client::Handler::check_server_key(&mut v, &host_key())
+            .await
+            .unwrap());
+        assert_eq!(v.captured.lock().await.as_deref(), Some(HOST_KEY_FP));
+    }
+
+    #[tokio::test]
+    async fn pinned_fingerprint_mismatch_refuses() {
+        let mut v = verifier("sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        assert!(!client::Handler::check_server_key(&mut v, &host_key())
+            .await
+            .unwrap());
+        assert_eq!(v.captured.lock().await.as_deref(), Some(HOST_KEY_FP));
+    }
+
+    #[tokio::test]
+    async fn host_certificate_refused_even_when_inner_key_is_pinned() {
+        let cert = ssh_key::Certificate::from_openssh(HOST_CERT).unwrap();
+        let mut v = verifier(HOST_KEY_FP);
+        assert!(!client::Handler::check_server_key(&mut v, &cert.into())
+            .await
+            .unwrap());
+        assert!(v.captured.lock().await.is_none());
     }
 }

@@ -44,7 +44,7 @@ keyring = { version = "3", default-features = false, features = ["sync-secret-se
 # Cargo features aren't per-platform — so the flag lives in the *base* config
 # (a no-op on Linux/Windows) to keep feature and allowlist in sync on every
 # target. Without that, Linux/Windows builds fail the allowlist check.
-tauri = { version = "2.11", features = ["macos-private-api"] }
+tauri = { version = "2.12", features = ["macos-private-api"] }
 # Forbid a second concurrent process: the architecture assumes ONE Rust
 # backend owns all canonical state (reflectors, supervisors, port-forwards).
 # A second instance would race prefs.json / session index.json (last-writer-
@@ -77,7 +77,7 @@ k8s-openapi.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 http.workspace = true
-scraper = { version = "0.27", default-features = false }
+scraper = { version = "0.29", default-features = false }
 url = "2"
 
 # Updater (Linux AppImage / macOS DMG)
