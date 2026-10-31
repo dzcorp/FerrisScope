@@ -76,7 +76,7 @@ tower-http = { version = "0.7", features = [
 # `Builder` types must unify with kube's `ClientBuilder::new`, so a minor bump that
 # kube hasn't picked up would fail to typecheck. Bump in lockstep with kube.
 hyper = "1"
-hyper-util = { version = "=0.1.20", features = ["client-legacy", "http2", "tokio"] }
+hyper-util = { version = "=0.1.21", features = ["client-legacy", "http2", "tokio"] }
 # Same version kube-client uses; we only add the `http2` ALPN it leaves off.
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12", "logging", "native-tokio"] }
 hyper-timeout = "=0.5.2"
