@@ -10,6 +10,9 @@ APP   := ferrisscope-app
 # repo root. (`npm --prefix ui run tauri` would chdir to ui/ first and then
 # fail to find crates/app/tauri.conf.json.)
 TAURI := ui/node_modules/.bin/tauri
+# The CLI's package.json search sorts alphabetically since 2.12, so it would
+# pick e2e/ and run `beforeDevCommand` there.
+export TAURI_FRONTEND_PATH := $(CURDIR)/ui
 
 # ---- meta ---------------------------------------------------------------
 help: ## Show this help
