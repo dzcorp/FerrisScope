@@ -179,7 +179,7 @@ describe("disabled buttons keep their tooltip reachable", () => {
   });
 
   it("Btn: a disabled submit button with a title doesn't submit its form", async () => {
-    const onSubmit = vi.fn((e: React.FormEvent) => e.preventDefault());
+    const onSubmit = vi.fn((e: React.SubmitEvent) => e.preventDefault());
     const { getByRole } = render(
       <form onSubmit={onSubmit}>
         <Btn t={t} type="submit" disabled title="Not permitted">

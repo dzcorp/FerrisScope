@@ -336,21 +336,6 @@ fn main() {
             // you need it.
             let _ = app;
 
-            // Strip GTK's client-side decorations on Linux. The default
-            // Wayland headerbar is oversized and themed via Adwaita,
-            // which clashes with KDE/Plasma chrome — see the custom
-            // `<TitleBar/>` in ui/src/components/TitleBar.tsx for the
-            // replacement. macOS keeps its *native* decorations but runs an
-            // integrated, transparent title bar (`titleBarStyle: "Overlay"` +
-            // `hiddenTitle` in tauri.conf.json): the webview fills the window
-            // and the real OS traffic lights float over our own `<AppHeader/>`,
-            // which reserves the left inset and acts as the drag region (see
-            // ui/src/lib/macChrome.ts). Windows keeps the standard native bar.
-            #[cfg(target_os = "linux")]
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.set_decorations(false);
-            }
-
             // Pre-apply the persisted UI scale to the main webview before its
             // first paint, via Tauri's native page-zoom API (WKWebView
             // setPageZoom on macOS, webkit_web_view_set_zoom_level on Linux,
@@ -567,3 +552,56 @@ fn configure_linux_render_env() -> String {
 // PATH recovery for GUI launches lives in `path_env::augment_path` (called
 // from `main` above). Kept in its own module so the planning logic is pure and
 // unit-testable without a GUI or a real shell.
+
+/// Per-OS window chrome lives in the `tauri.<os>.conf.json` overrides, which
+/// replace the whole `windows` array. Linux must be undecorated at creation:
+/// tao only suppresses the compositor's title bar (KDE) for windows created
+/// that way, so a runtime `set_decorations(false)` leaves a double title bar
+/// over our `<TitleBar/>`. macOS overlays the traffic lights on `<AppHeader/>`;
+/// Windows keeps the native bar.
+#[cfg(test)]
+mod window_config_tests {
+    use serde_json::Value;
+
+    fn main_window(src: &str) -> Value {
+        let conf: Value = serde_json::from_str(src).expect("valid json");
+        let windows = conf["app"]["windows"].as_array().expect("windows array");
+        assert_eq!(windows.len(), 1);
+        windows[0].clone()
+    }
+
+    fn base() -> Value {
+        main_window(include_str!("../tauri.conf.json"))
+    }
+
+    #[test]
+    fn linux_window_is_created_undecorated() {
+        let w = main_window(include_str!("../tauri.linux.conf.json"));
+        assert_eq!(w["decorations"], false);
+    }
+
+    #[test]
+    fn windows_and_macos_keep_native_decorations() {
+        let mac = main_window(include_str!("../tauri.macos.conf.json"));
+        assert_eq!(base()["decorations"], true);
+        assert_eq!(mac["decorations"], true);
+        assert_eq!(mac["titleBarStyle"], "Overlay");
+    }
+
+    #[test]
+    fn platform_overrides_keep_base_geometry() {
+        let base = base();
+        for (os, src) in [
+            ("linux", include_str!("../tauri.linux.conf.json")),
+            ("macos", include_str!("../tauri.macos.conf.json")),
+        ] {
+            let w = main_window(src);
+            for key in ["title", "width", "height", "minWidth", "minHeight"] {
+                assert_eq!(
+                    w[key], base[key],
+                    "{os}: {key} drifted from tauri.conf.json"
+                );
+            }
+        }
+    }
+}

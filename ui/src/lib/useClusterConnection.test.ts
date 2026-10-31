@@ -77,8 +77,7 @@ describe("useClusterConnection auto-reconnect", () => {
     vi.useFakeTimers();
     healthHandler = null;
     connectContext.mockReset().mockResolvedValue({ server_version: "v1" });
-    cancelConnect.mockClear();
-    reconnectCluster.mockClear().mockResolvedValue(undefined);
+    reconnectCluster.mockResolvedValue(undefined);
     getClusterHealth.mockReset().mockResolvedValue(HEALTHY);
     useAppStore.setState({
       ...initial,
@@ -374,8 +373,7 @@ describe("useClusterConnection permanent-failure gating", () => {
     vi.useFakeTimers();
     healthHandler = null;
     connectContext.mockReset().mockResolvedValue({ server_version: "v1" });
-    cancelConnect.mockClear();
-    reconnectCluster.mockClear().mockResolvedValue(undefined);
+    reconnectCluster.mockResolvedValue(undefined);
     getClusterHealth.mockReset().mockResolvedValue(HEALTHY);
     useAppStore.setState({
       ...initial,
