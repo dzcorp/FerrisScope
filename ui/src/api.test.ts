@@ -1002,6 +1002,15 @@ describe("fleet probes", () => {
 });
 
 describe("metrics + prefs + table views", () => {
+  it("podContainerMetrics", async () => {
+    const cap = captureNext([]);
+    await api.podContainerMetrics("ctx", "prod", "web");
+    expect(cap.calls[0]).toEqual({
+      cmd: "pod_container_metrics",
+      args: { clusterId: "ctx", namespace: "prod", name: "web" },
+    });
+  });
+
   it("subscribeMetrics / unsubscribeMetrics", async () => {
     const cap = captureNext(null);
     await api.subscribeMetrics("ctx", "cluster");

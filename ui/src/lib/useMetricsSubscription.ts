@@ -2,7 +2,8 @@ import { logErr } from "./log";
 import { useEffect } from "react";
 import { api, onMetrics } from "../api";
 import { useAppStore } from "../store";
-import type { MetricsNeed } from "../types";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import type { MetricsNeed, MetricsSnapshot } from "../types";
 
 // Subscribe to cluster metrics for `clusterId` for the lifetime of the
 // component that calls this hook. The backend refcounts subscribers so
@@ -26,27 +27,11 @@ export function useMetricsSubscription(clusterId: string | null, need: MetricsNe
   const setMetrics = useAppStore((s) => s.setMetrics);
   useEffect(() => {
     if (!clusterId) return;
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    (async () => {
-      try {
-        unlisten = await onMetrics(clusterId, (snap) => {
-          if (!cancelled) setMetrics(clusterId, snap);
-        });
-        const initial = await api.subscribeMetrics(clusterId, need);
-        if (!cancelled && initial) setMetrics(clusterId, initial);
-      } catch {
-        // Best-effort: unavailable metrics-server is not a hard error.
-      }
-    })();
+    let live = true;
+    const held = hold(clusterId, need, () => live, setMetrics);
     return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-      // Deliberately do NOT clear the store snapshot here: the backend
-      // subscription is refcounted and another consumer (gauges vs. pods
-      // table) may still be displaying it. Snapshots drop on scope switch
-      // (`scopeResetSlice`) and when the last context deselects (App.tsx).
-      api.unsubscribeMetrics(clusterId, need).catch(logErr("metrics-sub"));
+      live = false;
+      void held.then((release) => release());
     };
   }, [clusterId, need, setMetrics]);
 }
@@ -61,32 +46,41 @@ export function useMetricsSubscriptions(clusterIds: string[], need: MetricsNeed)
   useEffect(() => {
     const ids = key === "" ? [] : key.split(String.fromCharCode(0));
     if (ids.length === 0) return;
-    let cancelled = false;
-    const unlistens: Array<() => void> = [];
-    for (const cid of ids) {
-      void (async () => {
-        try {
-          const un = await onMetrics(cid, (snap) => {
-            if (!cancelled) setMetrics(cid, snap);
-          });
-          if (cancelled) {
-            un();
-            return;
-          }
-          unlistens.push(un);
-          const initial = await api.subscribeMetrics(cid, need);
-          if (!cancelled && initial) setMetrics(cid, initial);
-        } catch {
-          // Best-effort: unavailable metrics-server is not a hard error.
-        }
-      })();
-    }
+    let live = true;
+    const held = ids.map((cid) => hold(cid, need, () => live, setMetrics));
     return () => {
-      cancelled = true;
-      for (const u of unlistens) u();
-      for (const cid of ids) {
-        api.unsubscribeMetrics(cid, need).catch(logErr("metrics-sub"));
-      }
+      live = false;
+      for (const h of held) void h.then((release) => release());
     };
   }, [key, need, setMetrics]);
+}
+
+// Listen, then subscribe; resolves to a release for exactly what was taken.
+// The backend counts subscribers, so a consumer gone before its subscribe
+// never sends it, and one whose subscribe failed never unsubscribes — an
+// unmatched unsubscribe would drop another consumer's hold.
+async function hold(
+  clusterId: string,
+  need: MetricsNeed,
+  live: () => boolean,
+  setMetrics: (clusterId: string, snap: MetricsSnapshot) => void,
+): Promise<() => void> {
+  let unlisten: UnlistenFn | null = null;
+  try {
+    unlisten = await onMetrics(clusterId, (snap) => {
+      if (live()) setMetrics(clusterId, snap);
+    });
+    if (!live()) return unlisten;
+    const initial = await api.subscribeMetrics(clusterId, need);
+    if (live() && initial) setMetrics(clusterId, initial);
+  } catch {
+    // Best-effort: unavailable metrics-server is not a hard error.
+    const un = unlisten;
+    return () => un?.();
+  }
+  const un = unlisten;
+  return () => {
+    un();
+    api.unsubscribeMetrics(clusterId, need).catch(logErr("metrics-sub"));
+  };
 }

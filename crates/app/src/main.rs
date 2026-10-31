@@ -252,6 +252,7 @@ fn main() {
             commands::save_text_file,
             commands::subscribe_metrics,
             commands::unsubscribe_metrics,
+            commands::pod_container_metrics,
             commands::get_fleet_cache,
             commands::refresh_fleet,
             commands::list_kubeconfig_sources,

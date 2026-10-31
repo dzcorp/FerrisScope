@@ -88,6 +88,17 @@ pub struct PodMetric {
     pub name: String,
     pub cpu_milli: u64,
     pub mem_mib: u64,
+    /// Served per pod by [`MetricsService::pod_containers`]; kept out of the
+    /// broadcast snapshot, which would otherwise grow with every container.
+    #[serde(skip)]
+    pub containers: Vec<ContainerMetric>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ContainerMetric {
+    pub name: String,
+    pub cpu_milli: u64,
+    pub mem_mib: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -149,6 +160,13 @@ pub struct MetricsSnapshot {
 }
 
 impl MetricsSnapshot {
+    fn pod_containers(&self, key: &str) -> Vec<ContainerMetric> {
+        self.pods
+            .get(key)
+            .map(|p| p.containers.clone())
+            .unwrap_or_default()
+    }
+
     /// Same readings, ignoring when they were fetched.
     fn same_readings(&self, other: &Self) -> bool {
         self.available == other.available
@@ -292,6 +310,17 @@ impl MetricsService {
 
     pub async fn snapshot(&self) -> Option<Arc<MetricsSnapshot>> {
         self.last.lock().await.clone()
+    }
+
+    /// Per-container usage of the pod keyed `"{namespace}/{name}"` from the
+    /// last poll; empty when it wasn't reported.
+    pub async fn pod_containers(&self, key: &str) -> Vec<ContainerMetric> {
+        self.last
+            .lock()
+            .await
+            .as_deref()
+            .map(|s| s.pod_containers(key))
+            .unwrap_or_default()
     }
 }
 
@@ -483,6 +512,7 @@ struct PodMetricsWire {
 
 #[derive(Deserialize)]
 struct ContainerMetricsWire {
+    name: Option<String>,
     usage: Option<UsageWire>,
 }
 
@@ -566,18 +596,27 @@ fn pod_metrics_from(list: ListWire<PodMetricsWire>) -> HashMap<String, PodMetric
         if name.is_empty() {
             continue;
         }
-        let (mut cpu, mut mem) = (0u64, 0u64);
-        for usage in obj.containers.into_iter().flatten().filter_map(|c| c.usage) {
-            cpu += usage.cpu.as_deref().map_or(0, cpu_milli);
-            mem += usage.memory.as_deref().map_or(0, mem_mib);
-        }
+        let containers: Vec<ContainerMetric> = obj
+            .containers
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                let usage = c.usage?;
+                Some(ContainerMetric {
+                    name: c.name.unwrap_or_default(),
+                    cpu_milli: usage.cpu.as_deref().map_or(0, cpu_milli),
+                    mem_mib: usage.memory.as_deref().map_or(0, mem_mib),
+                })
+            })
+            .collect();
         out.insert(
             format!("{namespace}/{name}"),
             PodMetric {
                 namespace,
                 name,
-                cpu_milli: cpu,
-                mem_mib: mem,
+                cpu_milli: containers.iter().map(|c| c.cpu_milli).sum(),
+                mem_mib: containers.iter().map(|c| c.mem_mib).sum(),
+                containers,
             },
         );
     }
@@ -822,7 +861,16 @@ mod tests {
         assert_eq!(out.len(), 2);
         let web = &out["prod/web"];
         assert_eq!((web.cpu_milli, web.mem_mib), (255, 192));
+        let per_container: Vec<_> = web
+            .containers
+            .iter()
+            .map(|c| (c.name.as_str(), c.cpu_milli, c.mem_mib))
+            .collect();
+        assert_eq!(per_container, [("app", 250, 128), ("sidecar", 5, 64)]);
         assert_eq!(out["prod/idle"].cpu_milli, 0);
+        // The broadcast payload carries pod totals only.
+        let wire = serde_json::to_value(web).expect("serialize");
+        assert!(wire.get("containers").is_none());
     }
 
     #[test]
@@ -1055,6 +1103,7 @@ mod tests {
             name: "p".into(),
             cpu_milli: cpu,
             mem_mib: 10,
+            containers: Vec::new(),
         };
         let snap = |cpu, at| MetricsSnapshot {
             pods: HashMap::from([("ns/p".to_owned(), pod(cpu))]),
@@ -1067,6 +1116,29 @@ mod tests {
         };
         assert!(snap(5, 1).same_readings(&snap(5, 2)));
         assert!(!snap(5, 1).same_readings(&snap(6, 1)));
+        // A shift between containers at the same pod total still rebroadcasts,
+        // or the detail panel's per-container usage would go stale.
+        let split = |a, b| {
+            let mut s = snap(5, 1);
+            if let Some(p) = s.pods.get_mut("ns/p") {
+                p.containers = vec![
+                    ContainerMetric {
+                        name: "a".into(),
+                        cpu_milli: a,
+                        mem_mib: 5,
+                    },
+                    ContainerMetric {
+                        name: "b".into(),
+                        cpu_milli: b,
+                        mem_mib: 5,
+                    },
+                ];
+            }
+            s
+        };
+        assert!(!split(1, 4).same_readings(&split(4, 1)));
+        assert_eq!(split(1, 4).pod_containers("ns/p")[1].cpu_milli, 4);
+        assert!(split(1, 4).pod_containers("ns/missing").is_empty());
         let mut volumes_polled = snap(5, 1);
         volumes_polled.volumes_available = Some(false);
         assert!(!snap(5, 1).same_readings(&volumes_polled));

@@ -11,7 +11,7 @@ import {
   rowComparatorFor,
   tableComparator,
 } from "./ResourceTable";
-import { tokens } from "../theme";
+import { tokens, usageColor } from "../theme";
 import type { ColumnDef, MetricsSnapshot, ResourceRow } from "../types";
 import type { ScopedRow } from "../lib/multiCluster";
 
@@ -148,6 +148,45 @@ describe("renderCell — node link", () => {
     );
     fireEvent.click(container.firstChild as Element);
     expect(nav).not.toHaveBeenCalled();
+  });
+});
+
+describe("renderCell — pod cpu/mem tinted against requests", () => {
+  const CID = "default::c1";
+  const metrics = { [CID]: { "default/api": { cpu_milli: 95, mem_mib: 40 } } };
+  const podCell = (id: "cpu" | "mem", row: Partial<ResourceRow>) =>
+    render(
+      <>
+        {renderCell(
+          { id, header: id, kind: "number" },
+          { uid: "u", namespace: "default", name: "api", __clusterId: CID, ...row },
+          "dark",
+          t,
+          true,
+          metrics,
+          false,
+          vi.fn<NavFn>(),
+          vi.fn<SetNsFn>(),
+        )}
+      </>,
+    );
+
+  it("colours usage by its share of the request and says so on hover", () => {
+    const { getByText } = podCell("cpu", { cpu_request: 100, mem_request: 100 });
+    const el = getByText("95m");
+    expect(el.style.color).toBe(usageColor(95, 100, t));
+    expect(el.title).toBe("95m of 100m requested (95%)");
+    const mem = podCell("mem", { cpu_request: 100, mem_request: 100 }).getByText("40 Mi");
+    expect(mem.style.color).toBe(usageColor(40, 100, t));
+  });
+
+  it("stays dim with no tooltip when nothing is requested", () => {
+    const { getByText } = podCell("cpu", { cpu_request: null });
+    const el = getByText("95m");
+    const dim = document.createElement("span");
+    dim.style.color = t.textDim;
+    expect(el.style.color).toBe(dim.style.color);
+    expect(el.title).toBe("");
   });
 });
 

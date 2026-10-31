@@ -83,7 +83,7 @@ import {
   MetaPairsRow,
   MountsEditor,
   PortsEditor,
-  ResourcesEditor,
+  LiveResourcesEditor,
   TolerationList,
   VolumesEditor,
 } from "./detail/workload/shared";
@@ -157,6 +157,8 @@ import { NamespaceForwardButton } from "./forwards/NamespaceForwardButton";
 import { useDrawerEdge } from "../lib/drawerEdge";
 import { scrollTopWithin, useRestoreScroll } from "../lib/scrollMemory";
 import { useTabActive } from "../lib/tabScope";
+import { useMetricsSubscription } from "../lib/useMetricsSubscription";
+import { PodResources } from "./detail/resourceUsage";
 
 // Set of kind ids that have a structured Summary tab. Used to gate the tab
 // label + the default tab + the dispatch in the body.
@@ -2200,6 +2202,8 @@ function PodSummary({
   // Disable the inline Evict button while the cluster is unavailable / mid
   // auto-reconnect — same gate the row menu and bulk bar use.
   const degraded = useAppStore((s) => selectClusterDegraded(s, clusterId));
+  // Feeds the Resources usage; a parked drawer stops polling.
+  useMetricsSubscription(useTabActive() ? clusterId : null, "pods");
   const [state, setState] = useState<DetailState>({ kind: "loading" });
   const [refetch, setRefetch] = useState(0);
   const reqId = useRef(0);
@@ -2556,40 +2560,13 @@ function PodSummary({
         )}
       </div>
 
-      {hasResourceTotals(d) && (
-        <>
-          <Section t={t} title="Resources" />
-          <div style={{ marginBottom: 22 }}>
-            <DetailRow t={t} label="Sum of containers">
-              <SubGrid
-                t={t}
-                groups={[
-                  ...(Object.keys(d.totals.requests).length > 0
-                    ? [
-                        {
-                          label: "Requests",
-                          entries: Object.entries(d.totals.requests).map(
-                            ([k, v]) => ({ key: k, value: formatQuantity(k, v) }),
-                          ),
-                        },
-                      ]
-                    : []),
-                  ...(Object.keys(d.totals.limits).length > 0
-                    ? [
-                        {
-                          label: "Limits",
-                          entries: Object.entries(d.totals.limits).map(
-                            ([k, v]) => ({ key: k, value: formatQuantity(k, v) }),
-                          ),
-                        },
-                      ]
-                    : []),
-                ]}
-              />
-            </DetailRow>
-          </div>
-        </>
-      )}
+      <PodResources
+        t={t}
+        totals={d.totals}
+        clusterId={clusterId}
+        namespace={ns}
+        name={name}
+      />
 
       {d.scheduling && hasScheduling(d.scheduling) && (
         <>
@@ -2735,6 +2712,7 @@ function PodSummary({
                 mode={mode}
                 c={c}
                 signal={initGroup.signal}
+                clusterId={clusterId}
                 namespace={ns}
                 podName={name}
                 onNavigate={onNavigate}
@@ -2767,6 +2745,7 @@ function PodSummary({
                 mode={mode}
                 c={c}
                 signal={mainGroup.signal}
+                clusterId={clusterId}
                 namespace={ns}
                 podName={name}
                 onNavigate={onNavigate}
@@ -2983,12 +2962,6 @@ function ContainerSecurityRow({ t, s }: { t: Tokens; s: ContainerSecurity }) {
   return <ChipStrip t={t} items={items} />;
 }
 
-function hasResourceTotals(d: PodDetail): boolean {
-  return (
-    Object.keys(d.totals.requests).length > 0 ||
-    Object.keys(d.totals.limits).length > 0
-  );
-}
 
 function hasScheduling(s: PodScheduling): boolean {
   return (
@@ -3034,11 +3007,13 @@ function hasContainerSecurity(s: ContainerSecurity): boolean {
 
 // ── Container card ─────────────────────────────────────────────────────────
 
+
 function ContainerCard({
   t,
   mode,
   c,
   signal,
+  clusterId,
   namespace,
   podName,
   onNavigate,
@@ -3049,6 +3024,7 @@ function ContainerCard({
   mode: ThemeMode;
   c: ContainerDetail;
   signal?: CollapseSignal;
+  clusterId: string;
   namespace: string | null;
   podName: string;
   onNavigate?: DetailNavigate;
@@ -3376,7 +3352,10 @@ function ContainerCard({
           </DetailRow>
         )}
         {namespace ? (
-          <ResourcesEditor
+          <LiveResourcesEditor
+            clusterId={clusterId}
+            namespace={namespace}
+            podName={podName}
             t={t}
             containerName={c.name}
             containerKind={c.kind}

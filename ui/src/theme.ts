@@ -1106,6 +1106,40 @@ export function readyDesiredColor(
   }
 }
 
+// Usage against a request: amber from 70%, red from 90%. `null` when nothing
+// was requested — there is no ratio to judge.
+export const USAGE_WARN_RATIO = 0.7;
+export const USAGE_BAD_RATIO = 0.9;
+export function usageBucket(
+  used: number,
+  requested: number | null | undefined,
+): ReadyDesiredBucket | null {
+  if (requested == null || !(requested > 0)) return null;
+  const r = used / requested;
+  return r >= USAGE_BAD_RATIO ? "bad" : r >= USAGE_WARN_RATIO ? "warn" : "good";
+}
+
+/// Share of the status hue in the usage text; the rest is `textDim`, so a
+/// table of numbers reads as a quiet signal rather than a wall of colour.
+export const USAGE_TINT = 0.55;
+const usageToneCache = new Map<string, string>();
+export function usageColor(
+  used: number,
+  requested: number | null | undefined,
+  t: Tokens,
+): string {
+  const b = usageBucket(used, requested);
+  if (!b) return t.textDim;
+  const hue = b === "bad" ? t.bad : b === "warn" ? t.warn : t.good;
+  const key = `${hue}|${t.textDim}`;
+  let c = usageToneCache.get(key);
+  if (c === undefined) {
+    c = mixColors(hue, t.textDim, USAGE_TINT);
+    usageToneCache.set(key, c);
+  }
+  return c;
+}
+
 // Soft tinted background + legible foreground for an arbitrary accent/status
 // color. `bg` is the color at low alpha; `fg` is the raw color in dark mode
 // (already vivid on a dark surface) and a darkened mix in light mode — the
@@ -1177,6 +1211,16 @@ function mixWithBlack(color: string, amount: number): string {
   if (!rgb) return color;
   const m = (c: number) => Math.round(c * (1 - a));
   return `rgb(${m(rgb.r)}, ${m(rgb.g)}, ${m(rgb.b)})`;
+}
+
+/// `amount` of `a` over `b` (1 = `a`). Falls back to `a` on unparseable input.
+function mixColors(a: string, b: string, amount: number): string {
+  const x = toRgb(a);
+  const y = toRgb(b);
+  if (!x || !y) return a;
+  const k = Math.max(0, Math.min(1, amount));
+  const m = (p: number, q: number) => Math.round(p * k + q * (1 - k));
+  return `rgb(${m(x.r, y.r)}, ${m(x.g, y.g)}, ${m(x.b, y.b)})`;
 }
 
 function toRgb(color: string): { r: number; g: number; b: number } | null {

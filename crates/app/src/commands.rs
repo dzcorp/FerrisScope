@@ -10,7 +10,7 @@ use ferrisscope_core::fleet::{self, ClusterProbe};
 use ferrisscope_core::health::{ClusterHealthEvent, ClusterHealthStatus};
 use ferrisscope_core::kubeconfig::{self, ContextInfo};
 use ferrisscope_core::logs::{LogEvent, LogStream};
-use ferrisscope_core::metrics::{MetricsNeed, MetricsService, MetricsSnapshot};
+use ferrisscope_core::metrics::{ContainerMetric, MetricsNeed, MetricsService, MetricsSnapshot};
 use ferrisscope_core::portforwards::{self, ForwardSpec, ForwardTarget, PortForwardsFile};
 use ferrisscope_core::prefs::{self, Prefs};
 use ferrisscope_core::prom_cache::{self, PromCacheEntry, PromSource};
@@ -3134,6 +3134,35 @@ pub(crate) async fn unsubscribe_metrics(
     Ok(())
 }
 
+/// Per-container usage of one pod from the cluster's last metrics poll. Reads
+/// the running service only — never starts one — so it is empty until a
+/// `subscribe_metrics` with `pods` has polled.
+#[tauri::command]
+pub(crate) async fn pod_container_metrics(
+    cluster_id: String,
+    namespace: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ContainerMetric>, String> {
+    Ok(container_metrics(&state, &cluster_id, &namespace, &name).await)
+}
+
+async fn container_metrics(
+    state: &AppState,
+    cluster_id: &str,
+    namespace: &str,
+    name: &str,
+) -> Vec<ContainerMetric> {
+    let Some(entry) = state.get_existing(cluster_id).await else {
+        return Vec::new();
+    };
+    let svc = entry.metrics.lock().await.service.clone();
+    match svc {
+        Some(s) => s.pod_containers(&format!("{namespace}/{name}")).await,
+        None => Vec::new(),
+    }
+}
+
 // ---- Fleet probes (per-cluster summary cards) -----------------------------
 
 #[tauri::command]
@@ -5151,6 +5180,15 @@ mod tests {
         sanitize_event_segment,
     };
     use ferrisscope_core::health::{ClusterHealthEvent, ClusterHealthStatus};
+
+    #[tokio::test]
+    async fn container_metrics_never_connect_an_unknown_cluster() {
+        let state = crate::state::AppState::default();
+        assert!(super::container_metrics(&state, "nope", "ns", "p")
+            .await
+            .is_empty());
+        assert!(state.get_existing("nope").await.is_none());
+    }
 
     #[test]
     fn a_pin_drops_the_cached_client_whenever_the_kubeconfig_changed() {

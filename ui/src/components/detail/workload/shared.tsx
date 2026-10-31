@@ -19,6 +19,7 @@ import {
 } from "../../../theme";
 import { Btn, Checkbox, Chip, Section, Select, Icons } from "../../ui";
 import { ForwardChip } from "../forwardChip";
+import { resourceGroups, useContainerUsage, type Usage } from "../resourceUsage";
 import {
   KeyRefPicker,
   type KeyRefPickerKind,
@@ -2332,6 +2333,21 @@ function resourceRowsToMap(
   return out;
 }
 
+// Own component so a usage update re-renders only the Resources row.
+export function LiveResourcesEditor({
+  clusterId,
+  namespace,
+  podName,
+  ...rest
+}: Parameters<typeof ResourcesEditor>[0] & {
+  clusterId: string;
+  namespace: string;
+  podName: string;
+}) {
+  const usage = useContainerUsage(clusterId, namespace, podName, rest.containerName);
+  return <ResourcesEditor {...rest} usage={usage} />;
+}
+
 export function ResourcesEditor({
   t,
   containerName,
@@ -2339,6 +2355,7 @@ export function ResourcesEditor({
   requests,
   limits,
   serializeFor,
+  usage = null,
 }: {
   t: Tokens;
   containerName: string;
@@ -2353,6 +2370,8 @@ export function ResourcesEditor({
     };
     isInit: boolean;
   }) => Record<string, unknown>;
+  /// Live usage, folded into the read-only rows.
+  usage?: Usage | null;
 }) {
   const edit = useEditField<ResourcesBuffer>({
     id: `resources:${containerName}`,
@@ -2412,33 +2431,7 @@ export function ResourcesEditor({
         ) : !hasAny ? (
           <Mute t={t}>—</Mute>
         ) : (
-          <SubGrid
-            t={t}
-            groups={[
-              ...(requests && Object.keys(requests).length > 0
-                ? [
-                    {
-                      label: "Requests",
-                      entries: Object.entries(requests).map(([k, v]) => ({
-                        key: k,
-                        value: formatQuantity(k, v),
-                      })),
-                    },
-                  ]
-                : []),
-              ...(limits && Object.keys(limits).length > 0
-                ? [
-                    {
-                      label: "Limits",
-                      entries: Object.entries(limits).map(([k, v]) => ({
-                        key: k,
-                        value: formatQuantity(k, v),
-                      })),
-                    },
-                  ]
-                : []),
-            ]}
-          />
+          <SubGrid t={t} groups={resourceGroups(t, requests, limits, usage)} />
         )}
         <div
           style={{

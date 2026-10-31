@@ -79,6 +79,7 @@ import type {
   TerminalEvent,
   MetricsNeed,
   MetricsSnapshot,
+  ContainerMetric,
   MutatingWebhookConfigurationDetail,
   NamespaceDetail,
   NetworkPolicyDetail,
@@ -864,6 +865,10 @@ export const api = {
     invoke<MetricsSnapshot | null>("subscribe_metrics", { clusterId, need }),
   unsubscribeMetrics: (clusterId: string, need: MetricsNeed) =>
     invoke<void>("unsubscribe_metrics", { clusterId, need }),
+  // Per-container usage of one pod from the last poll of a running
+  // `pods` subscription; empty otherwise.
+  podContainerMetrics: (clusterId: string, namespace: string, name: string) =>
+    invoke<ContainerMetric[]>("pod_container_metrics", { clusterId, namespace, name }),
 
   // Fleet probes — per-context summary cards. Cached to disk; only re-probed
   // hourly unless `force=true`.

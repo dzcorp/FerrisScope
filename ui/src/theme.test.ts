@@ -12,6 +12,8 @@ import {
   statusDot,
   tintPair,
   tokens,
+  usageBucket,
+  usageColor,
   vibrantSurface,
   vibrancyAlpha,
   MAC_VIBRANCY_ALPHA_DARK,
@@ -352,5 +354,34 @@ describe("tokens(mode) — theme parity", () => {
     expect(tokens("light").warn).toBe(tokens("dark").warn);
     expect(tokens("light").bad).toBe(tokens("dark").bad);
     expect(tokens("light").info).toBe(tokens("dark").info);
+  });
+});
+
+describe("usageBucket / usageColor", () => {
+  const t = tokens("dark");
+  it("judges usage against the request at 70% and 90%", () => {
+    expect(usageBucket(69, 100)).toBe("good");
+    expect(usageBucket(70, 100)).toBe("warn");
+    expect(usageBucket(89, 100)).toBe("warn");
+    expect(usageBucket(90, 100)).toBe("bad");
+    expect(usageBucket(300, 100)).toBe("bad");
+  });
+
+  it("has no verdict without a request", () => {
+    expect(usageBucket(50, null)).toBeNull();
+    expect(usageBucket(50, 0)).toBeNull();
+    expect(usageColor(50, null, t)).toBe(t.textDim);
+  });
+
+  it("mutes the status hue toward textDim in every palette", () => {
+    for (const mode of ["dark", "light"] as const) {
+      const tk = tokens(mode);
+      const tones = [usageColor(10, 100, tk), usageColor(80, 100, tk), usageColor(95, 100, tk)];
+      expect(new Set(tones).size).toBe(3);
+      for (const c of tones) {
+        expect(c).toMatch(/^rgb\(\d+, \d+, \d+\)$/);
+        expect([tk.good, tk.warn, tk.bad, tk.textDim]).not.toContain(c);
+      }
+    }
   });
 });

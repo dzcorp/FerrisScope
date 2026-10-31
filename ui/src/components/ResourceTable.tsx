@@ -51,6 +51,7 @@ import {
   tokens,
   statusBucket,
   statusIsAmbient,
+  usageColor,
   clusterAccent,
   FF_MONO,
   FONT_MONO,
@@ -2806,14 +2807,24 @@ export function renderCell(
     const live = podMetrics
       ? podMetrics[`${ns}/${name}`] ?? podMetrics[`/${name}`] ?? null
       : null;
-    const n: number | null = live
-      ? c.id === "cpu"
-        ? live.cpu_milli
-        : live.mem_mib
-      : null;
+    const isCpu = c.id === "cpu";
+    const n: number | null = live ? (isCpu ? live.cpu_milli : live.mem_mib) : null;
+    const req = row[isCpu ? "cpu_request" : "mem_request"];
+    const requested = typeof req === "number" && req > 0 ? req : null;
+    const fmt = (v: number) => (isCpu ? `${v}m` : formatMi(v));
     return (
-      <span style={{ ...NUM_CELL_BASE, color: t.textDim }}>
-        {n == null ? "—" : c.id === "cpu" ? `${n}m` : formatMi(n)}
+      <span
+        style={{
+          ...NUM_CELL_BASE,
+          color: n == null ? t.textDim : usageColor(n, requested, t),
+        }}
+        title={
+          n != null && requested != null
+            ? `${fmt(n)} of ${fmt(requested)} requested (${Math.round((n / requested) * 100)}%)`
+            : undefined
+        }
+      >
+        {n == null ? "—" : fmt(n)}
       </span>
     );
   }

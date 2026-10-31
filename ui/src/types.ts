@@ -644,6 +644,12 @@ export type PodMetric = {
   mem_mib: number;
 };
 
+export type ContainerMetric = {
+  name: string;
+  cpu_milli: number;
+  mem_mib: number;
+};
+
 export type ClusterMetrics = {
   cpu_used_milli: number;
   cpu_capacity_milli: number;
