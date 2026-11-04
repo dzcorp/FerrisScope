@@ -134,9 +134,13 @@ describe("NewForwardForm — simple mode (text fallback)", () => {
     expect(screen.getByRole("button", { name: "Forward" })).toBeEnabled();
     fireEvent.change(await screen.findByPlaceholderText("default"), { target: { value: "default" } });
     fireEvent.change(screen.getByPlaceholderText("my-service"), { target: { value: "api" } });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Forward" })).toBeDisabled());
-    expect(screen.getByText("Not permitted: cannot create pods/portforward in default")).toBeInTheDocument();
-    expect(reqs.at(-1)).toEqual({ kindId: "services", action: "portForward", namespace: "default", name: "api" });
+    // Namespace and name settle on separate debounces, so a namespace-only
+    // denial can show first and go pending again once the name lands.
+    await waitFor(() => {
+      expect(reqs.at(-1)).toEqual({ kindId: "services", action: "portForward", namespace: "default", name: "api" });
+      expect(screen.getByRole("button", { name: "Forward" })).toBeDisabled();
+      expect(screen.getByText("Not permitted: cannot create pods/portforward in default")).toBeInTheDocument();
+    });
     cleanup();
     resetAccessCache();
   });
