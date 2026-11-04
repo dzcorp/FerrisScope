@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FF_MONO, type ThemeMode, R_LG, R_MD, R_SM, FS_MD, FS_SM, FS_XS, FW_SEMIBOLD, shade } from "../theme";
 import { useAppStore, useResolvedTheme } from "../store";
-import { Btn, IconBtn, Icons, Kbd, KindIcons } from "./ui";
+import { Btn, IconBtn, Icons, KindIcons } from "./ui";
 
 // Treat anything in the kube-* family plus the dashboard add-ons as "system."
 // Surfaced behind the Settings → General → Show system namespaces toggle.
@@ -566,7 +566,7 @@ export function NamespaceModal({
             variant="primary"
             size="sm"
             onClick={apply}
-            iconRight={<Kbd t={t}>↵</Kbd>}
+            kbd="↵"
           >
             Apply
           </Btn>

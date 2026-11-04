@@ -268,3 +268,11 @@ describe("NamespaceModal typed entry for identities that can list namespaces", (
     expect(screen.queryByText("deleted-team")).toBeNull();
   });
 });
+
+describe("NamespaceModal Apply hint", () => {
+  it("renders ↵ as the button's kbd chip, not inside the 13px icon box", () => {
+    renderModal();
+    const hint = screen.getByText("↵");
+    expect(hint.parentElement).toBe(screen.getByRole("button", { name: /Apply/ }));
+  });
+});
