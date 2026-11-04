@@ -7,8 +7,11 @@ import "./index.css";
 // clipboard plugin on webkit2gtk. Must run before any clipboard use.
 import "./lib/monacoClipboard";
 import { startBreathe } from "./lib/breathe";
+import { installTextEntryDefaults } from "./lib/textEntry";
 
 startBreathe();
+// Before render: child effects (autoFocus, ref.focus()) run ahead of App's.
+installTextEntryDefaults();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
